@@ -15,6 +15,7 @@ import { useSessionsStore } from "../../stores/sessions";
 import { useProjectsStore } from "../../stores/projects";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
+import { isActiveLifecycle, visibleSessionStatus } from "../../lib/session-lifecycle";
 
 type DrawerKind = "terminal" | "artifacts" | "dag" | null;
 
@@ -102,6 +103,8 @@ function ChatArea({
   const events = useSessionsStore((state) => state.events[sessionId] ?? []);
   const tasks = useSessionsStore((state) => state.tasks[sessionId] ?? []);
   const foregroundLifecycle = useSessionsStore((state) => state.foreground[sessionId]);
+  const orchestrationLifecycle = useSessionsStore((state) => state.running[sessionId]);
+  const startEditingMessage = useSessionsStore((state) => state.startEditingMessage);
   const teams = useTeamsStore((state) => state.teams);
   const instances = useAgentsStore((state) => state.instances);
   const projects = useProjectsStore((state) => state.projects);
@@ -123,7 +126,12 @@ function ChatArea({
 
   if (!session) return <div className="flex-1" />;
 
-  const foregroundRunning = foregroundLifecycle?.status === "running" || foregroundLifecycle?.status === "waiting_approval";
+  const foregroundRunning = isActiveLifecycle(foregroundLifecycle);
+  const orchestrationRunning = isActiveLifecycle(orchestrationLifecycle);
+  const waitingForDelegates = orchestrationRunning && !foregroundRunning;
+  const workbenchRunning = foregroundRunning || orchestrationRunning;
+  const visibleLifecycle = foregroundRunning ? foregroundLifecycle : orchestrationLifecycle;
+  const visibleStatus = visibleSessionStatus(session.status, orchestrationLifecycle);
   const project = projects.find((item) => item.id === session.projectId);
   const targetName = sessionTargetName(session, teams, instances);
   const hasPlan = tasks.length > 0;
@@ -135,9 +143,9 @@ function ChatArea({
           <div className="flex items-center gap-2">
             <h1 className="truncate text-sm font-semibold text-ink">{session.title || t("sessions.header.untitled")}</h1>
             <StatusChip
-              tone={session.status === "running" ? "accent" : session.status === "waiting_approval" ? "warn" : session.status === "failed" ? "danger" : "muted"}
-              label={t(`sessions.status.${session.status}` as MessageKey)}
-              pulse={session.status === "running"}
+              tone={visibleStatus === "running" ? "accent" : visibleStatus === "waiting_approval" ? "warn" : visibleStatus === "failed" ? "danger" : "muted"}
+              label={t(`sessions.status.${visibleStatus}` as MessageKey)}
+              pulse={visibleStatus === "running"}
             />
           </div>
           <p className="mt-0.5 truncate text-xs text-ink-3">
@@ -178,9 +186,10 @@ function ChatArea({
               event={event}
               onViewDiff={() => onOpenDrawer("artifacts")}
               onOpenSession={onOpenSession}
+              onEditMessage={(messageId, text) => startEditingMessage(sessionId, messageId, text)}
             />
           ))}
-          <RunActivityIndicator lifecycle={foregroundLifecycle} events={events} />
+          <RunActivityIndicator lifecycle={visibleLifecycle} events={events} waitingForDelegates={waitingForDelegates} />
           {events.length === 0 && (
             <p className="py-16 text-center text-sm text-ink-3">{t("sessions.noSelection")}</p>
           )}
@@ -190,7 +199,7 @@ function ChatArea({
       <Composer
         sessionId={sessionId}
         targetName={targetName}
-        running={foregroundRunning}
+        running={workbenchRunning}
         disabled={session.status === "archived"}
       />
 

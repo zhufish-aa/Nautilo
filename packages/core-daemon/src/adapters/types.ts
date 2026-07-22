@@ -6,7 +6,7 @@ export type AdapterEvent =
   | { kind: "thinking"; text: string; phase?: "delta" | "completed"; messageId?: string; raw?: unknown }
   | { kind: "tool"; callId?: string; name: string; phase?: "started" | "completed"; input?: unknown; output?: unknown; success?: boolean; raw?: unknown }
   | { kind: "command"; callId?: string; command: string; phase?: "started" | "completed"; exitCode?: number; output?: string; raw?: unknown }
-  | { kind: "file"; path: string; changeType?: string; raw?: unknown }
+  | { kind: "file"; path: string; changeType?: string; additions?: number; deletions?: number; diff?: string; raw?: unknown }
   | { kind: "session"; providerSessionId: string; raw?: unknown }
   | { kind: "status"; phase: "turn_started" | "turn_completed" | "turn_failed"; raw?: unknown }
   | { kind: "usage"; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningOutputTokens?: number; contextUsed?: number; contextWindow?: number; raw?: unknown }

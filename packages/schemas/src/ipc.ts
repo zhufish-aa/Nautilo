@@ -21,6 +21,14 @@ import type {
   Task,
   VerificationResult
 } from "@agenthub/domain";
+
+export interface MessageAttachmentInput {
+  path: string;
+  name: string;
+  kind: "image" | "file";
+  mimeType?: string;
+  sizeBytes?: number;
+}
 import type { RuntimeEvent } from "@agenthub/event-protocol";
 
 export interface IpcRequestMap {
@@ -40,7 +48,7 @@ export interface IpcRequestMap {
   "team.remove": { input: { teamId: string }; output: { removed: true } };
   "projectRun.list": { input: { projectId: string }; output: ProjectRun[] };
   "projectRun.get": { input: { projectRunId: string }; output: { projectRun: ProjectRun; mainSession: Session } };
-  "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string }; output: { projectRun: ProjectRun; mainSession: Session } };
+  "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string; attachments?: MessageAttachmentInput[] }; output: { projectRun: ProjectRun; mainSession: Session } };
   "orchestration.resolveDelegation": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.resolveMerge": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.recover": { input: { projectRunId: string; memberId: string; mode: "resume" | "replace" }; output: ProjectRun };
@@ -49,7 +57,7 @@ export interface IpcRequestMap {
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
   "session.create": { input: { projectId: string; memberId: string; title?: string }; output: Session };
   "session.upsert": { input: Session; output: Session };
-  "session.send": { input: { sessionId: string; text: string }; output: { accepted: true; runId: string } };
+  "session.send": { input: { sessionId: string; text: string; attachments?: MessageAttachmentInput[]; editMessageId?: string }; output: { accepted: true; runId: string } };
   "slashCommand.list": { input: { sessionId: string }; output: SlashCommandDefinition[] };
   "slashCommand.execute": { input: { sessionId: string; commandId: string; argument?: string }; output: SlashCommandResult };
   "slashCommand.continue": { input: { sessionId: string; commandId: string; actionId: string; selectedOptionIds?: string[] }; output: SlashCommandResult };

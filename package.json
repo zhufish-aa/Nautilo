@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -b tsconfig.json --pretty false",
     "build:desktop": "pnpm --filter @agenthub/core-daemon build && pnpm --filter @agenthub/desktop build",
+    "package:win": "pnpm build:desktop && node scripts/package-win-portable.mjs",
     "typecheck": "tsc -b tsconfig.json --pretty false && pnpm --filter @agenthub/desktop typecheck",
     "test": "pnpm -r --if-present test && node tests/contract/contracts.test.mjs",
     "check": "pnpm typecheck && pnpm test",

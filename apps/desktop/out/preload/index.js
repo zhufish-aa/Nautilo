@@ -20,7 +20,13 @@ const bridge = {
     }
   },
   dialog: {
-    pickDirectory: () => electron.ipcRenderer.invoke("dialog:pick-directory")
+    pickDirectory: () => electron.ipcRenderer.invoke("dialog:pick-directory"),
+    pickFiles: () => electron.ipcRenderer.invoke("dialog:pick-files")
+  },
+  attachments: {
+    pathForFile: (file) => electron.webUtils.getPathForFile(file),
+    describePaths: (paths) => electron.ipcRenderer.invoke("attachment:describe-paths", paths),
+    importClipboard: (input) => electron.ipcRenderer.invoke("attachment:import-clipboard", input)
   },
   core: {
     request: (request) => electron.ipcRenderer.invoke("core:request", request)

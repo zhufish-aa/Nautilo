@@ -37,7 +37,10 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
     env: request.env,
     timeoutMs: request.timeoutMs,
     idleTimeoutMs: request.idleTimeoutMs,
-    maxOutputBytes: request.maxOutputBytes ?? 20 * 1024 * 1024
+    // ACP can stream cumulative tool inputs (not user-visible output), making
+    // transport bytes grow quadratically for file writes. Honor an explicit
+    // caller limit, but do not apply the plain-text adapter's 20 MB default.
+    maxOutputBytes: request.maxOutputBytes
   });
   const rpc = new JsonRpcProcessClient(process);
   let sessionId: string | undefined;
@@ -45,7 +48,12 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
   let usageReceived = false;
 
   async function* events(): AsyncGenerator<AdapterEvent> {
-    const state: KimiAcpParseState = { messageId: "kimi-message-1", thinkingId: "kimi-thinking-1", toolNames: new Map() };
+    const state: KimiAcpParseState = {
+      messageId: "kimi-message-1",
+      thinkingId: "kimi-thinking-1",
+      toolNames: new Map(),
+      toolCalls: new Map()
+    };
     let messageText = "";
     let thinkingText = "";
     let messageIndex = 1;

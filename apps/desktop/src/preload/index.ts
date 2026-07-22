@@ -1,4 +1,5 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { DesktopAttachment } from "../main/attachment-file-service";
 
 export interface AppInfo {
   name: string;
@@ -35,7 +36,14 @@ const bridge = {
     }
   },
   dialog: {
-    pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("dialog:pick-directory")
+    pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("dialog:pick-directory"),
+    pickFiles: (): Promise<DesktopAttachment[]> => ipcRenderer.invoke("dialog:pick-files")
+  },
+  attachments: {
+    pathForFile: (file: File): string => webUtils.getPathForFile(file),
+    describePaths: (paths: string[]): Promise<DesktopAttachment[]> => ipcRenderer.invoke("attachment:describe-paths", paths),
+    importClipboard: (input: { name: string; mimeType?: string; data: Uint8Array }): Promise<DesktopAttachment> =>
+      ipcRenderer.invoke("attachment:import-clipboard", input)
   },
   core: {
     request: (request: { requestId?: string; method: string; input?: unknown }): Promise<unknown> => ipcRenderer.invoke("core:request", request)

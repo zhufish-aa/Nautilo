@@ -7,10 +7,11 @@ import type { RunLifecycle, TimelineEvent } from "../../lib/types";
 interface RunActivityIndicatorProps {
   lifecycle?: RunLifecycle;
   events: TimelineEvent[];
+  waitingForDelegates?: boolean;
 }
 
 /** Live, provider-neutral progress derived only from persisted runtime events. */
-export function RunActivityIndicator({ lifecycle, events }: RunActivityIndicatorProps): JSX.Element | null {
+export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = false }: RunActivityIndicatorProps): JSX.Element | null {
   const { locale } = useI18n();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const active = lifecycle?.status === "running" || lifecycle?.status === "waiting_approval";
@@ -36,9 +37,11 @@ export function RunActivityIndicator({ lifecycle, events }: RunActivityIndicator
   // Reasoning, tool, command, verification, and approval events already have
   // dedicated timeline rows. Rendering this generic indicator as well would
   // show the same in-flight operation twice.
-  if (!active || (latest && latest.data.kind !== "activity")) return null;
+  if (!active || (!waitingForDelegates && latest && latest.data.kind !== "activity")) return null;
   const zh = locale === "zh-CN";
-  const label = lifecycle?.status === "waiting_approval"
+  const label = waitingForDelegates
+    ? (zh ? "子 Agent 正在运行，完成后会通知主 Agent" : "Child agents are running; the main agent will be notified when they finish")
+    : lifecycle?.status === "waiting_approval"
     ? (zh ? "等待你的批准" : "Waiting for your approval")
     : progressLabel(latest, zh);
 

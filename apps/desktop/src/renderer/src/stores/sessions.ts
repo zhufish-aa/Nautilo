@@ -31,8 +31,11 @@ interface SessionsState {
   running: Record<string, RunLifecycle | undefined>;
   activeAgentRunIds: Record<string, string | undefined>;
   activeSessionId?: string;
+  editingMessage?: { sessionId: string; messageId: string; text: string };
 
   setActiveSession: (id: string | undefined) => void;
+  startEditingMessage: (sessionId: string, messageId: string, text: string) => void;
+  cancelEditingMessage: () => void;
   createSession: (input: {
     projectId: string;
     target: SessionTarget;
@@ -87,14 +90,19 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       foreground: {},
       activeAgentRunIds: {},
       activeSessionId: undefined,
+      editingMessage: undefined,
 
       setActiveSession: (id) =>
         set((state) => ({
           activeSessionId: id,
+          editingMessage: state.editingMessage?.sessionId === id ? state.editingMessage : undefined,
           sessions: state.sessions.map((session) =>
             session.id === id ? { ...session, unreadCount: 0 } : session
           )
         })),
+
+      startEditingMessage: (sessionId, messageId, text) => set({ editingMessage: { sessionId, messageId, text } }),
+      cancelEditingMessage: () => set({ editingMessage: undefined }),
 
       createSession: ({ projectId, target, title, model, reasoningEffort, serviceTier, parentSessionId, runId }) => {
         const now = new Date().toISOString();

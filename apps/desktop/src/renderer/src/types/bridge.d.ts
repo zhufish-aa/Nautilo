@@ -8,6 +8,14 @@ export interface AppInfo {
   node: string;
 }
 
+export interface DesktopAttachment {
+  path: string;
+  name: string;
+  kind: "image" | "file";
+  mimeType?: string;
+  sizeBytes: number;
+}
+
 /** Mirrors the preload bridge. Kept in sync with src/preload/index.ts. */
 export interface AgentHubBridge {
   readonly isElectron: true;
@@ -22,6 +30,12 @@ export interface AgentHubBridge {
   };
   dialog: {
     pickDirectory(): Promise<string | null>;
+    pickFiles(): Promise<DesktopAttachment[]>;
+  };
+  attachments: {
+    pathForFile(file: File): string;
+    describePaths(paths: string[]): Promise<DesktopAttachment[]>;
+    importClipboard(input: { name: string; mimeType?: string; data: Uint8Array }): Promise<DesktopAttachment>;
   };
   core: {
     request(request: { requestId?: string; method: string; input?: unknown }): Promise<unknown>;

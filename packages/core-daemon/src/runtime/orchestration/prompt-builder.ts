@@ -68,8 +68,11 @@ export class OrchestrationPromptBuilder {
       "[AGENTHUB_DELEGATION_ACCEPTED]",
       "The delegated tasks below were accepted by AgentHub and are now running asynchronously in child sessions.",
       "Continue the parent turn now. Do not wait for the child tasks and do not repeat the routing JSON.",
-      "Proceed with any useful independent work that remains. If nothing else can be done until results arrive, give the user a concise progress update and remain available for new messages.",
-      "Child results will be delivered back into this same provider session when they finish.",
+      "Do not execute, verify, create a fallback for, or claim completion of work that is already covered by a delegated task while that task is running.",
+      "Proceed only with useful independent work whose scope does not overlap any delegated task.",
+      "If there is no independent work left, give the user exactly one concise dispatch update and end this provider turn immediately.",
+      "Do not poll task status, repeatedly inspect the workspace, sleep, or loop while waiting; doing so only wastes tokens.",
+      "Ending this provider turn does not stop the orchestration. AgentHub keeps the overall run active and will deliver child results back into this same provider session when they finish.",
       `Original goal:\n${goal}`,
       `Dispatch receipts:\n${JSON.stringify(receipts, null, 2)}`
     ].join("\n\n");
@@ -80,6 +83,8 @@ export class OrchestrationPromptBuilder {
       "[AGENTHUB_FINAL_SYNTHESIS]",
       "All runnable delegated tasks have finished. Produce the final user-facing response for the original goal.",
       "Treat member results as reports, not proof. Verify important completion or artifact claims before presenting them as successful.",
+      "If a delegated task failed, state the failure clearly and do not claim that task succeeded.",
+      "Do not automatically retry, reassign, or take over a failed task in this synthesis turn. The main Agent may choose a next action in a later normal turn.",
       `Goal:\n${goal}`,
       `Task outcomes:\n${JSON.stringify(tasks.map((task) => {
         const outcome = results.find((item) => item.taskId === task.id);
@@ -93,29 +98,6 @@ export class OrchestrationPromptBuilder {
           result: outcome?.result?.slice(0, 16_000)
         };
       }), null, 2)}`
-    ].join("\n\n");
-  }
-
-  recovery(task: Task, failure: string, team: TeamDefinition): string {
-    return [
-      "[AGENTHUB_RECOVERY_DECISION]",
-      `Delegated task ${task.id} (${task.title}) failed after attempt ${task.attempt}.`,
-      `Failure:\n${failure}`,
-      "Choose what to do. Return exactly one JSON object and no Markdown:",
-      '{"action":"retry","taskId":"...","rationale":"...","assignedMemberId":"optional enabled member"}',
-      '{"action":"take_over","taskId":"...","rationale":"..."}',
-      '{"action":"continue","taskId":"...","rationale":"..."}',
-      "retry repeats or reassigns the task; take_over makes you complete it; continue skips it and cancels tasks that depend on it.",
-      `Enabled routing context:\n${JSON.stringify(this.teamContext(team), null, 2)}`
-    ].join("\n\n");
-  }
-
-  takeOver(task: Task, failure: string): string {
-    return [
-      "[AGENTHUB_TAKE_OVER]",
-      "You chose to take over a failed delegated task. Complete it yourself now.",
-      `Task:\n${JSON.stringify({ id: task.id, title: task.title, objective: task.objective, taskType: task.taskType, allowedPaths: task.allowedPaths, acceptanceCriteria: task.acceptanceCriteria }, null, 2)}`,
-      `Previous failure:\n${failure}`
     ].join("\n\n");
   }
 

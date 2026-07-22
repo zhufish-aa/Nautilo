@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
-import type { Message, ProjectRun, Session, Task } from "@agenthub/domain";
+import type { ArtifactId, Message, ProjectRun, Session, Task } from "@agenthub/domain";
 import { Database } from "../../database/index.js";
 
 export class MessageRouter {
   constructor(private readonly database: Database) {}
 
-  userGoal(session: Session, projectRun: ProjectRun): Message {
+  userGoal(session: Session, projectRun: ProjectRun, attachmentIds: ArtifactId[] = []): Message {
     return this.save(session, {
       sender: "user",
       kind: "chat",
       projectRunId: projectRun.id,
       toMemberId: projectRun.mainMemberId,
+      attachmentIds,
       text: projectRun.goal
     });
   }

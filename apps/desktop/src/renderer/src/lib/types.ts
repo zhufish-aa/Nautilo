@@ -256,11 +256,21 @@ export interface ContextUsage {
   contextWindow?: number;
 }
 
+export interface MessageAttachmentView {
+  id?: string;
+  name: string;
+  path?: string;
+  kind: "image" | "file";
+  mimeType?: string;
+  sizeBytes?: number;
+}
+
 export type TimelinePayload =
-    | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string }
+    | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string; attachments?: MessageAttachmentView[]; editedAt?: string }
   | { kind: "activity"; phase: "queued" | "starting" | "thinking" | "responding" | "completed"; detail?: string }
     | { kind: "reasoning"; text: string; streaming?: boolean }
   | { kind: "tool_activity"; toolName: string; status: "running" | "done" | "failed"; input?: string; output?: string }
+  | { kind: "tool_group"; items: TimelineEvent[]; stepCount: number; callCount: number; running: boolean }
   | { kind: "usage"; inputTokens?: number; outputTokens?: number; contextUsed?: number; contextWindow?: number }
   | { kind: "artifact"; artifactType: "image" | "file"; name: string; mimeType?: string; content?: string; path?: string }
   | { kind: "planner_decision"; mode: "direct" | "delegate" | "plan"; rationale: string }

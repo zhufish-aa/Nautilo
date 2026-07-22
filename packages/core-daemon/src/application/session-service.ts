@@ -6,9 +6,14 @@ import { RunService } from "../runtime/run-service.js";
 import { CoreError } from "../errors.js";
 import { MemberRouter } from "../runtime/orchestration/member-router.js";
 import { buildSessionTurnContext } from "./session-context.js";
+import { appendAttachmentContext, MessageAttachmentService } from "../runtime/message-attachment-service.js";
 export class SessionService {
   private readonly members: MemberRouter;
-  constructor(private readonly database: Database, private readonly runs: RunService) { this.members = new MemberRouter(database); }
+  private readonly attachments: MessageAttachmentService;
+  constructor(private readonly database: Database, private readonly runs: RunService) {
+    this.members = new MemberRouter(database);
+    this.attachments = new MessageAttachmentService(database);
+  }
   list(input: IpcRequestMap["session.list"]["input"]): Session[] { return this.database.sessions.list(input.projectId, input.memberId); }
   get(id: string): { session: Session; messages: Message[] } {
     const session = this.database.sessions.get(id);
@@ -60,16 +65,27 @@ export class SessionService {
   async send(input: IpcRequestMap["session.send"]["input"]): Promise<{ accepted: true; runId: string }> {
     const session = this.database.sessions.get(input.sessionId);
     if (!session) throw new CoreError("IPC_NOT_FOUND", { resource: "session", id: input.sessionId });
+    const existingMessages = this.database.sessions.messages(session.id);
+    const editedMessage = input.editMessageId ? existingMessages.find((message) => message.id === input.editMessageId) : undefined;
+    if (input.editMessageId && (!editedMessage || editedMessage.sender !== "user")) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "editMessageId", id: input.editMessageId });
+    }
+    const currentAttachments = await this.attachments.save(session, input.attachments);
     const sessionArtifacts = this.database.artifacts.list({ sessionId: session.id });
     const projectRunArtifacts = session.projectRunId ? this.database.artifacts.list({ projectRunId: session.projectRunId }) : [];
     const artifacts = [...new Map([...sessionArtifacts, ...projectRunArtifacts].map((artifact) => [artifact.id, artifact])).values()];
     const turnContext = buildSessionTurnContext({
-      currentText: input.text,
-      messages: this.database.sessions.messages(session.id),
+      currentText: appendAttachmentContext(input.editMessageId
+        ? `The user edited an earlier message. Treat the following as the corrected instruction:\n\n${input.text}`
+        : input.text, currentAttachments),
+      messages: existingMessages,
       artifacts,
+      currentAttachments,
       recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt
     });
-    const message: Message = { id: randomUUID(), sessionId: session.id, sender: "user", kind: "chat", projectRunId: session.projectRunId, taskId: session.taskId, toMemberId: session.memberId, text: input.text, createdAt: new Date().toISOString() };
+    const message: Message = editedMessage
+      ? { ...editedMessage, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), editedAt: new Date().toISOString() }
+      : { id: randomUUID(), sessionId: session.id, sender: "user", kind: "chat", projectRunId: session.projectRunId, taskId: session.taskId, toMemberId: session.memberId, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), createdAt: new Date().toISOString() };
     this.database.sessions.saveMessage(message);
     const agent = this.members.resolveSession(session);
     const runId = await this.runs.start(session, agent, turnContext.prompt, {

@@ -276,7 +276,7 @@ test("Kimi stream-json parser exposes messages, tools, and resume hints", () => 
 });
 
 test("Kimi ACP parser preserves streaming chunks and coalescible tool details", () => {
-  const state = { messageId: "message-1", thinkingId: "thinking-1", toolNames: new Map() };
+  const state = { messageId: "message-1", thinkingId: "thinking-1", toolNames: new Map(), toolCalls: new Map() };
   const chunk = parseKimiAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial" } }, state)[0];
   assert.deepEqual({ kind: chunk.kind, phase: chunk.phase, messageId: chunk.messageId, text: chunk.text }, {
     kind: "message", phase: "delta", messageId: "message-1", text: "partial"
@@ -287,6 +287,8 @@ test("Kimi ACP parser preserves streaming chunks and coalescible tool details", 
   assert.equal(completed.name, "web_search");
   assert.equal(completed.callId, "tool-1");
   assert.match(completed.output, /"hits": 2/);
+  const duplicate = parseKimiAcpUpdate({ sessionUpdate: "tool_call_update", toolCallId: "tool-1", status: "completed", rawOutput: { hits: 2 } }, state);
+  assert.deepEqual(duplicate, []);
   const usage = parseKimiAcpUpdate({ sessionUpdate: "usage_update", used: 4096, size: 262144 }, state)[0];
   assert.equal(usage.contextUsed, 4096);
   assert.equal(usage.contextWindow, 262144);
@@ -295,6 +297,19 @@ test("Kimi ACP parser preserves streaming chunks and coalescible tool details", 
   ] }, state)[0];
   assert.equal(commands.kind, "commands");
   assert.deepEqual(commands.commands[0], { name: "compact", description: "Compact context", inputHint: "instruction" });
+});
+
+test("Kimi ACP coalesces cumulative in-progress tool updates into one start event", () => {
+  const state = { messageId: "message-1", thinkingId: "thinking-1", toolNames: new Map(), toolCalls: new Map() };
+  const first = parseKimiAcpUpdate({ sessionUpdate: "tool_call", toolCallId: "write-1", title: "Write", status: "in_progress", rawInput: { content: "a" } }, state);
+  const incremental = parseKimiAcpUpdate({ sessionUpdate: "tool_call_update", toolCallId: "write-1", status: "in_progress", rawInput: { content: "a".repeat(10_000) } }, state);
+  const completed = parseKimiAcpUpdate({ sessionUpdate: "tool_call_update", toolCallId: "write-1", status: "completed", rawOutput: "written" }, state);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].phase, "started");
+  assert.deepEqual(incremental, []);
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].phase, "completed");
+  assert.equal(completed[0].input.length, 10_000);
 });
 
 test("Kimi context usage falls back to the provider wire log when ACP omits usage_update", () => {

@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type {
   PlannerDecision,
   ProjectRun,
-  RecoveryDecision,
   Session,
   Task,
   TeamDefinition,
@@ -26,6 +25,8 @@ import {
 import { RunService, type RunCompletion } from "../runtime/run-service.js";
 import { GitWorkflowService } from "../runtime/git-workflow-service.js";
 import { ApprovalService } from "../runtime/security/approval-service.js";
+import type { MessageAttachmentInput } from "@agenthub/schemas";
+import { MessageAttachmentService } from "../runtime/message-attachment-service.js";
 
 export interface StartOrchestrationInput {
   projectId: string;
@@ -33,6 +34,7 @@ export interface StartOrchestrationInput {
   agentInstanceId?: string;
   goal: string;
   sessionId?: string;
+  attachments?: MessageAttachmentInput[];
 }
 
 export interface StartOrchestrationResult {
@@ -54,6 +56,7 @@ export class OrchestrationService {
   private readonly sessionRouter: SessionRouter;
   private readonly messages: MessageRouter;
   private readonly continuity = new ConversationContinuityBuilder();
+  private readonly attachments: MessageAttachmentService;
   private readonly active = new Map<string, Promise<void>>();
 
   constructor(
@@ -68,6 +71,7 @@ export class OrchestrationService {
     this.graph = new TaskGraph(database);
     this.sessionRouter = new SessionRouter(database);
     this.messages = new MessageRouter(database);
+    this.attachments = new MessageAttachmentService(database);
   }
 
   start(input: StartOrchestrationInput): StartOrchestrationResult {
@@ -92,8 +96,12 @@ export class OrchestrationService {
     const mainSession = this.sessionRouter.main(projectRun, team, input.sessionId);
     projectRun = { ...projectRun, mainSessionId: mainSession.id };
     this.database.projectRuns.save(projectRun);
-    this.messages.userGoal(mainSession, projectRun);
+    const userMessage = this.messages.userGoal(mainSession, projectRun);
     this.schedule(projectRun.id, async () => {
+      const attachments = await this.attachments.save(mainSession, input.attachments);
+      if (attachments.length) {
+        this.database.sessions.saveMessage({ ...userMessage, attachmentIds: attachments.map((artifact) => artifact.id) });
+      }
       if (this.gitWorkflows) this.saveProjectRun(await this.gitWorkflows.initializeRun(this.requireProjectRun(projectRun.id)));
       await this.plan(projectRun.id);
     });
@@ -214,11 +222,12 @@ export class OrchestrationService {
       .filter((run) => run.id !== projectRun.id)
       .reverse()
       .flatMap((run) => this.database.artifacts.list({ projectRunId: run.id }));
+    const currentArtifacts = this.database.artifacts.list({ projectRunId: projectRun.id });
     const continuity = this.continuity.build({
       currentProjectRunId: projectRun.id,
       currentText: projectRun.goal,
       messages: this.database.sessions.messages(mainSession.id),
-      artifacts: previousArtifacts,
+      artifacts: [...previousArtifacts, ...currentArtifacts],
       recoverProviderContext: !mainSession.providerSessionId || !mainSession.providerContextSyncedAt
     });
     const handle = await this.runs.launch(
@@ -318,8 +327,15 @@ export class OrchestrationService {
     }
 
     const tasks = this.database.tasks.list(projectRunId);
-    const unresolved = tasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status));
+    const unresolved = tasks.filter((task) => !["completed", "failed", "cancelled", "blocked_dependency"].includes(task.status));
     if (unresolved.length > 0) throw new CoreError("RECOVERY_REQUIRED", { projectRunId, taskIds: unresolved.map((task) => task.id) });
+
+    // A task assigned to the main Agent already produced its user-facing result
+    // in that provider turn. Another synthesis would only duplicate the answer.
+    if (tasks.length === 1 && tasks[0]?.status === "completed" && tasks[0].completedByMemberId === projectRun.mainMemberId) {
+      await this.finishRun(projectRunId, mainSession);
+      return;
+    }
 
     const resultMessages = this.database.sessions.messages(mainSession.id)
       .filter((message) => message.projectRunId === projectRunId && message.kind === "result" && message.sender === "system" && message.taskId);
@@ -337,6 +353,20 @@ export class OrchestrationService {
     );
     const completion = await handle.completion;
     this.assertCompleted(completion, "final synthesis");
+
+    const latestRun = this.requireProjectRun(projectRunId);
+    const failedTaskIds = tasks
+      .filter((task) => task.status === "failed")
+      .map((task) => task.id);
+    if (failedTaskIds.length > 0) {
+      this.saveProjectRun({
+        ...latestRun,
+        status: "failed",
+        recoveryReason: `delegated_tasks_failed:${failedTaskIds.join(",")}`
+      });
+      return;
+    }
+
     await this.finishRun(projectRunId, mainSession);
   }
 
@@ -427,7 +457,7 @@ export class OrchestrationService {
           currentTask = this.updateTask(mainSession, currentTask, "failed", finalized.task);
           if (finalized.reason === "path") this.messages.system(mainSession, projectRun, `PATH_POLICY_VIOLATION: ${finalized.message}`, "recovery");
           if (finalized.reason === "conflict") this.messages.system(mainSession, projectRun, `MERGE_CONFLICT: ${finalized.message}`, "recovery");
-          await this.recoverTask(projectRun, team, mainSession, currentTask, finalized.message);
+          if (!isMain) this.returnResult(projectRun, mainSession, currentTask, finalized.message);
           return;
         }
         currentTask = this.updateTask(mainSession, currentTask, "merge_ready", finalized.task);
@@ -438,9 +468,8 @@ export class OrchestrationService {
     }
 
     currentTask = this.updateTask(mainSession, currentTask, "failed");
-    const failure = completion.finalMessage ?? completion.run.failureCode ?? `Run ended with ${completion.run.status}`;
-    if (!isMain) this.messages.result(mainSession, projectRun, currentTask, failure);
-    await this.recoverTask(projectRun, team, mainSession, currentTask, failure);
+    const failure = completion.run.failureCode ?? completion.finalMessage ?? `Run ended with ${completion.run.status}`;
+    if (!isMain) this.returnResult(projectRun, mainSession, currentTask, failure);
   }
 
   private async continueAfterDelegation(projectRunId: string, receipts: DelegationReceipt[]): Promise<void> {
@@ -468,59 +497,6 @@ export class OrchestrationService {
       taskId: task.id,
       targetSessionId: mainSession.id
     });
-  }
-
-  private async recoverTask(projectRun: ProjectRun, team: TeamDefinition, mainSession: Session, task: Task, failure: string): Promise<void> {
-    this.messages.recovery(mainSession, projectRun, task, failure);
-    const main = this.members.sessionMain(team, projectRun.mainAgentInstanceId);
-    const handle = await this.runs.launch(
-      this.requireMainSession(this.requireProjectRun(projectRun.id)),
-      main.agent,
-      this.prompts.recovery(task, failure, team),
-      { projectRunId: projectRun.id, taskId: task.id, memberId: main.member.id, messageKind: "recovery", workingDirectory: this.workingDirectory(projectRun) }
-    );
-    const completion = await handle.completion;
-    this.assertCompleted(completion, "failure recovery");
-    const decision = this.decisions.recovery(extractJsonObject(completion.finalMessage ?? ""), task, team);
-    this.events.append(mainSession, completion.run, "recovery.decision", {
-      action: decision.action,
-      taskId: decision.taskId,
-      rationale: decision.rationale,
-      assignedMemberId: decision.action === "retry" ? decision.assignedMemberId : undefined
-    });
-    await this.applyRecovery(projectRun, team, mainSession, task, failure, decision);
-  }
-
-  private async applyRecovery(projectRun: ProjectRun, team: TeamDefinition, mainSession: Session, task: Task, failure: string, decision: RecoveryDecision): Promise<void> {
-    if (decision.action === "retry") {
-      if (task.attempt >= 3) throw new CoreError("RECOVERY_REQUIRED", { taskId: task.id, reason: "maximum_attempts" });
-      this.updateTask(mainSession, task, "ready", {
-        attempt: task.attempt + 1,
-        assignedMemberId: decision.assignedMemberId ?? task.assignedMemberId
-      });
-      return;
-    }
-    if (decision.action === "continue") {
-      this.graph.cancelDependents(projectRun.id, task.id);
-      const current = this.requireProjectRun(projectRun.id);
-      this.saveProjectRun({ ...current, acceptedTaskFailures: [...new Set([...(current.acceptedTaskFailures ?? []), task.id])] });
-      for (const dependent of this.database.tasks.list(projectRun.id)) this.emitTask(mainSession, dependent);
-      return;
-    }
-
-    const main = this.members.sessionMain(team, projectRun.mainAgentInstanceId);
-    let takeoverTask = this.updateTask(mainSession, task, "ready");
-    takeoverTask = this.updateTask(mainSession, takeoverTask, "queued");
-    this.updateTask(mainSession, takeoverTask, "running", { completedByMemberId: main.member.id });
-    const handle = await this.runs.launch(
-      this.requireMainSession(this.requireProjectRun(projectRun.id)),
-      main.agent,
-      this.prompts.takeOver(task, failure),
-      { projectRunId: projectRun.id, taskId: task.id, memberId: main.member.id, workingDirectory: this.workingDirectory(projectRun) }
-    );
-    const completion = await handle.completion;
-    this.assertCompleted(completion, "main Agent takeover");
-    this.updateTask(mainSession, this.database.tasks.get(task.id) ?? task, "completed", { completedByMemberId: main.member.id });
   }
 
   private async finishRun(projectRunId: string, mainSession: Session): Promise<void> {

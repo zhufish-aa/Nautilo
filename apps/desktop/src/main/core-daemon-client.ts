@@ -14,7 +14,7 @@ export class CoreDaemonClient {
   async start(userDataPath: string): Promise<void> {
     if (this.process) return;
     const daemonEntry = this.resolveDaemonEntry();
-    const nodeCommand = process.env.AGENTHUB_NODE_PATH ?? (process.platform === "win32" ? "node.exe" : "node");
+    const nodeCommand = this.resolveNodeCommand();
     const socketPath = process.platform === "win32" ? "\\\\.\\pipe\\agenthub-core" : join(userDataPath, "core.sock");
     this.tokenPath = join(userDataPath, "core.token");
     this.process = spawn(nodeCommand, [daemonEntry, "--serve"], {
@@ -37,6 +37,13 @@ export class CoreDaemonClient {
     const entry = candidates.find((candidate) => existsSync(candidate));
     if (!entry) throw new Error(`Core Daemon entry was not found: ${candidates.join(", ")}`);
     return entry;
+  }
+
+  private resolveNodeCommand(): string {
+    if (process.env.AGENTHUB_NODE_PATH) return process.env.AGENTHUB_NODE_PATH;
+    const executable = process.platform === "win32" ? "node.exe" : "node";
+    const bundledRuntime = join(process.resourcesPath, "node", executable);
+    return existsSync(bundledRuntime) ? bundledRuntime : executable;
   }
 
   async request(request: { requestId?: string; method: string; input?: unknown }): Promise<unknown> {

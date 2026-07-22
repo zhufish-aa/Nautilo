@@ -114,6 +114,9 @@ export interface RuntimeEventPayloadMap {
   "file.changed": {
     path: string;
     changeType: "added" | "modified" | "deleted" | "renamed";
+    additions?: number;
+    deletions?: number;
+    diff?: string;
   };
   "approval.requested": {
     approvalId: string;

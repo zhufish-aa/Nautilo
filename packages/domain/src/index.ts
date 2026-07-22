@@ -433,6 +433,8 @@ export interface Message {
   fromMemberId?: string;
   toMemberId?: string;
   correlationId?: string;
+  attachmentIds?: ArtifactId[];
+  editedAt?: string;
   text: string;
   createdAt: string;
 }

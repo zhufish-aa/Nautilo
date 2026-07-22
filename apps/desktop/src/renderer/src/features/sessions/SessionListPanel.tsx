@@ -9,6 +9,7 @@ import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
+import { visibleSessionStatus } from "../../lib/session-lifecycle";
 
 export function sessionTargetName(
   session: UiSession,
@@ -38,12 +39,14 @@ function SessionItem({
   const { t, locale } = useI18n();
   const teams = useTeamsStore((state) => state.teams);
   const instances = useAgentsStore((state) => state.instances);
+  const orchestrationLifecycle = useSessionsStore((state) => state.running[session.id]);
+  const status = visibleSessionStatus(session.status, orchestrationLifecycle);
   const statusTone =
-    session.status === "running"
+    status === "running"
       ? "accent"
-      : session.status === "waiting_approval"
+      : status === "waiting_approval"
         ? "warn"
-        : session.status === "failed"
+        : status === "failed"
           ? "danger"
           : "muted";
 
@@ -80,11 +83,11 @@ function SessionItem({
           <div className="mt-1 flex items-center justify-between gap-2">
             <span className="truncate text-xs text-ink-3">{sessionTargetName(session, teams, instances)}</span>
             <span className="flex shrink-0 items-center gap-1.5">
-              {session.status !== "idle" && session.status !== "completed" && (
+              {status !== "idle" && status !== "completed" && (
                 <StatusChip
                   tone={statusTone}
-                  label={t(`sessions.status.${session.status}` as MessageKey)}
-                  pulse={session.status === "running"}
+                  label={t(`sessions.status.${status}` as MessageKey)}
+                  pulse={status === "running"}
                   className="h-5 px-1.5 text-[10px]"
                 />
               )}

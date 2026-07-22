@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { readWindowState, trackWindowState } from "./window-state";
 import { CoreDaemonClient } from "./core-daemon-client";
 import { ARTIFACT_SCHEME, registerArtifactProtocol, registerArtifactScheme } from "./artifact-protocol";
+import { importClipboardAttachment, prepareAttachmentPaths } from "./attachment-file-service";
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 const coreDaemon = new CoreDaemonClient();
@@ -69,6 +70,22 @@ function registerIpcHandlers(): void {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+
+  ipcMain.handle("dialog:pick-files", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return [];
+    const result = await dialog.showOpenDialog(win, {
+      title: "选择文件",
+      properties: ["openFile", "multiSelections", "dontAddToRecent"]
+    });
+    if (result.canceled) return [];
+    return prepareAttachmentPaths(app.getPath("userData"), result.filePaths);
+  });
+
+  ipcMain.handle("attachment:describe-paths", async (_event, paths: string[]) => prepareAttachmentPaths(app.getPath("userData"), paths));
+  ipcMain.handle("attachment:import-clipboard", async (_event, input: { name: string; mimeType?: string; data: Uint8Array }) =>
+    importClipboardAttachment(app.getPath("userData"), input)
+  );
 }
 
 function createMainWindow(): BrowserWindow {

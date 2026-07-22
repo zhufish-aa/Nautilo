@@ -43,7 +43,15 @@ function itemEvents(type: string, item: JsonRecord, raw: unknown): AdapterEvent[
     return changes.flatMap((change): AdapterEvent[] => {
       const entry = record(change);
       const path = entry && typeof entry.path === "string" ? entry.path : undefined;
-      return path ? [{ kind: "file", path, changeType: typeof entry?.kind === "string" ? entry.kind : "modified", raw }] : [];
+      return path ? [{
+        kind: "file",
+        path,
+        changeType: typeof entry?.kind === "string" ? entry.kind : "modified",
+        additions: number(entry?.additions),
+        deletions: number(entry?.deletions),
+        diff: typeof entry?.diff === "string" ? entry.diff : typeof entry?.patch === "string" ? entry.patch : undefined,
+        raw
+      }] : [];
     });
   }
   return [];

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
   AgentInstance,
   AgentRun,
+  GitChangedFile,
   Message,
   ProjectRunId,
   Session,
@@ -15,6 +16,8 @@ import { CoreError } from "../errors.js";
 import { AuditService } from "./observability/audit-service.js";
 import { ArtifactService } from "./artifact-service.js";
 import { SessionRunQueue } from "./session-run-queue.js";
+import { RunDiffCollector } from "./run-diff-collector.js";
+import { captureWorkspaceSnapshot, type WorkspaceSnapshot } from "./run-workspace-snapshot.js";
 
 export interface RunContext {
   projectRunId?: ProjectRunId;
@@ -50,6 +53,9 @@ export class RunService {
   private readonly outputTails = new Map<string, string>();
   private readonly messageBuffers = new Map<string, Map<string, string>>();
   private readonly artifactService: ArtifactService;
+  private readonly diffCollector = new RunDiffCollector();
+  private readonly touchedFiles = new Map<string, Map<string, { path: string; changeType: GitChangedFile["changeType"] }>>();
+  private readonly workspaceBaselines = new Map<string, WorkspaceSnapshot>();
   private readonly sessionQueue = new SessionRunQueue();
 
   constructor(
@@ -193,6 +199,13 @@ export class RunService {
     };
 
     try {
+      if (context.presentation !== "provider_command") {
+        const isGitWorkspace = await this.diffCollector.isGitWorkspace(request.cwd).catch(() => false);
+        if (!isGitWorkspace) {
+          const baseline = await captureWorkspaceSnapshot(request.cwd).catch(() => undefined);
+          if (baseline) this.workspaceBaselines.set(runId, baseline);
+        }
+      }
       const currentSession = this.database.sessions.get(session.id) ?? session;
       const adapterRun = currentSession.providerSessionId && this.adapters.capabilities(agent).nativeResume
         ? this.adapters.resume({ ...request, providerSessionId: currentSession.providerSessionId })
@@ -202,6 +215,7 @@ export class RunService {
       void completion.finally(() => this.active.delete(runId));
       return { runId, completion };
     } catch (error) {
+      this.workspaceBaselines.delete(runId);
       const failed = this.failRun(run, session, error, context.presentation === "provider_command");
       return { runId, completion: Promise.resolve({ run: failed, messages: [] }) };
     }
@@ -219,6 +233,7 @@ export class RunService {
         const message = await this.persist(run, session, event, context);
         if (message) messages.push(message);
       }
+      if (context.presentation !== "provider_command") await this.collectRunDiff(run, session, context);
       const latest = this.database.runs.get(run.id) ?? run;
       const failedStatuses: AgentRun["status"][] = ["failed", "timed_out", "cancelled", "cancelling", "crashed"];
       if (failedStatuses.includes(latest.status)) {
@@ -235,6 +250,8 @@ export class RunService {
         }
         this.updateSessionStatus(session.id, context.presentation === "provider_command" || cancelled ? "idle" : "failed");
         this.outputTails.delete(run.id);
+        this.touchedFiles.delete(run.id);
+        this.workspaceBaselines.delete(run.id);
         return { run: latest, messages, finalMessage: messages.at(-1)?.text };
       }
 
@@ -246,10 +263,14 @@ export class RunService {
       }
       this.updateSessionStatus(session.id, context.presentation === "provider_command" ? "idle" : "completed");
       this.outputTails.delete(run.id);
+      this.touchedFiles.delete(run.id);
+      this.workspaceBaselines.delete(run.id);
       return { run: completed, messages, finalMessage: messages.at(-1)?.text };
     } catch (error) {
       const failed = this.failRun(run, session, error, context.presentation === "provider_command");
       this.outputTails.delete(run.id);
+      this.touchedFiles.delete(run.id);
+      this.workspaceBaselines.delete(run.id);
       return { run: failed, messages, finalMessage: messages.at(-1)?.text };
     }
   }
@@ -384,7 +405,19 @@ export class RunService {
       outputSummary: event.output ? this.redaction.text(event.output.slice(0, 2_000)) : undefined
     });
     else if (event.kind === "command") this.events.append(session, run, "command.started", { callId: event.callId, command: event.command, cwd: context.workingDirectory ?? this.database.projects.get(session.projectId)?.rootPath ?? process.cwd() });
-    else if (event.kind === "file") this.events.append(session, run, "file.changed", { path: event.path, changeType: (event.changeType as "added" | "modified" | "deleted" | "renamed") ?? "modified" });
+    else if (event.kind === "file") {
+      const changeType = normalizeChangeType(event.changeType);
+      const touched = this.touchedFiles.get(run.id) ?? new Map();
+      touched.set(event.path, { path: event.path, changeType });
+      this.touchedFiles.set(run.id, touched);
+      this.events.append(session, run, "file.changed", {
+        path: event.path,
+        changeType,
+        additions: event.additions,
+        deletions: event.deletions,
+        diff: event.diff ? this.redaction.text(event.diff) : undefined
+      });
+    }
     else if (event.kind === "exit") {
       const current = this.database.runs.get(run.id) ?? run;
       if (!["cancelled", "cancelling"].includes(current.status)) {
@@ -414,4 +447,36 @@ export class RunService {
     if (!detail || detail === '""') return undefined;
     return this.redaction.text(detail.slice(0, limit));
   }
+
+  private async collectRunDiff(run: AgentRun, session: Session, context: RunContext): Promise<void> {
+    const touched = [...(this.touchedFiles.get(run.id)?.values() ?? [])];
+    if (!touched.length) return;
+    const project = this.database.projects.get(session.projectId);
+    const cwd = context.workingDirectory ?? project?.rootPath;
+    if (!cwd) return;
+    const files = await this.diffCollector.collect(cwd, touched, this.workspaceBaselines.get(run.id)).catch(() => []);
+    if (!files.length) return;
+    const artifact = this.artifactService.save({
+      kind: "diff",
+      name: `${session.title.slice(0, 80) || "run"}.diff.json`,
+      content: JSON.stringify({ files }),
+      projectRunId: context.projectRunId,
+      taskId: context.taskId,
+      sessionId: session.id,
+      metadata: { runId: run.id, paths: files.map((file) => file.path), fileCount: files.length }
+    });
+    this.events.append(session, run, "git.diff_collected", {
+      artifactId: artifact.id,
+      taskId: context.taskId,
+      fileCount: files.length
+    });
+  }
+}
+
+function normalizeChangeType(value?: string): GitChangedFile["changeType"] {
+  if (value === "added" || value === "deleted" || value === "renamed" || value === "modified") return value;
+  if (value === "add" || value === "create") return "added";
+  if (value === "delete" || value === "remove") return "deleted";
+  if (value === "rename") return "renamed";
+  return "modified";
 }

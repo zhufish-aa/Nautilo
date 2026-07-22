@@ -6,6 +6,8 @@ const node_child_process = require("node:child_process");
 const node_net = require("node:net");
 const node_os = require("node:os");
 const node_url = require("node:url");
+const node_crypto = require("node:crypto");
+const promises = require("node:fs/promises");
 const DEFAULT_STATE = {
   width: 1360,
   height: 860,
@@ -79,7 +81,7 @@ class CoreDaemonClient {
   async start(userDataPath) {
     if (this.process) return;
     const daemonEntry = this.resolveDaemonEntry();
-    const nodeCommand = process.env.AGENTHUB_NODE_PATH ?? (process.platform === "win32" ? "node.exe" : "node");
+    const nodeCommand = this.resolveNodeCommand();
     const socketPath = process.platform === "win32" ? "\\\\.\\pipe\\agenthub-core" : node_path.join(userDataPath, "core.sock");
     this.tokenPath = node_path.join(userDataPath, "core.token");
     this.process = node_child_process.spawn(nodeCommand, [daemonEntry, "--serve"], {
@@ -101,6 +103,12 @@ class CoreDaemonClient {
     const entry = candidates.find((candidate) => node_fs.existsSync(candidate));
     if (!entry) throw new Error(`Core Daemon entry was not found: ${candidates.join(", ")}`);
     return entry;
+  }
+  resolveNodeCommand() {
+    if (process.env.AGENTHUB_NODE_PATH) return process.env.AGENTHUB_NODE_PATH;
+    const executable = process.platform === "win32" ? "node.exe" : "node";
+    const bundledRuntime = node_path.join(process.resourcesPath, "node", executable);
+    return node_fs.existsSync(bundledRuntime) ? bundledRuntime : executable;
   }
   async request(request) {
     if (!this.socketPath || !this.tokenPath) throw new Error("Core Daemon is not ready");
@@ -206,15 +214,102 @@ function registerArtifactScheme() {
   }]);
 }
 function registerArtifactProtocol() {
-  const allowedRoots = [node_path.resolve(node_os.homedir(), ".codex", "generated_images")];
+  const allowedRoots = [
+    node_path.resolve(node_os.homedir(), ".codex", "generated_images"),
+    node_path.resolve(electron.app.getPath("userData"), "attachments")
+  ];
   electron.protocol.handle(ARTIFACT_SCHEME, (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");
     if (!requestedPath) return new Response("Missing artifact path", { status: 400 });
     const candidate = node_path.resolve(requestedPath);
-    if (!allowedRoots.some((root) => isWithin(root, candidate))) return new Response("Forbidden", { status: 403 });
+    if (!allowedRoots.some((root) => isWithin$1(root, candidate))) return new Response("Forbidden", { status: 403 });
     if (!node_fs.existsSync(candidate)) return new Response("Artifact not found", { status: 404 });
     return electron.net.fetch(node_url.pathToFileURL(candidate).toString());
   });
+}
+function isWithin$1(root, candidate) {
+  const path = node_path.relative(root, candidate);
+  return path === "" || !path.startsWith("..") && !node_path.isAbsolute(path);
+}
+const MAX_CLIPBOARD_BYTES = 32 * 1024 * 1024;
+const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".avif"]);
+async function describeAttachmentPaths(paths) {
+  return Promise.all(paths.map(async (path) => {
+    const file = await promises.stat(path);
+    if (!file.isFile()) throw new Error(`Attachment is not a file: ${path}`);
+    const name = node_path.basename(path);
+    const mimeType = inferMimeType(name);
+    return { path, name, sizeBytes: file.size, kind: mimeType?.startsWith("image/") ? "image" : "file", mimeType };
+  }));
+}
+async function prepareAttachmentPaths(dataDir, paths) {
+  const described = await describeAttachmentPaths(paths);
+  const directory = node_path.resolve(dataDir, "attachments", "selected");
+  await promises.mkdir(directory, { recursive: true });
+  return Promise.all(described.map(async (attachment) => {
+    if (attachment.kind !== "image" || isWithin(node_path.resolve(dataDir, "attachments"), node_path.resolve(attachment.path))) return attachment;
+    const extension = node_path.extname(attachment.name).slice(0, 16);
+    const path = node_path.join(directory, `${node_crypto.randomUUID()}${extension}`);
+    await promises.copyFile(attachment.path, path);
+    return { ...attachment, path };
+  }));
+}
+async function importClipboardAttachment(dataDir, input) {
+  const bytes = Buffer.from(input.data);
+  if (!bytes.length || bytes.length > MAX_CLIPBOARD_BYTES) {
+    throw new Error(`Clipboard attachment must be between 1 byte and ${MAX_CLIPBOARD_BYTES} bytes`);
+  }
+  const originalExtension = node_path.extname(input.name).slice(0, 16);
+  const extension = originalExtension || extensionForMime(input.mimeType);
+  const directory = node_path.join(dataDir, "attachments", "clipboard");
+  await promises.mkdir(directory, { recursive: true });
+  const path = node_path.join(directory, `${node_crypto.randomUUID()}${extension}`);
+  await promises.writeFile(path, bytes, { flag: "wx" });
+  const mimeType = input.mimeType || inferMimeType(input.name);
+  return {
+    path,
+    name: input.name || `clipboard${extension}`,
+    sizeBytes: bytes.length,
+    kind: mimeType?.startsWith("image/") ? "image" : "file",
+    mimeType
+  };
+}
+function inferMimeType(name) {
+  const extension = node_path.extname(name).toLowerCase();
+  const known = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+    ".avif": "image/avif",
+    ".pdf": "application/pdf",
+    ".json": "application/json",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".html": "text/html",
+    ".ts": "text/typescript",
+    ".tsx": "text/typescript",
+    ".js": "text/javascript",
+    ".jsx": "text/javascript"
+  };
+  return known[extension] ?? (IMAGE_EXTENSIONS.has(extension) ? `image/${extension.slice(1)}` : void 0);
+}
+function extensionForMime(mimeType) {
+  const extensions = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/svg+xml": ".svg",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt"
+  };
+  return mimeType ? extensions[mimeType] ?? "" : "";
 }
 function isWithin(root, candidate) {
   const path = node_path.relative(root, candidate);
@@ -274,6 +369,21 @@ function registerIpcHandlers() {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+  electron.ipcMain.handle("dialog:pick-files", async (event) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    if (!win) return [];
+    const result = await electron.dialog.showOpenDialog(win, {
+      title: "选择文件",
+      properties: ["openFile", "multiSelections", "dontAddToRecent"]
+    });
+    if (result.canceled) return [];
+    return prepareAttachmentPaths(electron.app.getPath("userData"), result.filePaths);
+  });
+  electron.ipcMain.handle("attachment:describe-paths", async (_event, paths) => prepareAttachmentPaths(electron.app.getPath("userData"), paths));
+  electron.ipcMain.handle(
+    "attachment:import-clipboard",
+    async (_event, input) => importClipboardAttachment(electron.app.getPath("userData"), input)
+  );
 }
 function createMainWindow() {
   const state = readWindowState();

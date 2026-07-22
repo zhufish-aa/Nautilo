@@ -92,6 +92,8 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(runtime, /data: \{ \.\.\.current, text: event\.payload\.text \|\| current\.text, streaming: false \}/);
   assert.match(runtime, /retryableCommands/);
   assert.match(runtime, /normalizeCommandForRetry/);
+  assert.match(runtime, /event\.type === "run\.failed" \? "failed"/);
+  assert.match(runtime, /status: terminalStatus/);
   assert.match(runtime, /_replaceContextUsage\(sessionId, latestContextUsage\(events\)\)/);
 
   const contextUsage = readFileSync(join(renderer, "features/sessions/ContextUsageIndicator.tsx"), "utf8");
@@ -109,6 +111,36 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(activityIndicator, /latest && latest\.data\.kind !== "activity"/);
 });
 
+test("chat timeline groups consecutive tool work while preserving full details", () => {
+  const grouping = readFileSync(join(renderer, "lib/tool-timeline-groups.ts"), "utf8");
+  const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
+  const timeline = readFileSync(join(renderer, "features/timeline/Timeline.tsx"), "utf8");
+
+  assert.match(grouping, /GROUPABLE_KINDS.*reasoning.*tool_activity.*command.*file_change.*verification/s);
+  assert.match(grouping, /stepCount < 2/);
+  assert.match(grouping, /stepCount,/);
+  assert.match(grouping, /items: pending/);
+  assert.match(grouping, /running: pending\.some/);
+  assert.match(runtime, /groupToolTimeline/);
+  assert.match(timeline, /function ToolGroupCard/);
+  assert.match(timeline, /const \[open, setOpen\] = useState\(false\)/);
+  assert.match(timeline, /items\.at\(-1\)/);
+  assert.match(timeline, /hasSupportingSteps/);
+  assert.match(timeline, /处理了 \$\{stepCount\} 个步骤/);
+  assert.match(timeline, /运行了/);
+  assert.match(timeline, /items\.map/);
+  assert.match(timeline, /item\.data\.kind === "file_change"/);
+  assert.match(timeline, /item\.data\.kind === "verification"/);
+});
+
+test("file change cards accept provider diffs and hydrated run diff artifacts", () => {
+  const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
+  assert.match(runtime, /artifacts\.flatMap\(parseDiffArtifact\)/);
+  assert.match(runtime, /additions: event\.payload\.additions \?\? 0/);
+  assert.match(runtime, /deletions: event\.payload\.deletions \?\? 0/);
+  assert.match(runtime, /diff: event\.payload\.diff/);
+});
+
 test("main timeline compacts delegation internals into one task card", () => {
   const policy = readFileSync(join(renderer, "lib/orchestration-timeline-policy.ts"), "utf8");
   assert.match(policy, /message\.kind === "planner_decision" \|\| message\.kind === "delegation"/);
@@ -117,13 +149,25 @@ test("main timeline compacts delegation internals into one task card", () => {
   assert.match(policy, /event\.data\.run\.status === "running"/);
 });
 
-test("delegated child work does not lock the main chat composer", () => {
+test("delegated child work keeps the orchestration visibly running until stopped or completed", () => {
   const page = readFileSync(join(renderer, "features/sessions/SessionsPage.tsx"), "utf8");
+  const indicator = readFileSync(join(renderer, "features/sessions/RunActivityIndicator.tsx"), "utf8");
+  const sessionList = readFileSync(join(renderer, "features/sessions/SessionListPanel.tsx"), "utf8");
+  const agentPanel = readFileSync(join(renderer, "features/sessions/AgentPanel.tsx"), "utf8");
+  const lifecycle = readFileSync(join(renderer, "lib/session-lifecycle.ts"), "utf8");
   const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
   const store = readFileSync(join(renderer, "stores/sessions.ts"), "utf8");
   assert.match(page, /state\.foreground\[sessionId\]/);
-  assert.match(page, /running=\{foregroundRunning\}/);
-  assert.match(page, /RunActivityIndicator lifecycle=\{foregroundLifecycle\}/);
+  assert.match(page, /state\.running\[sessionId\]/);
+  assert.match(page, /waitingForDelegates = orchestrationRunning && !foregroundRunning/);
+  assert.match(page, /running=\{workbenchRunning\}/);
+  assert.match(page, /RunActivityIndicator lifecycle=\{visibleLifecycle\}/);
+  assert.match(indicator, /子 Agent 正在运行，完成后会通知主 Agent/);
+  assert.match(sessionList, /visibleSessionStatus\(session\.status, orchestrationLifecycle\)/);
+  assert.match(agentPanel, /visibleSessionStatus\(session\.status, orchestrationLifecycle\)/);
+  assert.match(lifecycle, /orchestration\?\.status === "running"/);
+  assert.match(runtime, /session\.projectRunId && !session\.parentSessionId/);
+  assert.match(runtime, /"orchestration\.cancel"/);
   assert.match(runtime, /activeProjectRunId === session\.projectRunId/);
   assert.match(runtime, /status: session\.status/);
   assert.match(runtime, /"session\.send"/);
@@ -158,4 +202,21 @@ test("composer exposes provider slash commands and structured result selection",
   assert.match(menu, /role="listbox"/);
   assert.match(result, /selection\.mode === "single"/);
   assert.match(result, /selectedOptionIds/);
+});
+
+test("chat messages expose copy and edit actions and the composer imports attachments", () => {
+  const timeline = readFileSync(join(renderer, "features/timeline/Timeline.tsx"), "utf8");
+  const composer = readFileSync(join(renderer, "features/sessions/Composer.tsx"), "utf8");
+  const preload = readFileSync(join(import.meta.dirname, "../src/preload/index.ts"), "utf8");
+  const main = readFileSync(join(import.meta.dirname, "../src/main/index.ts"), "utf8");
+  assert.match(timeline, /navigator\.clipboard\.writeText/);
+  assert.match(timeline, /onEditMessage/);
+  assert.match(timeline, /<Copy/);
+  assert.match(timeline, /<Pencil/);
+  assert.match(composer, /onPaste=\{onPaste\}/);
+  assert.match(composer, /dialog\.pickFiles/);
+  assert.match(composer, /attachments\.importClipboard/);
+  assert.match(preload, /webUtils\.getPathForFile/);
+  assert.match(main, /dialog:pick-files/);
+  assert.match(main, /attachment:import-clipboard/);
 });

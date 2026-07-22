@@ -7,11 +7,14 @@ import {
   Check,
   ChevronDown,
   ClipboardList,
+  Copy,
   FileCode2,
+  FileText,
   FlaskConical,
   GitBranch,
   ImageIcon,
   Loader2,
+  Pencil,
   Sparkles,
   SquareTerminal,
   User,
@@ -75,8 +78,13 @@ function CardShell({
   );
 }
 
-function MessageCard({ event, locale }: { event: TimelineEvent & { data: { kind: "message" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
-  const { sender, authorName, text, streaming } = event.data;
+function MessageCard({ event, locale, onEditMessage }: {
+  event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> };
+  locale: "zh-CN" | "en-US";
+  onEditMessage?: (messageId: string, text: string) => void;
+}): JSX.Element {
+  const { sender, authorName, text, streaming, messageId, attachments, editedAt } = event.data;
+  const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
   const isSystem = sender === "system";
   if (isSystem) {
@@ -120,8 +128,53 @@ function MessageCard({ event, locale }: { event: TimelineEvent & { data: { kind:
           )}
         >
           <MarkdownContent source={text} inverted={isUser} />
+          {attachments && attachments.length > 0 && (
+            <div className={cn("mt-2.5 grid gap-2", attachments.length > 1 && "sm:grid-cols-2")}>
+              {attachments.map((attachment) => attachment.kind === "image" && attachment.path ? (
+                <figure key={attachment.id ?? attachment.path} className={cn("overflow-hidden rounded-xl border", isUser ? "border-white/20 bg-black/10" : "border-line bg-card-hover")}>
+                  <img src={`agenthub-artifact://local/?path=${encodeURIComponent(attachment.path)}`} alt={attachment.name} className="max-h-72 w-full object-contain" />
+                  <figcaption className="truncate px-2.5 py-1.5 text-[11px] opacity-75">{attachment.name}</figcaption>
+                </figure>
+              ) : (
+                <div key={attachment.id ?? attachment.path ?? attachment.name} className={cn("flex min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2", isUser ? "border-white/20 bg-black/10" : "border-line bg-card-hover")}>
+                  <FileText className="h-4 w-4 shrink-0" aria-hidden />
+                  <span className="truncate text-xs">{attachment.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-label={locale === "zh-CN" ? "正在流式生成" : "Streaming"} />}
         </div>
+        {!streaming && (
+          <div className={cn("mt-1.5 flex items-center gap-1", isUser && "justify-end")}>
+            {editedAt && <span className="mr-1 text-[10px] text-ink-3">{locale === "zh-CN" ? "已编辑" : "Edited"}</span>}
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard.writeText(text).then(() => {
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1400);
+                });
+              }}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-card-hover hover:text-ink"
+              aria-label={locale === "zh-CN" ? "复制" : "Copy"}
+              title={locale === "zh-CN" ? "复制" : "Copy"}
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-ok" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
+            </button>
+            {isUser && messageId && onEditMessage && (
+              <button
+                type="button"
+                onClick={() => onEditMessage(messageId, text)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-card-hover hover:text-ink"
+                aria-label={locale === "zh-CN" ? "编辑" : "Edit"}
+                title={locale === "zh-CN" ? "编辑" : "Edit"}
+              >
+                <Pencil className="h-3.5 w-3.5" aria-hidden />
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </motion.div>
   );
@@ -402,6 +455,101 @@ function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { ki
   );
 }
 
+function ToolGroupCard({ event, t, locale, onViewDiff }: {
+  event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> };
+  t: (k: MessageKey, v?: Record<string, string | number>) => string;
+  locale: "zh-CN" | "en-US";
+  onViewDiff?: () => void;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const { items, stepCount, callCount, running } = event.data;
+  const calls = items.filter((item) => item.data.kind === "tool_activity" || item.data.kind === "command");
+  const latest = items.at(-1);
+  const onlyCommands = calls.every((item) => item.data.kind === "command");
+  const hasSupportingSteps = items.some((item) => item.data.kind !== "tool_activity" && item.data.kind !== "command");
+  const zh = locale === "zh-CN";
+  const title = hasSupportingSteps
+    ? running
+      ? zh ? `正在处理 ${stepCount} 个步骤` : `Working through ${stepCount} steps`
+      : zh ? `处理了 ${stepCount} 个步骤` : `Completed ${stepCount} steps`
+    : running
+      ? zh ? `正在运行 ${callCount} 个${onlyCommands ? "命令" : "工具/命令"}` : `Running ${callCount} ${onlyCommands ? "commands" : "tools/commands"}`
+      : zh ? `运行了 ${callCount} 个${onlyCommands ? "命令" : "工具/命令"}` : `Ran ${callCount} ${onlyCommands ? "commands" : "tools/commands"}`;
+  const latestStatus = latest?.data.kind === "command" || latest?.data.kind === "tool_activity"
+    ? latest.data.status
+    : latest?.data.kind === "reasoning"
+      ? latest.data.streaming ? "running" : "done"
+      : latest?.data.kind === "verification"
+        ? latest.data.status === "running" ? "running" : latest.data.status === "failed" ? "failed" : "done"
+        : "done";
+  const latestLabel = latest?.data.kind === "command"
+    ? commandPresentation(latest.data.command).summary
+    : latest?.data.kind === "tool_activity"
+      ? latest.data.toolName
+      : latest?.data.kind === "reasoning"
+        ? latest.data.text.replace(/\s+/g, " ").trim()
+        : latest?.data.kind === "file_change"
+          ? zh
+            ? `修改了 ${latest.data.files.length} 个文件 · ${latest.data.files.at(-1)?.path ?? ""}`
+            : `Changed ${latest.data.files.length} files · ${latest.data.files.at(-1)?.path ?? ""}`
+          : latest?.data.kind === "verification"
+            ? latest.data.command
+            : "";
+
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="overflow-hidden rounded-xl border border-line bg-card/70"
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="w-full px-3.5 py-2.5 text-left outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/45"
+      >
+        <span className="flex items-center gap-2 text-[13px] font-medium text-ink-2">
+          <SquareTerminal className="h-4 w-4 shrink-0 text-accent" aria-hidden />
+          <span>{title}</span>
+          {running && <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden />}
+          <ChevronDown className={cn("ml-auto h-3.5 w-3.5 text-ink-3 transition-transform duration-200", open && "rotate-180")} aria-hidden />
+        </span>
+        {latest && (
+          <span className="mt-1.5 flex min-w-0 items-center gap-2 pl-6 text-xs text-ink-3">
+            {latestStatus === "running"
+              ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-accent" aria-hidden />
+              : latestStatus === "failed"
+                ? <X className="h-3 w-3 shrink-0 text-danger" aria-hidden />
+                : <Check className="h-3 w-3 shrink-0 text-ok" aria-hidden />}
+            <span className="truncate font-mono" title={latestLabel}>{latestLabel}</span>
+            {latest.data.kind === "command" && latest.data.exitCode !== undefined && (
+              <span className="ml-auto shrink-0">exit {latest.data.exitCode}</span>
+            )}
+          </span>
+        )}
+      </button>
+      {open && (
+        <motion.div
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: "auto", opacity: 1 }}
+          className="overflow-hidden border-t border-line"
+        >
+          <div className="space-y-3 px-3.5 py-3">
+            {items.map((item) => {
+              if (item.data.kind === "reasoning") return <ReasoningCard key={item.id} event={item as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
+              if (item.data.kind === "tool_activity") return <ToolActivityCard key={item.id} event={item as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
+              if (item.data.kind === "command") return <CommandCard key={item.id} event={item as TimelineEvent & { data: { kind: "command" } }} t={t} locale={locale} />;
+              if (item.data.kind === "file_change") return <FileChangeCard key={item.id} event={item as TimelineEvent & { data: { kind: "file_change" } }} t={t} locale={locale} onViewDiff={onViewDiff} />;
+              if (item.data.kind === "verification") return <VerificationCard key={item.id} event={item as TimelineEvent & { data: { kind: "verification" } }} t={t} locale={locale} />;
+              return null;
+            })}
+          </div>
+        </motion.div>
+      )}
+    </motion.article>
+  );
+}
+
 function FileChangeCard({
   event,
   t,
@@ -651,24 +799,28 @@ function HandoffCard({ event, t, locale, onOpenSession }: { event: TimelineEvent
 export function TimelineEventView({
   event,
   onViewDiff,
-  onOpenSession
+  onOpenSession,
+  onEditMessage
 }: {
   event: TimelineEvent;
   onViewDiff?: () => void;
   onOpenSession?: (id: string) => void;
+  onEditMessage?: (messageId: string, text: string) => void;
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const data = event.data;
 
   switch (data.kind) {
     case "message":
-      return <MessageCard event={event as TimelineEvent & { data: { kind: "message" } }} locale={locale} />;
+      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} />;
     case "activity":
       return <ActivityLine event={event as TimelineEvent & { data: { kind: "activity" } }} locale={locale} />;
     case "reasoning":
       return <ReasoningCard event={event as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
     case "tool_activity":
       return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
+    case "tool_group":
+      return <ToolGroupCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> }} t={t} locale={locale} onViewDiff={onViewDiff} />;
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
     case "artifact":

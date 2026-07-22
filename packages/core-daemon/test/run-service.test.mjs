@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AdapterRegistry, Database, EventService, RunService } from "../dist/index.js";
 
 const now = new Date().toISOString();
@@ -107,5 +110,55 @@ test("RunService serializes turns in one session without blocking another sessio
   const second = await queuedMain;
   await second.completion;
   assert.deepEqual(starts, ["main-first", "child-first", "main-second"]);
+  database.close();
+});
+
+test("RunService captures modified and added file diffs without a Git repository", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "agenthub-non-git-diff-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeFile(join(workspace, "existing.txt"), "before\n", "utf8");
+
+  const adapter = {
+    providerId: "fake",
+    supportsStructuredOutput: true,
+    supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }),
+    start: (request) => {
+      async function* events() {
+        await writeFile(join(request.cwd, "existing.txt"), "after\n", "utf8");
+        yield { kind: "file", path: "existing.txt", changeType: "modified" };
+        await writeFile(join(request.cwd, "created.txt"), "created\n", "utf8");
+        yield { kind: "file", path: "created.txt", changeType: "added" };
+        yield { kind: "message", text: "done" };
+        yield { kind: "exit", exitCode: 0 };
+      }
+      return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+    }
+  };
+  const database = new Database(":memory:");
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  const project = { id: "p-diff", name: "No Git", rootPath: workspace, repositoryType: "none", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const session = { id: "s-diff", projectId: project.id, memberId: "a-diff", title: "Diff", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+  const agent = { id: "a-diff", providerId: "fake", displayName: "Fake", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now };
+  database.projects.save(project, now);
+  database.sessions.save(session);
+
+  const handle = await service.launch(session, agent, "edit files");
+  await handle.completion;
+
+  const artifact = database.artifacts.list({ sessionId: session.id }).find((item) => item.kind === "diff");
+  assert.ok(artifact, "a diff artifact should be created for a non-Git workspace");
+  const files = JSON.parse(artifact.content).files;
+  const modified = files.find((file) => file.path === "existing.txt");
+  const added = files.find((file) => file.path === "created.txt");
+  assert.equal(modified.additions, 1);
+  assert.equal(modified.deletions, 1);
+  assert.match(modified.diff, /-before/);
+  assert.match(modified.diff, /\+after/);
+  assert.equal(added.changeType, "added");
+  assert.match(added.diff, /--- \/dev\/null/);
+  assert.match(added.diff, /\+created/);
+  assert.equal(await readFile(join(workspace, "existing.txt"), "utf8"), "after\n");
   database.close();
 });

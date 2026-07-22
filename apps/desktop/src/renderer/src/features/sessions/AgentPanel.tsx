@@ -9,6 +9,7 @@ import { StatusChip, Tag } from "../../components/ui/Badge";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
+import { visibleSessionStatus } from "../../lib/session-lifecycle";
 
 /**
  * Right rail (per the workbench contract): the current run's sessions —
@@ -58,7 +59,8 @@ function SessionEntryRow({
 }): JSX.Element {
   const { t } = useI18n();
   const { session, member, providerName, model } = info;
-  const status = session.status;
+  const orchestrationLifecycle = useSessionsStore((state) => state.running[session.id]);
+  const status = visibleSessionStatus(session.status, orchestrationLifecycle);
   const tone =
     status === "running"
       ? "accent"

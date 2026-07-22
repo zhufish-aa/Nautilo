@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CoreDaemon } from "./application/core-daemon.js";
 
 export * from "./adapters/index.js";
@@ -42,7 +43,7 @@ export async function startDaemon(options: { dataDir?: string; socketPath?: stri
   return { daemon, socketPath, token: result.token };
 }
 
-const isMainProcess = process.argv[1]?.replaceAll("\\", "/").endsWith("/dist/index.js") ?? false;
+const isMainProcess = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMainProcess) {
   if (process.argv.includes("--serve")) {
     void startDaemon({}).then(({ daemon, socketPath }) => {

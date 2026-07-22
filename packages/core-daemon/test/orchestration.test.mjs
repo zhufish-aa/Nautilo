@@ -170,6 +170,10 @@ test("the parent Agent continues immediately after a child run is accepted", asy
     () => fixture.prompts.some((entry) => entry.prompt.includes("[AGENTHUB_DELEGATION_ACCEPTED]")),
     "parent did not receive a dispatch receipt"
   );
+  const dispatchPrompt = fixture.prompts.find((entry) => entry.prompt.includes("[AGENTHUB_DELEGATION_ACCEPTED]"))?.prompt ?? "";
+  assert.match(dispatchPrompt, /end this provider turn immediately/);
+  assert.match(dispatchPrompt, /Do not poll task status/);
+  assert.match(dispatchPrompt, /does not stop the orchestration/);
   await waitUntil(
     () => fixture.database.sessions.messages(started.mainSession.id).some((message) => message.text.includes("Child accepted")),
     "parent did not continue after dispatch"
@@ -411,62 +415,51 @@ test("direct_only and enabled-member routing reject unauthorized decisions", asy
   }
 });
 
-test("failed child can be retried by the main Agent", async () => {
-  let attempts = 0;
+test("failed child is returned to the main Agent without automatic recovery", async () => {
   const fixture = setup({
     responder: ({ prompt }) => {
       if (prompt.includes("[AGENTHUB_PLANNER_DECISION]")) return { text: JSON.stringify({ mode: "delegate", rationale: "delegate", task: plannedTask("retry-task", "child") }) };
-      if (prompt.includes("[AGENTHUB_DELEGATED_TASK]")) return ++attempts === 1 ? { text: "first failure", exitCode: 1 } : { text: "retry passed" };
-      if (prompt.includes("[AGENTHUB_RECOVERY_DECISION]")) return { text: JSON.stringify({ action: "retry", taskId: "retry-task", rationale: "transient failure" }) };
-      if (prompt.includes("[AGENTHUB_CHILD_RESULT]")) return { text: "ack" };
-      return { text: "final" };
+      if (prompt.includes("[AGENTHUB_DELEGATED_TASK]")) return { text: "provider failed", exitCode: 1 };
+      if (prompt.includes("[AGENTHUB_FINAL_SYNTHESIS]")) return { text: "The delegated task failed; choose the next action when ready." };
+      return { text: "dispatch accepted" };
     }
   });
   const started = fixture.orchestration.start({ projectId: "project", teamId: "team", goal: "Retry failures" });
   await fixture.orchestration.wait(started.projectRun.id);
-  assert.equal(fixture.database.tasks.get("retry-task")?.attempt, 2);
-  assert.equal(fixture.database.tasks.get("retry-task")?.status, "completed");
-  assert.ok(fixture.database.events.replay({ sessionId: started.mainSession.id }).some((event) => event.type === "recovery.decision" && event.payload.action === "retry"));
+  assert.equal(fixture.database.tasks.get("retry-task")?.attempt, 1);
+  assert.equal(fixture.database.tasks.get("retry-task")?.status, "failed");
+  assert.equal(fixture.database.projectRuns.get(started.projectRun.id)?.status, "failed");
+  assert.equal(fixture.prompts.filter((entry) => entry.prompt.includes("[AGENTHUB_DELEGATED_TASK]")).length, 1);
+  assert.equal(fixture.prompts.filter((entry) => entry.prompt.includes("[AGENTHUB_RECOVERY_DECISION]")).length, 0);
+  assert.equal(fixture.prompts.filter((entry) => entry.prompt.includes("[AGENTHUB_TAKE_OVER]")).length, 0);
+  const synthesis = fixture.prompts.find((entry) => entry.prompt.includes("[AGENTHUB_FINAL_SYNTHESIS]"));
+  assert.ok(synthesis);
+  assert.match(synthesis.prompt, /provider failed/);
+  assert.match(synthesis.prompt, /"status": "failed"/);
+  const mainMessages = fixture.database.sessions.messages(started.mainSession.id);
+  assert.ok(mainMessages.some((message) => message.kind === "result" && message.taskId === "retry-task" && message.text.includes("provider failed")));
+  assert.ok(fixture.database.events.replay({ sessionId: started.mainSession.id }).some((event) => event.type === "handoff.created" && event.payload.taskId === "retry-task" && event.payload.toMemberId === "main"));
   fixture.database.close();
 });
 
-test("failed child can be taken over or skipped by the main Agent", async (context) => {
-  await context.test("take_over", async () => {
-    const fixture = setup({
-      responder: ({ prompt }) => {
-        if (prompt.includes("[AGENTHUB_PLANNER_DECISION]")) return { text: JSON.stringify({ mode: "delegate", rationale: "delegate", task: plannedTask("takeover-task", "child") }) };
-        if (prompt.includes("[AGENTHUB_DELEGATED_TASK]")) return { text: "failed", exitCode: 1 };
-        if (prompt.includes("[AGENTHUB_RECOVERY_DECISION]")) return { text: JSON.stringify({ action: "take_over", taskId: "takeover-task", rationale: "main can finish" }) };
-        if (prompt.includes("[AGENTHUB_TAKE_OVER]")) return { text: "main completed it" };
-        return { text: "final" };
-      }
-    });
-    const started = fixture.orchestration.start({ projectId: "project", teamId: "team", goal: "Take over" });
-    await fixture.orchestration.wait(started.projectRun.id);
-    assert.equal(fixture.database.tasks.get("takeover-task")?.status, "completed");
-    assert.equal(fixture.database.tasks.get("takeover-task")?.completedByMemberId, started.projectRun.mainMemberId);
-    fixture.database.close();
+test("a failed dependency remains blocked while independent tasks finish", async () => {
+  const fixture = setup({
+    responder: ({ prompt }) => {
+      if (prompt.includes("[AGENTHUB_PLANNER_DECISION]")) return { text: JSON.stringify({ mode: "plan", rationale: "parallel work", tasks: [plannedTask("failed", "child"), plannedTask("dependent", "other", ["failed"]), plannedTask("independent", "other")] }) };
+      if (prompt.includes("[AGENTHUB_DELEGATED_TASK]")) return prompt.includes('"id": "failed"') ? { text: "child failed", exitCode: 1 } : { text: "independent done" };
+      if (prompt.includes("[AGENTHUB_FINAL_SYNTHESIS]")) return { text: "One task failed and its dependent task remains blocked." };
+      return { text: "dispatch accepted" };
+    }
   });
-
-  await context.test("continue", async () => {
-    const fixture = setup({
-      responder: ({ prompt }) => {
-        if (prompt.includes("[AGENTHUB_PLANNER_DECISION]")) return { text: JSON.stringify({ mode: "plan", rationale: "continue independent work", tasks: [plannedTask("failed", "child"), plannedTask("dependent", "other", ["failed"]), plannedTask("independent", "other")] }) };
-        if (prompt.includes("[AGENTHUB_DELEGATED_TASK]")) return prompt.includes('"id": "failed"') ? { text: "failed", exitCode: 1 } : { text: "independent done" };
-        if (prompt.includes("[AGENTHUB_RECOVERY_DECISION]")) return { text: JSON.stringify({ action: "continue", taskId: "failed", rationale: "skip nonessential task" }) };
-        if (prompt.includes("[AGENTHUB_CHILD_RESULT]")) return { text: "ack" };
-        return { text: "final" };
-      }
-    });
-    const started = fixture.orchestration.start({ projectId: "project", teamId: "team", goal: "Continue independent work" });
-    await fixture.orchestration.wait(started.projectRun.id);
-    assert.equal(fixture.database.tasks.get("failed")?.status, "failed");
-    assert.equal(fixture.database.tasks.get("dependent")?.status, "cancelled");
-    assert.equal(fixture.database.tasks.get("independent")?.status, "completed");
-    assert.deepEqual(fixture.database.projectRuns.get(started.projectRun.id)?.acceptedTaskFailures, ["failed"]);
-    assert.equal(fixture.database.projectRuns.get(started.projectRun.id)?.status, "completed");
-    fixture.database.close();
-  });
+  const started = fixture.orchestration.start({ projectId: "project", teamId: "team", goal: "Continue independent work" });
+  await fixture.orchestration.wait(started.projectRun.id);
+  assert.equal(fixture.database.tasks.get("failed")?.status, "failed");
+  assert.equal(fixture.database.tasks.get("dependent")?.status, "blocked_dependency");
+  assert.equal(fixture.database.tasks.get("independent")?.status, "completed");
+  assert.equal(fixture.database.projectRuns.get(started.projectRun.id)?.status, "failed");
+  assert.equal(fixture.prompts.filter((entry) => entry.prompt.includes("[AGENTHUB_RECOVERY_DECISION]")).length, 0);
+  assert.match(fixture.prompts.find((entry) => entry.prompt.includes("[AGENTHUB_FINAL_SYNTHESIS]"))?.prompt ?? "", /child failed/);
+  fixture.database.close();
 });
 
 test("desktop-facing IPC persists configuration and drives a real orchestration run", async () => {

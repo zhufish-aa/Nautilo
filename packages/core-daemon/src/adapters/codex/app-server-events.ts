@@ -114,7 +114,15 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
     return changes.flatMap((change) => {
       const value = record(change);
       const path = text(value.path);
-      return path ? [{ kind: "file" as const, path, changeType: text(value.kind), raw: paramsValue }] : [];
+      return path ? [{
+        kind: "file" as const,
+        path,
+        changeType: text(value.kind),
+        additions: typeof value.additions === "number" ? value.additions : undefined,
+        deletions: typeof value.deletions === "number" ? value.deletions : undefined,
+        diff: text(value.diff) ?? text(value.patch),
+        raw: paramsValue
+      }] : [];
     });
   }
   return [];

@@ -14,8 +14,10 @@ import type {
 import type { RuntimeEvent } from "@agenthub/event-protocol";
 import { getBridge, requestCore } from "./bridge";
 import { toDomainAgent, toDomainProject, toDomainTeam, toStandaloneUiSession } from "./core-mappers";
+import type { DesktopAttachment } from "../types/bridge";
 import type { ApprovalScope, RunLifecycle, SessionArtifact, SessionTask, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
 import { compactOrchestrationTimeline, hiddenCompletionRunIds, hiddenInternalRunIds, isVisibleTimelineMessage } from "./orchestration-timeline-policy";
+import { groupToolTimeline } from "./tool-timeline-groups";
 import { useAgentsStore } from "../stores/agents";
 import { useProjectsStore } from "../stores/projects";
 import { useSessionsStore } from "../stores/sessions";
@@ -91,7 +93,7 @@ export async function hydrateWorkbenchSessions(): Promise<void> {
   for (const projectRunId of runIds) await hydrateProjectRun(projectRunId);
 }
 
-export async function sendWorkbenchMessage(sessionId: string, text: string): Promise<void> {
+export async function sendWorkbenchMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], editMessageId?: string): Promise<void> {
   const state = useSessionsStore.getState();
   const session = state.sessions.find((item) => item.id === sessionId);
   if (!session) return;
@@ -99,7 +101,9 @@ export async function sendWorkbenchMessage(sessionId: string, text: string): Pro
     state._append(sessionId, { kind: "error", code: "CORE_UNAVAILABLE", message: "Core Daemon 仅在 Electron 桌面端可用。", retryable: false });
     return;
   }
-  state._append(sessionId, { kind: "message", sender: "user", text });
+  const attachmentViews = attachments.map((attachment) => ({ ...attachment }));
+  if (editMessageId) state._patchEvent(sessionId, `message-${editMessageId}`, { text, attachments: attachmentViews, editedAt: new Date().toISOString() });
+  else state._append(sessionId, { kind: "message", sender: "user", text, attachments: attachmentViews });
   state._append(sessionId, { kind: "activity", phase: "queued" });
   state._setForeground(sessionId, { status: "running" });
 
@@ -111,7 +115,7 @@ export async function sendWorkbenchMessage(sessionId: string, text: string): Pro
       if (session.projectRunId && activeProjectRunId === session.projectRunId) {
         const domainSession = toDomainSession(session);
         await requestCore<DomainSession>("session.upsert", domainSession);
-        const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text });
+        const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text, attachments, editMessageId });
         state._setActiveAgentRun(sessionId, result.runId);
         await hydrateProjectRun(session.projectRunId);
         schedulePoll(session.projectRunId);
@@ -126,7 +130,8 @@ export async function sendWorkbenchMessage(sessionId: string, text: string): Pro
         teamId: team.id,
         agentInstanceId: session.target.instanceId,
         goal: text,
-        sessionId: session.id
+        sessionId: session.id,
+        attachments
       });
       state._upsertExternalSession(toUiSession(result.mainSession, result.projectRun, team));
       state._setRunning(sessionId, { status: "running" });
@@ -137,7 +142,7 @@ export async function sendWorkbenchMessage(sessionId: string, text: string): Pro
 
     const domainSession = toDomainSession(session);
     await requestCore<DomainSession>("session.upsert", domainSession);
-    const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text });
+    const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text, attachments, editMessageId });
     state._setActiveAgentRun(sessionId, result.runId);
     await hydrateStandaloneSession(session, result.runId);
     scheduleStandalonePoll(sessionId, result.runId);
@@ -184,6 +189,12 @@ export async function stopWorkbenchRun(sessionId: string): Promise<void> {
   const session = useSessionsStore.getState().sessions.find((item) => item.id === sessionId);
   if (!session) return;
   const store = useSessionsStore.getState();
+  if (session.projectRunId && !session.parentSessionId) {
+    await requestCore<ProjectRun>("orchestration.cancel", { projectRunId: session.projectRunId });
+    store._setForeground(sessionId, { status: "cancelled" });
+    await hydrateProjectRun(session.projectRunId);
+    return;
+  }
   let runId = store.activeAgentRunIds[sessionId];
   if (!runId) {
     const runs = await requestCore<AgentRun[]>("run.list", { sessionId });
@@ -441,10 +452,11 @@ function scheduleStandalonePoll(sessionId: string, runId: string): void {
 }
 
 function buildStandaloneTimeline(messages: Message[], events: RuntimeEvent[], artifacts: Artifact[]): TimelineEvent[] {
-  const timeline = messageTimeline(messages);
-  appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, undefined, [], new Map(), new Map(artifacts.map((artifact) => [artifact.id, artifact])), new Map(), new Map()));
-  return timeline
-    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence)
+  const timeline = messageTimeline(messages, undefined, artifacts);
+  const changedFiles = new Map(artifacts.flatMap(parseDiffArtifact).map((file) => [file.path, file]));
+  appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, undefined, [], new Map(), new Map(artifacts.map((artifact) => [artifact.id, artifact])), new Map(), changedFiles));
+  return groupToolTimeline(timeline
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence))
     .map((event, index) => ({ ...event, sequence: index + 1 }));
 }
 
@@ -470,7 +482,7 @@ function buildTimeline(
   const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
   const verificationsById = new Map(verifications.map((verification) => [verification.id, verification]));
   const changedFiles = new Map(artifacts.flatMap(parseDiffArtifact).map((file) => [file.path, file]));
-  const timeline = messageTimeline(messages, team);
+  const timeline = messageTimeline(messages, team, artifacts);
   appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, team, tasks, resolvedApprovals, artifactsById, verificationsById, changedFiles));
   if (isMain) {
     timeline.push({
@@ -481,8 +493,8 @@ function buildTimeline(
       data: { kind: "run_status", run: projectLifecycle(projectRun) ?? { status: "running" } }
     });
   }
-  return compactOrchestrationTimeline(timeline, projectRun.mainSessionId)
-    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence)
+  return groupToolTimeline(compactOrchestrationTimeline(timeline, projectRun.mainSessionId)
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence))
     .map((event, index) => ({ ...event, sequence: index + 1 }));
 }
 
@@ -495,7 +507,9 @@ function appendRuntimeEvents(
   const finalMessageRuns = new Set(messages.map((message) => message.runId).filter((runId): runId is string => Boolean(runId)));
   const hiddenCompletions = hiddenCompletionRunIds(messages);
   const hiddenInternalRuns = hiddenInternalRunIds(messages);
-  const terminalRuns = new Set(events.filter((event) => event.type === "run.completed" || event.type === "run.failed").map((event) => String(event.runId ?? "")));
+  const terminalRuns = new Map(events
+    .filter((event) => event.type === "run.completed" || event.type === "run.failed")
+    .map((event) => [String(event.runId ?? ""), event.type === "run.failed" ? "failed" as const : "done" as const]));
   const streaming = new Map<string, number>();
   const reasoning = new Map<string, number>();
   const latestReasoning = new Map<string, string>();
@@ -635,10 +649,11 @@ function appendRuntimeEvents(
   }
 
   for (const [index, runId] of runningRows) {
-    if (!terminalRuns.has(runId)) continue;
+    const terminalStatus = terminalRuns.get(runId);
+    if (!terminalStatus) continue;
     const current = timeline[index].data;
-    if (current.kind === "tool_activity") timeline[index] = { ...timeline[index], data: { ...current, status: "done" } };
-    if (current.kind === "command") timeline[index] = { ...timeline[index], data: { ...current, status: "done" } };
+    if (current.kind === "tool_activity") timeline[index] = { ...timeline[index], data: { ...current, status: terminalStatus } };
+    if (current.kind === "command") timeline[index] = { ...timeline[index], data: { ...current, status: terminalStatus } };
   }
 }
 
@@ -646,7 +661,8 @@ function normalizeCommandForRetry(command: string): string {
   return command.replaceAll("\\\\", "\\").replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 
-function messageTimeline(messages: Message[], team?: UiTeam): TimelineEvent[] {
+function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact[] = []): TimelineEvent[] {
+  const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
   return messages.filter(isVisibleTimelineMessage).map((message, index) => ({
     id: `message-${message.id}`,
     sessionId: message.sessionId,
@@ -656,7 +672,20 @@ function messageTimeline(messages: Message[], team?: UiTeam): TimelineEvent[] {
       kind: "message",
       sender: message.sender,
       authorName: message.fromMemberId ? team?.members.find((member) => member.id === message.fromMemberId)?.displayName : undefined,
-      text: message.text
+      text: message.text,
+      messageId: message.id,
+      editedAt: message.editedAt,
+      attachments: message.attachmentIds?.flatMap((id) => {
+        const artifact = artifactsById.get(id);
+        return artifact ? [{
+          id: artifact.id,
+          name: artifact.name,
+          path: artifact.path,
+          kind: artifact.kind === "image" ? "image" as const : "file" as const,
+          mimeType: typeof artifact.metadata?.mimeType === "string" ? artifact.metadata.mimeType : undefined,
+          sizeBytes: typeof artifact.metadata?.sizeBytes === "number" ? artifact.metadata.sizeBytes : undefined
+        }] : [];
+      })
     }
   }));
 }
@@ -745,7 +774,13 @@ function runtimePayload(
       kind: "file_change",
       files: [file
         ? { ...file, changeType: file.changeType === "renamed" ? "modified" : file.changeType }
-        : { path: event.payload.path, changeType: event.payload.changeType === "renamed" ? "modified" : event.payload.changeType, additions: 0, deletions: 0 }]
+        : {
+            path: event.payload.path,
+            changeType: event.payload.changeType === "renamed" ? "modified" : event.payload.changeType,
+            additions: event.payload.additions ?? 0,
+            deletions: event.payload.deletions ?? 0,
+            diff: event.payload.diff
+          }]
     };
   }
   if (event.type === "verification.started") {

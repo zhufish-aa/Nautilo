@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import { AnimatePresence } from "framer-motion";
 import type { SlashCommandDefinition } from "@agenthub/domain";
-import { ArrowUp, Square } from "lucide-react";
+import { ArrowUp, FileText, Loader2, Paperclip, Square, X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { sendWorkbenchMessage, stopWorkbenchRun } from "../../lib/orchestration-runtime";
+import { getBridge } from "../../lib/bridge";
+import type { DesktopAttachment } from "../../types/bridge";
+import { useSessionsStore } from "../../stores/sessions";
 import { SessionModelControl } from "./SessionModelControl";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { CommandResultDialog } from "./slash-commands/CommandResultDialog";
@@ -25,6 +28,12 @@ export function Composer({
 }): JSX.Element {
   const { t } = useI18n();
   const [value, setValue] = useState("");
+  const [attachments, setAttachments] = useState<DesktopAttachment[]>([]);
+  const [importing, setImporting] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string>();
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editingMessage = useSessionsStore((state) => state.editingMessage?.sessionId === sessionId ? state.editingMessage : undefined);
+  const cancelEditingMessage = useSessionsStore((state) => state.cancelEditingMessage);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const slash = useSlashCommands(sessionId);
   const commandQuery = slashCommandQuery(value);
@@ -35,8 +44,61 @@ export function Composer({
   const commandMenuOpen = commandQuery !== undefined && slash.commands.length > 0;
 
   useEffect(() => setActiveCommandIndex(0), [commandQuery, sessionId]);
+  useEffect(() => {
+    setValue("");
+    setAttachments([]);
+    setAttachmentError(undefined);
+  }, [sessionId]);
+  useEffect(() => {
+    if (!editingMessage) return;
+    setValue(editingMessage.text);
+    textareaRef.current?.focus();
+    textareaRef.current?.setSelectionRange(editingMessage.text.length, editingMessage.text.length);
+  }, [editingMessage]);
 
-  const canSend = !!sessionId && !running && value.trim().length > 0 && !disabled;
+  const canSend = !!sessionId && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled;
+
+  const appendAttachments = (next: DesktopAttachment[]): void => {
+    setAttachments((current) => {
+      const unique = new Map(current.map((attachment) => [attachment.path, attachment]));
+      for (const attachment of next) unique.set(attachment.path, attachment);
+      return [...unique.values()].slice(0, 10);
+    });
+    setAttachmentError(undefined);
+  };
+  const pickFiles = async (): Promise<void> => {
+    const bridge = getBridge();
+    if (!bridge) return;
+    try {
+      appendAttachments(await bridge.dialog.pickFiles());
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const importClipboardFiles = async (files: File[]): Promise<void> => {
+    const bridge = getBridge();
+    if (!bridge || files.length === 0) return;
+    setImporting(true);
+    setAttachmentError(undefined);
+    try {
+      const imported: DesktopAttachment[] = [];
+      for (const file of files.slice(0, 10)) {
+        let path = "";
+        try {
+          path = bridge.attachments.pathForFile(file);
+        } catch {
+          // Clipboard screenshots have no filesystem path; import their bytes below.
+        }
+        if (path) imported.push(...await bridge.attachments.describePaths([path]));
+        else imported.push(await bridge.attachments.importClipboard({ name: file.name || "clipboard-image.png", mimeType: file.type || undefined, data: new Uint8Array(await file.arrayBuffer()) }));
+      }
+      appendAttachments(imported);
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const runCommand = (command: SlashCommandDefinition, argument?: string): void => {
     if (!sessionId) return;
@@ -49,14 +111,17 @@ export function Composer({
   };
   const submit = (): void => {
     if (!sessionId) return;
-    const parsed = parseSlashCommand(value, slash.commands);
+    const parsed = attachments.length === 0 ? parseSlashCommand(value, slash.commands) : undefined;
     if (parsed && (parsed.command.availability === "always" || !running)) {
       runCommand(parsed.command, parsed.argument);
       return;
     }
     if (!canSend) return;
-    void sendWorkbenchMessage(sessionId, value.trim());
+    const text = value.trim() || t("sessions.composer.attachmentPrompt");
+    void sendWorkbenchMessage(sessionId, text, attachments, editingMessage?.messageId);
     setValue("");
+    setAttachments([]);
+    if (editingMessage) cancelEditingMessage();
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (commandMenuOpen) {
@@ -86,6 +151,12 @@ export function Composer({
       submit();
     }
   };
+  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const files = Array.from(event.clipboardData.files);
+    if (!files.length) return;
+    event.preventDefault();
+    void importClipboardFiles(files);
+  };
   return (
     <div className="border-t border-line/70 bg-panel/95 px-5 pb-4 pt-3 backdrop-blur-xl">
       <div className="relative mx-auto w-full max-w-4xl rounded-[22px] border border-line-strong bg-card shadow-[0_12px_36px_-24px_rgba(15,23,42,0.42)] transition-[border-color,box-shadow] focus-within:border-accent/45 focus-within:shadow-[0_16px_44px_-24px_rgba(99,102,241,0.42)]">
@@ -99,17 +170,51 @@ export function Composer({
             />
           )}
         </AnimatePresence>
+        {editingMessage && (
+          <div className="mx-3 mt-3 flex items-center gap-2 rounded-xl border border-accent/20 bg-accent-soft px-3 py-2 text-xs text-ink-2">
+            <span className="min-w-0 flex-1 truncate">{t("sessions.composer.editing")}</span>
+            <button type="button" onClick={cancelEditingMessage} className="rounded-md p-1 text-ink-3 transition-colors hover:bg-card-hover hover:text-ink" aria-label={t("sessions.composer.cancelEdit")}>
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
+        )}
+        {attachments.length > 0 && (
+          <div className="flex gap-2 overflow-x-auto px-3 pt-3">
+            {attachments.map((attachment) => (
+              <div key={attachment.path} className="group relative flex h-16 min-w-[154px] max-w-[220px] items-center gap-2.5 rounded-xl border border-line bg-card-hover px-2.5">
+                {attachment.kind === "image" ? (
+                  <img src={`agenthub-artifact://local/?path=${encodeURIComponent(attachment.path)}`} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
+                ) : (
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-info/10 text-info"><FileText className="h-5 w-5" aria-hidden /></span>
+                )}
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium text-ink-2">{attachment.name}</p>
+                  <p className="mt-0.5 text-[10px] text-ink-3">{formatFileSize(attachment.sizeBytes)}</p>
+                </div>
+                <button type="button" onClick={() => setAttachments((current) => current.filter((item) => item.path !== attachment.path))} className="absolute right-1 top-1 rounded-full bg-card/90 p-1 text-ink-3 opacity-0 shadow-sm transition-opacity hover:text-danger group-hover:opacity-100" aria-label={t("sessions.composer.removeAttachment")}>
+                  <X className="h-3 w-3" aria-hidden />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
+          ref={textareaRef}
           value={value}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           rows={2}
           disabled={!sessionId || disabled}
           placeholder={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
           aria-label={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
           className="block max-h-48 min-h-[58px] w-full resize-none rounded-t-[22px] bg-transparent px-4 pb-1.5 pt-3.5 text-sm leading-6 text-ink outline-none placeholder:text-ink-3/65 disabled:opacity-50"
         />
+        {attachmentError && <p className="px-4 pb-1 text-[11px] text-danger">{attachmentError}</p>}
         <div className="flex min-h-11 items-center gap-3 px-3 pb-2.5">
+          <button type="button" onClick={() => void pickFiles()} disabled={!sessionId || disabled || importing} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
+            {importing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Paperclip className="h-4 w-4" aria-hidden />}
+          </button>
           <p className="min-w-0 flex-1 truncate px-1 text-[11px] text-ink-3">{t("sessions.composer.hint")}</p>
           <SessionModelControl sessionId={sessionId} disabled={running || disabled} />
           <ContextUsageIndicator sessionId={sessionId} />
@@ -146,4 +251,10 @@ export function Composer({
       />
     </div>
   );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

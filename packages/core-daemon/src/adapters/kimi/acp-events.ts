@@ -24,6 +24,11 @@ export interface KimiAcpParseState {
   messageId: string;
   thinkingId: string;
   toolNames: Map<string, string>;
+  toolCalls: Map<string, {
+    phase: "started" | "completed";
+    input?: string;
+    output?: string;
+  }>;
 }
 
 export function parseKimiAcpUpdate(value: unknown, state: KimiAcpParseState): AdapterEvent[] {
@@ -68,13 +73,35 @@ export function parseKimiAcpUpdate(value: unknown, state: KimiAcpParseState): Ad
   const name = (callId ? state.toolNames.get(callId) : undefined) ?? suppliedName ?? "tool";
   const status = string(update.status);
   const completed = status === "completed" || status === "failed";
+  const input = printable(update.rawInput);
+  const output = printable(update.rawOutput) ?? printable(update.content);
+  if (callId) {
+    const previous = state.toolCalls.get(callId);
+    const next = {
+      phase: completed ? "completed" as const : "started" as const,
+      input: input ?? previous?.input,
+      output: output ?? previous?.output
+    };
+    state.toolCalls.set(callId, next);
+    if (previous?.phase === "completed" || (!completed && previous?.phase === "started")) return [];
+    return [{
+      kind: "tool",
+      callId,
+      name,
+      phase: next.phase,
+      input: next.input,
+      output: next.output,
+      success: status !== "failed",
+      raw: value
+    }];
+  }
   return [{
     kind: "tool",
     callId,
     name,
     phase: completed ? "completed" : "started",
-    input: printable(update.rawInput),
-    output: printable(update.rawOutput) ?? printable(update.content),
+    input,
+    output,
     success: status !== "failed",
     raw: value
   }];
