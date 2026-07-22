@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@agenthub/domain": ["packages/domain/src/index.ts"],
+      "@agenthub/schemas": ["packages/schemas/src/index.ts"],
+      "@agenthub/event-protocol": ["packages/event-protocol/src/index.ts"],
+      "@agenthub/core-daemon": ["packages/core-daemon/src/index.ts"]
+    },
+    "strict": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

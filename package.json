@@ -1,0 +1,31 @@
+{
+  "name": "agenthub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local, user-configurable multi-agent coding workspace.",
+  "packageManager": "pnpm@10.12.1",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json --pretty false",
+    "build:desktop": "pnpm --filter @agenthub/core-daemon build && pnpm --filter @agenthub/desktop build",
+    "typecheck": "tsc -b tsconfig.json --pretty false && pnpm --filter @agenthub/desktop typecheck",
+    "test": "pnpm -r --if-present test && node tests/contract/contracts.test.mjs",
+    "check": "pnpm typecheck && pnpm test",
+    "dev": "pnpm --filter @agenthub/core-daemon dev",
+    "dev:daemon": "pnpm --filter @agenthub/core-daemon serve",
+    "dev:desktop": "pnpm --filter @agenthub/core-daemon build && pnpm --filter @agenthub/desktop dev"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild",
+      "node-pty"
+    ]
+  }
+}

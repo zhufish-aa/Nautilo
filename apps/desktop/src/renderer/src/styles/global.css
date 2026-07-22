@@ -1,0 +1,315 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+ * Design tokens. Raw values live on :root / .dark so the theme can swap at
+ * runtime; Tailwind colors reference them via @theme inline.
+ * ------------------------------------------------------------------------- */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-card: var(--card);
+  --color-card-hover: var(--card-hover);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+
+  --font-sans: "Inter", "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas,
+    "Courier New", monospace;
+
+  --shadow-card: var(--shadow-card-value);
+  --shadow-pop: var(--shadow-pop-value);
+  --shadow-glow: var(--shadow-glow-value);
+
+  --animate-drift-slow: drift 42s ease-in-out infinite alternate;
+  --animate-drift-slower: drift 56s ease-in-out infinite alternate-reverse;
+}
+
+:root {
+  color-scheme: light;
+  --canvas: #f2f4f9;
+  --panel: rgba(255, 255, 255, 0.72);
+  --card: #ffffff;
+  --card-hover: #fafbfe;
+  --line: #e3e7ef;
+  --line-strong: #cfd6e2;
+  --ink: #151a23;
+  --ink-2: #4a5364;
+  --ink-3: #6f7989;
+  --accent: #6553f0;
+  --accent-2: #8574ff;
+  --accent-soft: rgba(101, 83, 240, 0.1);
+  --on-accent: #ffffff;
+  --ok: #0c9d6c;
+  --warn: #c77400;
+  --danger: #dc2f55;
+  --info: #0476c9;
+
+  --aurora-1: rgba(124, 108, 255, 0.16);
+  --aurora-2: rgba(56, 189, 248, 0.12);
+  --grid-line: rgba(21, 26, 35, 0.045);
+
+  --shadow-card-value: 0 1px 2px rgba(21, 26, 35, 0.05),
+    0 8px 24px -12px rgba(21, 26, 35, 0.12);
+  --shadow-pop-value: 0 4px 12px rgba(21, 26, 35, 0.08),
+    0 24px 64px -16px rgba(21, 26, 35, 0.28);
+  --shadow-glow-value: 0 0 0 1px rgba(101, 83, 240, 0.25),
+    0 8px 32px -8px rgba(101, 83, 240, 0.45);
+}
+
+.dark {
+  color-scheme: dark;
+  --canvas: #080a0f;
+  --panel: rgba(12, 15, 22, 0.72);
+  --card: #0f121b;
+  --card-hover: #151929;
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.13);
+  --ink: #e9ebf2;
+  --ink-2: #a8aebf;
+  --ink-3: #798094;
+  --accent: #8b7cff;
+  --accent-2: #6a5af9;
+  --accent-soft: rgba(139, 124, 255, 0.14);
+  --on-accent: #ffffff;
+  --ok: #3ddc97;
+  --warn: #fbbf24;
+  --danger: #fb6b8b;
+  --info: #4cc3ff;
+
+  --aurora-1: rgba(124, 108, 255, 0.14);
+  --aurora-2: rgba(56, 189, 248, 0.08);
+  --grid-line: rgba(255, 255, 255, 0.03);
+
+  --shadow-card-value: 0 1px 2px rgba(0, 0, 0, 0.4),
+    0 12px 32px -16px rgba(0, 0, 0, 0.6);
+  --shadow-pop-value: 0 4px 16px rgba(0, 0, 0, 0.5),
+    0 32px 80px -16px rgba(0, 0, 0, 0.75);
+  --shadow-glow-value: 0 0 0 1px rgba(139, 124, 255, 0.35),
+    0 8px 40px -8px rgba(139, 124, 255, 0.5);
+}
+
+/* ------------------------------------------------------------------------- */
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-canvas font-sans text-ink overflow-hidden;
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 32%, transparent);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--ink-3);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  .session-effort-range {
+    appearance: none;
+    height: 22px;
+    border-radius: 999px;
+    outline: none;
+    background: transparent;
+  }
+  .session-effort-range::-webkit-slider-runnable-track {
+    height: 22px;
+    border-radius: 999px;
+    background: transparent;
+  }
+  .session-effort-range::-webkit-slider-thumb {
+    appearance: none;
+    width: 28px;
+    height: 28px;
+    margin-top: -3px;
+    border-radius: 999px;
+    border: 1px solid var(--line-strong);
+    background: var(--card);
+    box-shadow: 0 2px 8px rgba(21, 26, 35, 0.2);
+    cursor: grab;
+  }
+  .session-effort-range::-webkit-slider-thumb:active {
+    cursor: grabbing;
+  }
+  .session-effort-range:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--accent-soft), 0 2px 8px rgba(21, 26, 35, 0.2);
+  }
+  .session-effort-track {
+    height: 22px;
+    border-radius: 999px;
+    background: var(--line-strong);
+  }
+  .session-effort-fill {
+    position: relative;
+    height: 100%;
+    min-width: 7px;
+    overflow: hidden;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  }
+  .session-effort-fill.is-fast {
+    background: linear-gradient(100deg, var(--accent), var(--info), var(--accent-2), var(--info));
+    background-size: 260% 100%;
+    animation: session-speed-flow 1.15s linear infinite;
+  }
+  .session-speed-particles {
+    position: absolute;
+    inset: 0;
+    opacity: 0.9;
+    background-image:
+      radial-gradient(circle, rgba(255, 255, 255, 0.9) 0 1px, transparent 1.4px),
+      radial-gradient(circle, rgba(255, 255, 255, 0.58) 0 1px, transparent 1.5px);
+    background-position: 2px 4px, 13px 15px;
+    background-size: 22px 22px, 31px 22px;
+    animation: session-speed-particles 0.75s linear infinite;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+
+@keyframes drift {
+  0% {
+    transform: translate3d(-6%, -4%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(5%, 6%, 0) scale(1.12);
+  }
+  100% {
+    transform: translate3d(-3%, 8%, 0) scale(0.96);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  80%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@keyframes session-speed-flow {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -160% 0;
+  }
+}
+
+@keyframes session-speed-particles {
+  from {
+    background-position: 2px 4px, 13px 15px;
+  }
+  to {
+    background-position: 46px 4px, 75px 15px;
+  }
+}
+
+@layer utilities {
+  .animate-shimmer {
+    background: linear-gradient(
+      110deg,
+      transparent 25%,
+      color-mix(in srgb, var(--ink) 7%, transparent) 50%,
+      transparent 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+
+  .animate-pop-in {
+    animation: pop-in 0.14s ease-out;
+  }
+
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
