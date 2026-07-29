@@ -11,6 +11,12 @@ export interface SlashCommandDefinition {
   availability: SlashCommandAvailability;
   /** AgentHub commands open structured local UI; provider commands are sent to the active CLI session. */
   execution?: "agenthub" | "provider";
+  /**
+   * Provider-native control command this entry maps to. When set, the daemon
+   * passes it to the adapter, which may use a dedicated transport (e.g.
+   * OpenCode's summarize endpoint) instead of only sending the name as chat text.
+   */
+  providerCommand?: "compact";
   argumentHint?: string;
   argumentRequired?: boolean;
 }

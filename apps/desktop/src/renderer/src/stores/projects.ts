@@ -1,7 +1,7 @@
 import { create } from "zustand";
-import type { Project, ProjectInspection, VerificationCommandTemplate } from "@agenthub/domain";
+import type { Project, ProjectInspection, VerificationCommandTemplate, WorkspaceMode } from "@agenthub/domain";
 import { requestCore } from "../lib/bridge";
-import { toUiProject } from "../lib/core-mappers";
+import { toDomainProject, toUiProject } from "../lib/core-mappers";
 import { normalizePath } from "../lib/utils";
 import type { ActiveRunSummary, UiProject } from "../lib/types";
 
@@ -14,6 +14,7 @@ interface ProjectsState {
   touchProject: (id: string) => void;
   setActiveRun: (id: string, activeRun: ActiveRunSummary | undefined) => void;
   setVerificationTemplates: (id: string, templates: VerificationCommandTemplate[]) => Promise<void>;
+  setWorkspaceMode: (id: string, mode: WorkspaceMode) => Promise<void>;
 }
 
 export const useProjectsStore = create<ProjectsState>((set, get) => ({
@@ -80,6 +81,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       name: current.name,
       rootPath: current.rootPath,
       repositoryType: current.repositoryType,
+      workspaceMode: current.workspaceMode,
       defaultBranch: current.scan?.git.defaultBranch,
       frontendPaths: current.scan?.frontendPaths ?? [],
       backendPaths: current.scan?.backendPaths ?? [],
@@ -90,6 +92,20 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     set((state) => ({
       projects: state.projects.map((project) => project.id === id
         ? { ...project, verificationTemplates: saved.verificationTemplates ?? [] }
+        : project)
+    }));
+  },
+
+  setWorkspaceMode: async (id, workspaceMode) => {
+    const current = get().projects.find((project) => project.id === id);
+    if (!current) return;
+    const saved = await requestCore<Project>("project.upsert", {
+      ...toDomainProject(current),
+      workspaceMode
+    });
+    set((state) => ({
+      projects: state.projects.map((project) => project.id === id
+        ? { ...project, workspaceMode: saved.workspaceMode ?? "direct" }
         : project)
     }));
   }

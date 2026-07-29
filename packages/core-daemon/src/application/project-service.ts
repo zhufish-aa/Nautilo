@@ -9,7 +9,7 @@ export class ProjectService {
   list(): Project[] { return this.database.projects.list(); }
   add(input: { rootPath: string; name?: string }): Project {
     const now = new Date().toISOString();
-    const project = { id: randomUUID(), name: input.name ?? input.rootPath.split(/[\\/]/).filter(Boolean).pop() ?? "Project", rootPath: input.rootPath, repositoryType: "none" as const, frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default", createdAt: now, updatedAt: now } as Project;
+    const project = { id: randomUUID(), name: input.name ?? input.rootPath.split(/[\\/]/).filter(Boolean).pop() ?? "Project", rootPath: input.rootPath, repositoryType: "none" as const, workspaceMode: "direct" as const, frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default", createdAt: now, updatedAt: now } as Project;
     this.database.projects.save(project, now);
     return project;
   }

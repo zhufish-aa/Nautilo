@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { AgentInstance, ProviderModelCatalog } from "@agenthub/domain";
 import { requestCore } from "../lib/bridge";
 import { toDomainAgent, toUiAgent } from "../lib/core-mappers";
-import { PROVIDERS } from "../lib/provider-catalog";
+import { providerMetas } from "../lib/provider-catalog";
 import { newId } from "../lib/utils";
 import type { AgentInstanceConfig, ProviderInstallation } from "../lib/types";
 
@@ -45,7 +45,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       return { ...toUiAgent(instance), credentialStored: status.stored };
     }));
     set({ instances: hydrated });
-    await Promise.all(PROVIDERS.map((provider) => get().redetect(provider.id)));
+    await Promise.all(providerMetas().map((provider) => get().redetect(provider.id)));
   },
 
   redetect: async (providerId) => {

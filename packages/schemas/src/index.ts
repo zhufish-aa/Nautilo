@@ -89,4 +89,5 @@ export function validateRecoveryDecision(value: unknown): RecoveryDecision {
   return value;
 }
 
+export * from "./capability-import.js";
 export * from "./ipc.js";

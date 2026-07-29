@@ -5,7 +5,8 @@
     "paths": {
       "@agenthub/domain": ["../domain/src/index.ts"],
       "@agenthub/schemas": ["../schemas/src/index.ts"],
-      "@agenthub/event-protocol": ["../event-protocol/src/index.ts"]
+      "@agenthub/event-protocol": ["../event-protocol/src/index.ts"],
+      "@agenthub/provider-sdk": ["../provider-sdk/src/index.ts"]
     },
     "rootDir": "src",
     "outDir": "dist"
@@ -14,6 +15,7 @@
   "references": [
     { "path": "../domain" },
     { "path": "../schemas" },
-    { "path": "../event-protocol" }
+    { "path": "../event-protocol" },
+    { "path": "../provider-sdk" }
   ]
 }

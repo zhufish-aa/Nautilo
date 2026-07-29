@@ -4,6 +4,7 @@
     { "path": "packages/domain" },
     { "path": "packages/event-protocol" },
     { "path": "packages/schemas" },
+    { "path": "packages/provider-sdk" },
     { "path": "packages/core-daemon" }
   ]
 }

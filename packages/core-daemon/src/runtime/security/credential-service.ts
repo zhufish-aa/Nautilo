@@ -3,23 +3,25 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 import { Database } from "../../database/index.js";
 import { CoreError } from "../../errors.js";
+import type { AdapterRegistry } from "../../adapters/index.js";
 
 interface StoredCredential { apiKey: string; envName?: string; }
 
-const PROVIDER_ENV: Record<string, string> = {
-  codex: "OPENAI_API_KEY",
-  kimi: "KIMI_API_KEY",
-  "kimi-code": "KIMI_API_KEY",
-  claude: "ANTHROPIC_API_KEY",
-  "claude-code": "ANTHROPIC_API_KEY",
-  opencode: "OPENCODE_API_KEY"
+/** Env vars for legacy provider ids that predate descriptor-driven lookup. */
+const LEGACY_PROVIDER_ENV: Readonly<Record<string, readonly string[]>> = {
+  kimi: ["KIMI_API_KEY"],
+  claude: ["ANTHROPIC_API_KEY"]
 };
 
 /** AES-GCM local vault. Plaintext credentials are never persisted in AgentInstance JSON. */
 export class CredentialService {
   private readonly keyPath: string;
   private key?: Buffer;
-  constructor(private readonly database: Database, dataDir: string) {
+  constructor(
+    private readonly database: Database,
+    dataDir: string,
+    private readonly adapters?: AdapterRegistry
+  ) {
     this.keyPath = join(dataDir, "credential.key");
   }
 
@@ -46,13 +48,9 @@ export class CredentialService {
     const credential = this.read(agentInstanceId);
     if (!credential) return {};
     if (credential.envName) return { [credential.envName]: credential.apiKey };
-    if (providerId === "codex") {
-      return {
-        OPENAI_API_KEY: credential.apiKey,
-        CODEX_API_KEY: credential.apiKey
-      };
-    }
-    return { [PROVIDER_ENV[providerId] ?? "AGENTHUB_API_KEY"]: credential.apiKey };
+    const envNames = this.adapters?.find(providerId)?.descriptor?.credentialEnv ?? LEGACY_PROVIDER_ENV[providerId];
+    if (envNames?.length) return Object.fromEntries(envNames.map((name) => [name, credential.apiKey]));
+    return { AGENTHUB_API_KEY: credential.apiKey };
   }
 
   secretValues(): string[] {

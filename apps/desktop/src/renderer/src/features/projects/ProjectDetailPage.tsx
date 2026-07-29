@@ -26,6 +26,7 @@ import { SkeletonCard } from "../../components/ui/Skeleton";
 import { useProjectsStore } from "../../stores/projects";
 import { toast } from "../../stores/toast";
 import { VerificationTemplatesCard } from "./VerificationTemplatesCard";
+import { WorkspaceModeCard } from "./WorkspaceModeCard";
 
 function SectionCard({
   icon: Icon,
@@ -184,6 +185,10 @@ export function ProjectDetailPage(): JSX.Element {
               </SectionCard>
             </div>
           )}
+
+          <div className="lg:col-span-2">
+            <WorkspaceModeCard project={project} />
+          </div>
 
           <SectionCard icon={GitBranch} title={t("projects.detail.gitTitle")}>
             {scan.git.isRepo ? (

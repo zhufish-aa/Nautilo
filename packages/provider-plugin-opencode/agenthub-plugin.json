@@ -1,0 +1,26 @@
+{
+  "id": "opencode",
+  "apiVersion": 1,
+  "main": "dist/index.js",
+  "version": "0.1.0",
+  "descriptor": {
+    "providerId": "opencode",
+    "name": "OpenCode",
+    "vendor": "OpenCode",
+    "capabilities": ["headless_text", "provider_server"],
+    "defaultExecutable": "opencode",
+    "credentialEnv": ["OPENCODE_API_KEY"],
+    "permissionModes": [
+      {
+        "value": "build",
+        "name": { "zh-CN": "执行模式", "en-US": "Build mode" },
+        "description": { "zh-CN": "正常执行，可修改文件", "en-US": "Normal execution with file edits" }
+      },
+      {
+        "value": "plan",
+        "name": { "zh-CN": "计划模式", "en-US": "Plan mode" },
+        "description": { "zh-CN": "只读探索，批准计划后再执行", "en-US": "Read-only planning until the plan is approved" }
+      }
+    ]
+  }
+}

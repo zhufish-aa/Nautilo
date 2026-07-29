@@ -14,6 +14,8 @@ import { PolicyRepository } from "./policy-repository.js";
 import { ApprovalRepository } from "./approval-repository.js";
 import { AuditRepository } from "./audit-repository.js";
 import { CredentialRepository } from "./credential-repository.js";
+import { CapabilityRepository } from "./capability-repository.js";
+import { CheckpointRepository } from "./checkpoint-repository.js";
 
 /** Composition root for persistence. It exposes repositories, not SQL. */
 export class Database {
@@ -32,6 +34,8 @@ export class Database {
   readonly approvals: ApprovalRepository;
   readonly audit: AuditRepository;
   readonly credentials: CredentialRepository;
+  readonly capabilities: CapabilityRepository;
+  readonly checkpoints: CheckpointRepository;
   constructor(filePath: string) {
     this.connection = new DatabaseConnection(filePath);
     migrateDatabase(this.connection.raw);
@@ -49,6 +53,8 @@ export class Database {
     this.approvals = new ApprovalRepository(this.connection.raw);
     this.audit = new AuditRepository(this.connection.raw);
     this.credentials = new CredentialRepository(this.connection.raw);
+    this.capabilities = new CapabilityRepository(this.connection.raw);
+    this.checkpoints = new CheckpointRepository(this.connection.raw);
   }
   close(): void { this.connection.close(); }
 }

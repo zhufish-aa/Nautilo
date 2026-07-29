@@ -30,6 +30,10 @@ export function migrateDatabase(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, action TEXT NOT NULL, resource_id TEXT, outcome TEXT NOT NULL, data TEXT NOT NULL, timestamp TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp DESC);
     CREATE TABLE IF NOT EXISTS credentials (agent_instance_id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS capabilities (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, created_at TEXT NOT NULL, truncated INTEGER NOT NULL DEFAULT 0);
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id, created_at);
+    CREATE TABLE IF NOT EXISTS run_touched_files (run_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(run_id, path));
     INSERT INTO schema_meta(key, value) VALUES('schema', '4') ON CONFLICT(key) DO NOTHING;
   `);
   ensureColumn(db, "artifacts", "project_run_id", "TEXT");
@@ -38,6 +42,10 @@ export function migrateDatabase(db: DatabaseSync): void {
   const version = currentSchemaVersion(db);
   if (version < 5) migrateExecutionDefaultsToTeamMembers(db);
   if (version < 5) setSchemaVersion(db, 5);
+  // Schema 6 adds the capabilities table (user-managed skills and MCP servers).
+  if (version < 6) setSchemaVersion(db, 6);
+  // Schema 7 adds per-turn checkpoints (workspace snapshots) and run touched files.
+  if (version < 7) setSchemaVersion(db, 7);
 }
 
 function ensureColumn(db: DatabaseSync, table: string, column: string, type: string): void {

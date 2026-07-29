@@ -1,6 +1,6 @@
 # Codex 与 Kimi Code Adapter 查询及验证记录
 
-> 日期：2026-07-21  
+> 日期：2026-07-23  
 > 范围：只验证 Codex CLI 与 Kimi Code CLI；Claude Code/OpenCode 不在本次完成范围内。
 
 ## 1. 本机环境
@@ -78,12 +78,22 @@ Kimi Start：通过
 Kimi Resume：通过
 ```
 
-Kimi ACP 已确认官方支持 `initialize`、`session/new`、`session/load`、`session/resume`、`session/prompt` 和 `session/cancel`，但本轮 Core Daemon 采用“一次提示启动一个非交互进程、后续通过原生 Resume 续跑”的架构，尚未实现长驻 ACP Client，不能标记为完成。
+Kimi ACP 已接入 `initialize`、`session/new`、`session/resume`、`session/prompt` 和 `session/cancel`。AgentHub 每个 Provider Turn 启动独立 ACP 进程，使用原生 Session ID 恢复上下文；这不是长驻进程，但属于完整的 ACP Client 运行路径。
 
-## 7. 官方来源
+## 7. 会话级动态工具
+
+- Codex app-server：在新 Thread 的 `dynamicTools` 注册符合 Responses API 命名规则的 `agenthub_delegate`、`agenthub_plan`，并处理 `item/tool/call`。工具随原生 Thread 保存；历史 Thread 首次需要工具时会创建一次带工具的新 Thread，并把 AgentHub 持久化聊天记录同步进去。
+- Kimi Code：官方文档确认 Kimi 是 MCP Client；本机 Kimi 0.27.0 的 ACP 初始化能力声明 `mcpCapabilities.http=true`、`sse=true`。AgentHub 为每次根主会话运行创建仅监听 `127.0.0.1`、带随机路径的 Streamable HTTP MCP 服务，并在该次 `session/new` 或 `session/resume` 的 `mcpServers` 中注入。
+- 临时 MCP 不写入 `~/.kimi-code/mcp.json`，运行结束或停止后销毁；工具执行仍校验当前 `mainSessionId`、`teamId` 和 `projectRunId`。子会话及其他主会话无法继承或跨会话调用。
+- Kimi 工具在模型侧显示为 `mcp__agenthub__delegate` / `mcp__agenthub__plan`，内部统一映射回 Provider 无关且符合动态工具命名规则的 `agenthub_delegate` / `agenthub_plan`。
+
+协议级自动化测试已使用真实 MCP Client 完成临时端点的 `tools/list` 和 `tools/call`，并验证调用参数只进入当前运行的回调。
+
+## 8. 官方来源
 
 - [OpenAI Codex CLI 命令参考](https://developers.openai.com/codex/cli/reference/)
 - [OpenAI Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode)
 - [Kimi Code CLI 命令参考](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command)
 - [Kimi Code ACP 参考](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp)
 - [Kimi Code Session 指南](https://www.kimi.com/code/docs/en/kimi-code-cli/guides/sessions)
+- [Kimi Code MCP 文档](https://www.kimi.com/code/docs/kimi-code-cli/customization/mcp.html)

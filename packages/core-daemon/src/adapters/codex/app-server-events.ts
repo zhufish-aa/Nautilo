@@ -43,6 +43,29 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
   const item = record(params.item);
   const phase = method === "item/completed" ? "completed" : "started";
   const id = text(item.id);
+  if (item.type === "collabAgentToolCall") {
+    // Codex multi-agent collab call (spawnAgent / sendInput / wait / …). The
+    // spawnAgent variant is AgentHub's sub-agent dispatch; its receiver thread
+    // ids are correlated back to this item's id by the run loop.
+    const states = record(item.agentsStates);
+    const stateSummary = Object.entries(states)
+      .map(([threadId, state]) => {
+        const status = text(record(state).status) ?? "unknown";
+        const message = text(record(state).message);
+        return `${threadId}: ${status}${message ? ` — ${message}` : ""}`;
+      })
+      .join("\n");
+    return [{
+      kind: "tool",
+      callId: id,
+      name: text(item.tool) ?? "spawnAgent",
+      phase,
+      input: { prompt: text(item.prompt), model: text(item.model) },
+      output: phase === "completed" ? stateSummary || undefined : undefined,
+      success: text(item.status) !== "failed",
+      raw: paramsValue
+    }];
+  }
   if (item.type === "agentMessage") {
     if (phase === "started") return [];
     return [{ kind: "message", phase: "completed", messageId: id, text: text(item.text) ?? "", raw: paramsValue }];
@@ -126,4 +149,19 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
     });
   }
   return [];
+}
+
+/** Tags events emitted from a subscribed child agent thread with their dispatch id. */
+export function withSubagentDispatch(events: AdapterEvent[], subagentDispatchId: string): AdapterEvent[] {
+  return events.map((event) => {
+    switch (event.kind) {
+      case "message":
+      case "thinking":
+      case "tool":
+      case "command":
+        return { ...event, subagentDispatchId };
+      default:
+        return event;
+    }
+  });
 }

@@ -85,7 +85,7 @@ function setup({ policy = "autonomous", responder, disabledChild = false, disabl
 }
 
 async function waitUntil(predicate, message) {
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -115,6 +115,88 @@ test("direct lets the main Agent finish without creating child tasks", async () 
   fixture.database.close();
 });
 
+test("session-selected main Agent can call delegation as a runtime tool without a planner turn", async () => {
+  const daemon = new CoreDaemon({ databasePath: ":memory:", enableGitWorkflows: false });
+  const prompts = [];
+  const receipts = [];
+  const runFor = (request) => {
+    async function* events() {
+      prompts.push({ agentId: request.instance.id, prompt: request.prompt, tools: request.runtimeTools?.map((tool) => tool.name) ?? [] });
+      yield { kind: "session", providerSessionId: `${request.instance.id}-native-thread` };
+      if (request.instance.id === "modern-main" && request.prompt.includes("[AGENTHUB_MAIN_TURN]")) {
+        assert.deepEqual(request.runtimeTools?.map((tool) => tool.name), ["agenthub_delegate", "agenthub_plan"]);
+        assert.match(request.prompt, /Every delegated task must be self-contained/);
+        assert.match(request.prompt, /Never ask one child Agent to obtain status, context, or output from another child Agent/);
+        assert.match(request.prompt, /Delegation tools do not forward chat-only attachments or inline images/);
+        assert.match(request.runtimeTools[0].description, /cannot read the parent or sibling Agent sessions/);
+        assert.match(request.runtimeTools[1].description, /use dependsOn so AgentHub can supply completed dependency outcomes/);
+        receipts.push(await request.executeRuntimeTool({
+          providerId: "modern-fake",
+          callId: "call-1",
+          name: "agenthub_delegate",
+          arguments: { memberId: "child", task: "Inspect the API" }
+        }));
+        yield { kind: "message", text: "Child dispatched; I can continue without waiting." };
+      } else if (request.instance.id === "modern-child") {
+        assert.equal(request.runtimeTools, undefined);
+        yield { kind: "message", text: "Child API result" };
+      } else {
+        yield { kind: "message", text: "Main received child result" };
+      }
+      yield { kind: "exit", exitCode: 0 };
+    }
+    return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+  };
+  daemon.adapters.register({
+    providerId: "modern-fake",
+    supportsStructuredOutput: true,
+    supportsResume: true,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: true, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }),
+    start: runFor,
+    resume: runFor
+  });
+  daemon.database.projects.save({ id: "modern-project", name: "Modern", rootPath: process.cwd(), repositoryType: "none", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" }, now);
+  daemon.database.agents.save({ id: "modern-main", providerId: "modern-fake", displayName: "Main", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now }, now);
+  daemon.database.agents.save({ id: "modern-child", providerId: "modern-fake", displayName: "Child", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now }, now);
+  daemon.database.teams.save({
+    id: "modern-team",
+    name: "Children only",
+    delegationPolicy: "autonomous",
+    members: [{ id: "child", displayName: "API child", agentInstanceId: "modern-child", roleId: "api", strengths: {}, allowedTaskTypes: [], maxConcurrentTasks: 1, enabled: true }],
+    createdAt: now,
+    updatedAt: now
+  }, now);
+
+  const started = daemon.orchestration.start({
+    projectId: "modern-project",
+    teamId: "modern-team",
+    agentInstanceId: "modern-main",
+    goal: "Handle the request"
+  });
+  try {
+    await waitUntil(
+      () => daemon.database.tasks.list(started.projectRun.id).some((task) => task.status === "completed")
+        && daemon.database.projectRuns.get(started.projectRun.id)?.status === "completed",
+      "runtime delegation did not complete"
+    );
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}: ${JSON.stringify({
+      prompts,
+      receipts,
+      tasks: daemon.database.tasks.list(started.projectRun.id),
+      projectRun: daemon.database.projectRuns.get(started.projectRun.id)
+    })}`);
+  }
+
+  assert.equal(prompts.some((entry) => entry.prompt.includes("[AGENTHUB_PLANNER_DECISION]")), false);
+  assert.equal(receipts[0]?.success, true);
+  assert.equal(JSON.parse(receipts[0].content).accepted, true);
+  assert.equal(daemon.database.sessions.get(started.mainSession.id)?.runtimeToolVersion, 2);
+  assert.ok(prompts.find((entry) => entry.agentId === "modern-main" && entry.prompt.includes("[AGENTHUB_FINAL_SYNTHESIS]")));
+  await daemon.stop();
+});
+
 test("delegate creates a child session and returns the child result to the main session", async () => {
   const fixture = setup({
     responder: ({ prompt }) => {
@@ -136,6 +218,12 @@ test("delegate creates a child session and returns the child result to the main 
   assert.equal(childRequest?.model, "child-model");
   assert.equal(childRequest?.reasoningEffort, "high");
   assert.equal(childRequest?.serviceTier, "priority");
+  assert.match(childRequest?.prompt ?? "", /This prompt is your complete cross-Agent handoff/);
+  assert.match(childRequest?.prompt ?? "", /Do not attempt to query another Agent/);
+  assert.match(childRequest?.prompt ?? "", /A mention of an attached or inline image is not image access/);
+  const planningRequest = fixture.prompts.find((entry) => entry.prompt.includes("[AGENTHUB_PLANNER_DECISION]"));
+  assert.match(planningRequest?.prompt ?? "", /Every task must be self-contained/);
+  assert.match(planningRequest?.prompt ?? "", /Chat-only attachments and inline images are not transferred by delegation/);
   const mainMessages = fixture.database.sessions.messages(started.mainSession.id);
   assert.ok(mainMessages.some((message) => message.kind === "result" && message.fromMemberId === "child" && message.text.includes("Child implementation")));
   assert.ok(fixture.database.events.replay({ sessionId: started.mainSession.id }).some((event) => event.type === "handoff.created" && event.payload.toMemberId === "child"));
@@ -375,6 +463,8 @@ test("plan validates and executes an acyclic dependency graph in order", async (
   const delegatedPrompts = fixture.prompts.filter((entry) => entry.prompt.includes("[AGENTHUB_DELEGATED_TASK]"));
   assert.ok(delegatedPrompts[0].prompt.includes('"id": "first"'));
   assert.ok(delegatedPrompts[1].prompt.includes('"id": "second"'));
+  assert.match(delegatedPrompts[1].prompt, /Completed dependency outcomes supplied by AgentHub/);
+  assert.match(delegatedPrompts[1].prompt, /first done/);
   fixture.database.close();
 });
 

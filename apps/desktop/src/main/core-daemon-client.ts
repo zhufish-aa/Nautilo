@@ -58,7 +58,10 @@ export class CoreDaemonClient {
     socket.write(`${JSON.stringify({ request })}\n`);
     const response = await lines.next();
     socket.end();
-    if (!response.value?.ok) throw new Error(response.value?.error?.message ?? "Core Daemon request failed");
+    if (!response.value?.ok) {
+      const reason = response.value?.error?.details?.reason;
+      throw new Error(typeof reason === "string" ? reason : response.value?.error?.message ?? "Core Daemon request failed");
+    }
     return response.value.data;
   }
 

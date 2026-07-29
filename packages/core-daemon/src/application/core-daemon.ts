@@ -25,6 +25,12 @@ import { AuditService, DiagnosticsService, MetricsService } from "../runtime/obs
 import { RecoveryService } from "../runtime/recovery-service.js";
 import { EventSubscriptionService } from "../runtime/event-subscription-service.js";
 import { SlashCommandService } from "./slash-commands/index.js";
+import { CapabilityService } from "./capability-service.js";
+import { CapabilityImportService } from "./capability-import/index.js";
+import { InteractionService } from "./interaction-service.js";
+import { MainAgentRuntimeToolProvider } from "../runtime/orchestration/index.js";
+import { PluginService } from "../runtime/plugins/plugin-service.js";
+import { CheckpointService } from "../runtime/checkpoint-service.js";
 
 export interface CoreDaemonOptions { dataDir?: string; databasePath?: string; worktreeRoot?: string; enableGitWorkflows?: boolean; }
 
@@ -55,13 +61,18 @@ export class CoreDaemon {
   readonly recovery: RecoveryService;
   readonly subscriptions: EventSubscriptionService;
   readonly slashCommands: SlashCommandService;
+  readonly capabilities: CapabilityService;
+  readonly capabilityImports: CapabilityImportService;
+  readonly interactions: InteractionService;
+  readonly plugins: PluginService;
+  readonly checkpoints: CheckpointService;
 
   constructor(options: CoreDaemonOptions = {}) {
     const dataDir = options.dataDir ?? join(homedir(), ".agenthub");
     this.database = new Database(options.databasePath ?? join(dataDir, "agenthub.sqlite"));
     this.adapters = new AdapterRegistry();
     this.gateway = new IpcGateway();
-    this.credentials = new CredentialService(this.database, dataDir);
+    this.credentials = new CredentialService(this.database, dataDir, this.adapters);
     this.redaction = new RedactionService(() => this.credentials.secretValues());
     this.environment = new EnvironmentPolicyService();
     this.commandPolicies = new CommandPolicyService(this.database);
@@ -89,11 +100,19 @@ export class CoreDaemon {
       ? undefined
       : new GitWorkflowService(this.database, this.events, options.worktreeRoot ?? join(dataDir, "worktrees"), this.redaction);
     this.orchestration = new OrchestrationService(this.database, this.runs, this.events, this.gitWorkflows, this.approvals);
+    this.runs.setRuntimeToolProvider(new MainAgentRuntimeToolProvider(this.database, this.orchestration));
     this.metrics = new MetricsService(this.database);
     this.diagnostics = new DiagnosticsService(this.database, this.audit, this.metrics, this.redaction, dataDir);
     this.recovery = new RecoveryService(this.database, this.audit);
     this.subscriptions = new EventSubscriptionService(this.events);
     this.slashCommands = new SlashCommandService(this.database, this.agents, this.audit, this.runs);
+    this.capabilities = new CapabilityService(this.database);
+    this.capabilityImports = new CapabilityImportService(this.capabilities);
+    this.interactions = new InteractionService(this.database, this.events);
+    this.runs.setInteractionService(this.interactions);
+    this.plugins = new PluginService(dataDir, this.adapters);
+    this.checkpoints = new CheckpointService(this.database, dataDir, this.events);
+    this.runs.setCheckpointService(this.checkpoints);
     this.recovery.recoverInterrupted();
     this.gateway.setObserver((request, response) => {
       this.audit.ipc(

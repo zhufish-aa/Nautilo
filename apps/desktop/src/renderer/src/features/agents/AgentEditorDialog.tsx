@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
-import { ENV_POLICIES, PROVIDERS } from "../../lib/provider-catalog";
+import { ENV_POLICIES, permissionModesFor, supportsConfigProfile, useProviderMetas } from "../../lib/provider-catalog";
 import type { AgentInstanceConfig } from "../../lib/types";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -23,6 +23,7 @@ interface FormState {
   baseArgs: string[];
   profile: string;
   envPolicyId: string;
+  permissionMode: string;
   apiKey: string;
   baseUrl: string;
   enabled: boolean;
@@ -36,6 +37,7 @@ function emptyForm(): FormState {
     baseArgs: [],
     profile: "",
     envPolicyId: "env-standard",
+    permissionMode: "",
     apiKey: "",
     baseUrl: "",
     enabled: true
@@ -50,6 +52,7 @@ function formFromInstance(instance: AgentInstanceConfig): FormState {
     baseArgs: instance.baseArgs,
     profile: instance.profile ?? "",
     envPolicyId: instance.envPolicyId,
+    permissionMode: instance.permissionMode ?? "",
     apiKey: instance.apiKey ?? "",
     baseUrl: instance.baseUrl ?? "",
     enabled: instance.enabled
@@ -65,7 +68,7 @@ export function AgentEditorDialog({
   onOpenChange: (open: boolean) => void;
   instance?: AgentInstanceConfig;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const createInstance = useAgentsStore((state) => state.createInstance);
   const updateInstance = useAgentsStore((state) => state.updateInstance);
   const installations = useAgentsStore((state) => state.installations);
@@ -84,9 +87,10 @@ export function AgentEditorDialog({
 
   const patch = (changes: Partial<FormState>): void => setForm((prev) => ({ ...prev, ...changes }));
 
+  const providers = useProviderMetas();
   const providerOptions = useMemo(
     () =>
-      PROVIDERS.map((provider) => {
+      providers.map((provider) => {
         const installation = installations.find((item) => item.providerId === provider.id);
         return {
           value: provider.id,
@@ -94,7 +98,7 @@ export function AgentEditorDialog({
           hint: installation ? t(`status.provider.${installation.status}` as MessageKey) : undefined
         };
       }),
-    [installations, t]
+    [providers, installations, t]
   );
 
   const envOptions = useMemo(
@@ -105,6 +109,16 @@ export function AgentEditorDialog({
         hint: t(policy.descriptionKey as MessageKey)
       })),
     [t]
+  );
+
+  const permissionModeOptions = useMemo(
+    () =>
+      permissionModesFor(form.providerId).map((mode) => ({
+        value: mode.value,
+        label: mode.name[locale],
+        hint: mode.description[locale]
+      })),
+    [form.providerId, locale]
   );
 
   const save = async (): Promise<void> => {
@@ -120,8 +134,9 @@ export function AgentEditorDialog({
       providerId: form.providerId,
       executable: form.executable.trim(),
       baseArgs: form.baseArgs,
-      profile: form.profile.trim() || undefined,
+      profile: supportsConfigProfile(form.providerId) ? form.profile.trim() || undefined : undefined,
       envPolicyId: form.envPolicyId,
+      permissionMode: form.permissionMode || undefined,
       apiKey: form.apiKey.trim() || undefined,
       baseUrl: form.baseUrl.trim() || undefined,
       enabled: form.enabled
@@ -171,7 +186,8 @@ export function AgentEditorDialog({
             value={form.providerId || undefined}
             onValueChange={(value) => patch({
               providerId: value,
-              executable: installations.find((item) => item.providerId === value)?.executable ?? ""
+              executable: installations.find((item) => item.providerId === value)?.executable ?? "",
+              permissionMode: ""
             })}
             options={providerOptions}
             placeholder={t("agents.editor.basic.providerPlaceholder")}
@@ -188,14 +204,16 @@ export function AgentEditorDialog({
           />
         </Field>
 
-        <Field label={t("agents.editor.basic.profile")} htmlFor="agent-profile">
-          <Input
-            id="agent-profile"
-            value={form.profile}
-            onChange={(event) => patch({ profile: event.target.value })}
-            placeholder={t("agents.editor.basic.profilePlaceholder")}
-          />
-        </Field>
+        {supportsConfigProfile(form.providerId) && (
+          <Field label={t("agents.editor.basic.profile")} htmlFor="agent-profile">
+            <Input
+              id="agent-profile"
+              value={form.profile}
+              onChange={(event) => patch({ profile: event.target.value })}
+              placeholder={t("agents.editor.basic.profilePlaceholder")}
+            />
+          </Field>
+        )}
 
         <div className="sm:col-span-2">
           <Field label={t("agents.editor.basic.args")} hint={t("agents.editor.basic.argsHint")}>
@@ -216,6 +234,18 @@ export function AgentEditorDialog({
             options={envOptions}
           />
         </Field>
+
+        {permissionModeOptions.length > 0 && (
+          <Field label={t("agents.editor.basic.permissionMode")} hint={t("agents.editor.basic.permissionModeHint")}>
+            <SelectField
+              aria-label={t("agents.editor.basic.permissionMode")}
+              value={form.permissionMode || undefined}
+              onValueChange={(permissionMode) => patch({ permissionMode })}
+              options={permissionModeOptions}
+              placeholder={t("agents.editor.basic.permissionModePlaceholder")}
+            />
+          </Field>
+        )}
 
         <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-card-hover px-3.5 py-3">
           <div>

@@ -3,12 +3,7 @@ import type { AdapterDetectionResult } from "../adapters/index.js";
 import { AdapterRegistry } from "../adapters/index.js";
 import { Database } from "../database/index.js";
 import { CoreError } from "../errors.js";
-import { CredentialService, EnvironmentPolicyService } from "../runtime/security/index.js";
-
-const VERIFIED_EXECUTABLES: Readonly<Record<string, string>> = {
-  codex: "codex",
-  "kimi-code": "kimi"
-};
+import { CredentialService, EnvironmentPolicyService, providerEnvironmentPassthrough } from "../runtime/security/index.js";
 
 export class AgentService {
   constructor(
@@ -17,6 +12,10 @@ export class AgentService {
     private readonly credentials?: CredentialService,
     private readonly environment = new EnvironmentPolicyService()
   ) {}
+
+  private defaultExecutable(providerId: string): string | undefined {
+    return this.adapters.find(providerId)?.descriptor?.defaultExecutable;
+  }
 
   list(): AgentInstance[] {
     return this.database.agents.list();
@@ -32,7 +31,7 @@ export class AgentService {
 
   async detect(providerId: string, executable?: string): Promise<AdapterDetectionResult & { providerId: string }> {
     const configured = this.list().find((instance) => instance.providerId === providerId && instance.executable.trim());
-    const command = executable?.trim() || configured?.executable || VERIFIED_EXECUTABLES[providerId];
+    const command = executable?.trim() || configured?.executable || this.defaultExecutable(providerId);
     if (!command) {
       return {
         providerId,
@@ -62,7 +61,7 @@ export class AgentService {
     const configured = agentInstanceId
       ? this.list().find((instance) => instance.id === agentInstanceId && instance.providerId === providerId)
       : this.list().find((instance) => instance.providerId === providerId && instance.executable.trim());
-    const command = executable?.trim() || configured?.executable || VERIFIED_EXECUTABLES[providerId];
+    const command = executable?.trim() || configured?.executable || this.defaultExecutable(providerId);
     if (!command) {
       return {
         providerId,
@@ -89,7 +88,7 @@ export class AgentService {
       const instance = { ...probe, executable: command };
       const credentialEnvironment = this.credentials?.environment(instance.id, instance.providerId) ?? {};
       return await this.adapters.listModels(instance, {
-        env: this.environment.build(undefined, credentialEnvironment)
+        env: this.environment.build(undefined, { ...providerEnvironmentPassthrough(instance, process.env, this.adapters.find(providerId)?.descriptor), ...credentialEnvironment })
       });
     } catch (error) {
       return {

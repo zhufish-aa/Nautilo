@@ -53,7 +53,9 @@ const projectRunTransitions: Record<ProjectRunStatus, readonly ProjectRunStatus[
   review_required: ["merge_ready", "executing", "failed"],
   merge_ready: ["merging", "review_required", "executing", "failed"],
   merging: ["paused", "completed", "review_required", "failed"],
-  completed: [],
+  // A chat session may receive another user turn after a previously completed
+  // orchestration cycle; runtime-tool delegation reopens that same cycle.
+  completed: ["executing", "waiting_user"],
   failed: ["planning", "executing", "cancelled"],
   cancelled: []
 };

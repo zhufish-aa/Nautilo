@@ -3,7 +3,10 @@ import { ProcessRuntime } from "../../process-runtime.js";
 import { JsonRpcProcessClient } from "../json-rpc-process.js";
 import type { AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest } from "../types.js";
 import { parseKimiAcpUpdate, type KimiAcpParseState } from "./acp-events.js";
+import { KimiAcpTurnSegments } from "./acp-segments.js";
 import { readKimiSessionUsage } from "./session-usage.js";
+import { startKimiRuntimeMcpBridge, type KimiRuntimeMcpBridge } from "./runtime-mcp-server.js";
+import { normalizeKimiPermissionInteraction } from "./interaction.js";
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue => typeof value === "object" && value !== null ? value as RecordValue : {};
@@ -26,6 +29,23 @@ async function applyConfig(rpc: JsonRpcProcessClient, sessionId: string, respons
     if (!option?.id) continue;
     await rpc.request("session/set_config_option", { sessionId, configId: option.id, value }).catch(() => undefined);
   }
+  // Permission mode must match exactly — a fuzzy "mode" hint would also hit the model option.
+  // Session-level override wins; otherwise fall back to the instance setting
+  // (same precedence as the codex/claude adapters).
+  const instanceMode = typeof request.instance.providerOptions?.permissionMode === "string"
+    ? request.instance.providerOptions.permissionMode
+    : undefined;
+  const mode = request.permissionMode ?? instanceMode;
+  if (mode) {
+    const option = options.find((item) => {
+      const id = String(item.id ?? "").toLowerCase();
+      const name = String(item.name ?? "").toLowerCase();
+      return id === "mode" || name === "mode" || id === "permission" || name === "permission";
+    });
+    // Older AgentHub builds saved "manual"; the CLI calls that mode "default".
+    const value = mode === "manual" ? "default" : mode;
+    if (option?.id) await rpc.request("session/set_config_option", { sessionId, configId: option.id, value }).catch(() => undefined);
+  }
 }
 
 export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
@@ -46,6 +66,7 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
   let sessionId: string | undefined;
   let finished = false;
   let usageReceived = false;
+  let runtimeMcp: KimiRuntimeMcpBridge | undefined;
 
   async function* events(): AsyncGenerator<AdapterEvent> {
     const state: KimiAcpParseState = {
@@ -54,28 +75,44 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
       toolNames: new Map(),
       toolCalls: new Map()
     };
-    let messageText = "";
-    let thinkingText = "";
-    let messageIndex = 1;
-    const flushMessage = function* (): Generator<AdapterEvent> {
-      if (messageText) yield { kind: "message", phase: "completed", messageId: state.messageId, text: messageText };
-      messageText = "";
-      messageIndex += 1;
-      state.messageId = `kimi-message-${messageIndex}`;
-    };
+    const segments = new KimiAcpTurnSegments(state);
     try {
+      const mcpServers: Array<Record<string, unknown>> = [];
+      if (request.runtimeTools?.length && request.executeRuntimeTool) {
+        runtimeMcp = await startKimiRuntimeMcpBridge(request.runtimeTools, request.executeRuntimeTool);
+        mcpServers.push({ type: "http", name: "agenthub", url: runtimeMcp.url, headers: [] });
+      }
+      for (const server of request.mcpServers ?? []) {
+        if (server.transport === "http" && server.url) {
+          mcpServers.push({
+            type: "http",
+            name: server.name,
+            url: server.url,
+            headers: Object.entries(server.headers ?? {}).map(([name, value]) => ({ name, value }))
+          });
+        } else if (server.transport === "stdio" && server.command) {
+          mcpServers.push({
+            name: server.name,
+            command: server.command,
+            args: server.args ?? [],
+            env: Object.entries(server.env ?? {}).map(([name, value]) => ({ name, value }))
+          });
+        }
+      }
       await rpc.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
         clientInfo: { name: "AgentHub", version: "0.1.0" }
       });
       const sessionResponse = record(await rpc.request(resume ? "session/resume" : "session/new", resume
-        ? { sessionId: (request as AdapterResumeRequest).providerSessionId, cwd: request.cwd, mcpServers: [] }
-        : { cwd: request.cwd, mcpServers: [] }));
+        ? { sessionId: (request as AdapterResumeRequest).providerSessionId, cwd: request.cwd, mcpServers }
+        : { cwd: request.cwd, mcpServers }));
       sessionId = String(sessionResponse.sessionId ?? (resume ? (request as AdapterResumeRequest).providerSessionId : ""));
       if (!sessionId) throw new Error("Kimi ACP did not return a session id");
       yield { kind: "session", providerSessionId: sessionId };
-      if (!resume) await applyConfig(rpc, sessionId, sessionResponse, request);
+      // Resume spawns a fresh CLI process whose mode/model reset to defaults
+      // (the resume response carries configOptions too), so re-apply every time.
+      await applyConfig(rpc, sessionId, sessionResponse, request);
       yield { kind: "status", phase: "turn_started" };
       const prompt = rpc.requestWithId("session/prompt", { sessionId, prompt: [{ type: "text", text: request.prompt }] });
       void prompt.promise.catch(() => undefined);
@@ -84,23 +121,34 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
         if (event.kind === "notification" && event.method === "session/update") {
           const update = record(event.params).update;
           const parsed = parseKimiAcpUpdate(update, state);
-          if (parsed.some((item) => item.kind === "tool" && item.phase === "started")) yield* flushMessage();
+          for (const boundary of segments.flushBefore(parsed)) yield boundary;
           for (const item of parsed) {
-            if (item.kind === "message" && item.phase === "delta") messageText += item.text;
-            if (item.kind === "thinking" && item.phase === "delta") thinkingText += item.text;
+            segments.append(item);
             if (item.kind === "usage") usageReceived = true;
             yield item;
           }
         } else if (event.kind === "request" && event.method === "session/request_permission") {
-          const options = Array.isArray(record(event.params).options) ? record(event.params).options as unknown[] : [];
-          const allowed = options.map(record).find((option) => !String(option.kind ?? "").includes("reject"));
-          if (allowed?.optionId) rpc.respond(event.id, { outcome: { outcome: "selected", optionId: allowed.optionId } });
-          else rpc.respond(event.id, { outcome: { outcome: "cancelled" } });
+          const params = record(event.params);
+          const options = Array.isArray(params.options) ? params.options.map(record) : [];
+          if (request.requestInteraction) {
+            const toolCall = record(params.toolCall);
+            try {
+              const response = await request.requestInteraction(normalizeKimiPermissionInteraction(toolCall, options));
+              rpc.respond(event.id, response.outcome === "selected" && response.optionId
+                ? { outcome: { outcome: "selected", optionId: response.optionId } }
+                : { outcome: { outcome: "cancelled" } });
+            } catch {
+              rpc.respond(event.id, { outcome: { outcome: "cancelled" } });
+            }
+          } else {
+            const allowed = options.find((option) => !String(option.kind ?? "").includes("reject"));
+            if (allowed?.optionId) rpc.respond(event.id, { outcome: { outcome: "selected", optionId: allowed.optionId } });
+            else rpc.respond(event.id, { outcome: { outcome: "cancelled" } });
+          }
         } else if (event.kind === "request") {
           rpc.respondError(event.id, -32601, `AgentHub does not support ACP request ${event.method}`);
         } else if (event.kind === "response" && event.id === prompt.id) {
-          yield* flushMessage();
-          if (thinkingText) yield { kind: "thinking", phase: "completed", messageId: state.thinkingId, text: thinkingText };
+          for (const completed of [...segments.flushMessage(), ...segments.flushThinking()]) yield completed;
           if (!usageReceived && sessionId) {
             const configOptions = Array.isArray(sessionResponse.configOptions) ? sessionResponse.configOptions.map(record) : [];
             const modelOption = configOptions.find((option) => `${String(option.id ?? "")} ${String(option.name ?? "")}`.toLowerCase().includes("model"));
@@ -126,6 +174,8 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
     } catch (error) {
       yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
       if (!finished) await process.cancel().catch(() => undefined);
+    } finally {
+      await runtimeMcp?.close().catch(() => undefined);
     }
   }
 
@@ -136,6 +186,7 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
     cancel: async () => {
       if (sessionId) rpc.notify("session/cancel", { sessionId });
       await process.cancel();
+      await runtimeMcp?.close().catch(() => undefined);
     }
   };
 }

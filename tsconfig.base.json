@@ -8,6 +8,7 @@
       "@agenthub/domain": ["packages/domain/src/index.ts"],
       "@agenthub/schemas": ["packages/schemas/src/index.ts"],
       "@agenthub/event-protocol": ["packages/event-protocol/src/index.ts"],
+      "@agenthub/provider-sdk": ["packages/provider-sdk/src/index.ts"],
       "@agenthub/core-daemon": ["packages/core-daemon/src/index.ts"]
     },
     "strict": true,

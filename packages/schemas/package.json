@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@agenthub/domain": "workspace:*",
-    "@agenthub/event-protocol": "workspace:*"
+    "@agenthub/event-protocol": "workspace:*",
+    "@agenthub/provider-sdk": "workspace:*"
   }
 }

@@ -18,6 +18,7 @@ import {
   MemberRouter,
   MessageRouter,
   OrchestrationPromptBuilder,
+  RuntimeToolDecisionBuilder,
   SessionRouter,
   TaskGraph,
   type DelegationReceipt
@@ -27,6 +28,7 @@ import { GitWorkflowService } from "../runtime/git-workflow-service.js";
 import { ApprovalService } from "../runtime/security/approval-service.js";
 import type { MessageAttachmentInput } from "@agenthub/schemas";
 import { MessageAttachmentService } from "../runtime/message-attachment-service.js";
+import type { RuntimeToolResult } from "../adapters/index.js";
 
 export interface StartOrchestrationInput {
   projectId: string;
@@ -47,10 +49,17 @@ interface TaskLaunch {
   execution: Promise<void>;
 }
 
+interface ExecuteTaskOptions {
+  taskIds?: Set<string>;
+  notifyDispatch?: boolean;
+  finalizeProjectRun?: boolean;
+}
+
 /** Coordinates decisions and task execution; provider/process details stay in RunService. */
 export class OrchestrationService {
   private readonly members: MemberRouter;
   private readonly decisions: DecisionValidator;
+  private readonly runtimeDecisions: RuntimeToolDecisionBuilder;
   private readonly prompts = new OrchestrationPromptBuilder();
   private readonly graph: TaskGraph;
   private readonly sessionRouter: SessionRouter;
@@ -68,6 +77,7 @@ export class OrchestrationService {
   ) {
     this.members = new MemberRouter(database);
     this.decisions = new DecisionValidator(this.members);
+    this.runtimeDecisions = new RuntimeToolDecisionBuilder(this.decisions);
     this.graph = new TaskGraph(database);
     this.sessionRouter = new SessionRouter(database);
     this.messages = new MessageRouter(database);
@@ -82,6 +92,7 @@ export class OrchestrationService {
     if (!input.goal.trim()) throw new CoreError("IPC_INVALID_REQUEST", { field: "goal" });
 
     const now = new Date().toISOString();
+    const nativeRuntimeTools = !team.mainMemberId && Boolean(input.agentInstanceId);
     let projectRun: ProjectRun = {
       id: randomUUID(),
       projectId: input.projectId,
@@ -89,7 +100,8 @@ export class OrchestrationService {
       goal: input.goal.trim(),
       mainMemberId: main.member.id,
       mainAgentInstanceId: main.agent.id,
-      status: "planning",
+      status: nativeRuntimeTools ? "executing" : "planning",
+      workspaceMode: project.workspaceMode ?? "direct",
       createdAt: now,
       updatedAt: now
     };
@@ -103,7 +115,8 @@ export class OrchestrationService {
         this.database.sessions.saveMessage({ ...userMessage, attachmentIds: attachments.map((artifact) => artifact.id) });
       }
       if (this.gitWorkflows) this.saveProjectRun(await this.gitWorkflows.initializeRun(this.requireProjectRun(projectRun.id)));
-      await this.plan(projectRun.id);
+      if (nativeRuntimeTools) await this.executeMainTurn(projectRun.id);
+      else await this.plan(projectRun.id);
     });
     return { projectRun, mainSession };
   }
@@ -127,6 +140,7 @@ export class OrchestrationService {
       scope
     });
 
+    const runtimeToolRequest = projectRun.plannerDecision.rationale === "runtime_tool";
     if (approved) {
       this.graph.releaseApproval(projectRunId);
       const executing = this.saveProjectRun({ ...projectRun, status: "executing", pendingApprovalId: undefined });
@@ -136,6 +150,10 @@ export class OrchestrationService {
 
     for (const task of this.database.tasks.list(projectRunId)) this.updateTask(mainSession, task, "cancelled");
     const executing = this.saveProjectRun({ ...projectRun, status: "executing", pendingApprovalId: undefined });
+    if (runtimeToolRequest) {
+      this.schedule(projectRunId, () => this.notifyRuntimeDelegationRejected(projectRunId));
+      return executing;
+    }
     this.schedule(projectRunId, () => this.executeDirect(projectRunId, true));
     return executing;
   }
@@ -208,6 +226,127 @@ export class OrchestrationService {
 
   async wait(projectRunId: string): Promise<void> {
     await this.active.get(projectRunId);
+  }
+
+  /** Invoked by provider-native runtime tools; it never asks for a routing decision first. */
+  async invokeRuntimeTool(sessionId: string, toolName: string, input: unknown): Promise<RuntimeToolResult> {
+    try {
+      const mainSession = this.database.sessions.get(sessionId);
+      if (!mainSession?.projectRunId || !mainSession.teamId || mainSession.parentSessionId) {
+        throw new CoreError("PLAN_DELEGATION_NOT_ALLOWED", { sessionId, reason: "not_main_team_session" });
+      }
+      const projectRun = this.requireProjectRun(mainSession.projectRunId);
+      if (projectRun.mainSessionId !== mainSession.id || projectRun.teamId !== mainSession.teamId) {
+        throw new CoreError("PLAN_DELEGATION_NOT_ALLOWED", { sessionId, reason: "session_scope_mismatch" });
+      }
+      const team = this.requireTeam(mainSession.teamId);
+      const decision = this.runtimeDecisions.build(toolName, input, team);
+      const planned = decision.mode === "delegate" ? [decision.task] : decision.tasks;
+      const approvalRequired = team.delegationPolicy === "ask_before_delegate";
+      const tasks = this.graph.create(projectRun.id, planned, approvalRequired);
+      for (const task of tasks) this.emitTask(mainSession, task);
+      let currentRun = projectRun;
+      if (!["executing", "waiting_user"].includes(currentRun.status)) {
+        currentRun = this.saveProjectRun({ ...currentRun, status: "executing" });
+      }
+
+      if (approvalRequired) {
+        const approvalId = randomUUID();
+        this.approvals?.request({
+          id: approvalId,
+          category: "delegate",
+          operation: "orchestration.delegate",
+          summary: `Delegate ${tasks.length} runtime tool task${tasks.length === 1 ? "" : "s"}`,
+          projectId: projectRun.projectId,
+          projectRunId: projectRun.id,
+          sessionId: mainSession.id,
+          requestedBy: projectRun.mainMemberId
+        });
+        this.saveProjectRun({
+          ...currentRun,
+          plannerDecision: decision,
+          pendingApprovalId: approvalId,
+          status: "waiting_user"
+        });
+        this.events.appendForSession(mainSession, { projectRunId: projectRun.id }, "approval.requested", {
+          approvalId,
+          category: "delegate",
+          summary: `${tasks.length} delegated runtime tool task${tasks.length === 1 ? "" : "s"}`
+        });
+        return {
+          success: true,
+          content: JSON.stringify({ accepted: false, approvalRequired: true, approvalId, tasks: tasks.map((task) => ({ taskId: task.id, memberId: task.assignedMemberId })) })
+        };
+      }
+
+      this.saveProjectRun({ ...currentRun, plannerDecision: decision });
+
+      const taskIds = new Set(tasks.map((task) => task.id));
+      void this.executeTasks(projectRun.id, {
+        taskIds,
+        notifyDispatch: false,
+        finalizeProjectRun: !team.mainMemberId && projectRun.status === "executing"
+      }).catch((error) => {
+        const descriptor = toAgentHubError(error);
+        this.messages.system(mainSession, projectRun, `${descriptor.code}: ${descriptor.message}`, "recovery");
+      });
+
+      return {
+        success: true,
+        content: JSON.stringify({
+          accepted: true,
+          mode: decision.mode,
+          tasks: tasks.map((task) => ({ taskId: task.id, memberId: task.assignedMemberId, status: task.status }))
+        })
+      };
+    } catch (error) {
+      const descriptor = toAgentHubError(error);
+      return { success: false, content: JSON.stringify({ accepted: false, code: descriptor.code, message: descriptor.message }) };
+    }
+  }
+
+  private async notifyRuntimeDelegationRejected(projectRunId: string): Promise<void> {
+    const projectRun = this.requireProjectRun(projectRunId);
+    const team = this.requireTeam(String(projectRun.teamId));
+    const main = this.members.sessionMain(team, projectRun.mainAgentInstanceId);
+    const mainSession = this.requireMainSession(projectRun);
+    const handle = await this.runs.launch(
+      mainSession,
+      main.agent,
+      "[AGENTHUB_DELEGATION_REJECTED]\nThe user rejected the requested child-Agent delegation. Do not retry, reassign, or take over automatically. Continue only if the user has already asked for other independent work; otherwise acknowledge the rejection briefly and end this turn.",
+      { projectRunId, memberId: main.member.id, workingDirectory: this.workingDirectory(projectRun) }
+    );
+    await handle.completion;
+  }
+
+  private async executeMainTurn(projectRunId: string): Promise<void> {
+    const projectRun = this.requireProjectRun(projectRunId);
+    const team = this.requireTeam(String(projectRun.teamId));
+    const mainSession = this.requireMainSession(projectRun);
+    const main = this.members.sessionMain(team, projectRun.mainAgentInstanceId);
+    const childSessions = this.database.sessions.list(projectRun.projectId)
+      .filter((session) => session.parentSessionId === mainSession.id);
+    const continuity = this.continuity.build({
+      currentProjectRunId: projectRun.id,
+      currentText: projectRun.goal,
+      messages: this.database.sessions.messages(mainSession.id),
+      artifacts: this.database.artifacts.list({ projectRunId: projectRun.id }),
+      recoverProviderContext: !mainSession.providerSessionId || !mainSession.providerContextSyncedAt
+    });
+    const handle = await this.runs.launch(
+      mainSession,
+      main.agent,
+      this.prompts.mainTurn(projectRun.goal, team, childSessions, continuity.prompt),
+      {
+        projectRunId,
+        memberId: main.member.id,
+        workingDirectory: this.workingDirectory(projectRun),
+        localImagePaths: continuity.localImagePaths
+      }
+    );
+    const completion = await handle.completion;
+    this.assertCompleted(completion, "main Agent turn");
+    if (this.database.tasks.list(projectRunId).length === 0) await this.finishRun(projectRunId, mainSession);
   }
 
   private async plan(projectRunId: string): Promise<void> {
@@ -283,13 +422,13 @@ export class OrchestrationService {
     await this.finishRun(projectRunId, mainSession);
   }
 
-  private async executeTasks(projectRunId: string): Promise<void> {
+  private async executeTasks(projectRunId: string, options: ExecuteTaskOptions = {}): Promise<void> {
     const projectRun = this.requireProjectRun(projectRunId);
     const team = this.requireTeam(String(projectRun.teamId));
     const mainSession = this.requireMainSession(projectRun);
 
     while (true) {
-      const ready = this.graph.ready(projectRunId);
+      const ready = this.graph.ready(projectRunId).filter((task) => !options.taskIds || options.taskIds.has(task.id));
       if (ready.length === 0) break;
       const memberCounts = new Map<string, number>();
       const wave = ready.filter((task) => {
@@ -315,7 +454,7 @@ export class OrchestrationService {
       const childReceipts = receipts.filter((receipt) => receipt.sessionId !== mainSession.id);
       let continuationError: unknown;
       try {
-        if (childReceipts.length) await this.continueAfterDelegation(projectRunId, childReceipts);
+        if (childReceipts.length && options.notifyDispatch !== false) await this.continueAfterDelegation(projectRunId, childReceipts);
       } catch (error) {
         continuationError = error;
       }
@@ -326,14 +465,14 @@ export class OrchestrationService {
       if (failed) throw failed.reason;
     }
 
-    const tasks = this.database.tasks.list(projectRunId);
+    const tasks = this.database.tasks.list(projectRunId).filter((task) => !options.taskIds || options.taskIds.has(task.id));
     const unresolved = tasks.filter((task) => !["completed", "failed", "cancelled", "blocked_dependency"].includes(task.status));
     if (unresolved.length > 0) throw new CoreError("RECOVERY_REQUIRED", { projectRunId, taskIds: unresolved.map((task) => task.id) });
 
     // A task assigned to the main Agent already produced its user-facing result
     // in that provider turn. Another synthesis would only duplicate the answer.
     if (tasks.length === 1 && tasks[0]?.status === "completed" && tasks[0].completedByMemberId === projectRun.mainMemberId) {
-      await this.finishRun(projectRunId, mainSession);
+      if (options.finalizeProjectRun !== false) await this.finishRun(projectRunId, mainSession);
       return;
     }
 
@@ -353,6 +492,8 @@ export class OrchestrationService {
     );
     const completion = await handle.completion;
     this.assertCompleted(completion, "final synthesis");
+
+    if (options.finalizeProjectRun === false) return;
 
     const latestRun = this.requireProjectRun(projectRunId);
     const failedTaskIds = tasks
@@ -436,7 +577,7 @@ export class OrchestrationService {
     const handle = await this.runs.launch(
       taskSession,
       assigned.agent,
-      this.prompts.delegatedTask(currentTask, team),
+      this.prompts.delegatedTask(currentTask, team, this.dependencyOutcomes(projectRun, team, currentTask)),
       { projectRunId: projectRun.id, taskId: task.id, memberId: assigned.member.id, workingDirectory: this.workingDirectory(projectRun, currentTask) }
     );
     onDispatched?.({
@@ -496,6 +637,26 @@ export class OrchestrationService {
       artifactIds: [],
       taskId: task.id,
       targetSessionId: mainSession.id
+    });
+  }
+
+  private dependencyOutcomes(projectRun: ProjectRun, team: TeamDefinition, task: Task) {
+    if (!task.dependencies.length) return [];
+    const mainSession = this.requireMainSession(projectRun);
+    const resultMessages = this.database.sessions.messages(mainSession.id)
+      .filter((message) => message.projectRunId === projectRun.id && message.kind === "result" && message.sender === "system" && message.taskId);
+    return task.dependencies.map((taskId) => {
+      const dependency = this.database.tasks.get(taskId);
+      const result = [...resultMessages].reverse().find((message) => message.taskId === taskId)?.text;
+      const member = team.members.find((candidate) => candidate.id === dependency?.assignedMemberId);
+      return {
+        taskId,
+        title: dependency?.title ?? taskId,
+        status: dependency?.status ?? "blocked_dependency" as const,
+        assignedMemberId: dependency?.assignedMemberId,
+        memberName: member?.displayName,
+        result: result?.slice(0, 16_000)
+      };
     });
   }
 

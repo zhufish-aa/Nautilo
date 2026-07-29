@@ -127,7 +127,10 @@ class CoreDaemonClient {
 `);
     const response = await lines.next();
     socket.end();
-    if (!response.value?.ok) throw new Error(response.value?.error?.message ?? "Core Daemon request failed");
+    if (!response.value?.ok) {
+      const reason = response.value?.error?.details?.reason;
+      throw new Error(typeof reason === "string" ? reason : response.value?.error?.message ?? "Core Daemon request failed");
+    }
     return response.value.data;
   }
   async stop() {
@@ -315,6 +318,209 @@ function isWithin(root, candidate) {
   const path = node_path.relative(root, candidate);
   return path === "" || !path.startsWith("..") && !node_path.isAbsolute(path);
 }
+const SKIP_DIRS = /* @__PURE__ */ new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "out",
+  "release",
+  "coverage",
+  "build",
+  ".idea",
+  ".vscode",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".cache",
+  ".parcel-cache",
+  "target",
+  "__pycache__",
+  ".pytest_cache",
+  ".svn",
+  ".hg",
+  "vendor",
+  "tmp",
+  "temp"
+]);
+const MAX_DEPTH = 8;
+const MAX_MATCHES = 50;
+async function searchFileReferences(queryPath, basePaths) {
+  const query = queryPath.replace(/\\/g, "/").toLowerCase().replace(/^\.\//, "");
+  if (!query) return [];
+  const bare = !query.includes("/");
+  const matches = [];
+  const walk = async (dir, depth) => {
+    if (depth > MAX_DEPTH || matches.length >= MAX_MATCHES) return;
+    let entries;
+    try {
+      entries = await promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (matches.length >= MAX_MATCHES) return;
+      if (entry.isSymbolicLink()) continue;
+      const full = node_path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) await walk(full, depth + 1);
+      } else if (entry.isFile()) {
+        if (bare) {
+          if (entry.name.toLowerCase() === query) matches.push(full);
+        } else {
+          const candidate = full.replace(/\\/g, "/").toLowerCase();
+          if (candidate.endsWith(query) && (candidate.length === query.length || candidate[candidate.length - query.length - 1] === "/")) {
+            matches.push(full);
+          }
+        }
+      }
+    }
+  };
+  for (const base of new Set(basePaths)) {
+    await walk(base, 0);
+    if (matches.length >= MAX_MATCHES) break;
+  }
+  return matches;
+}
+const MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
+function registerInteractionHandlers() {
+  electron.ipcMain.handle("shell:open-path", (_event, path) => electron.shell.openPath(path));
+  electron.ipcMain.handle("shell:show-item-in-folder", (_event, path) => {
+    electron.shell.showItemInFolder(path);
+  });
+  electron.ipcMain.handle("clipboard:write-image", (_event, payload) => {
+    const image = payload.path ? electron.nativeImage.createFromPath(payload.path) : payload.dataUrl ? electron.nativeImage.createFromDataURL(payload.dataUrl) : electron.nativeImage.createEmpty();
+    if (image.isEmpty()) return false;
+    electron.clipboard.writeImage(image);
+    return true;
+  });
+  electron.ipcMain.handle("image:save-as", async (event, payload) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    if (!win) return null;
+    const result = await electron.dialog.showSaveDialog(win, {
+      title: "Save image",
+      defaultPath: payload.defaultName ?? "image.png"
+    });
+    if (result.canceled || !result.filePath) return null;
+    if (payload.path) {
+      await promises.copyFile(payload.path, result.filePath);
+    } else if (payload.dataUrl) {
+      const image = electron.nativeImage.createFromDataURL(payload.dataUrl);
+      if (image.isEmpty()) throw new Error("Invalid image data");
+      await promises.writeFile(result.filePath, image.toPNG());
+    } else {
+      return null;
+    }
+    return result.filePath;
+  });
+  electron.ipcMain.handle("menu:popup", async (event, items) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    if (!win || !Array.isArray(items) || items.length === 0) return null;
+    return new Promise((resolve2) => {
+      let settled = false;
+      const settle = (id) => {
+        if (settled) return;
+        settled = true;
+        resolve2(id);
+      };
+      const template = items.map(
+        (item) => item.type === "separator" ? { type: "separator" } : { label: item.label, enabled: item.enabled ?? true, click: () => settle(item.id) }
+      );
+      electron.Menu.buildFromTemplate(template).popup({ window: win, callback: () => settle(null) });
+    });
+  });
+  electron.ipcMain.handle("file:read-text", async (_event, payload) => {
+    const candidates = node_path.isAbsolute(payload.path) ? [payload.path] : (payload.basePaths ?? []).map((base) => node_path.resolve(base, payload.path));
+    let resolvedPath;
+    let sizeBytes = 0;
+    for (const candidate of candidates) {
+      try {
+        const info = await promises.stat(candidate);
+        if (!info.isFile()) return { ok: false, reason: "not-file" };
+        resolvedPath = candidate;
+        sizeBytes = info.size;
+        break;
+      } catch {
+      }
+    }
+    if (!resolvedPath) {
+      const found = await searchFileReferences(payload.path, payload.basePaths ?? []);
+      if (found.length === 0) return { ok: false, reason: "not-found" };
+      if (found.length > 1) return { ok: false, reason: "ambiguous", candidates: found };
+      const info = await promises.stat(found[0]);
+      resolvedPath = found[0];
+      sizeBytes = info.size;
+    }
+    const handle = await promises.open(resolvedPath, "r");
+    try {
+      const probe = Buffer.alloc(Math.min(8192, sizeBytes));
+      if (probe.length > 0) await handle.read(probe, 0, probe.length, 0);
+      if (probe.includes(0)) return { ok: false, reason: "binary" };
+    } finally {
+      await handle.close();
+    }
+    const truncated = sizeBytes > MAX_TEXT_PREVIEW_BYTES;
+    const buffer = Buffer.alloc(Math.min(sizeBytes, MAX_TEXT_PREVIEW_BYTES));
+    if (buffer.length > 0) {
+      const handle2 = await promises.open(resolvedPath, "r");
+      try {
+        await handle2.read(buffer, 0, buffer.length, 0);
+      } finally {
+        await handle2.close();
+      }
+    }
+    return { ok: true, resolvedPath, content: buffer.toString("utf8"), truncated, sizeBytes };
+  });
+}
+const MAX_OUTPUT_BYTES = 256 * 1024;
+const activeUpdates = /* @__PURE__ */ new Map();
+function spawnUpdate(executable, args) {
+  if (process.platform === "win32") {
+    const line = [`"${executable}"`, ...args.map((arg) => `"${arg.replace(/"/g, "")}"`)].join(" ");
+    return node_child_process.spawn(line, { shell: true, windowsHide: true });
+  }
+  return node_child_process.spawn(executable, args, { windowsHide: true });
+}
+function registerProviderUpdateHandlers() {
+  electron.ipcMain.handle("provider:update-start", (event, payload) => {
+    const updateId = typeof payload?.updateId === "string" ? payload.updateId : "";
+    const executable = typeof payload?.executable === "string" ? payload.executable.trim() : "";
+    const args = Array.isArray(payload?.args) ? payload.args.filter((arg) => typeof arg === "string" && arg.trim().length > 0) : [];
+    if (!updateId || !executable || args.length === 0) return { ok: false, reason: "invalid-payload" };
+    if (activeUpdates.has(updateId)) return { ok: false, reason: "busy" };
+    const sender = event.sender;
+    const send = (channel, data) => {
+      if (!sender.isDestroyed()) sender.send(channel, data);
+    };
+    let child;
+    try {
+      child = spawnUpdate(executable, args);
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+    activeUpdates.set(updateId, child);
+    let buffered = 0;
+    const decoder = new TextDecoder(process.platform === "win32" ? "gbk" : "utf-8");
+    const onData = (chunk) => {
+      buffered += chunk.length;
+      if (buffered > MAX_OUTPUT_BYTES) return;
+      send("provider:update-output", { updateId, chunk: decoder.decode(chunk, { stream: true }) });
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
+    child.on("error", (error) => {
+      activeUpdates.delete(updateId);
+      send("provider:update-exit", { updateId, exitCode: -1, error: error.message });
+    });
+    child.on("exit", (code) => {
+      activeUpdates.delete(updateId);
+      send("provider:update-exit", { updateId, exitCode: code ?? -1 });
+    });
+    return { ok: true };
+  });
+  electron.ipcMain.handle("provider:update-cancel", (_event, updateId) => {
+    if (typeof updateId === "string") activeUpdates.get(updateId)?.kill();
+  });
+}
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 const coreDaemon = new CoreDaemonClient();
 registerArtifactScheme();
@@ -384,6 +590,8 @@ function registerIpcHandlers() {
     "attachment:import-clipboard",
     async (_event, input) => importClipboardAttachment(electron.app.getPath("userData"), input)
   );
+  registerInteractionHandlers();
+  registerProviderUpdateHandlers();
 }
 function createMainWindow() {
   const state = readWindowState();

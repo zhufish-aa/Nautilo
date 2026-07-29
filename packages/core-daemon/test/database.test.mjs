@@ -124,7 +124,8 @@ test("schema 5 migrates execution defaults from AgentInstance to TeamMember and 
       assert.equal(session?.serviceTier, "priority");
     }
     const version = migrated.connection.raw.prepare("SELECT value FROM schema_meta WHERE key = 'schema'").get();
-    assert.equal(version.value, "5");
+    // Schema 7 (checkpoints tables) is the current version; the schema 5 data migration still ran.
+    assert.equal(version.value, "7");
     migrated.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });

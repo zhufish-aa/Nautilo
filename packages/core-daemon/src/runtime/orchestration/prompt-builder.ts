@@ -9,7 +9,33 @@ export interface DelegationReceipt {
   runId: string;
 }
 
+export interface DelegatedDependencyOutcome {
+  taskId: string;
+  title: string;
+  status: Task["status"];
+  assignedMemberId?: string;
+  memberName?: string;
+  result?: string;
+}
+
 export class OrchestrationPromptBuilder {
+  mainTurn(goal: string, team: TeamDefinition, childSessions: Session[] = [], continuity?: string): string {
+    return [
+      "[AGENTHUB_MAIN_TURN]",
+      "Work on the user's request normally. You are not required to classify it or emit routing JSON.",
+      "You may complete the request yourself. If a configured child Agent would materially help, optionally call the AgentHub delegate or plan tool at any point in this turn.",
+      "Every delegated task must be self-contained. A child receives the task text and its own provider session; it cannot inspect the parent session, a sibling Agent session, or another Agent's pending result.",
+      "Never ask one child Agent to obtain status, context, or output from another child Agent. Use plan dependencies when ordering matters; AgentHub supplies completed dependency outcomes to the dependent child.",
+      "Delegation tools do not forward chat-only attachments or inline images. Do not tell a child to inspect 'the attached image' or other unseen conversation content. Handle the visual analysis yourself, or provide a verified child-readable workspace path plus all essential textual observations in the task.",
+      "A successful tool call is only a dispatch receipt. Continue useful non-overlapping work, or end this turn after one concise dispatch update when nothing else remains.",
+      "Do not poll child status or retry failed child work automatically. AgentHub will return child results into this provider session.",
+      `Goal:\n${goal}`,
+      continuity ?? "",
+      `Configured child Agents:\n${JSON.stringify(this.teamContext(team), null, 2)}`,
+      `Existing compatible child sessions:\n${JSON.stringify(this.sessionContext(childSessions, team), null, 2)}`
+    ].join("\n\n");
+  }
+
   planning(goal: string, team: TeamDefinition, childSessions: Session[] = [], continuity?: string): string {
     const allowedModes = team.delegationPolicy === "direct_only" ? ["direct"] : ["direct", "delegate", "plan"];
     return [
@@ -23,6 +49,9 @@ export class OrchestrationPromptBuilder {
       'delegate, continue child session: {"mode":"delegate","memberId":"exact enabled member id","task":"follow-up task","continueSessionId":"exact compatible session id"}',
       'plan: {"mode":"plan","tasks":[{"id":"task-1","memberId":"exact enabled member id","task":"what to do","dependsOn":[],"continueSessionId":"optional exact compatible session id"}]}',
       "Use member IDs exactly as listed below. Do not invent or shorten an ID.",
+      "Every task must be self-contained. Children cannot read the parent or sibling Agent sessions and must never be told to fetch another child's context or result.",
+      "Use dependsOn for ordering. AgentHub will include completed dependency outcomes in the dependent child's task prompt.",
+      "Chat-only attachments and inline images are not transferred by delegation. Do not delegate visual inspection of unseen conversation images; either do that analysis in the main Agent or give the child a verified readable workspace path and the essential observations in task text.",
       "Choose whether to start fresh or continue context. Only set continueSessionId when an existing session below belongs to the assigned member; omit it to create a new child session.",
       "For plan mode, dependsOn contains task IDs from the same plan and must form an acyclic graph.",
       "A reason is optional. Do not output database fields, acceptance objects, paths, session data, or provider commands; AgentHub creates those internally.",
@@ -51,16 +80,22 @@ export class OrchestrationPromptBuilder {
     ].join("\n\n");
   }
 
-  delegatedTask(task: Task, team: TeamDefinition): string {
+  delegatedTask(task: Task, team: TeamDefinition, dependencyOutcomes: DelegatedDependencyOutcome[] = []): string {
     const member = team.members.find((candidate) => candidate.id === task.assignedMemberId);
     const role = team.roles?.find((candidate) => candidate.id === member?.roleId);
     return [
       "[AGENTHUB_DELEGATED_TASK]",
       "You are executing one task assigned by the user-selected main Agent.",
       `Task:\n${JSON.stringify({ id: task.id, title: task.title, objective: task.objective, taskType: task.taskType, allowedPaths: task.allowedPaths, acceptanceCriteria: task.acceptanceCriteria }, null, 2)}`,
+      dependencyOutcomes.length
+        ? `Completed dependency outcomes supplied by AgentHub:\n${JSON.stringify(dependencyOutcomes, null, 2)}`
+        : "",
       `Your user-defined member configuration:\n${JSON.stringify({ member, role }, null, 2)}`,
+      "This prompt is your complete cross-Agent handoff. You cannot access the parent Agent session, sibling Agent sessions, or their tools and pending results.",
+      "Do not attempt to query another Agent. Use only this task, the dependency outcomes above, and files you can actually access in your workspace.",
+      "A mention of an attached or inline image is not image access. Inspect an image only when this prompt gives a concrete path that you can read; otherwise report the missing input as a blocker instead of calling unavailable tools.",
       "Complete only this task. End with a concise result including changes, checks, risks, and blockers."
-    ].join("\n\n");
+    ].filter(Boolean).join("\n\n");
   }
 
   delegationAccepted(goal: string, receipts: DelegationReceipt[]): string {

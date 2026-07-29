@@ -18,6 +18,7 @@ export type AgentHubErrorCode =
   | "COMMAND_APPROVAL_REQUIRED"
   | "COMMAND_BLOCKED"
   | "APPROVAL_NOT_FOUND"
+  | "INTERACTION_NOT_FOUND"
   | "RECOVERY_NOT_AVAILABLE"
   | "CREDENTIAL_STORE_FAILED"
   | "VERIFICATION_FAILED"
@@ -26,7 +27,12 @@ export type AgentHubErrorCode =
   | "RECOVERY_REQUIRED"
   | "IPC_INVALID_REQUEST"
   | "IPC_NOT_FOUND"
-  | "IPC_INTERNAL_ERROR";
+  | "IPC_INTERNAL_ERROR"
+  | "PLUGIN_REGISTRY_UNAVAILABLE"
+  | "PLUGIN_DOWNLOAD_FAILED"
+  | "PLUGIN_CHECKSUM_MISMATCH"
+  | "PLUGIN_MANIFEST_MISSING"
+  | "PLUGIN_INVALID";
 
 export type RetryStrategy = "immediate" | "backoff" | "user_action" | "never";
 
@@ -57,6 +63,7 @@ export const errorCatalog: Record<AgentHubErrorCode, ErrorDescriptor> = {
   COMMAND_APPROVAL_REQUIRED: { message: "该命令需要用户审批。", retryable: false, retryStrategy: "user_action", userAction: "批准或拒绝该命令。" },
   COMMAND_BLOCKED: { message: "该命令被权限策略阻止。", retryable: false, retryStrategy: "never", userAction: "修改项目权限策略后重试。" },
   APPROVAL_NOT_FOUND: { message: "找不到待处理的审批请求。", retryable: false, retryStrategy: "user_action", userAction: "刷新审批列表后重试。" },
+  INTERACTION_NOT_FOUND: { message: "该提问或审批已被处理或已过期。", retryable: false, retryStrategy: "user_action", userAction: "刷新对话后重试。" },
   RECOVERY_NOT_AVAILABLE: { message: "当前运行不可恢复。", retryable: false, retryStrategy: "user_action", userAction: "选择处于暂停或失败状态的运行。" },
   CREDENTIAL_STORE_FAILED: { message: "凭证存储操作失败。", retryable: false, retryStrategy: "user_action", userAction: "检查本地数据目录权限。" },
   VERIFICATION_FAILED: { message: "验收命令失败。", retryable: true, retryStrategy: "user_action", userAction: "查看测试结果并修复后重试。" },
@@ -65,7 +72,12 @@ export const errorCatalog: Record<AgentHubErrorCode, ErrorDescriptor> = {
   RECOVERY_REQUIRED: { message: "运行需要恢复处理。", retryable: false, retryStrategy: "user_action", userAction: "选择恢复、重试或结束运行。" },
   IPC_INVALID_REQUEST: { message: "请求格式无效。", retryable: false, retryStrategy: "never", userAction: "刷新应用或检查客户端版本。" },
   IPC_NOT_FOUND: { message: "请求的资源不存在。", retryable: false, retryStrategy: "user_action", userAction: "刷新列表后重试。" },
-  IPC_INTERNAL_ERROR: { message: "Core Daemon 发生内部错误。", retryable: true, retryStrategy: "backoff", userAction: "重试并导出诊断信息。" }
+  IPC_INTERNAL_ERROR: { message: "Core Daemon 发生内部错误。", retryable: true, retryStrategy: "backoff", userAction: "重试并导出诊断信息。" },
+  PLUGIN_REGISTRY_UNAVAILABLE: { message: "插件市场注册表暂时不可用。", retryable: true, retryStrategy: "backoff", userAction: "检查网络后重试，或更换 registry 地址。" },
+  PLUGIN_DOWNLOAD_FAILED: { message: "插件包下载失败。", retryable: true, retryStrategy: "backoff", userAction: "检查网络后重试。" },
+  PLUGIN_CHECKSUM_MISMATCH: { message: "插件包校验和不匹配，可能已被篡改。", retryable: false, retryStrategy: "never", userAction: "不要安装该插件，并向 registry 维护者报告。" },
+  PLUGIN_MANIFEST_MISSING: { message: "插件包中缺少 agenthub-plugin.json 清单。", retryable: false, retryStrategy: "user_action", userAction: "确认选择的是有效的插件目录或安装包。" },
+  PLUGIN_INVALID: { message: "插件清单或入口无效。", retryable: false, retryStrategy: "user_action", userAction: "检查插件的 agenthub-plugin.json 与入口文件。" }
 };
 
 export interface AgentHubError {

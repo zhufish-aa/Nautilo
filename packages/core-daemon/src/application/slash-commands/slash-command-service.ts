@@ -132,8 +132,19 @@ export class SlashCommandService {
     if (command.availability === "idle" && ["running", "starting", "cancelling"].includes(context.session.status)) {
       throw new CoreError("IPC_INVALID_REQUEST", { reason: "provider_command_requires_idle", commandId: command.id });
     }
+    // Native compaction runs through a dedicated provider transport (Codex
+    // app-server thread/compact/start, OpenCode server /session/:id/summarize),
+    // which needs an existing provider thread to compact. Commands opt in by
+    // declaring providerCommand: "compact" (built-in catalog or plugin report).
+    const nativeCompact = command.providerCommand === "compact";
+    if (nativeCompact && !context.session.providerSessionId) {
+      throw new CoreError("IPC_INVALID_REQUEST", { reason: "compact_requires_provider_session", commandId: command.id });
+    }
     const nativeCommand = [command.name, argument?.trim()].filter(Boolean).join(" ");
-    const handle = await this.runs.launch(context.session, context.agent, nativeCommand, { presentation: "provider_command" });
+    const handle = await this.runs.launch(context.session, context.agent, nativeCommand, {
+      presentation: "provider_command",
+      ...(nativeCompact ? { providerCommand: "compact" as const } : {})
+    });
     const completion = await handle.completion;
     const failed = ["failed", "timed_out", "crashed"].includes(completion.run.status);
     this.record(context.session.id, command.id, failed ? "failed" : "completed", { runId: handle.runId });
@@ -143,16 +154,17 @@ export class SlashCommandService {
         failureCode: completion.run.failureCode ?? "PROVIDER_COMMAND_FAILED"
       });
     }
+    const label = providerLabel(context.agent.providerId);
     const output = completion.finalMessage?.trim();
     return {
       commandId: command.id,
       title: command.title,
-      description: `${command.name} 已由 Kimi Code CLI 处理，未作为普通聊天消息发送。`,
+      description: `${command.name} 已由 ${label} CLI 处理，未作为普通聊天消息发送。`,
       sections: [{
         kind: "text",
         text: output || (completion.run.status === "cancelled"
-          ? "Kimi Code 已结束该控制命令。"
-          : "Kimi Code 已执行该控制命令，没有返回额外文本。")
+          ? `${label} 已结束该控制命令。`
+          : `${label} 已执行该控制命令，没有返回额外文本。`)
       }],
       actions: [{ id: "close", label: "关闭", kind: "primary" }],
       completed: true
@@ -162,7 +174,7 @@ export class SlashCommandService {
   private help(sessionId: string, providerId: string): SlashCommandResult {
     return {
       commandId: `${providerId}.help`,
-      title: providerId === "codex" ? "Codex 指令" : "Kimi Code 指令",
+      title: `${providerLabel(providerId)} 指令`,
       description: "这里只展示 AgentHub 已接入并可执行的 Provider 指令。",
       sections: [{ kind: "list", items: this.list(sessionId).map((command) => ({
         label: command.name,
@@ -323,7 +335,7 @@ export class SlashCommandService {
     return this.database.events.replay({ sessionId }).filter((event): event is Extract<RuntimeEvent, { type: "usage.updated" }> => event.type === "usage.updated").at(-1);
   }
 
-  private latestProviderCommands(sessionId: string, providerId: string): Array<{ name: string; description: string; inputHint?: string }> {
+  private latestProviderCommands(sessionId: string, providerId: string): Array<{ name: string; description: string; inputHint?: string; providerCommand?: "compact" }> {
     return this.database.events.replay({ sessionId })
       .filter((event): event is Extract<RuntimeEvent, { type: "provider.commands_updated" }> => event.type === "provider.commands_updated" && event.payload.providerId === providerId)
       .at(-1)?.payload.commands ?? [];
@@ -340,6 +352,16 @@ export class SlashCommandService {
 
 function effortLabel(value: string): string {
   return ({ low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max", ultra: "Ultra" } as Record<string, string>)[value.toLowerCase()] ?? value;
+}
+
+const PROVIDER_LABELS: Readonly<Record<string, string>> = {
+  codex: "Codex",
+  "kimi-code": "Kimi Code",
+  "claude-code": "Claude Code"
+};
+
+function providerLabel(providerId: string): string {
+  return PROVIDER_LABELS[providerId] ?? providerId;
 }
 
 function tokenLabel(value: number): string {

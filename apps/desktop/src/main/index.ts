@@ -4,6 +4,8 @@ import { readWindowState, trackWindowState } from "./window-state";
 import { CoreDaemonClient } from "./core-daemon-client";
 import { ARTIFACT_SCHEME, registerArtifactProtocol, registerArtifactScheme } from "./artifact-protocol";
 import { importClipboardAttachment, prepareAttachmentPaths } from "./attachment-file-service";
+import { registerInteractionHandlers } from "./desktop-interactions";
+import { registerProviderUpdateHandlers } from "./provider-updates";
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 const coreDaemon = new CoreDaemonClient();
@@ -86,6 +88,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle("attachment:import-clipboard", async (_event, input: { name: string; mimeType?: string; data: Uint8Array }) =>
     importClipboardAttachment(app.getPath("userData"), input)
   );
+
+  registerInteractionHandlers();
+  registerProviderUpdateHandlers();
 }
 
 function createMainWindow(): BrowserWindow {

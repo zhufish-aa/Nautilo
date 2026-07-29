@@ -3,6 +3,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { useSettingsStore } from "../../stores/settings";
+import { Tooltip } from "../ui/Tooltip";
 import { NAV_ENTRIES } from "./nav";
 
 export function Sidebar(): JSX.Element {
@@ -16,43 +17,42 @@ export function Sidebar(): JSX.Element {
 
   const renderLink = (entry: (typeof NAV_ENTRIES)[number]): JSX.Element => {
     const Icon = entry.icon;
+    const label = t(`nav.${entry.key}` as MessageKey);
     const active =
       location.pathname === entry.path || location.pathname.startsWith(`${entry.path}/`);
     return (
       <li key={entry.key}>
-        <NavLink
-          to={entry.path}
-          aria-current={active ? "page" : undefined}
-          className={cn(
-            "group relative flex h-9.5 items-center gap-3 rounded-xl px-3 text-sm font-medium outline-none transition-colors duration-150",
-            "focus-visible:ring-2 focus-visible:ring-accent/70",
-            active ? "text-accent" : "text-ink-2 hover:bg-accent-soft/60 hover:text-ink"
-          )}
-        >
-          {active && (
-            <motion.span
-              layoutId="nav-active-pill"
-              transition={{ type: "spring", stiffness: 420, damping: 34 }}
-              className="absolute inset-0 rounded-xl border border-accent/25 bg-accent-soft"
-              aria-hidden
-            />
-          )}
-          <Icon
+        <Tooltip content={label} side="right">
+          <NavLink
+            to={entry.path}
+            aria-label={label}
+            aria-current={active ? "page" : undefined}
             className={cn(
-              "relative z-10 h-4.5 w-4.5 transition-transform duration-150 group-hover:scale-110",
-              active ? "text-accent" : "text-ink-3 group-hover:text-ink-2"
+              "group relative grid h-10 w-10 place-items-center rounded-xl outline-none transition-[background-color,color,box-shadow,transform] duration-200",
+              "focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:ring-offset-2 focus-visible:ring-offset-panel",
+              active
+                ? "bg-card text-accent shadow-[0_1px_2px_rgba(21,26,35,0.06),0_8px_24px_-14px_rgba(101,83,240,0.72),inset_0_0_0_1px_var(--line)]"
+                : "text-ink-3 hover:-translate-y-px hover:bg-card/75 hover:text-ink hover:shadow-[inset_0_0_0_1px_var(--line)]"
             )}
-            aria-hidden
-          />
-          <span className="relative z-10">{t(`nav.${entry.key}` as MessageKey)}</span>
-          {active && (
-            <motion.span
-              layoutId="nav-active-dot"
-              className="relative z-10 ml-auto h-1.5 w-1.5 rounded-full bg-accent"
+          >
+            {active && (
+              <motion.span
+                layoutId="nav-active-rail"
+                transition={{ type: "spring", stiffness: 460, damping: 36 }}
+                className="absolute -left-2 h-5 w-0.5 rounded-r-full bg-accent shadow-[0_0_10px_var(--accent)]"
+                aria-hidden
+              />
+            )}
+            <Icon
+              className={cn(
+                "relative z-10 h-[18px] w-[18px] transition-transform duration-200",
+                active ? "scale-105 text-accent" : "group-hover:scale-105"
+              )}
               aria-hidden
             />
-          )}
-        </NavLink>
+            <span className="sr-only">{label}</span>
+          </NavLink>
+        </Tooltip>
       </li>
     );
   };
@@ -60,17 +60,14 @@ export function Sidebar(): JSX.Element {
   return (
     <nav
       aria-label={t("nav.section")}
-      className="relative z-20 flex w-56 shrink-0 flex-col border-r border-line bg-panel backdrop-blur-xl"
+      className="relative z-20 flex w-[64px] shrink-0 flex-col border-r border-line/80 bg-panel/90 backdrop-blur-2xl"
     >
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
-        <p className="mb-2 px-3 text-[11px] font-semibold tracking-widest text-ink-3 uppercase">
-          {t("nav.section")}
-        </p>
-        <ul className="space-y-1">{primary.map(renderLink)}</ul>
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3.5">
+        <ul className="flex flex-col items-center gap-1.5">{primary.map(renderLink)}</ul>
       </div>
       {settingsEntry && (
-        <div className="border-t border-line px-3 py-3">
-          <ul className="space-y-1">{[settingsEntry].map(renderLink)}</ul>
+        <div className="relative px-3 pt-3 pb-3.5 before:absolute before:top-0 before:right-3 before:left-3 before:h-px before:bg-line/80">
+          <ul className="flex justify-center">{[settingsEntry].map(renderLink)}</ul>
         </div>
       )}
     </nav>

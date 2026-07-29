@@ -8,7 +8,7 @@ export function useSlashCommands(sessionId?: string): {
   result?: SlashCommandResult;
   loading: boolean;
   error?: string;
-  execute(command: SlashCommandDefinition, argument?: string): Promise<void>;
+  execute(command: SlashCommandDefinition, argument?: string): Promise<boolean>;
   continueCommand(actionId: string, selectedOptionIds: string[]): Promise<void>;
   closeResult(): void;
 } {
@@ -34,14 +34,15 @@ export function useSlashCommands(sessionId?: string): {
     useSessionsStore.getState()._configureSession(sessionId, next.sessionPatch);
   }, [sessionId]);
 
-  const execute = useCallback(async (command: SlashCommandDefinition, argument?: string): Promise<void> => {
-    if (!sessionId) return;
+  const execute = useCallback(async (command: SlashCommandDefinition, argument?: string): Promise<boolean> => {
+    if (!sessionId) return false;
     setLoading(true);
     setError(undefined);
     try {
       const next = await requestCore<SlashCommandResult>("slashCommand.execute", { sessionId, commandId: command.id, argument });
       applyPatch(next);
       setResult(next);
+      return true;
     } catch (cause) {
       setError(message(cause));
       setResult({
@@ -51,6 +52,7 @@ export function useSlashCommands(sessionId?: string): {
         actions: [{ id: "close", label: "关闭", kind: "primary" }],
         completed: true
       });
+      return false;
     } finally {
       setLoading(false);
     }

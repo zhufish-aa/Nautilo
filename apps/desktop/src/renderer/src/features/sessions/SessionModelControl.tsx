@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Zap } from "lucide-react";
-import { useI18n } from "../../lib/i18n";
-import { configureWorkbenchSession } from "../../lib/orchestration-runtime";
+import type { ProviderModel } from "@agenthub/domain";
+import { useI18n, type MessageKey } from "../../lib/i18n";
+import { configureWorkbenchSession, switchWorkbenchSessionInstance } from "../../lib/orchestration-runtime";
+import { permissionModesFor } from "../../lib/provider-catalog";
 import { useAgentsStore } from "../../stores/agents";
 import { useSessionsStore } from "../../stores/sessions";
+import { Input } from "../../components/ui/Input";
 
-type MenuView = "summary" | "models" | "efforts" | "speeds";
+type MenuView = "summary" | "models" | "efforts" | "speeds" | "modes" | "sources";
 
 function effortLabel(value: string): string {
   const labels: Record<string, string> = {
@@ -20,18 +23,33 @@ function effortLabel(value: string): string {
   return labels[value.toLowerCase()] ?? `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }
 
+/** Groups catalog models by the source prefix of `source/model` ids (opencode-style); flat ids land in one unnamed group. */
+function groupModelsBySource(catalogModels: ProviderModel[]): { source: string; models: ProviderModel[] }[] {
+  const groups = new Map<string, ProviderModel[]>();
+  for (const item of catalogModels) {
+    const slash = item.id.indexOf("/");
+    const source = slash > 0 ? item.id.slice(0, slash) : "";
+    const list = groups.get(source) ?? [];
+    list.push(item);
+    groups.set(source, list);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([source, groupModels]) => ({ source, models: groupModels }));
+}
+
 /** A Codex-style, per-session model and reasoning control. */
 export function SessionModelControl({ sessionId, disabled }: { sessionId?: string; disabled?: boolean }): JSX.Element | null {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<MenuView>("summary");
   const [advancedDetails, setAdvancedDetails] = useState(false);
   const [previousStandardModelId, setPreviousStandardModelId] = useState<string>();
+  const [customModelId, setCustomModelId] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
   const instances = useAgentsStore((state) => state.instances);
   const catalogs = useAgentsStore((state) => state.modelCatalogs);
-  const loadingModels = useAgentsStore((state) => state.loadingModels);
   const loadModels = useAgentsStore((state) => state.loadModels);
   const instanceId = session?.target.type === "agent" ? session.target.instanceId : undefined;
   const instance = instances.find((item) => item.id === instanceId);
@@ -63,6 +81,19 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
   const speedTier = speedTiers.find((item) => item.id === speedTierId) ?? speedTiers[0]!;
   const fastTier = speedTiers.find((item) => item.id !== "standard");
   const fastActive = !!fastTier && speedTier.id === fastTier.id;
+
+  const permissionModes = useMemo(() => (instance ? permissionModesFor(instance.providerId) : []), [instance]);
+  // Same-provider enabled instances are the switchable API sources for this session.
+  const sourceInstances = useMemo(
+    () => (instance ? instances.filter((item) => item.providerId === instance.providerId && item.enabled) : []),
+    [instance, instances]
+  );
+  const modelGroups = useMemo(() => groupModelsBySource(models), [models]);
+  const effectivePermissionMode = session?.permissionMode ?? instance?.permissionMode ?? "";
+  const permissionModeOption = permissionModes.find((mode) => mode.value === effectivePermissionMode);
+  const displayPermissionMode = permissionModeOption
+    ? permissionModeOption.name[locale]
+    : t("sessions.composer.permissionModeDefault");
 
   useEffect(() => {
     if (!instance?.id) return;
@@ -97,8 +128,18 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
     });
     setView("summary");
   };
+  const selectCustomModel = (): void => {
+    const nextModelId = customModelId.trim();
+    if (!nextModelId) return;
+    selectModel(nextModelId);
+  };
   const selectEffort = (nextEffort: string): void => {
     void configureWorkbenchSession(sessionId, { reasoningEffort: nextEffort });
+    setView("summary");
+  };
+  const selectPermission = (nextMode: string): void => {
+    // Empty selection clears the session override so the instance setting applies.
+    void configureWorkbenchSession(sessionId, { permissionMode: nextMode || undefined });
     setView("summary");
   };
   const selectSpeed = (nextTierId: string): void => {
@@ -147,7 +188,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
   const displayModel = model?.displayName ?? (modelId || t("agents.editor.basic.model"));
   const displayEffort = effort ? effortLabel(effort) : t("agents.editor.basic.reasoningDefault");
   const panelKey = view === "summary" ? (advancedDetails ? "advanced" : "quick") : view;
-  const panelWidth = view !== "summary" ? 288 : advancedDetails ? 264 : 224;
+  const panelWidth = view === "models" ? 320 : view !== "summary" ? 288 : advancedDetails ? 264 : 224;
 
   return (
     <div ref={rootRef} className="relative ml-auto shrink-0">
@@ -234,10 +275,18 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                 {view === "summary" && advancedDetails && (
                 <>
                   <SettingRow
+                    label={t("sessions.composer.apiSource")}
+                    value={instance.displayName}
+                    disabled={sourceInstances.length <= 1}
+                    onClick={() => setView("sources")}
+                  />
+                  <SettingRow
                     label={t("agents.editor.basic.model")}
                     value={displayModel}
-                    disabled={loadingModels[instance.providerId] || models.length === 0}
-                    onClick={() => setView("models")}
+                    onClick={() => {
+                      setCustomModelId(modelId === "default" ? "" : modelId);
+                      setView("models");
+                    }}
                   />
                   <SettingRow
                     label={t("agents.editor.basic.reasoning")}
@@ -251,6 +300,13 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                     disabled={speedTiers.length <= 1}
                     onClick={() => setView("speeds")}
                   />
+                  {permissionModes.length > 0 && (
+                    <SettingRow
+                      label={t("agents.editor.basic.permissionMode")}
+                      value={displayPermissionMode}
+                      onClick={() => setView("modes")}
+                    />
+                  )}
                   <div className="mt-1 border-t border-line pt-1">
                     <button
                       type="button"
@@ -267,14 +323,50 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
 
                 {view === "models" && (
                   <SelectionList title={t("agents.editor.basic.model")} onBack={() => setView("summary")}>
-                    {models.map((item) => (
-                      <SelectionItem
-                        key={item.id}
-                        label={item.displayName}
-                        description={item.description}
-                        selected={item.id === modelId}
-                        onClick={() => selectModel(item.id)}
-                      />
+                    <form
+                      className="border-b border-line px-2 py-2"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        selectCustomModel();
+                      }}
+                    >
+                      <div className="flex gap-2">
+                        <Input
+                          value={customModelId}
+                          onChange={(event) => setCustomModelId(event.target.value)}
+                          placeholder={t("agents.editor.basic.modelCustomPlaceholder")}
+                          aria-label={t("agents.editor.basic.modelCustomPlaceholder")}
+                          autoComplete="off"
+                          spellCheck={false}
+                          className="h-9 min-w-0 flex-1 font-mono text-xs"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!customModelId.trim()}
+                          className="shrink-0 rounded-lg bg-accent px-3 text-xs font-medium text-white outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {t("common.confirm")}
+                        </button>
+                      </div>
+                      <p className="mt-1.5 px-0.5 text-[11px] leading-4 text-ink-3">
+                        {t("agents.editor.basic.modelCustom")}
+                      </p>
+                    </form>
+                    {modelGroups.map((group) => (
+                      <div key={group.source || "default"}>
+                        {modelGroups.length > 1 && (
+                          <p className="px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-ink-3/70">{group.source}</p>
+                        )}
+                        {group.models.map((item) => (
+                          <SelectionItem
+                            key={item.id}
+                            label={item.displayName}
+                            description={item.description}
+                            selected={item.id === modelId}
+                            onClick={() => selectModel(item.id)}
+                          />
+                        ))}
+                      </div>
                     ))}
                   </SelectionList>
                 )}
@@ -301,6 +393,42 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                         description={item.description}
                         selected={item.id === speedTier.id}
                         onClick={() => selectSpeed(item.id)}
+                      />
+                    ))}
+                  </SelectionList>
+                )}
+
+                {view === "modes" && (
+                  <SelectionList title={t("agents.editor.basic.permissionMode")} onBack={() => setView("summary")}>
+                    <SelectionItem
+                      label={t("sessions.composer.permissionModeDefault")}
+                      selected={!session?.permissionMode}
+                      onClick={() => selectPermission("")}
+                    />
+                    {permissionModes.map((mode) => (
+                      <SelectionItem
+                        key={mode.value}
+                        label={mode.name[locale]}
+                        description={mode.description[locale]}
+                        selected={session?.permissionMode === mode.value}
+                        onClick={() => selectPermission(mode.value)}
+                      />
+                    ))}
+                  </SelectionList>
+                )}
+
+                {view === "sources" && (
+                  <SelectionList title={t("sessions.composer.apiSource")} onBack={() => setView("summary")}>
+                    {sourceInstances.map((item) => (
+                      <SelectionItem
+                        key={item.id}
+                        label={item.displayName}
+                        description={item.baseUrl ?? item.executable}
+                        selected={item.id === instanceId}
+                        onClick={() => {
+                          if (sessionId && item.id !== instanceId) void switchWorkbenchSessionInstance(sessionId, item.id);
+                          setView("summary");
+                        }}
                       />
                     ))}
                   </SelectionList>

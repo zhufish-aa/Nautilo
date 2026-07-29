@@ -4,8 +4,13 @@ import type {
   RunMode,
   SessionStatus,
   TaskStatus,
-  VerificationCommandTemplate
+  VerificationCommandTemplate,
+  WorkspaceMode
 } from "@agenthub/domain";
+import type { ToolFileDiff } from "@agenthub/event-protocol";
+import type { LocalizedText, ProviderPermissionMode } from "@agenthub/provider-sdk";
+
+export type { LocalizedText };
 
 /** UI-facing DTOs extend domain contracts with presentation-only fields. */
 
@@ -35,6 +40,9 @@ export interface EnvironmentPolicy {
   descriptionKey: string;
 }
 
+/** A CLI-native permission mode exposed for a provider (e.g. Codex approval modes). */
+export type PermissionModeOption = ProviderPermissionMode;
+
 export interface AgentInstanceConfig {
   id: string;
   providerId: string;
@@ -43,6 +51,8 @@ export interface AgentInstanceConfig {
   executable: string;
   profile?: string;
   envPolicyId: string;
+  /** CLI-native permission/approval mode; forwarded to the provider adapter. */
+  permissionMode?: string;
   /** Write-only editor value; it is never hydrated from Core. */
   apiKey?: string;
   credentialStored?: boolean;
@@ -99,6 +109,7 @@ export interface UiProject {
   name: string;
   rootPath: string;
   repositoryType: "git" | "none";
+  workspaceMode: WorkspaceMode;
   scan?: ProjectScanResult;
   scanning: boolean;
   activeRun?: ActiveRunSummary;
@@ -149,6 +160,7 @@ export interface TeamRole {
   strengths: Record<string, number>;
   limitations: string[];
   systemInstructions: string;
+  permissionPolicyId: string;
 }
 
 export interface UiTeamMember {
@@ -200,6 +212,8 @@ export interface UiSession {
   model?: string;
   reasoningEffort?: string;
   serviceTier?: string;
+  /** CLI-native permission mode override for this session; empty falls back to the instance setting. */
+  permissionMode?: string;
   status: SessionStatus;
   /** Set for sub-agent sessions spawned by a delegation: the owning run's main session. */
   parentSessionId?: string;
@@ -256,6 +270,22 @@ export interface ContextUsage {
   contextWindow?: number;
 }
 
+/** Per-turn workspace checkpoint metadata (checkpoint.list IPC). */
+export interface SessionCheckpoint {
+  id: string;
+  sessionId: string;
+  runId?: string;
+  createdAt: string;
+  truncated: boolean;
+}
+
+export interface CheckpointRevertPreview {
+  restored: string[];
+  removed: string[];
+  skipped: string[];
+  warning?: string;
+}
+
 export interface MessageAttachmentView {
   id?: string;
   name: string;
@@ -268,8 +298,8 @@ export interface MessageAttachmentView {
 export type TimelinePayload =
     | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string; attachments?: MessageAttachmentView[]; editedAt?: string }
   | { kind: "activity"; phase: "queued" | "starting" | "thinking" | "responding" | "completed"; detail?: string }
-    | { kind: "reasoning"; text: string; streaming?: boolean }
-  | { kind: "tool_activity"; toolName: string; status: "running" | "done" | "failed"; input?: string; output?: string }
+    | { kind: "reasoning"; text: string; streaming?: boolean; messageId?: string }
+  | { kind: "tool_activity"; toolName: string; status: "running" | "done" | "failed"; input?: string; output?: string; fileDiff?: ToolFileDiff; subagent?: { agentType?: string; task?: string; background?: boolean; activities?: TimelinePayload[] } }
   | { kind: "tool_group"; items: TimelineEvent[]; stepCount: number; callCount: number; running: boolean }
   | { kind: "usage"; inputTokens?: number; outputTokens?: number; contextUsed?: number; contextWindow?: number }
   | { kind: "artifact"; artifactType: "image" | "file"; name: string; mimeType?: string; content?: string; path?: string }
@@ -304,6 +334,7 @@ export type TimelinePayload =
     }
   | { kind: "approval"; approval: ApprovalRequest }
   | { kind: "approval_resolved"; approvalId: string; decision: "approved" | "rejected"; scope: ApprovalScope }
+  | { kind: "checkpoint_reverted"; checkpointId: string; restored: string[]; removed: string[]; skipped: string[]; warning?: string }
   | { kind: "error"; code: string; message: string; retryable: boolean }
   | { kind: "run_status"; run: RunLifecycle };
 

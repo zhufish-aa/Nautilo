@@ -103,7 +103,7 @@ test("B-045 encrypts credentials and redacts events, audit records and diagnosti
   const now = new Date().toISOString();
   database.projects.save(project(), now);
   database.agents.save({ id: "agent", providerId: "kimi-code", displayName: "Kimi", executable: "kimi", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now }, now);
-  const credentials = new CredentialService(database, dataDir);
+  const credentials = new CredentialService(database, dataDir, new AdapterRegistry());
   const secret = "plain-kimi-secret-12345";
   credentials.set("agent", { apiKey: secret });
   assert.equal(credentials.environment("agent", "kimi-code").KIMI_API_KEY, secret);
@@ -132,7 +132,7 @@ test("B-045 encrypts credentials and redacts events, audit records and diagnosti
 test("Codex credentials support app-server custom providers and exec fallback", (t) => {
   const dataDir = temporaryDirectory(t, "agenthub-codex-credentials-");
   const database = new Database(":memory:");
-  const credentials = new CredentialService(database, dataDir);
+  const credentials = new CredentialService(database, dataDir, new AdapterRegistry());
   const secret = "codex-custom-provider-secret";
   credentials.set("codex-agent", { apiKey: secret });
 

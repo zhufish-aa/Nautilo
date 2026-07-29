@@ -64,7 +64,8 @@ pnpm build:desktop
 | Codex | `codex exec` | `--json` JSONL | `codex exec resume` | 官方文档、本机 0.128.0、真实 Smoke 已验证 |
 | Kimi Code | `kimi --prompt` | `--output-format stream-json` | `--session <id>` | 官方文档、本机 0.27.0、真实 Smoke 已验证 |
 | Claude Code | 未验证 | 未验证 | 未验证 | 仅骨架 |
-| OpenCode | 未验证 | 未验证 | 未验证 | 仅骨架 |
+
+OpenCode 不内置，由插件提供：`packages/provider-plugin-opencode/`（检测、`run --format json`、原生 resume、`models --verbose` 模型发现均已对本机 1.18.7 验证）。
 
 真实 Provider Smoke 默认跳过，显式执行：
 

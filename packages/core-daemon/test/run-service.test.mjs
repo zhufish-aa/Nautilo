@@ -62,6 +62,8 @@ test("RunService starts a new provider session and resumes subsequent messages",
   await waitForRun(database, secondRunId);
   assert.equal(starts, 1);
   assert.equal(resumes, 1);
+  assert.equal(requests[0].timeoutMs, 30 * 60_000);
+  assert.equal(requests[0].idleTimeoutMs, 30 * 60_000);
   assert.deepEqual(requests.map(({ model, reasoningEffort, serviceTier }) => ({ model, reasoningEffort, serviceTier })), [
     { model: "session-model", reasoningEffort: "max", serviceTier: "priority" },
     { model: "session-model", reasoningEffort: "max", serviceTier: "priority" }
@@ -113,6 +115,47 @@ test("RunService serializes turns in one session without blocking another sessio
   database.close();
 });
 
+test("RunService includes the final tool input in tool.finished events", async () => {
+  const adapter = {
+    providerId: "fake",
+    supportsStructuredOutput: true,
+    supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }),
+    start: () => {
+      async function* events() {
+        yield { kind: "tool", callId: "read-1", name: "Read", phase: "started" };
+        yield {
+          kind: "tool",
+          callId: "read-1",
+          name: "Read",
+          phase: "completed",
+          input: { path: "src/example.ts" },
+          output: "contents",
+          success: true,
+          fileDiff: { path: "src/example.ts", before: "old", after: "new" }
+        };
+        yield { kind: "exit", exitCode: 0 };
+      }
+      return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+    }
+  };
+  const database = new Database(":memory:");
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  const project = { id: "p-tool", name: "Project", rootPath: process.cwd(), repositoryType: "none", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const session = { id: "s-tool", projectId: project.id, memberId: "a-tool", title: "Tools", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+  const agent = { id: "a-tool", providerId: "fake", displayName: "Fake", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now };
+  database.projects.save(project, now);
+  database.sessions.save(session);
+
+  const runId = await service.start(session, agent, "read file");
+  await waitForRun(database, runId);
+  const finished = database.events.replay({ sessionId: session.id }).find((event) => event.type === "tool.finished");
+  assert.match(finished?.payload.inputSummary ?? "", /"path": "src\/example\.ts"/);
+  assert.deepEqual(finished?.payload.fileDiff, { path: "src/example.ts", before: "old", after: "new" });
+  database.close();
+});
+
 test("RunService captures modified and added file diffs without a Git repository", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "agenthub-non-git-diff-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
@@ -160,5 +203,91 @@ test("RunService captures modified and added file diffs without a Git repository
   assert.match(added.diff, /--- \/dev\/null/);
   assert.match(added.diff, /\+created/);
   assert.equal(await readFile(join(workspace, "existing.txt"), "utf8"), "after\n");
+  database.close();
+});
+
+test("RunService derives file.changed line counts from the unified diff when the provider omits them", async () => {
+  const diff = [
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1,2 +1,3 @@",
+    " keep",
+    "-old",
+    "+new",
+    "+extra"
+  ].join("\n");
+  const adapter = {
+    providerId: "fake",
+    supportsStructuredOutput: true,
+    supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }),
+    start: () => {
+      async function* events() {
+        yield { kind: "file", path: "src/a.ts", changeType: "update", diff };
+        yield { kind: "file", path: "src/b.ts", changeType: "update", diff, additions: 7, deletions: 3 };
+        yield { kind: "message", text: "done" };
+        yield { kind: "exit", exitCode: 0 };
+      }
+      return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+    }
+  };
+  const database = new Database(":memory:");
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  const project = { id: "p-counts", name: "Counts", rootPath: process.cwd(), repositoryType: "git", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const session = { id: "s-counts", projectId: project.id, memberId: "a-counts", title: "Counts", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+  const agent = { id: "a-counts", providerId: "fake", displayName: "Fake", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now };
+  database.projects.save(project, now);
+  database.sessions.save(session);
+
+  const handle = await service.launch(session, agent, "edit");
+  await handle.completion;
+
+  const changes = database.events.replay({ sessionId: session.id }).filter((event) => event.type === "file.changed");
+  const derived = changes.find((event) => event.payload.path === "src/a.ts");
+  assert.equal(derived?.payload.additions, 2);
+  assert.equal(derived?.payload.deletions, 1);
+  const explicit = changes.find((event) => event.payload.path === "src/b.ts");
+  assert.equal(explicit?.payload.additions, 7);
+  assert.equal(explicit?.payload.deletions, 3);
+  database.close();
+});
+
+test("RunService forwards providerOptions.baseUrl as ANTHROPIC_BASE_URL to claude runs", async () => {
+  let captured;
+  const adapter = {
+    providerId: "claude-code",
+    descriptor: {
+      providerId: "claude-code",
+      name: "Claude Code",
+      vendor: "Anthropic",
+      capabilities: [],
+      envPassthrough: ["ANTHROPIC_BASE_URL"],
+      baseUrlEnv: "ANTHROPIC_BASE_URL"
+    },
+    supportsStructuredOutput: true,
+    supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    detect: async () => ({ installed: true, executable: "claude" }),
+    start: (request) => {
+      captured = request;
+      async function* events() {
+        yield { kind: "message", text: "ok" };
+        yield { kind: "exit", exitCode: 0 };
+      }
+      return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+    }
+  };
+  const database = new Database(":memory:");
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  const project = { id: "p1", name: "Project", rootPath: process.cwd(), repositoryType: "none", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const session = { id: "s1", projectId: "p1", memberId: "a1", title: "Session", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+  const agent = { id: "a1", providerId: "claude-code", displayName: "Claude", executable: "claude", baseArgs: [], capabilities: [], enabled: true, status: "available", providerOptions: { baseUrl: "https://relay.example.com" }, createdAt: now, updatedAt: now };
+  database.projects.save(project, now);
+  database.sessions.save(session);
+
+  const runId = await service.start(session, agent, "hello");
+  await waitForRun(database, runId);
+  assert.equal(captured.env.ANTHROPIC_BASE_URL, "https://relay.example.com");
   database.close();
 });

@@ -1,12 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { TerminalSquare } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, Fragment } from "react";
+import { Bot, TerminalSquare } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
+import { collectChangedFiles, type ChangedFileEntry } from "../../lib/changed-files";
+import { formatDurationMs, parseSubagentInput, parseSubagentResult, type SubagentUsage } from "../../lib/subagent-result";
+import { highlightDiffLine } from "../../lib/highlight";
 import { cn } from "../../lib/utils";
-import type { SessionTask } from "../../lib/types";
+import type { SessionTask, TimelineEvent } from "../../lib/types";
 import { Drawer } from "../../components/ui/Drawer";
-import { StatusChip } from "../../components/ui/Badge";
 import { TabBar } from "../../components/ui/Tabs";
+import { StatusChip, Tag } from "../../components/ui/Badge";
+import { ToolFileDiffView } from "../timeline/ToolFileDiffView";
+import { MarkdownContent } from "../timeline/MarkdownContent";
+import { TimelineEventView } from "../timeline/Timeline";
+import { sessionTargetName } from "./SessionListPanel";
+import { useAgentsStore } from "../../stores/agents";
 import { useSessionsStore } from "../../stores/sessions";
+import { useTeamsStore } from "../../stores/teams";
 
 /* ---------------------------------------------------------------------------
  * F-033: raw terminal drawer — debug fallback only, never replaces chat.
@@ -62,7 +71,7 @@ function DiffView({ content }: { content: string }): JSX.Element {
           <div
             key={index}
             className={cn(
-              "px-4 whitespace-pre-wrap break-all",
+              "hljs px-4 whitespace-pre-wrap break-all",
               line.startsWith("+") && !line.startsWith("+++")
                 ? "bg-ok/10 text-ok"
                 : line.startsWith("-") && !line.startsWith("---")
@@ -71,9 +80,8 @@ function DiffView({ content }: { content: string }): JSX.Element {
                     ? "bg-info/10 text-info"
                     : "text-ink-2"
             )}
-          >
-            {line || " "}
-          </div>
+            dangerouslySetInnerHTML={{ __html: highlightDiffLine(line) }}
+          />
         ))}
       </pre>
     </div>
@@ -83,23 +91,38 @@ function DiffView({ content }: { content: string }): JSX.Element {
 export function ArtifactsDrawer({
   open,
   onClose,
-  sessionId
+  sessionId,
+  focusPath
 }: {
   open: boolean;
   onClose: () => void;
   sessionId?: string;
+  /** When set, selects this file in the diff list upon opening. */
+  focusPath?: string | null;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const artifacts = useSessionsStore((state) => (sessionId ? (state.artifacts[sessionId] ?? []) : []));
   const events = useSessionsStore((state) => (sessionId ? (state.events[sessionId] ?? []) : []));
+  const sessions = useSessionsStore((state) => state.sessions);
+  const allEvents = useSessionsStore((state) => state.events);
+  const teams = useTeamsStore((state) => state.teams);
+  const instances = useAgentsStore((state) => state.instances);
 
-  const changedFiles = useMemo(
-    () =>
-      events
-        .filter((event) => event.data.kind === "file_change")
-        .flatMap((event) => (event.data.kind === "file_change" ? event.data.files : [])),
-    [events]
-  );
+  // Diff sources: this session's timeline plus every delegated sub-session's
+  // timeline. kimi sessions surface edits via tool fileDiff, codex via
+  // file_change events — collectChangedFiles covers both.
+  const changeGroups = useMemo(() => {
+    const groups: { label?: string; entries: ChangedFileEntry[] }[] = [
+      { entries: collectChangedFiles(events) }
+    ];
+    for (const sub of sessions.filter((item) => item.parentSessionId === sessionId)) {
+      const entries = collectChangedFiles(allEvents[sub.id] ?? []);
+      if (entries.length > 0) groups.push({ label: sessionTargetName(sub, teams, instances), entries });
+    }
+    return groups;
+  }, [events, sessions, sessionId, allEvents, teams, instances]);
+
+  const changedFiles = useMemo(() => changeGroups.flatMap((group) => group.entries), [changeGroups]);
 
   const tabs = [
     { value: "diff", label: t("sessions.drawers.tabs.diff") },
@@ -109,6 +132,18 @@ export function ArtifactsDrawer({
   ];
   const [tab, setTab] = useState("diff");
   const [selectedFile, setSelectedFile] = useState(0);
+
+  // Opening via a "view diff" entry jumps straight to the referenced file;
+  // timeline refreshes keep the user's selection whenever it is still valid.
+  useEffect(() => {
+    if (!open) return;
+    setTab("diff");
+    setSelectedFile((current) => {
+      const index = focusPath ? changedFiles.findIndex((file) => file.path === focusPath) : -1;
+      if (index >= 0) return index;
+      return current < changedFiles.length ? current : 0;
+    });
+  }, [open, focusPath, changedFiles]);
 
   const filtered = artifacts.filter((artifact) => artifact.kind === tab);
 
@@ -120,37 +155,73 @@ export function ArtifactsDrawer({
         </div>
 
         {tab === "diff" ? (
-          changedFiles.length === 0 && filtered.length === 0 ? (
-            <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{t("sessions.drawers.noArtifacts")}</p>
+          changedFiles.length === 0 ? (
+            <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{t("sessions.drawers.noChanges")}</p>
           ) : (
             <div className="flex min-h-0 flex-1">
               <ul className="w-56 shrink-0 space-y-1 overflow-y-auto border-r border-line p-3">
-                {changedFiles.map((file, index) => (
-                  <li key={`${file.path}-${index}`}>
-                    <button
-                      onClick={() => setSelectedFile(index)}
-                      aria-current={selectedFile === index}
-                      className={cn(
-                        "w-full truncate rounded-lg px-2.5 py-2 text-left font-mono text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
-                        selectedFile === index ? "bg-accent-soft text-accent" : "text-ink-2 hover:bg-card-hover"
+                {(() => {
+                  let flatIndex = -1;
+                  return changeGroups.map((group, groupIndex) => (
+                    <Fragment key={group.label ?? "main"}>
+                      {group.label && (
+                        <li className={cn("px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3", groupIndex > 0 && "pt-2")}>
+                          {group.label}
+                        </li>
                       )}
-                      title={file.path}
-                    >
-                      {file.path.split("/").pop()}
-                      <span className="ml-1.5 font-mono text-[10px]">
-                        <span className="text-ok">+{file.additions}</span>{" "}
-                        <span className="text-danger">-{file.deletions}</span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
+                      {group.entries.map((entry) => {
+                        flatIndex += 1;
+                        const index = flatIndex;
+                        const stats = entry.kind === "patch"
+                          ? { added: entry.additions, removed: entry.deletions }
+                          : {
+                              added: entry.diff.after ? entry.diff.after.split(/\r?\n/).length : 0,
+                              removed: entry.diff.before ? entry.diff.before.split(/\r?\n/).length : 0
+                            };
+                        return (
+                          <li key={`${entry.path}-${index}`}>
+                            <button
+                              onClick={() => setSelectedFile(index)}
+                              aria-current={selectedFile === index}
+                              className={cn(
+                                "w-full truncate rounded-lg px-2.5 py-2 text-left font-mono text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
+                                selectedFile === index ? "bg-accent-soft text-accent" : "text-ink-2 hover:bg-card-hover"
+                              )}
+                              title={entry.path}
+                            >
+                              {entry.path.split(/[\\/]/).pop()}
+                              {entry.edits > 1 && <span className="ml-1 text-[10px] text-ink-3">×{entry.edits}</span>}
+                              <span className="ml-1.5 font-mono text-[10px]">
+                                <span className="text-ok">+{stats.added}</span>{" "}
+                                <span className="text-danger">-{stats.removed}</span>
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </Fragment>
+                  ));
+                })()}
               </ul>
               <div className="min-w-0 flex-1">
-                {changedFiles[selectedFile]?.diff ? (
-                  <DiffView content={changedFiles[selectedFile].diff!} />
-                ) : (
-                  <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noArtifacts")}</p>
-                )}
+                {(() => {
+                  const selected = changedFiles[selectedFile];
+                  if (!selected) {
+                    return <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noChanges")}</p>;
+                  }
+                  if (selected.kind === "patch") {
+                    return selected.diff ? (
+                      <DiffView content={selected.diff} />
+                    ) : (
+                      <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noDiffDetail")}</p>
+                    );
+                  }
+                  return (
+                    <div className="h-full overflow-y-auto">
+                      <ToolFileDiffView diff={selected.diff} locale={locale} scrollClassName="max-h-none" />
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )
@@ -262,30 +333,169 @@ export function DagDrawer({
           {tasks.map((task, index) => {
             const pos = positions[index];
             const tone = statusTone[task.status] ?? statusTone.queued;
+            const title = task.title.length > 12 ? `${task.title.slice(0, 12)}…` : task.title;
+            const subtitle = `${task.memberName ?? "—"} · ${t(`sessions.taskStatus.${task.status}` as MessageKey)}`;
             return (
               <g key={task.id} transform={`translate(${pos.x}, ${pos.y})`}>
                 <rect width="180" height="60" rx="12" fill="var(--card)" stroke="var(--line-strong)" strokeWidth="1" />
                 <rect width="4" height="60" rx="2" fill="currentColor" className={tone.split(" ")[0]} />
                 <text x="16" y="24" fill="var(--ink)" fontSize="12" fontWeight="600">
-                  {task.title.length > 14 ? `${task.title.slice(0, 14)}…` : task.title}
+                  {title}
                 </text>
                 <text x="16" y="44" fill="var(--ink-3)" fontSize="11">
-                  {task.memberName ?? "—"} · {t(`sessions.taskStatus.${task.status}` as MessageKey)}
+                  {subtitle.length > 18 ? `${subtitle.slice(0, 18)}…` : subtitle}
                 </text>
               </g>
             );
           })}
         </svg>
-        <div className="mt-3 flex flex-wrap gap-2 px-1">
+        <ul className="mt-4 space-y-1 border-t border-line px-1 pt-3">
           {tasks.map((task) => (
-            <StatusChip
-              key={task.id}
-              tone={task.status === "completed" ? "ok" : task.status === "running" ? "accent" : task.status === "failed" ? "danger" : "muted"}
-              label={`${task.title} · ${t(`sessions.taskStatus.${task.status}` as MessageKey)}`}
-              pulse={task.status === "running"}
-            />
+            <li key={task.id} className="flex min-w-0 items-center gap-2 text-xs">
+              <span
+                aria-hidden
+                className={cn("h-1.5 w-1.5 shrink-0 rounded-full", (statusTone[task.status] ?? statusTone.queued).split(" ")[0])}
+                style={{ background: "currentColor" }}
+              />
+              <span className="min-w-0 flex-1 truncate text-ink-2" title={task.title}>
+                {task.title}
+              </span>
+              <span className="max-w-[45%] shrink-0 truncate text-ink-3">
+                {task.memberName ?? "—"} · {t(`sessions.taskStatus.${task.status}` as MessageKey)}
+              </span>
+            </li>
           ))}
+        </ul>
+      </div>
+    </Drawer>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * Provider-native sub-agent detail: the dispatch card's nested activity.
+ * ------------------------------------------------------------------------ */
+function SubagentUsageChips({ usage, agentId }: { usage?: SubagentUsage; agentId?: string }): JSX.Element | null {
+  const { t, locale } = useI18n();
+  if (!usage && !agentId) return null;
+  const chip = "rounded-md border border-line bg-card px-1.5 py-0.5 font-mono text-[10px] text-ink-3";
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {usage?.totalTokens !== undefined && (
+        <span className={chip}>{t("sessions.drawers.subagentUsageTokens", { count: usage.totalTokens.toLocaleString(locale) })}</span>
+      )}
+      {usage?.toolUses !== undefined && <span className={chip}>{t("sessions.drawers.subagentUsageTools", { count: usage.toolUses })}</span>}
+      {usage?.durationMs !== undefined && <span className={chip}>{formatDurationMs(usage.durationMs)}</span>}
+      {agentId && <span className={chip} title={agentId}>agentId: {agentId.length > 12 ? `${agentId.slice(0, 6)}…${agentId.slice(-4)}` : agentId}</span>}
+    </div>
+  );
+}
+
+export function SubagentDrawer({
+  open,
+  onClose,
+  sessionId,
+  eventId
+}: {
+  open: boolean;
+  onClose: () => void;
+  sessionId?: string;
+  eventId?: string;
+}): JSX.Element {
+  const { t } = useI18n();
+  const event = useSessionsStore((state) =>
+    (sessionId ? state.events[sessionId] ?? [] : []).find((item) => item.id === eventId));
+  const data = event?.data.kind === "tool_activity" ? event.data : undefined;
+  const subagent = data?.subagent;
+  const tone = data?.status === "running" ? "accent" : data?.status === "done" ? "ok" : "danger";
+  const statusLabel = data?.status === "running"
+    ? subagent?.background ? t("sessions.cards.subagentBackgroundRunning") : t("sessions.cards.running")
+    : data?.status === "done"
+      ? t("sessions.status.completed")
+      : t("sessions.cards.failed");
+  const activities: TimelineEvent[] = (subagent?.activities ?? []).map((payload, index) => ({
+    id: `${eventId ?? "sub"}-activity-${index}`,
+    sessionId: sessionId ?? "",
+    sequence: index + 1,
+    timestamp: event?.timestamp ?? "",
+    data: payload
+  }));
+  const inputView = useMemo(() => (data?.input ? parseSubagentInput(data.input) : undefined), [data?.input]);
+  const resultView = useMemo(() => (data?.output ? parseSubagentResult(data.output) : undefined), [data?.output]);
+
+  return (
+    <Drawer open={open} onClose={onClose} title={t("sessions.drawers.subagent")} subtitle={subagent?.task} defaultWidth={560}>
+      <div className="h-full overflow-y-auto p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <span aria-hidden className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-info/20 bg-info/10 text-info">
+            <Bot className="h-4 w-4" />
+          </span>
+          {subagent?.agentType && <Tag label={subagent.agentType} />}
+          {subagent?.background && <Tag label={t("sessions.cards.subagentBackground")} />}
+          {data && <StatusChip tone={tone} label={statusLabel} pulse={data.status === "running"} className="h-5 px-1.5 text-[10px]" />}
+          <SubagentUsageChips usage={resultView?.usage} agentId={resultView?.agentId} />
         </div>
+        {subagent?.task && (
+          <p className="mb-4 rounded-xl border border-line bg-card px-3.5 py-2.5 text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-2">
+            {subagent.task}
+          </p>
+        )}
+        {activities.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-line-strong px-3 py-4 text-center">
+            <p className="text-xs text-ink-3">{t("sessions.drawers.subagentEmpty")}</p>
+            {data?.status !== "running" && (
+              <p className="mt-1 text-[11px] leading-relaxed text-ink-3/70">{t("sessions.drawers.subagentEmptyHint")}</p>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {activities.map((activity) => (
+              <TimelineEventView key={activity.id} event={activity} />
+            ))}
+          </div>
+        )}
+        {(inputView || resultView) && (
+          <div className="mt-4 space-y-2 border-t border-line pt-3">
+            {resultView && (
+              <details className="overflow-hidden rounded-xl border border-line bg-card" open={activities.length === 0}>
+                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                  {t("sessions.drawers.subagentResult")}
+                </summary>
+                <div className="max-h-96 overflow-auto border-t border-line px-3.5 py-2.5 text-[13px] text-ink-2">
+                  <MarkdownContent source={resultView.body} />
+                </div>
+              </details>
+            )}
+            {inputView?.prompt && (
+              <details className="overflow-hidden rounded-xl border border-line bg-card" open={activities.length === 0}>
+                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                  {t("sessions.drawers.subagentPrompt")}
+                </summary>
+                <p className="max-h-56 overflow-auto border-t border-line px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap text-ink-2">
+                  {inputView.prompt}
+                </p>
+              </details>
+            )}
+            {inputView && (inputView.raw !== undefined || inputView.fields.length > 0) && (
+              <details className="overflow-hidden rounded-xl border border-line bg-card">
+                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                  {t("sessions.drawers.subagentInputRaw")}
+                </summary>
+                {inputView.raw !== undefined ? (
+                  <pre className="max-h-56 overflow-auto border-t border-line px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-2">{inputView.raw}</pre>
+                ) : (
+                  <dl className="space-y-1.5 border-t border-line px-3.5 py-2.5">
+                    {inputView.fields.map(([key, value]) => (
+                      <div key={key} className="flex min-w-0 gap-2 text-[12px]">
+                        <dt className="shrink-0 font-mono text-ink-3">{key}</dt>
+                        <dd className="min-w-0 flex-1 break-all whitespace-pre-wrap text-ink-2">{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                )}
+              </details>
+            )}
+          </div>
+        )}
       </div>
     </Drawer>
   );

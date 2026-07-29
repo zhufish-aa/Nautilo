@@ -1,20 +1,24 @@
-import { ClaudeCodeAdapter } from "./claude.js";
+import { ClaudeCodeAdapter } from "./claude/index.js";
 import { CodexAdapter } from "./codex/index.js";
 import { CustomCliAdapter } from "./custom.js";
 import { KimiCodeAdapter } from "./kimi/index.js";
-import { OpenCodeAdapter } from "./opencode.js";
 import type { AdapterCapabilities, AdapterDiscoveryContext, AdapterResumeRequest, AdapterStartRequest, AgentCliAdapter } from "./types.js";
 import type { AgentInstance, ProviderModelCatalog } from "@agenthub/domain";
 
 export class AdapterRegistry {
   private readonly adapters = new Map<string, AgentCliAdapter>();
-  constructor(adapters: AgentCliAdapter[] = [new CodexAdapter(), new ClaudeCodeAdapter(), new KimiCodeAdapter(), new OpenCodeAdapter(), new CustomCliAdapter()]) {
+  // OpenCode is deliberately NOT built in: it ships as a provider plugin
+  // (packages/provider-plugin-opencode) and is registered by PluginService.
+  constructor(adapters: AgentCliAdapter[] = [new CodexAdapter(), new ClaudeCodeAdapter(), new KimiCodeAdapter(), new CustomCliAdapter()]) {
     for (const adapter of adapters) this.register(adapter);
   }
   register(adapter: AgentCliAdapter): void { this.adapters.set(adapter.providerId, adapter); }
+  unregister(providerId: string): boolean { return this.adapters.delete(providerId); }
+  has(providerId: string): boolean { return this.adapters.has(providerId); }
+  find(providerId: string): AgentCliAdapter | undefined { return this.adapters.get(providerId); }
   get(providerId: string): AgentCliAdapter {
     const adapter = this.adapters.get(providerId);
-    if (!adapter) throw new Error(`Unsupported provider: ${providerId}`);
+    if (!adapter) throw new Error(`Provider "${providerId}" 不可用：适配器未注册（插件缺失或未启用）`);
     return adapter;
   }
   detect(instance: Parameters<AgentCliAdapter["detect"]>[0]): ReturnType<AgentCliAdapter["detect"]> { return this.get(instance.providerId).detect(instance); }

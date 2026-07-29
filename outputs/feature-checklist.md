@@ -164,9 +164,9 @@
 | √ | B-012 | 进程树取消 | Windows 使用 `taskkill /T /F`，其他平台使用进程信号 |
 | √ | B-013 | 超时/空闲超时 | 总超时、空闲超时和输出上限产生明确 Runtime 事件 |
 | √ | B-014 | Adapter Registry | Provider 可注册、检测、启动、发现模型，并按能力协商运行模式 |
-| √ | B-015 | Codex Adapter | 官方 `codex exec --json`、app-server `model/list`、Provider 专属 JSONL、Session ID、用量、错误、输出 Schema、进程取消和 `codex exec resume` 已封装；真实 CLI Start/Resume/模型目录 Smoke 已验证 |
+| √ | B-015 | Codex Adapter | 官方 app-server 流式协议、`model/list`、原生 Thread Resume、图片输入和 `dynamicTools` 已封装；`item/tool/call` 可回调 AgentHub 会话级工具；旧 Thread 会自动迁移一次并补入持久化聊天上下文 |
 | × | B-016 | Claude Code Adapter | 目前只有初版命令骨架和 Fake CLI 契约；尚未按官方文档与真实账号验证 |
-| √ | B-017 | Kimi Code Adapter | 官方 `kimi --prompt ... --output-format stream-json`、`kimi provider list --json` 模型目录、Assistant/Tool/Resume Hint 事件、进程取消和 `--session` Resume 已封装；真实 CLI Start/Resume/模型目录 Smoke 已验证 |
+| √ | B-017 | Kimi Code Adapter | 官方 Kimi ACP `session/new/resume/prompt/cancel`、模型配置、流式消息/思考/工具事件已封装；AgentHub 通过 ACP `mcpServers` 为每次主会话运行动态注入独立的临时 MCP 工具端点，不修改用户全局配置 |
 | × | B-018 | OpenCode Adapter | 目前只有初版命令骨架和 Fake CLI 契约；尚未按官方文档与真实环境验证 |
 | √ | B-019 | Custom CLI Adapter | 支持参数模板、stdin/argument 输入、text/JSONL 输出和资源限制 |
 | √ | B-020 | 能力降级 | structured/text/stdin/PTY/Resume 能力显式声明并确定性降级 |
@@ -178,17 +178,17 @@
 | 状态 | 编号 | 功能 | 验收标准 |
 |---|---|---|---|
 | √ | B-023 | direct 运行路径 | 主 Agent 可独立完成任务，不创建子任务 |
-| √ | B-024 | delegate 工具 | 主 Agent 可主动创建/分配局部任务 |
-| √ | B-025 | plan 工具 | 主 Agent 可主动创建带依赖的任务图 |
-| √ | B-026 | PlannerDecision 校验 | direct、delegate、plan 三种决策可验证 |
+| √ | B-024 | delegate 工具 | 主 Agent 可在任意正常 Provider Turn 中主动调用会话级工具创建局部任务；调用立即返回派发回执，子任务异步运行 |
+| √ | B-025 | plan 工具 | 主 Agent 可在任意正常 Provider Turn 中主动创建带依赖的任务图，不阻塞主 Turn 等待子任务 |
+| √ | B-026 | PlannerDecision 校验 | 新团队会话不再要求每轮或首轮先输出 PlannerDecision；该 Schema 仅保留给旧团队配置兼容路径，运行时工具输入另行严格校验 |
 | √ | B-027 | 成员动态路由 | 只从用户启用的成员中选择 |
 | √ | B-028 | 用户委派策略 | direct_only/ask_before_delegate/autonomous 生效 |
 | √ | B-029 | 消息路由 | 主 Agent、成员和用户之间消息可追踪 |
-| √ | B-030 | 结果回传 | 子 Agent 结果回到发起委派的主 Agent |
-| √ | B-031 | 重新规划 | 子任务失败后主 Agent 可决定重试、接管或继续 |
+| √ | B-030 | 结果回传 | 子 Agent 完成或失败后，结果进入原主会话的 Provider Resume 队列；主 Agent 当前 Turn 不等待、不轮询 |
+| √ | B-031 | 重新规划 | 子任务失败只回传失败事实，不自动重试或接管；是否派生新任务、继续旧子会话或自行处理由主 Agent 后续决定 |
 
-> 实现：`OrchestrationService` 负责 ProjectRun 用例；`runtime/orchestration` 按决策校验、成员路由、任务图、Prompt、Session 和消息路由拆分。前端 `core-bootstrap.ts` 和 `orchestration-runtime.ts` 接入实体 list/upsert、`orchestration.start/resolveDelegation/cancel`、Session/Task/Event 回放；Electron 只走真实 Core Daemon，浏览器预览不生成业务数据。  
-> 验证：`packages/core-daemon/test/orchestration.test.mjs` 覆盖 direct、delegate、plan、DAG、三种委派策略、禁用成员、结果回传，以及 retry/take_over/continue；`pnpm check` 与 `pnpm build:desktop` 通过。
+> 实现：`RunService` 只负责把会话级工具绑定交给 Provider；Codex 使用原生 `dynamicTools`，Kimi 使用本轮 ACP 请求内的临时 MCP HTTP 端点。`MainAgentRuntimeToolProvider` 只向当前 ProjectRun 的根主会话暴露工具，子会话和其他主会话不会继承。`OrchestrationService` 校验成员、会话归属和 DAG 后异步启动任务。  
+> 验证：协议测试已实际连接 Kimi 临时 MCP 并完成 `tools/list`、`tools/call`；编排回归测试证明会话选择的主 Agent 不经过 Planner Turn 即可调用 delegate、立即继续并在稍后收到子结果。
 
 ### 4.4 Git、任务和验收
 

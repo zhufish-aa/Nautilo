@@ -1,8 +1,18 @@
-import type { AdapterEvent } from "../types.js";
+import type { AdapterEvent, AdapterFileDiff } from "../types.js";
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue => typeof value === "object" && value !== null ? value as RecordValue : {};
 const string = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
+const TOOL_INPUT_IDENTITY_KEYS = [
+  "path",
+  "file_path",
+  "filePath",
+  "target_path",
+  "targetPath",
+  "query",
+  "pattern",
+  "glob"
+] as const;
 
 function printable(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
@@ -20,13 +30,84 @@ function printable(value: unknown): string | undefined {
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
+function toolInput(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const source = value as RecordValue;
+  const prioritized: RecordValue = {};
+  for (const key of TOOL_INPUT_IDENTITY_KEYS) {
+    if (Object.hasOwn(source, key)) prioritized[key] = source[key];
+  }
+  for (const [key, entry] of Object.entries(source)) {
+    if (!Object.hasOwn(prioritized, key)) prioritized[key] = entry;
+  }
+  return prioritized;
+}
+
+function mergeToolInput(previous: unknown, current: unknown): unknown {
+  if (
+    typeof previous !== "object" || previous === null || Array.isArray(previous)
+    || typeof current !== "object" || current === null || Array.isArray(current)
+  ) return current ?? previous;
+  return toolInput({ ...previous as RecordValue, ...current as RecordValue });
+}
+
+function toolInputIdentity(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const input = value as RecordValue;
+  const identity = TOOL_INPUT_IDENTITY_KEYS.flatMap((key) => {
+    const entry = input[key];
+    return typeof entry === "string" && entry.trim() ? [[key, entry.trim()] as const] : [];
+  });
+  return identity.length ? JSON.stringify(identity) : undefined;
+}
+
+function firstString(input: RecordValue, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function fileDiff(toolName: string, value: unknown): AdapterFileDiff | undefined {
+  const normalized = toolName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  const isEdit = normalized === "edit"
+    || normalized.startsWith("edit_")
+    || normalized.startsWith("editing_")
+    || normalized.endsWith("_edit")
+    || normalized.endsWith("_edit_file");
+  const isWrite = normalized === "write"
+    || normalized.startsWith("write_")
+    || normalized.startsWith("writing_")
+    || normalized.endsWith("_write")
+    || normalized.endsWith("_write_file");
+  if (!isEdit && !isWrite) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const input = value as RecordValue;
+  const path = firstString(input, TOOL_INPUT_IDENTITY_KEYS);
+  if (isWrite) {
+    const content = firstString(input, ["content", "text", "data"]);
+    return content === undefined ? undefined : { operation: "write", path, before: "", after: content };
+  }
+  const before = firstString(input, ["old_string", "oldString", "old_text", "oldText", "before"]);
+  const after = firstString(input, ["new_string", "newString", "new_text", "newText", "after"]);
+  if (before === undefined || after === undefined) return undefined;
+  return {
+    operation: "edit",
+    path,
+    before,
+    after
+  };
+}
+
 export interface KimiAcpParseState {
   messageId: string;
   thinkingId: string;
   toolNames: Map<string, string>;
   toolCalls: Map<string, {
     phase: "started" | "completed";
-    input?: string;
+    input?: unknown;
+    inputIdentity?: string;
     output?: string;
   }>;
 }
@@ -62,28 +143,33 @@ export function parseKimiAcpUpdate(value: unknown, state: KimiAcpParseState): Ad
   }
   if (update.sessionUpdate === "agent_thought_chunk") {
     const content = record(update.content);
-    return content.type === "text" && typeof content.text === "string"
+    return content.type === "text" && typeof content.text === "string" && content.text.length > 0
       ? [{ kind: "thinking", phase: "delta", messageId: state.thinkingId, text: content.text, raw: value }]
       : [];
   }
   if (update.sessionUpdate !== "tool_call" && update.sessionUpdate !== "tool_call_update") return [];
   const callId = string(update.toolCallId);
   const suppliedName = string(update.title);
-  if (callId && suppliedName) state.toolNames.set(callId, suppliedName);
+  if (callId && suppliedName && !state.toolNames.has(callId)) state.toolNames.set(callId, suppliedName);
   const name = (callId ? state.toolNames.get(callId) : undefined) ?? suppliedName ?? "tool";
   const status = string(update.status);
   const completed = status === "completed" || status === "failed";
-  const input = printable(update.rawInput);
+  const input = update.rawInput === undefined ? undefined : toolInput(update.rawInput);
   const output = printable(update.rawOutput) ?? printable(update.content);
   if (callId) {
     const previous = state.toolCalls.get(callId);
+    const mergedInput = input === undefined ? previous?.input : mergeToolInput(previous?.input, input);
     const next = {
       phase: completed ? "completed" as const : "started" as const,
-      input: input ?? previous?.input,
+      input: mergedInput,
+      inputIdentity: toolInputIdentity(mergedInput),
       output: output ?? previous?.output
     };
     state.toolCalls.set(callId, next);
-    if (previous?.phase === "completed" || (!completed && previous?.phase === "started")) return [];
+    if (
+      previous?.phase === "completed"
+      || (!completed && previous?.phase === "started" && previous.inputIdentity === next.inputIdentity)
+    ) return [];
     return [{
       kind: "tool",
       callId,
@@ -92,6 +178,7 @@ export function parseKimiAcpUpdate(value: unknown, state: KimiAcpParseState): Ad
       input: next.input,
       output: next.output,
       success: status !== "failed",
+      fileDiff: fileDiff(name, next.input),
       raw: value
     }];
   }
@@ -103,6 +190,7 @@ export function parseKimiAcpUpdate(value: unknown, state: KimiAcpParseState): Ad
     input,
     output,
     success: status !== "failed",
+    fileDiff: fileDiff(name, input),
     raw: value
   }];
 }

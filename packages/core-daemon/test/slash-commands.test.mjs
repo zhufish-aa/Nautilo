@@ -20,6 +20,7 @@ test("Codex and Kimi expose different provider-scoped slash command catalogs", (
   const kimi = slashCommandCatalog("kimi-code");
   assert.ok(codex.some((command) => command.name === "/fast"));
   assert.ok(codex.some((command) => command.name === "/reasoning"));
+  assert.ok(codex.some((command) => command.id === "codex.native.compact" && command.execution === "provider" && command.availability === "idle"));
   assert.ok(!kimi.some((command) => command.name === "/fast"));
   assert.ok(kimi.some((command) => command.name === "/thinking"));
   assert.ok(kimi.some((command) => command.name === "/title"));
@@ -125,4 +126,106 @@ test("Kimi provider commands use the command runtime and do not create chat mess
     database.close();
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("plugin providers get a generic catalog from their reported native commands", () => {
+  // No built-in catalog: nothing shows until the plugin reports commands.
+  assert.deepEqual(slashCommandCatalog("opencode"), []);
+  const opencode = slashCommandCatalog("opencode", [
+    { name: "compact", description: "压缩当前会话上下文（OpenCode summarize）", providerCommand: "compact" }
+  ]);
+  const compact = opencode.find((command) => command.name === "/compact");
+  assert.equal(compact.id, "opencode.native.compact");
+  assert.equal(compact.execution, "provider");
+  assert.equal(compact.availability, "idle");
+  assert.equal(compact.providerCommand, "compact");
+});
+
+test("plugin-reported compact requires a provider session and uses the compact transport", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "agenthub-opencode-command-"));
+  const database = new Database(join(directory, "test.sqlite"));
+  try {
+    const adapter = {
+      providerId: "opencode",
+      supportsStructuredOutput: true,
+      supportsResume: true,
+      capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: true, pty: false },
+      detect: async () => ({ installed: true, executable: "opencode" }),
+      listModels: async () => ({ providerId: "opencode", source: "provider_cli", fetchedAt: now, models: [] }),
+      start: () => { throw new Error("not used"); }
+    };
+    const registry = new AdapterRegistry([adapter]);
+    const agent = { id: "opencode-1", providerId: "opencode", displayName: "OpenCode", executable: "opencode", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now };
+    const session = { id: "session-opencode", projectId: "project-1", memberId: agent.id, agentInstanceId: agent.id, title: "Chat", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+    database.agents.save(agent, now);
+    database.sessions.save(session);
+    // The plugin reports its native commands during a run; the daemon replays
+    // the latest report when listing slash commands.
+    database.events.append({
+      schemaVersion: 1,
+      eventId: "evt-commands-1",
+      sequence: 1,
+      projectId: "project-1",
+      sessionId: session.id,
+      type: "provider.commands_updated",
+      timestamp: now,
+      payload: { providerId: "opencode", commands: [{ name: "compact", description: "Compact context", providerCommand: "compact" }] }
+    });
+    const invocations = [];
+    const runs = {
+      launch: async (_session, _agent, prompt, context) => {
+        invocations.push({ prompt, context });
+        return {
+          runId: "command-run-1",
+          completion: Promise.resolve({
+            run: { id: "command-run-1", sessionId: session.id, agentInstanceId: agent.id, mode: "headless_structured", status: "completed" },
+            messages: [],
+            finalMessage: "Context compacted"
+          })
+        };
+      }
+    };
+    const redaction = new RedactionService(() => []);
+    const service = new SlashCommandService(database, new AgentService(database, registry), new AuditService(database, redaction), runs);
+
+    assert.ok(service.list(session.id).some((command) => command.id === "opencode.native.compact"));
+
+    // Without a provider session there is nothing to summarize.
+    const rejected = await service.execute(session.id, "opencode.native.compact").catch((error) => error);
+    assert.equal(rejected.descriptor?.details?.reason, "compact_requires_provider_session");
+    assert.equal(invocations.length, 0);
+
+    database.sessions.save({ ...session, providerSessionId: "ses_1" });
+    const result = await service.execute(session.id, "opencode.native.compact");
+    assert.deepEqual(invocations, [{ prompt: "/compact", context: { presentation: "provider_command", providerCommand: "compact" } }]);
+    assert.equal(result.sections[0].text, "Context compacted");
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Claude Code exposes a provider-scoped catalog with dynamic native commands", () => {
+  const claude = slashCommandCatalog("claude-code");
+  assert.ok(claude.some((command) => command.name === "/model"));
+  assert.ok(claude.some((command) => command.name === "/effort"));
+  assert.ok(claude.some((command) => command.name === "/title"));
+  assert.ok(claude.some((command) => command.name === "/usage"));
+  assert.ok(!claude.some((command) => command.name === "/compact"));
+
+  const withNative = slashCommandCatalog("claude-code", [
+    { name: "compact", description: "Compact conversation context" },
+    { name: "review", description: "Review a pull request", inputHint: "PR number" },
+    { name: "login", description: "Interactive only" },
+    { name: "clear", description: "Destructive, excluded" }
+  ]);
+  const compact = withNative.find((command) => command.name === "/compact");
+  assert.equal(compact.execution, "provider");
+  assert.equal(compact.availability, "idle");
+  const review = withNative.find((command) => command.name === "/review");
+  assert.equal(review.argumentHint, "PR number");
+  assert.ok(!withNative.some((command) => command.name === "/login"));
+  assert.ok(!withNative.some((command) => command.name === "/clear"));
+  // AgentHub-local /status stays authoritative over a provider /status.
+  assert.equal(withNative.filter((command) => command.name === "/status").length, 1);
 });

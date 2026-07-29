@@ -1,14 +1,17 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { MotionConfig } from "framer-motion";
-import { History, Workflow } from "lucide-react";
+import { Workflow } from "lucide-react";
 import { AppShell } from "./components/layout/AppShell";
 import { Toaster } from "./components/ui/Toaster";
 import { TooltipProvider } from "./components/ui/Tooltip";
+import { ImageLightbox } from "./features/timeline/ImageLightbox";
+import { FilePreviewDrawer } from "./features/timeline/FilePreviewDrawer";
 import { AgentsPage } from "./features/agents/AgentsPage";
 import { PlaceholderPage } from "./features/placeholder/PlaceholderPage";
 import { ProjectDetailPage } from "./features/projects/ProjectDetailPage";
 import { ProjectsPage } from "./features/projects/ProjectsPage";
+import { RunsPage } from "./features/runs/RunsPage";
 import { SessionsPage } from "./features/sessions/SessionsPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { TeamEditorPage } from "./features/teams/TeamEditorPage";
@@ -70,21 +73,14 @@ export default function App(): JSX.Element {
                 />
               }
             />
-            <Route
-              path="/runs"
-              element={
-                <PlaceholderPage
-                  icon={History}
-                  titleKey="placeholder.runs.title"
-                  descKey="placeholder.runs.desc"
-                />
-              }
-            />
+            <Route path="/runs" element={<RunsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/sessions" replace />} />
           </Routes>
         </AppShell>
         <Toaster />
+        <ImageLightbox />
+        <FilePreviewDrawer />
       </TooltipProvider>
     </MotionConfig>
   );

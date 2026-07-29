@@ -6,11 +6,13 @@ import type {
   Artifact,
   AuditRecord,
   DiagnosticExportResult,
+  InteractionRequest,
   Message,
   PermissionPolicy,
   Project,
   ProjectInspection,
   ProjectRun,
+  ProviderCapability,
   ProviderModelCatalog,
   RecoverableProjectRun,
   RuntimeMetrics,
@@ -30,6 +32,40 @@ export interface MessageAttachmentInput {
   sizeBytes?: number;
 }
 import type { RuntimeEvent } from "@agenthub/event-protocol";
+import type { ProviderDescriptor, ProviderPluginManifest, ProviderRegistryEntry } from "@agenthub/provider-sdk";
+
+/** One provider plugin known to the daemon (loaded, disabled, or failed). */
+export interface ProviderPluginInfo {
+  id: string;
+  enabled: boolean;
+  status: "loaded" | "error" | "disabled";
+  error?: string;
+  dir: string;
+  manifest?: ProviderPluginManifest;
+}
+import type {
+  CapabilityImportConflictPolicy,
+  CapabilityImportOutcome,
+  CapabilityImportPreview,
+  CapabilityImportSource,
+  CapabilityScanResult,
+  DiscoveredMcpSource
+} from "./capability-import.js";
+
+export interface CheckpointInfo {
+  id: string;
+  sessionId: string;
+  runId?: string;
+  createdAt: string;
+  truncated: boolean;
+}
+
+export interface CheckpointRevertPreview {
+  restored: string[];
+  removed: string[];
+  skipped: string[];
+  warning?: string;
+}
 
 export interface IpcRequestMap {
   "health.get": { input: undefined; output: { status: "ok"; version: string } };
@@ -41,6 +77,19 @@ export interface IpcRequestMap {
   "agent.list": { input: { projectId?: string }; output: AgentInstance[] };
   "agent.upsert": { input: AgentInstance; output: AgentInstance };
   "provider.detect": { input: { providerId: string; executable?: string }; output: { providerId: string; installed: boolean; compatible?: boolean; executable: string; version?: string; error?: string } };
+  "provider.catalog": { input: undefined; output: ProviderDescriptor[] };
+  "plugin.list": { input: undefined; output: ProviderPluginInfo[] };
+  "plugin.registry": { input: { registryUrl?: string }; output: ProviderRegistryEntry[] };
+  "plugin.install": { input: { source: { kind: "local"; path: string } | { kind: "registry"; pluginId: string; registryUrl?: string } }; output: ProviderPluginInfo };
+  "plugin.uninstall": { input: { pluginId: string }; output: { removed: true } };
+  "plugin.setEnabled": { input: { pluginId: string; enabled: boolean }; output: ProviderPluginInfo };
+  "capability.list": { input: undefined; output: ProviderCapability[] };
+  "capability.upsert": { input: ProviderCapability; output: ProviderCapability };
+  "capability.remove": { input: { capabilityId: string }; output: { removed: true } };
+  "capability.parseImport": { input: { source: CapabilityImportSource; text: string; fileName?: string }; output: CapabilityImportPreview };
+  "capability.discoverMcp": { input: { projectRoot?: string }; output: { sources: DiscoveredMcpSource[] } };
+  "capability.scanSkills": { input: { dir: string }; output: CapabilityScanResult };
+  "capability.importMany": { input: { items: ProviderCapability[]; onConflict?: CapabilityImportConflictPolicy }; output: { results: CapabilityImportOutcome[] } };
   "provider.models": { input: { providerId: string; agentInstanceId?: string; executable?: string }; output: ProviderModelCatalog };
   "team.list": { input: undefined; output: TeamDefinition[] };
   "team.get": { input: { teamId: string }; output: TeamDefinition };
@@ -57,10 +106,15 @@ export interface IpcRequestMap {
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
   "session.create": { input: { projectId: string; memberId: string; title?: string }; output: Session };
   "session.upsert": { input: Session; output: Session };
+  "session.delete": { input: { sessionId: string }; output: { removed: true; sessionIds: string[] } };
+  "session.followUp": { input: { sessionId: string; text: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };
   "session.send": { input: { sessionId: string; text: string; attachments?: MessageAttachmentInput[]; editMessageId?: string }; output: { accepted: true; runId: string } };
   "slashCommand.list": { input: { sessionId: string }; output: SlashCommandDefinition[] };
   "slashCommand.execute": { input: { sessionId: string; commandId: string; argument?: string }; output: SlashCommandResult };
   "slashCommand.continue": { input: { sessionId: string; commandId: string; actionId: string; selectedOptionIds?: string[] }; output: SlashCommandResult };
+  "checkpoint.list": { input: { sessionId: string }; output: CheckpointInfo[] };
+  "checkpoint.preview": { input: { checkpointId: string }; output: CheckpointRevertPreview };
+  "checkpoint.revert": { input: { checkpointId: string }; output: CheckpointRevertPreview & { checkpointId: string } };
   "run.cancel": { input: { runId: string }; output: { cancelled: true } };
   "run.list": { input: { sessionId?: string; projectRunId?: string }; output: AgentRun[] };
   "task.list": { input: { projectRunId: string }; output: Task[] };
@@ -72,6 +126,8 @@ export interface IpcRequestMap {
   "policy.evaluate": { input: { policyId?: string; command: string; args?: string[]; source: "agent" | "verification" | "system" }; output: { action: "safe" | "approval" | "blocked"; ruleId?: string; reason: string } };
   "approval.list": { input: { status?: ApprovalRecord["status"]; projectRunId?: string }; output: ApprovalRecord[] };
   "approval.resolve": { input: { approvalId: string; decision: "approved" | "rejected"; scope: ApprovalScope }; output: ApprovalRecord };
+  "interaction.list": { input: { sessionId?: string; status?: InteractionRequest["status"] }; output: InteractionRequest[] };
+  "interaction.respond": { input: { interactionId: string; outcome: "selected" | "cancelled"; optionId?: string; answers?: Record<string, string[]> }; output: InteractionRequest };
   "credential.set": { input: { agentInstanceId: string; apiKey: string; envName?: string }; output: { stored: true } };
   "credential.status": { input: { agentInstanceId: string }; output: { stored: boolean } };
   "credential.delete": { input: { agentInstanceId: string }; output: { removed: boolean } };

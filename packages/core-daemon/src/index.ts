@@ -7,6 +7,7 @@ export * from "./adapters/index.js";
 export * from "./database.js";
 export * from "./ipc-gateway.js";
 export * from "./process-runtime.js";
+export * from "./win-command.js";
 export * from "./pty-runtime.js";
 export * from "./service.js";
 export * from "./errors.js";
@@ -19,11 +20,16 @@ export * from "./runtime/security/index.js";
 export * from "./runtime/observability/index.js";
 export * from "./runtime/recovery-service.js";
 export * from "./runtime/event-subscription-service.js";
+export * from "./runtime/checkpoint-service.js";
 export * from "./application/orchestration-service.js";
 export * from "./application/agent-service.js";
 export * from "./application/session-context.js";
 export * from "./application/core-daemon.js";
+export * from "./application/capability-service.js";
+export * from "./application/capability-import/index.js";
+export * from "./application/interaction-service.js";
 export * from "./application/slash-commands/index.js";
+export * from "./runtime/plugins/plugin-service.js";
 
 export interface CoreDaemonHealth {
   service: "core-daemon";
@@ -38,6 +44,9 @@ export function getHealth(): CoreDaemonHealth {
 export async function startDaemon(options: { dataDir?: string; socketPath?: string; tokenPath?: string } = {}): Promise<{ daemon: CoreDaemon; socketPath: string; token: string }> {
   const dataDir = options.dataDir ?? process.env.AGENTHUB_DATA_DIR ?? join(homedir(), ".agenthub");
   const daemon = new CoreDaemon({ dataDir });
+  // Plugin scan runs async (dynamic imports); settle it before serving IPC so
+  // provider.catalog and runs see every loadable plugin.
+  await daemon.plugins.ready;
   const socketPath = options.socketPath ?? process.env.AGENTHUB_SOCKET ?? (process.platform === "win32" ? "\\\\.\\pipe\\agenthub-core" : join(dataDir, "core.sock"));
   const result = await daemon.gateway.startSocket(socketPath, options.tokenPath ?? process.env.AGENTHUB_TOKEN_PATH ?? join(dataDir, "core.token"));
   return { daemon, socketPath, token: result.token };

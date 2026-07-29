@@ -1,6 +1,7 @@
 import type {
   AgentRunId,
   ArtifactId,
+  InteractionRequest,
   ProjectId,
   ProjectRunId,
   SessionId,
@@ -25,6 +26,8 @@ export type RuntimeEventType =
   | "file.changed"
   | "approval.requested"
   | "approval.resolved"
+  | "interaction.requested"
+  | "interaction.resolved"
   | "verification.started"
   | "verification.finished"
   | "git.diff_collected"
@@ -33,10 +36,29 @@ export type RuntimeEventType =
   | "git.conflict"
   | "usage.updated"
   | "provider.commands_updated"
+  | "session.checkpoint_reverted"
   | "artifact.created"
   | "run.waiting"
   | "run.completed"
   | "run.failed";
+
+export interface ToolFileDiff {
+  operation?: "edit" | "write";
+  path?: string;
+  before: string;
+  after: string;
+  truncated?: boolean;
+}
+
+/** A provider CLI's native sub-agent dispatch (Claude's Task, Kimi's Agent, opencode's task, …). */
+export interface SubagentDispatch {
+  /** CLI-specific sub-agent type (e.g. Claude's subagent_type), when declared. */
+  agentType?: string;
+  /** Short task description (the dispatch's description, else a truncated prompt). */
+  task?: string;
+  /** The dispatch runs in the background; the main agent continues without waiting. */
+  background?: boolean;
+}
 
 export interface RuntimeEventPayloadMap {
   "run.started": {
@@ -49,19 +71,23 @@ export interface RuntimeEventPayloadMap {
   "agent.message_delta": {
     messageId: string;
     text: string;
+    subagentDispatchId?: string;
   };
   "agent.message": {
     messageId: string;
     text: string;
     isFinal?: boolean;
+    subagentDispatchId?: string;
   };
   "agent.thinking_delta": {
     messageId: string;
     text: string;
+    subagentDispatchId?: string;
   };
   "agent.thinking_summary": {
     messageId?: string;
     text: string;
+    subagentDispatchId?: string;
   };
   "planner.decision": {
     mode: "direct" | "delegate" | "plan";
@@ -91,18 +117,28 @@ export interface RuntimeEventPayloadMap {
     callId?: string;
     toolName: string;
     inputSummary?: string;
+    fileDiff?: ToolFileDiff;
+    /** Set when the tool call is the provider CLI's native sub-agent dispatch (e.g. Claude's Task). */
+    subagent?: SubagentDispatch;
+    /** Set when this call ran inside a native sub-agent; value is the dispatch's callId. */
+    subagentDispatchId?: string;
   };
   "tool.finished": {
     callId?: string;
     toolName: string;
     success: boolean;
+    inputSummary?: string;
     outputSummary?: string;
+    fileDiff?: ToolFileDiff;
+    subagent?: SubagentDispatch;
+    subagentDispatchId?: string;
   };
   "command.started": {
     callId?: string;
     command: string;
     cwd: string;
     approvalId?: string;
+    subagentDispatchId?: string;
   };
   "command.finished": {
     callId?: string;
@@ -110,6 +146,7 @@ export interface RuntimeEventPayloadMap {
     exitCode: number;
     durationMs: number;
     outputSummary?: string;
+    subagentDispatchId?: string;
   };
   "file.changed": {
     path: string;
@@ -127,6 +164,12 @@ export interface RuntimeEventPayloadMap {
     approvalId: string;
     decision: "approved" | "rejected";
     scope: "once" | "run" | "task" | "project" | "global";
+  };
+  "interaction.requested": {
+    interaction: InteractionRequest;
+  };
+  "interaction.resolved": {
+    interaction: InteractionRequest;
   };
   "verification.started": {
     verificationId: string;
@@ -170,7 +213,14 @@ export interface RuntimeEventPayloadMap {
   };
   "provider.commands_updated": {
     providerId: string;
-    commands: Array<{ name: string; description: string; inputHint?: string }>;
+    commands: Array<{ name: string; description: string; inputHint?: string; providerCommand?: "compact" }>;
+  };
+  "session.checkpoint_reverted": {
+    checkpointId: string;
+    restored: string[];
+    removed: string[];
+    skipped: string[];
+    warning?: string;
   };
   "artifact.created": {
     artifactId: ArtifactId;

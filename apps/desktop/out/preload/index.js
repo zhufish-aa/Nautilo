@@ -28,6 +28,42 @@ const bridge = {
     describePaths: (paths) => electron.ipcRenderer.invoke("attachment:describe-paths", paths),
     importClipboard: (input) => electron.ipcRenderer.invoke("attachment:import-clipboard", input)
   },
+  shell: {
+    openPath: (path) => electron.ipcRenderer.invoke("shell:open-path", path),
+    showItemInFolder: (path) => electron.ipcRenderer.invoke("shell:show-item-in-folder", path)
+  },
+  images: {
+    copyToClipboard: (input) => electron.ipcRenderer.invoke("clipboard:write-image", input),
+    saveAs: (input) => electron.ipcRenderer.invoke("image:save-as", input)
+  },
+  menu: {
+    popup: (items) => electron.ipcRenderer.invoke("menu:popup", items)
+  },
+  files: {
+    readText: (input) => electron.ipcRenderer.invoke("file:read-text", input)
+  },
+  providers: {
+    startUpdate: (input) => electron.ipcRenderer.invoke("provider:update-start", input),
+    cancelUpdate: (updateId) => electron.ipcRenderer.invoke("provider:update-cancel", updateId),
+    onUpdateOutput: (callback) => {
+      const listener = (_event, payload) => {
+        callback(payload.updateId, payload.chunk);
+      };
+      electron.ipcRenderer.on("provider:update-output", listener);
+      return () => {
+        electron.ipcRenderer.removeListener("provider:update-output", listener);
+      };
+    },
+    onUpdateExit: (callback) => {
+      const listener = (_event, payload) => {
+        callback(payload.updateId, payload.exitCode, payload.error);
+      };
+      electron.ipcRenderer.on("provider:update-exit", listener);
+      return () => {
+        electron.ipcRenderer.removeListener("provider:update-exit", listener);
+      };
+    }
+  },
   core: {
     request: (request) => electron.ipcRenderer.invoke("core:request", request)
   }

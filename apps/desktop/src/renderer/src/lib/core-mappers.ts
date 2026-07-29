@@ -2,6 +2,16 @@ import type { AgentInstance, Project, ProjectInspection, Session, TeamDefinition
 import { providerMeta } from "./provider-catalog";
 import type { AgentInstanceConfig, ProjectScanResult, UiProject, UiSession, UiTeam } from "./types";
 
+/** UI catalog id → Core Daemon provider id (only custom-cli differs). */
+export function toDaemonProviderId(providerId: string): string {
+  return providerId === "custom-cli" ? "custom" : providerId;
+}
+
+/** Core Daemon provider id → UI catalog id. */
+export function toUiProviderId(providerId: string): string {
+  return providerId === "custom" ? "custom-cli" : providerId;
+}
+
 export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
   return {
     id: instance.id,
@@ -12,6 +22,7 @@ export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
     profile: instance.profile,
     providerOptions: {
       envPolicyId: instance.envPolicyId,
+      ...(instance.permissionMode ? { permissionMode: instance.permissionMode } : {}),
       ...(instance.baseUrl ? { baseUrl: instance.baseUrl } : {})
     },
     capabilities: providerMeta(instance.providerId).capabilities,
@@ -31,6 +42,7 @@ export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
     baseArgs: instance.baseArgs,
     profile: instance.profile,
     envPolicyId: typeof instance.providerOptions?.envPolicyId === "string" ? instance.providerOptions.envPolicyId : "env-standard",
+    permissionMode: typeof instance.providerOptions?.permissionMode === "string" ? instance.providerOptions.permissionMode : undefined,
     baseUrl: typeof instance.providerOptions?.baseUrl === "string" ? instance.providerOptions.baseUrl : undefined,
     enabled: instance.enabled,
     status: instance.status,
@@ -42,7 +54,7 @@ export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
 export function toDomainTeam(team: UiTeam): TeamDefinition {
   const roles = [...new Map(team.members.map((member) => [member.role.id, {
     ...member.role,
-    permissionPolicyId: "default"
+    permissionPolicyId: member.role.permissionPolicyId ?? "default"
   }])).values()];
   return {
     id: team.id,
@@ -89,7 +101,8 @@ export function toUiTeam(team: TeamDefinition): UiTeam {
           responsibilities: role.responsibilities,
           strengths: role.strengths,
           limitations: role.limitations,
-          systemInstructions: role.systemInstructions
+          systemInstructions: role.systemInstructions,
+          permissionPolicyId: role.permissionPolicyId ?? "default"
         } : {
           id: member.roleId,
           name: member.roleId,
@@ -97,7 +110,8 @@ export function toUiTeam(team: TeamDefinition): UiTeam {
           responsibilities: [],
           strengths: member.strengths,
           limitations: [],
-          systemInstructions: ""
+          systemInstructions: "",
+          permissionPolicyId: "default"
         },
         allowedTaskTypes: member.allowedTaskTypes,
         maxConcurrentTasks: member.maxConcurrentTasks,
@@ -116,6 +130,7 @@ export function toUiProject(project: Project, inspection?: ProjectInspection, pr
     name: project.name,
     rootPath: project.rootPath,
     repositoryType: project.repositoryType,
+    workspaceMode: project.workspaceMode ?? "direct",
     scan: inspection ? toUiInspection(inspection) : previous?.scan,
     scanning: false,
     activeRun: previous?.activeRun,
@@ -142,6 +157,7 @@ export function toDomainProject(project: UiProject): Project {
     name: project.name,
     rootPath: project.rootPath,
     repositoryType: project.repositoryType,
+    workspaceMode: project.workspaceMode,
     defaultBranch: project.scan?.git.defaultBranch,
     frontendPaths: project.scan?.frontendPaths ?? [],
     backendPaths: project.scan?.backendPaths ?? [],
@@ -155,11 +171,19 @@ export function toStandaloneUiSession(session: Session): UiSession {
   return {
     id: session.id,
     projectId: session.projectId,
-    target: { type: "agent", instanceId: session.agentInstanceId ?? session.memberId, teamId: session.teamId },
+    // Mirror MemberRouter.resolveSession: an explicit agentInstanceId means an
+    // agent-targeted session; a teamId without one is member-routed (delegated
+    // child sessions persist agentInstanceId as null). Falling back to memberId
+    // here would corrupt the target and later fail with "Agent instance
+    // <memberId> is missing" on the next send.
+    target: session.teamId && !session.agentInstanceId
+      ? { type: "member", teamId: session.teamId, memberId: session.memberId }
+      : { type: "agent", instanceId: session.agentInstanceId ?? session.memberId, teamId: session.teamId },
     title: session.title,
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     serviceTier: session.serviceTier,
+    permissionMode: session.permissionMode,
     status: session.status,
     parentSessionId: session.parentSessionId,
     projectRunId: session.projectRunId,

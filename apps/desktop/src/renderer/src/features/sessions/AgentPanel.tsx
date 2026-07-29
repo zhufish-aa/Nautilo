@@ -91,7 +91,7 @@ function SessionEntryRow({
           <span
             className={cn(
               "absolute -right-0.5 -bottom-0.5 h-2 w-2 rounded-full border border-card",
-              status === "running" ? "bg-accent motion-safe:animate-pulse" : status === "completed" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-ink-3"
+              status === "running" ? "bg-accent shadow-[0_0_12px_2px_var(--accent)] motion-safe:animate-pulse" : status === "completed" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-ink-3"
             )}
           />
         </span>

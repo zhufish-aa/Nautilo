@@ -1,8 +1,14 @@
 import type { AgentInstance } from "@agenthub/domain";
 import { ProcessAdapter, streamEvents } from "./process-adapter.js";
-import type { AdapterRun, AdapterStartRequest } from "./types.js";
+import type { AdapterRun, AdapterStartRequest, ProviderDescriptor } from "./types.js";
 export class CustomCliAdapter extends ProcessAdapter {
   readonly providerId = "custom";
+  readonly descriptor: ProviderDescriptor = {
+    providerId: "custom",
+    name: "Custom CLI",
+    vendor: "Local",
+    capabilities: ["headless_text"]
+  };
   readonly supportsStructuredOutput = false;
   readonly supportsResume = false;
   override get capabilities() { return { structuredOutput: false, textOutput: true, interactiveStdin: true, nativeResume: false, pty: false }; }

@@ -4,6 +4,7 @@ import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { Field, Input } from "../../components/ui/Input";
 import { SelectField, type SelectOption } from "../../components/ui/Select";
+import { useProviderMetas } from "../../lib/provider-catalog";
 import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
@@ -24,9 +25,10 @@ export function NewSessionDialog({
   const projects = useProjectsStore((state) => state.projects);
   const teams = useTeamsStore((state) => state.teams);
   const instances = useAgentsStore((state) => state.instances);
+  const providers = useProviderMetas();
   const createSession = useSessionsStore((state) => state.createSession);
   const [projectId, setProjectId] = useState("");
-  const [instanceId, setInstanceId] = useState("");
+  const [providerId, setProviderId] = useState("");
   const [teamId, setTeamId] = useState(NO_TEAM);
   const [title, setTitle] = useState("");
 
@@ -34,14 +36,17 @@ export function NewSessionDialog({
     () => projects.map((project) => ({ value: project.id, label: project.name, hint: project.rootPath })),
     [projects]
   );
-  const instanceOptions = useMemo<SelectOption[]>(
-    () => instances.map((instance) => ({
-      value: instance.id,
-      label: instance.displayName,
-      hint: instance.providerId,
-      disabled: !instance.enabled
-    })),
-    [instances]
+  const providerOptions = useMemo<SelectOption[]>(
+    () => providers.map((provider) => {
+      const count = instances.filter((instance) => instance.providerId === provider.id && instance.enabled).length;
+      return {
+        value: provider.id,
+        label: provider.name,
+        hint: count > 0 ? t("sessions.providerInstanceCount", { count }) : t("sessions.noProviderInstance"),
+        disabled: count === 0
+      };
+    }),
+    [providers, instances, t]
   );
   const teamOptions = useMemo<SelectOption[]>(
     () => [
@@ -54,21 +59,25 @@ export function NewSessionDialog({
     ],
     [teams, t]
   );
-  const selectedInstance = instances.find((instance) => instance.id === instanceId);
-  const canCreate = !!projectId && !!selectedInstance;
+  // The session still binds to one agent instance underneath; the provider
+  // picker just chooses which family, defaulting to its first enabled instance.
+  // The instance (API source) can be switched later inside the session.
+  const selectedProvider = providers.find((provider) => provider.id === providerId);
+  const defaultInstance = instances.find((instance) => instance.providerId === providerId && instance.enabled);
+  const canCreate = !!projectId && !!selectedProvider && !!defaultInstance;
 
   const reset = (): void => {
     setProjectId("");
-    setInstanceId("");
+    setProviderId("");
     setTeamId(NO_TEAM);
     setTitle("");
   };
   const submit = (): void => {
-    if (!canCreate || !selectedInstance) return;
+    if (!canCreate || !selectedProvider || !defaultInstance) return;
     const session = createSession({
       projectId,
-      target: { type: "agent", instanceId, teamId: teamId === NO_TEAM ? undefined : teamId },
-      title: title.trim() || selectedInstance.displayName
+      target: { type: "agent", instanceId: defaultInstance.id, teamId: teamId === NO_TEAM ? undefined : teamId },
+      title: title.trim() || selectedProvider.name
     });
     onCreated(session.id);
     onOpenChange(false);
@@ -96,7 +105,7 @@ export function NewSessionDialog({
           <SelectField aria-label={t("sessions.projectLabel")} value={projectId || undefined} onValueChange={setProjectId} options={projectOptions} placeholder={t("sessions.projectLabel")} />
         </Field>
         <Field label={t("sessions.cliLabel")}>
-          <SelectField aria-label={t("sessions.cliLabel")} value={instanceId || undefined} onValueChange={setInstanceId} options={instanceOptions} placeholder={t("sessions.cliPlaceholder")} />
+          <SelectField aria-label={t("sessions.cliLabel")} value={providerId || undefined} onValueChange={setProviderId} options={providerOptions} placeholder={t("sessions.cliPlaceholder")} />
         </Field>
         <Field label={t("sessions.delegateTeamLabel")} hint={t("sessions.delegateTeamHint")}>
           <SelectField aria-label={t("sessions.delegateTeamLabel")} value={teamId} onValueChange={setTeamId} options={teamOptions} />

@@ -41,7 +41,9 @@ export class GitWorkflowService {
 
   async initializeRun(projectRun: ProjectRun): Promise<ProjectRun> {
     const project = this.requireProject(projectRun.projectId);
-    if (project.repositoryType !== "git") return { ...projectRun, workspacePath: project.rootPath };
+    if (projectRun.workspaceMode !== "git_isolated" || project.repositoryType !== "git") {
+      return this.withSharedWorkspace(projectRun, project.rootPath);
+    }
     try {
       const repository = await this.repositories.inspect(project.rootPath);
       if (!repository.headCommit) return this.withSharedWorkspace(projectRun, project.rootPath);
@@ -58,7 +60,7 @@ export class GitWorkflowService {
   async initializeTask(projectRun: ProjectRun, task: Task): Promise<Task> {
     const project = this.requireProject(projectRun.projectId);
     const sharedWorkspace = projectRun.workspacePath ?? project.rootPath;
-    if (project.repositoryType !== "git" || !projectRun.branchName || !projectRun.baseCommit) {
+    if (projectRun.workspaceMode !== "git_isolated" || project.repositoryType !== "git" || !projectRun.branchName || !projectRun.baseCommit) {
       return { ...task, workspacePath: sharedWorkspace, updatedAt: new Date().toISOString() };
     }
     try {
@@ -75,7 +77,7 @@ export class GitWorkflowService {
 
   async finalizeTask(projectRun: ProjectRun, task: Task, taskSession: Session, mainSession: Session): Promise<TaskFinalizeResult> {
     const project = this.requireProject(projectRun.projectId);
-    if (project.repositoryType !== "git" || !task.workspacePath || !task.branchName || !projectRun.workspacePath || !projectRun.branchName) {
+    if (projectRun.workspaceMode !== "git_isolated" || project.repositoryType !== "git" || !task.workspacePath || !task.branchName || !projectRun.workspacePath || !projectRun.branchName) {
       const verificationResults = await this.verify(project, task.workspacePath ?? project.rootPath, taskSession, projectRun.id, task.id, "task", task.acceptanceCriteria.flatMap((criterion) => criterion.commandTemplateId ? [criterion.commandTemplateId] : []));
       return this.verification.passed(verificationResults)
         ? { ok: true, task, files: [], verificationResults }
@@ -118,7 +120,7 @@ export class GitWorkflowService {
   async finalizeRun(projectRun: ProjectRun, mainSession: Session): Promise<RunFinalizeResult> {
     const project = this.requireProject(projectRun.projectId);
     const workspace = this.workingDirectory(projectRun);
-    const isolatedGitRun = project.repositoryType === "git" && !!projectRun.baseCommit && !!projectRun.branchName;
+    const isolatedGitRun = projectRun.workspaceMode === "git_isolated" && project.repositoryType === "git" && !!projectRun.baseCommit && !!projectRun.branchName;
     const files = isolatedGitRun ? await this.changes.collect(workspace) : [];
     const diffArtifact = files.length ? this.saveDiff(projectRun.id, undefined, mainSession.id, projectRun.goal, files) : undefined;
     this.emitFiles(mainSession, projectRun.id, undefined, files, diffArtifact);
@@ -137,7 +139,7 @@ export class GitWorkflowService {
 
   async mergeFinal(projectRun: ProjectRun, mainSession: Session): Promise<ProjectRun> {
     const project = this.requireProject(projectRun.projectId);
-    if (project.repositoryType !== "git" || !projectRun.branchName || !projectRun.baseBranch) return projectRun;
+    if (projectRun.workspaceMode !== "git_isolated" || project.repositoryType !== "git" || !projectRun.branchName || !projectRun.baseBranch) return projectRun;
     const repository = await this.repositories.inspect(project.rootPath);
     if (repository.branch !== projectRun.baseBranch) throw new CoreError("MERGE_CONFLICT", { reason: "base_branch_changed", expected: projectRun.baseBranch, actual: repository.branch });
     this.events.appendForSession(mainSession, { projectRunId: projectRun.id }, "git.merge_started", { sourceBranch: projectRun.branchName, targetBranch: projectRun.baseBranch });

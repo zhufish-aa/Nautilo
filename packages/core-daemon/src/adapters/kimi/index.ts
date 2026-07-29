@@ -3,4 +3,7 @@ export * from "./commands.js";
 export * from "./events.js";
 export * from "./models.js";
 export * from "./session-usage.js";
+export * from "./runtime-mcp-server.js";
 export * from "./acp-events.js";
+export * from "./acp-segments.js";
+export * from "./interaction.js";

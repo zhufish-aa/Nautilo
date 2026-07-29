@@ -19,7 +19,7 @@ function git(cwd, ...args) {
   return execFileSync("git", ["--no-pager", "-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
 
-function createFixture(t, verificationTemplates = []) {
+function createFixture(t, verificationTemplates = [], workspaceMode = "git_isolated") {
   const root = mkdtempSync(join(tmpdir(), "agenthub-git-workflow-"));
   const repositoryPath = join(root, "repository");
   const worktreeRoot = join(root, "worktrees");
@@ -36,6 +36,7 @@ function createFixture(t, verificationTemplates = []) {
     name: "Project",
     rootPath: repositoryPath,
     repositoryType: "git",
+    workspaceMode,
     defaultBranch: "main",
     frontendPaths: [],
     backendPaths: ["src/**"],
@@ -53,6 +54,7 @@ function createFixture(t, verificationTemplates = []) {
     mainMemberId: "main",
     mainSessionId: "session-main",
     status: "executing",
+    workspaceMode,
     createdAt: now,
     updatedAt: now
   };
@@ -129,8 +131,8 @@ test("Git is optional: an unborn repository runs in the project directory withou
 
   const database = new Database(":memory:");
   const now = new Date().toISOString();
-  const project = { id: "unborn-project", name: "Unborn", rootPath: repositoryPath, repositoryType: "git", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default", verificationTemplates: [] };
-  const projectRun = { id: "unborn-run", projectId: project.id, goal: "Handle a non-Git-dependent task", mainMemberId: "main", mainSessionId: "unborn-session", status: "executing", createdAt: now, updatedAt: now };
+  const project = { id: "unborn-project", name: "Unborn", rootPath: repositoryPath, repositoryType: "git", workspaceMode: "git_isolated", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default", verificationTemplates: [] };
+  const projectRun = { id: "unborn-run", projectId: project.id, goal: "Handle a non-Git-dependent task", mainMemberId: "main", mainSessionId: "unborn-session", status: "executing", workspaceMode: "git_isolated", createdAt: now, updatedAt: now };
   const session = { id: "unborn-session", projectId: project.id, memberId: "main", projectRunId: projectRun.id, title: "Main", status: "running", unreadCount: 0, createdAt: now, updatedAt: now };
   database.projects.save(project, now);
   database.sessions.save(session);
@@ -156,6 +158,24 @@ test("Git is optional: an unborn repository runs in the project directory withou
   assert.equal(finalized.projectRun.resultCommit, undefined);
   assert.equal(git(repositoryPath, "status", "--porcelain=v1"), "?? uncommitted.txt");
   assert.throws(() => git(repositoryPath, "rev-parse", "HEAD"));
+});
+
+test("direct workspace mode skips worktrees, commits, and merge approval in a Git repository", async (t) => {
+  const fixture = createFixture(t, [], "direct");
+  const run = await fixture.workflow.initializeRun(fixture.projectRun);
+  assert.equal(run.workspacePath, fixture.repositoryPath);
+  assert.equal(run.branchName, undefined);
+  assert.equal(run.baseCommit, undefined);
+
+  const task = await fixture.workflow.initializeTask(run, plannedTask());
+  assert.equal(task.workspacePath, fixture.repositoryPath);
+  assert.equal(task.branchName, undefined);
+
+  writeFileSync(join(fixture.repositoryPath, "src", "direct-mode.txt"), "direct\n", "utf8");
+  const finalized = await fixture.workflow.finalizeRun(run, fixture.mainSession);
+  assert.equal(finalized.needsMergeApproval, false);
+  assert.equal(finalized.projectRun.resultCommit, undefined);
+  assert.match(git(fixture.repositoryPath, "status", "--porcelain=v1"), /src\/direct-mode\.txt/);
 });
 
 test("B-033 through B-040 isolate worktrees, collect diff, verify, and merge tasks in order", async (t) => {

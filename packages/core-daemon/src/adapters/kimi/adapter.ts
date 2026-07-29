@@ -1,6 +1,6 @@
 import type { AgentInstance } from "@agenthub/domain";
 import { ProcessAdapter } from "../process-adapter.js";
-import type { AdapterDiscoveryContext, AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest } from "../types.js";
+import type { AdapterDiscoveryContext, AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest, ProviderDescriptor } from "../types.js";
 import { buildKimiResumeArgs, buildKimiStartArgs } from "./commands.js";
 import { parseKimiJsonEvent } from "./events.js";
 import { discoverKimiModels } from "./models.js";
@@ -8,6 +8,41 @@ import { startKimiAcp } from "./acp-run.js";
 
 export class KimiCodeAdapter extends ProcessAdapter {
   readonly providerId = "kimi-code";
+  readonly descriptor: ProviderDescriptor = {
+    providerId: "kimi-code",
+    name: "Kimi Code",
+    vendor: "Moonshot AI",
+    capabilities: ["headless_structured", "pty_interactive"],
+    defaultExecutable: "kimi",
+    credentialEnv: ["KIMI_API_KEY"],
+    contextWindowDiscovery: true,
+    permissionModes: [
+      {
+        value: "default",
+        name: { "zh-CN": "逐个询问", "en-US": "Ask every time" },
+        description: {
+          "zh-CN": "每次工具调用都向你确认（default）",
+          "en-US": "Confirms every tool call with you (default)"
+        }
+      },
+      {
+        value: "yolo",
+        name: { "zh-CN": "完全自主", "en-US": "Fully autonomous" },
+        description: {
+          "zh-CN": "自动批准一切，不再询问（yolo）",
+          "en-US": "Auto-approve everything without asking (yolo)"
+        }
+      },
+      {
+        value: "auto",
+        name: { "zh-CN": "自动批准安全操作", "en-US": "Auto-approve safe ops" },
+        description: {
+          "zh-CN": "安全操作自动通过，其余仍会询问（auto）",
+          "en-US": "Safe operations are auto-approved; the rest still ask (auto)"
+        }
+      }
+    ]
+  };
   readonly supportsStructuredOutput = true;
   readonly supportsResume = true;
 

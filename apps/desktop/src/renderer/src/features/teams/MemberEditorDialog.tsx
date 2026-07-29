@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { Plus, RefreshCw, Trash2, X } from "lucide-react";
+import type { PermissionPolicy } from "@agenthub/domain";
 import { useI18n, type MessageKey } from "../../lib/i18n";
+import { requestCore } from "../../lib/bridge";
 import { cn, newId } from "../../lib/utils";
 import { STRENGTH_AREA_KEYS, TASK_TYPE_KEYS } from "../../lib/types";
 import type { UiTeamMember } from "../../lib/types";
@@ -36,6 +38,7 @@ interface MemberForm {
   responsibilities: string[];
   limitations: string[];
   systemInstructions: string;
+  permissionPolicyId: string;
 }
 
 function formFromMember(member?: UiTeamMember): { form: MemberForm; strengths: StrengthRow[] } {
@@ -54,7 +57,8 @@ function formFromMember(member?: UiTeamMember): { form: MemberForm; strengths: S
         roleDescription: "",
         responsibilities: [],
         limitations: [],
-        systemInstructions: ""
+        systemInstructions: "",
+        permissionPolicyId: "default"
       },
       strengths: []
     };
@@ -73,7 +77,8 @@ function formFromMember(member?: UiTeamMember): { form: MemberForm; strengths: S
       roleDescription: member.role.description,
       responsibilities: [...member.role.responsibilities],
       limitations: [...member.role.limitations],
-      systemInstructions: member.role.systemInstructions
+      systemInstructions: member.role.systemInstructions,
+      permissionPolicyId: member.role.permissionPolicyId ?? "default"
     },
     strengths: Object.entries(member.role.strengths).map(([area, score]) => ({
       id: newId("str"),
@@ -105,6 +110,16 @@ export function MemberEditorDialog({
   const [strengthRows, setStrengthRows] = useState<StrengthRow[]>([]);
   const [customTaskDraft, setCustomTaskDraft] = useState("");
   const [errors, setErrors] = useState<{ name?: string; instance?: string }>({});
+  const [policies, setPolicies] = useState<PermissionPolicy[]>([]);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    requestCore<PermissionPolicy[]>("policy.list")
+      .then((list) => { if (!cancelled) setPolicies(list); })
+      .catch(() => { if (!cancelled) setPolicies([]); });
+    return () => { cancelled = true; };
+  }, [open]);
 
   useEffect(() => {
     if (open) {
@@ -196,7 +211,8 @@ export function MemberEditorDialog({
         responsibilities: form.responsibilities,
         strengths,
         limitations: form.limitations,
-        systemInstructions: form.systemInstructions.trim()
+        systemInstructions: form.systemInstructions.trim(),
+        permissionPolicyId: form.permissionPolicyId
       }
     });
     toast.success(t(member ? "agents.editor.savedToast" : "agents.editor.createdToast", { name: form.displayName.trim() }));
@@ -264,7 +280,9 @@ export function MemberEditorDialog({
 
             <Field
               label={t("agents.editor.basic.model")}
-              hint={modelCatalog?.warning
+              hint={form.model.trim() && !selectedModel
+                ? t("agents.editor.basic.modelCustom")
+                : modelCatalog?.warning
                 ?? (modelCatalog?.source === "provider_cli"
                   ? t("agents.editor.basic.modelLoaded", {
                     count: modelCatalog.models.length,
@@ -286,6 +304,8 @@ export function MemberEditorDialog({
                   }}
                   options={modelOptions}
                   loading={!!selectedInstance && loadingModels[selectedInstance.id]}
+                  customOptionLabel={t("agents.editor.basic.modelUseCustom")}
+                  customOptionDescription={t("agents.editor.basic.modelCustom")}
                   placeholder={modelCatalog?.defaultModel
                     ? t("agents.editor.basic.modelDefaultPlaceholder", { model: modelCatalog.defaultModel })
                     : t("agents.editor.basic.modelPlaceholder")}
@@ -416,6 +436,19 @@ export function MemberEditorDialog({
                 />
               </Field>
             </div>
+
+            <Field label={t("teams.role.permissionPolicy")} hint={t("teams.role.permissionPolicyHint")}>
+              <SelectField
+                aria-label={t("teams.role.permissionPolicy")}
+                value={form.permissionPolicyId}
+                onValueChange={(permissionPolicyId) => patch({ permissionPolicyId })}
+                options={(policies.length ? policies : [{ id: form.permissionPolicyId, name: form.permissionPolicyId }]).map((policy) => ({
+                  value: policy.id,
+                  label: policy.name || policy.id,
+                  hint: policy.id
+                }))}
+              />
+            </Field>
 
             <Field label={t("teams.role.responsibilities")}>
               <TagInput

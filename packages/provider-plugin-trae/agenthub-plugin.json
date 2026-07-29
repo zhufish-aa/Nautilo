@@ -1,0 +1,14 @@
+{
+  "id": "trae",
+  "apiVersion": 1,
+  "main": "dist/index.js",
+  "version": "0.1.0",
+  "descriptor": {
+    "providerId": "trae",
+    "name": "Trae",
+    "vendor": "ByteDance",
+    "capabilities": ["headless_text"],
+    "defaultExecutable": "traecli",
+    "credentialEnv": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "DOUBAO_API_KEY"]
+  }
+}

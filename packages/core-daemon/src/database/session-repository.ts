@@ -16,6 +16,36 @@ export class SessionRepository {
     return rows.map((row) => JSON.parse(String(row.data)) as Session);
   }
   listAll(): Session[] { return (this.db.prepare("SELECT data FROM sessions ORDER BY updated_at DESC").all() as Row[]).map((row) => JSON.parse(String(row.data)) as Session); }
+  /** Permanently removes a conversation, its nested sub-sessions, and their session-scoped records. */
+  deleteTree(id: string): string[] {
+    const sessions = this.listAll();
+    if (!sessions.some((session) => session.id === id)) return [];
+    const sessionIds = new Set<string>([id]);
+    let added = true;
+    while (added) {
+      added = false;
+      for (const session of sessions) {
+        if (session.parentSessionId && sessionIds.has(session.parentSessionId) && !sessionIds.has(session.id)) {
+          sessionIds.add(session.id);
+          added = true;
+        }
+      }
+    }
+    const ids = [...sessionIds];
+    const placeholders = ids.map(() => "?").join(", ");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const table of ["messages", "runs", "runtime_events", "artifacts"] as const) {
+        this.db.prepare(`DELETE FROM ${table} WHERE session_id IN (${placeholders})`).run(...ids);
+      }
+      this.db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids);
+      this.db.exec("COMMIT");
+      return ids;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
   saveMessage(message: Message): void { this.db.prepare("INSERT OR REPLACE INTO messages(id, session_id, data, created_at) VALUES(?, ?, ?, ?)").run(message.id, message.sessionId, JSON.stringify(message), message.createdAt); }
   messages(sessionId: string): Message[] { return (this.db.prepare("SELECT data FROM messages WHERE session_id = ? ORDER BY created_at").all(sessionId) as Row[]).map((row) => JSON.parse(String(row.data)) as Message); }
 }

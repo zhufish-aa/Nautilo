@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { BrainCircuit, Loader2 } from "lucide-react";
+import { BrainCircuit, Sparkles } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import type { RunLifecycle, TimelineEvent } from "../../lib/types";
 
@@ -45,22 +45,39 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
     ? (zh ? "等待你的批准" : "Waiting for your approval")
     : progressLabel(latest, zh);
 
+  const thinking = latest?.data.kind === "reasoning" || (latest?.data.kind === "activity" && latest.data.phase === "thinking");
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="flex items-center gap-2.5 py-1 text-[13px] text-ink-2"
+      initial={{ opacity: 0, y: 12, scale: 0.97, filter: "blur(6px)" }}
+      animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
+      transition={{ type: "spring", stiffness: 300, damping: 26 }}
+      className="run-border relative overflow-hidden rounded-2xl border border-accent/25 bg-card/80 shadow-[0_14px_44px_-16px_var(--accent)] backdrop-blur-md"
       role="status"
       aria-live="polite"
     >
-      <span className="relative flex h-6 w-6 shrink-0 items-center justify-center text-accent">
-        <span className="absolute inset-1 animate-ping rounded-full bg-accent/15" aria-hidden />
-        {latest?.data.kind === "reasoning" || (latest?.data.kind === "activity" && latest.data.phase === "thinking")
-          ? <BrainCircuit className="relative h-4 w-4" aria-hidden />
-          : <Loader2 className="relative h-4 w-4 animate-spin" aria-hidden />}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink-3">{formatElapsed(elapsedSeconds)}</span>
+      <div className="flex items-center gap-3.5 px-4 py-3">
+        <span className="relative flex h-10 w-10 shrink-0 items-center justify-center" aria-hidden>
+          <span className="run-orb-glow absolute inset-0 rounded-full bg-accent/30 blur-md" />
+          <span className="run-orb absolute inset-1 rounded-full opacity-90" />
+          <span className="relative flex h-[26px] w-[26px] items-center justify-center rounded-full bg-card text-accent shadow-inner">
+            {thinking ? <BrainCircuit className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
+          </span>
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="shimmer-text truncate text-[13px] font-medium">{label}</p>
+          <p className="mt-0.5 text-[10px] font-medium uppercase tracking-[0.22em] text-ink-3">
+            {zh ? "实时运行" : "Live run"}
+          </p>
+        </div>
+        <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-accent/25 bg-accent-soft px-2.5 py-1 font-mono text-[11px] tabular-nums text-accent">
+          <span className="relative flex h-1.5 w-1.5">
+            <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" aria-hidden />
+            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" aria-hidden />
+          </span>
+          {formatElapsed(elapsedSeconds)}
+        </span>
+      </div>
     </motion.div>
   );
 }

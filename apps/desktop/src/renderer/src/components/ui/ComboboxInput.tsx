@@ -18,6 +18,8 @@ export function ComboboxInput({
   options,
   placeholder,
   loading,
+  customOptionLabel,
+  customOptionDescription,
   className
 }: {
   id?: string;
@@ -26,17 +28,22 @@ export function ComboboxInput({
   options: ComboboxOption[];
   placeholder?: string;
   loading?: boolean;
+  customOptionLabel?: string;
+  customOptionDescription?: string;
   className?: string;
 }): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const query = value.trim().toLocaleLowerCase();
+  const customValue = value.trim();
+  const query = customValue.toLocaleLowerCase();
   const filtered = useMemo(() => {
     if (!query) return options;
     return options.filter((option) =>
       `${option.label} ${option.value}`.toLocaleLowerCase().includes(query)
     );
   }, [options, query]);
+  const exactMatch = !!query && options.some((option) => option.value.toLocaleLowerCase() === query);
+  const showCustomOption = !!customOptionLabel && !!customValue && !exactMatch;
 
   useEffect(() => {
     const close = (event: MouseEvent): void => {
@@ -67,8 +74,22 @@ export function ComboboxInput({
       >
         {loading ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden /> : <ChevronDown className="h-4 w-4" aria-hidden />}
       </button>
-      {open && filtered.length > 0 && (
+      {open && (filtered.length > 0 || showCustomOption) && (
         <div className="absolute z-60 mt-1.5 max-h-56 w-full overflow-y-auto rounded-xl border border-line bg-card p-1.5 shadow-pop">
+          {showCustomOption && (
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setOpen(false)}
+              className="mb-1 flex w-full items-start justify-between gap-3 rounded-lg bg-accent-soft px-3 py-2 text-left hover:bg-accent-soft/80 focus-visible:bg-accent-soft focus-visible:outline-none"
+            >
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-accent">{customOptionLabel}</span>
+                <span className="block truncate font-mono text-[11px] text-ink-2">{customValue}</span>
+                {customOptionDescription && <span className="mt-0.5 block text-[11px] text-ink-3">{customOptionDescription}</span>}
+              </span>
+            </button>
+          )}
           {filtered.map((option) => (
             <button
               key={option.value}

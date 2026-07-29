@@ -32,7 +32,7 @@ export function groupToolTimeline(events: TimelineEvent[]): TimelineEvent[] {
           items: pending,
           stepCount,
           callCount,
-          running: pending.some((event) => isToolCall(event) && event.data.status === "running")
+          running: pending.some(isRunningStep)
         }
       });
     }
@@ -40,7 +40,10 @@ export function groupToolTimeline(events: TimelineEvent[]): TimelineEvent[] {
   };
 
   for (const event of events) {
-    if (GROUPABLE_KINDS.has(event.data.kind)) pending.push(event);
+    // A native sub-agent dispatch is a delegation milestone, not an anonymous
+    // tool step: keep it out of the collapsed burst so it renders like one.
+    const isSubagentDispatch = event.data.kind === "tool_activity" && !!event.data.subagent;
+    if (GROUPABLE_KINDS.has(event.data.kind) && !isSubagentDispatch) pending.push(event);
     else {
       flush();
       result.push(event);
@@ -54,4 +57,13 @@ function isToolCall(event: TimelineEvent): event is TimelineEvent & {
   data: Extract<TimelineEvent["data"], { kind: "tool_activity" | "command" }>;
 } {
   return event.data.kind === "tool_activity" || event.data.kind === "command";
+}
+
+function isRunningStep(event: TimelineEvent): boolean {
+  if (event.data.kind === "reasoning") return Boolean(event.data.streaming);
+  if (event.data.kind === "tool_activity" || event.data.kind === "command") {
+    return event.data.status === "running";
+  }
+  if (event.data.kind === "verification") return event.data.status === "running";
+  return false;
 }

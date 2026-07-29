@@ -1,23 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { platform } from "node:os";
+import type { ProcessEvent, ProcessHandle, ProcessRequest } from "@agenthub/provider-sdk";
+import { resolveSpawnCommand } from "./win-command.js";
 
-export interface ProcessRequest {
-  command: string;
-  args?: string[];
-  cwd?: string;
-  env?: Record<string, string | undefined>;
-  timeoutMs?: number;
-  idleTimeoutMs?: number;
-  maxOutputBytes?: number;
-}
-
-export type ProcessEvent =
-  | { kind: "stdout"; text: string }
-  | { kind: "stderr"; text: string }
-  | { kind: "exit"; exitCode: number | null; signal?: string }
-  | { kind: "error"; error: Error }
-  | { kind: "timeout"; reason: "timeout" | "idle" | "max_output" };
+export type { ProcessEvent, ProcessHandle, ProcessRequest };
 
 interface Queue<T> {
   values: T[];
@@ -36,21 +23,14 @@ function closeQueue<T>(queue: Queue<T>): void {
   for (const waiter of queue.waiters.splice(0)) waiter({ value: undefined as T, done: true });
 }
 
-export interface ProcessHandle {
-  readonly pid?: number;
-  readonly events: AsyncIterable<ProcessEvent>;
-  readonly child: ChildProcessWithoutNullStreams;
-  write(input: string): void;
-  cancel(): Promise<void>;
-  wait(): Promise<{ exitCode: number | null; signal?: string }>;
-}
-
 export class ProcessRuntime {
   start(request: ProcessRequest): ProcessHandle {
-    const child = spawn(request.command, request.args ?? [], {
+    const resolved = resolveSpawnCommand(request.command, request.args ?? [], request.env);
+    const child = spawn(resolved.command, resolved.args, {
       cwd: request.cwd,
       shell: false,
       windowsHide: true,
+      windowsVerbatimArguments: resolved.verbatim ?? false,
       env: request.env ?? {}
     });
     const queue = createQueue<ProcessEvent>();

@@ -10,7 +10,7 @@
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client"],
+    "types": ["vite/client", "node"],
     "strict": true,
     "skipLibCheck": true,
     "isolatedModules": true,
@@ -23,7 +23,8 @@
       "@/*": ["./src/renderer/src/*"],
       "@agenthub/domain": ["../../packages/domain/src/index.ts"],
       "@agenthub/schemas": ["../../packages/schemas/src/index.ts"],
-      "@agenthub/event-protocol": ["../../packages/event-protocol/src/index.ts"]
+      "@agenthub/event-protocol": ["../../packages/event-protocol/src/index.ts"],
+      "@agenthub/provider-sdk": ["../../packages/provider-sdk/src/index.ts"]
     }
   },
   "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/renderer/src/**/*.d.ts"]

@@ -11,9 +11,12 @@ export type TaskId = string;
 export type TeamId = string;
 
 export * from "./slash-commands.js";
+export * from "./capabilities.js";
+export * from "./interactions.js";
 
 export type PlannerMode = "direct" | "delegate" | "plan";
 export type RepositoryType = "git" | "none";
+export type WorkspaceMode = "direct" | "git_isolated";
 export type RunMode =
   | "headless_structured"
   | "headless_text"
@@ -253,6 +256,8 @@ export interface Project {
   name: string;
   rootPath: string;
   repositoryType: RepositoryType;
+  /** How new Agent runs edit this project. Defaults to direct for legacy records. */
+  workspaceMode?: WorkspaceMode;
   defaultBranch?: string;
   frontendPaths: string[];
   backendPaths: string[];
@@ -310,6 +315,8 @@ export interface ProjectRun {
   mainAgentInstanceId?: AgentInstanceId;
   mainSessionId?: SessionId;
   status: ProjectRunStatus;
+  /** Snapshot of the project's workspace mode when this run started. */
+  workspaceMode?: WorkspaceMode;
   plannerDecision?: PlannerDecision;
   pendingApprovalId?: string;
   mergeApprovalId?: string;
@@ -339,11 +346,15 @@ export interface Session {
   model?: string;
   reasoningEffort?: string;
   serviceTier?: string;
+  /** CLI-native permission mode override; falls back to the agent instance setting. */
+  permissionMode?: string;
   title: string;
   status: SessionStatus;
   providerSessionId?: string;
   /** Set after persisted AgentHub history is synchronized into the provider thread. */
   providerContextSyncedAt?: string;
+  /** AgentHub runtime-tool contract installed into the native provider thread. */
+  runtimeToolVersion?: number;
   unreadCount: number;
   lastMessageAt?: string;
   createdAt: string;

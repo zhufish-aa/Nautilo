@@ -8,16 +8,21 @@ import type {
   Session,
   TaskId
 } from "@agenthub/domain";
-import { AdapterRegistry, type AdapterEvent } from "../adapters/index.js";
+import { AdapterRegistry, type AdapterEvent, type AdapterFileDiff, type AdapterInteractionInput, type AdapterMcpServer } from "../adapters/index.js";
 import { Database } from "../database/index.js";
 import { EventService } from "./event-service.js";
-import { ApprovalService, CommandPolicyService, CredentialService, EnvironmentPolicyService, RedactionService } from "./security/index.js";
+import { ApprovalService, CommandPolicyService, CredentialService, EnvironmentPolicyService, RedactionService, providerEnvironmentPassthrough } from "./security/index.js";
 import { CoreError } from "../errors.js";
 import { AuditService } from "./observability/audit-service.js";
 import { ArtifactService } from "./artifact-service.js";
 import { SessionRunQueue } from "./session-run-queue.js";
 import { RunDiffCollector } from "./run-diff-collector.js";
+import { subagentMeta } from "./subagent-detection.js";
 import { captureWorkspaceSnapshot, type WorkspaceSnapshot } from "./run-workspace-snapshot.js";
+import type { CheckpointService } from "./checkpoint-service.js";
+import { RUNTIME_TOOL_SCHEMA_VERSION, type RuntimeToolProvider } from "./runtime-tool-provider.js";
+import { capabilityToMcpServer } from "../application/capability-service.js";
+import type { InteractionService } from "../application/interaction-service.js";
 
 export interface RunContext {
   projectRunId?: ProjectRunId;
@@ -29,6 +34,10 @@ export interface RunContext {
   synchronizeProviderContext?: boolean;
   /** Provider control commands run through the native transport without appearing as chat. */
   presentation?: "chat" | "provider_command";
+  /** Provider-native control command forwarded to the adapter (e.g. Codex thread compaction). */
+  providerCommand?: "compact";
+  /** Internal marker persisted after a provider thread is created with runtime tools. */
+  runtimeToolVersion?: number;
 }
 
 export interface RunCompletion {
@@ -43,7 +52,9 @@ export interface RunHandle {
 }
 
 interface ActiveRun {
+  sessionId: string;
   cancel: () => Promise<void>;
+  steer?: (input: string) => Promise<void>;
   completion: Promise<RunCompletion>;
   projectRunId?: ProjectRunId;
 }
@@ -57,6 +68,9 @@ export class RunService {
   private readonly touchedFiles = new Map<string, Map<string, { path: string; changeType: GitChangedFile["changeType"] }>>();
   private readonly workspaceBaselines = new Map<string, WorkspaceSnapshot>();
   private readonly sessionQueue = new SessionRunQueue();
+  private runtimeToolProvider?: RuntimeToolProvider;
+  private interactions?: InteractionService;
+  private checkpoints?: CheckpointService;
 
   constructor(
     private readonly database: Database,
@@ -70,6 +84,18 @@ export class RunService {
     private readonly audit?: AuditService
   ) {
     this.artifactService = new ArtifactService(database);
+  }
+
+  setRuntimeToolProvider(provider: RuntimeToolProvider): void {
+    this.runtimeToolProvider = provider;
+  }
+
+  setInteractionService(interactions: InteractionService): void {
+    this.interactions = interactions;
+  }
+
+  setCheckpointService(checkpoints: CheckpointService): void {
+    this.checkpoints = checkpoints;
   }
 
   async cancel(runId: string): Promise<void> {
@@ -99,6 +125,20 @@ export class RunService {
     await Promise.all(runIds.map((runId) => this.cancel(runId)));
   }
 
+  /** True when the session's in-flight turn can accept immediate guidance. */
+  canSteer(sessionId: string): boolean {
+    const active = [...this.active.values()].find((run) => run.sessionId === sessionId);
+    return typeof active?.steer === "function";
+  }
+
+  /** Sends new user guidance into an in-flight provider turn without cancelling it. */
+  async steerSession(sessionId: string, input: string): Promise<void> {
+    const active = [...this.active.values()].find((run) => run.sessionId === sessionId);
+    if (!active) throw new CoreError("IPC_INVALID_REQUEST", { field: "sessionId", reason: "There is no active run to guide." });
+    if (!active.steer) throw new CoreError("IPC_INVALID_REQUEST", { field: "sessionId", reason: "The active provider does not support immediate guidance. Use Queue instead." });
+    await active.steer(input);
+  }
+
   async start(
     session: Session,
     agent: AgentInstance,
@@ -124,7 +164,7 @@ export class RunService {
     context: RunContext
   ): Promise<RunHandle> {
     let contextWindow: number | undefined;
-    if (agent.providerId === "kimi-code") {
+    if (this.adapters.find(agent.providerId)?.descriptor?.contextWindowDiscovery) {
       const catalog = await this.adapters.listModels(agent).catch(() => undefined);
       const modelId = session.model || catalog?.defaultModel;
       const discoveredContextWindow = catalog?.models.find((model) => model.id === modelId)?.contextWindow;
@@ -182,8 +222,12 @@ export class RunService {
     if (context.presentation !== "provider_command") this.events.append(session, run, "run.started", { runId });
 
     const additions = {
+      ...providerEnvironmentPassthrough(agent, process.env, this.adapters.find(agent.providerId)?.descriptor),
       ...this.credentials?.environment(agent.id, agent.providerId)
     };
+    const runtimeToolBinding = context.presentation === "provider_command"
+      ? undefined
+      : this.runtimeToolProvider?.forRun(session, context);
     const request = {
       instance: agent,
       prompt,
@@ -191,34 +235,65 @@ export class RunService {
       model: session.model,
       reasoningEffort: session.reasoningEffort,
       serviceTier: session.serviceTier,
+      permissionMode: session.permissionMode,
       contextWindow,
       env: this.environment.build(policy, additions),
       timeoutMs: 30 * 60_000,
-      idleTimeoutMs: 5 * 60_000,
-      localImagePaths: context.localImagePaths
+      idleTimeoutMs: 30 * 60_000,
+      localImagePaths: context.localImagePaths,
+      providerCommand: context.providerCommand,
+      mcpServers: this.resolveMcpServers(agent),
+      ...(runtimeToolBinding ? { runtimeTools: runtimeToolBinding.tools, executeRuntimeTool: runtimeToolBinding.execute } : {}),
+      ...(this.interactions && context.presentation !== "provider_command"
+        ? { requestInteraction: (input: AdapterInteractionInput) => this.interactions!.request(session, runId, agent.providerId, input) }
+        : {})
     };
 
     try {
       if (context.presentation !== "provider_command") {
         const isGitWorkspace = await this.diffCollector.isGitWorkspace(request.cwd).catch(() => false);
+        let snapshot: WorkspaceSnapshot | undefined;
         if (!isGitWorkspace) {
-          const baseline = await captureWorkspaceSnapshot(request.cwd).catch(() => undefined);
-          if (baseline) this.workspaceBaselines.set(runId, baseline);
+          snapshot = await captureWorkspaceSnapshot(request.cwd).catch(() => undefined);
+          if (snapshot) this.workspaceBaselines.set(runId, snapshot);
+        }
+        // Per-turn checkpoint ("回滚到此轮之前"): same bounded snapshot, reused
+        // for the non-git diff baseline when both apply.
+        if (this.checkpoints) {
+          snapshot ??= await captureWorkspaceSnapshot(request.cwd).catch(() => undefined);
+          if (snapshot) await this.checkpoints.save(session, run, snapshot).catch(() => undefined);
         }
       }
       const currentSession = this.database.sessions.get(session.id) ?? session;
-      const adapterRun = currentSession.providerSessionId && this.adapters.capabilities(agent).nativeResume
+      const mustRecreateCodexThread = agent.providerId === "codex"
+        && Boolean(runtimeToolBinding)
+        && currentSession.runtimeToolVersion !== RUNTIME_TOOL_SCHEMA_VERSION;
+      const adapterRun = currentSession.providerSessionId && this.adapters.capabilities(agent).nativeResume && !mustRecreateCodexThread
         ? this.adapters.resume({ ...request, providerSessionId: currentSession.providerSessionId })
         : this.adapters.start(request);
-      const completion = this.consume(run, currentSession, adapterRun.events, context);
-      this.active.set(runId, { cancel: adapterRun.cancel, completion, projectRunId: context.projectRunId });
-      void completion.finally(() => this.active.delete(runId));
+      const completion = this.consume(run, currentSession, adapterRun.events, {
+        ...context,
+        runtimeToolVersion: runtimeToolBinding ? RUNTIME_TOOL_SCHEMA_VERSION : context.runtimeToolVersion
+      });
+      this.active.set(runId, { sessionId: session.id, cancel: adapterRun.cancel, steer: adapterRun.steer, completion, projectRunId: context.projectRunId });
+      void completion.finally(() => {
+        this.active.delete(runId);
+        this.interactions?.cancelForRun(runId);
+      });
       return { runId, completion };
     } catch (error) {
       this.workspaceBaselines.delete(runId);
       const failed = this.failRun(run, session, error, context.presentation === "provider_command");
       return { runId, completion: Promise.resolve({ run: failed, messages: [] }) };
     }
+  }
+
+  /** User-managed MCP servers enabled for this run's provider, with env passthrough resolved. */
+  private resolveMcpServers(agent: AgentInstance): AdapterMcpServer[] {
+    return this.database.capabilities.list()
+      .filter((capability) => capability.enabled && capability.providerIds.includes(agent.providerId))
+      .map((capability) => capabilityToMcpServer(capability))
+      .filter((server): server is AdapterMcpServer => server !== undefined);
   }
 
   private async consume(
@@ -308,18 +383,22 @@ export class RunService {
   ): Promise<Message | undefined> {
     if (event.kind === "message") {
       const messageId = event.messageId ?? "default";
+      // Sub-agent messages share the run with the main agent; keep their delta
+      // buffers separate and never persist them as chat history, otherwise they
+      // would leak into the provider context replayed on the next turn.
+      const bufferKey = event.subagentDispatchId ? `sub:${event.subagentDispatchId}:${messageId}` : messageId;
       if (event.phase === "delta") {
         const buffers = this.messageBuffers.get(run.id) ?? new Map<string, string>();
-        buffers.set(messageId, `${buffers.get(messageId) ?? ""}${event.text}`);
+        buffers.set(bufferKey, `${buffers.get(bufferKey) ?? ""}${event.text}`);
         this.messageBuffers.set(run.id, buffers);
         if (context.presentation !== "provider_command") {
-          this.events.append(session, run, "agent.message_delta", { messageId, text: this.redaction.text(event.text) });
+          this.events.append(session, run, "agent.message_delta", { messageId: bufferKey, text: this.redaction.text(event.text), subagentDispatchId: event.subagentDispatchId });
         }
         return undefined;
       }
-      const buffered = this.messageBuffers.get(run.id)?.get(messageId);
+      const buffered = this.messageBuffers.get(run.id)?.get(bufferKey);
       const finalText = event.text || buffered || "";
-      this.messageBuffers.get(run.id)?.delete(messageId);
+      this.messageBuffers.get(run.id)?.delete(bufferKey);
       if (!finalText) return undefined;
       const message: Message = {
         id: randomUUID(),
@@ -334,16 +413,16 @@ export class RunService {
         createdAt: new Date().toISOString()
       };
       if (context.presentation !== "provider_command") {
-        this.database.sessions.saveMessage(message);
-        this.events.append(session, run, "agent.message", { messageId: message.id, text: message.text });
+        if (!event.subagentDispatchId) this.database.sessions.saveMessage(message);
+        this.events.append(session, run, "agent.message", { messageId: message.id, text: message.text, subagentDispatchId: event.subagentDispatchId });
       }
       return message;
     }
     if (event.kind === "thinking" && event.phase === "delta") {
-      if (context.presentation !== "provider_command") this.events.append(session, run, "agent.thinking_delta", { messageId: event.messageId ?? "default", text: this.redaction.text(event.text) });
+      if (context.presentation !== "provider_command") this.events.append(session, run, "agent.thinking_delta", { messageId: event.messageId ?? "default", text: this.redaction.text(event.text), subagentDispatchId: event.subagentDispatchId });
     }
     else if (event.kind === "thinking") {
-      if (context.presentation !== "provider_command") this.events.append(session, run, "agent.thinking_summary", { messageId: event.messageId, text: this.redaction.text(event.text) });
+      if (context.presentation !== "provider_command") this.events.append(session, run, "agent.thinking_summary", { messageId: event.messageId, text: this.redaction.text(event.text), subagentDispatchId: event.subagentDispatchId });
     }
     else if (event.kind === "status") {
       if (context.presentation !== "provider_command") this.events.append(session, run, "agent.status", { phase: event.phase });
@@ -355,6 +434,7 @@ export class RunService {
         ...current,
         providerSessionId: event.providerSessionId,
         providerContextSyncedAt: now,
+        runtimeToolVersion: context.runtimeToolVersion ?? current.runtimeToolVersion,
         updatedAt: now
       });
     } else if (event.kind === "usage") this.events.append(session, run, "usage.updated", {
@@ -395,26 +475,46 @@ export class RunService {
         path: event.path
       });
     }
-    else if (event.kind === "tool" && event.phase === "completed") this.events.append(session, run, "tool.finished", { callId: event.callId, toolName: event.name, success: event.success ?? true, outputSummary: this.eventDetail(event.output, 2_000) });
-    else if (event.kind === "tool") this.events.append(session, run, "tool.started", { callId: event.callId, toolName: event.name, inputSummary: this.eventDetail(event.input, 2_000) });
+    else if (event.kind === "tool" && event.phase === "completed") this.events.append(session, run, "tool.finished", {
+      callId: event.callId,
+      toolName: event.name,
+      success: event.success ?? true,
+      inputSummary: this.eventDetail(event.input, this.toolInputLimit(event.name)),
+      outputSummary: this.eventDetail(event.output, 2_000),
+      fileDiff: this.eventFileDiff(event.fileDiff),
+      subagent: subagentMeta(event.name, event.input),
+      subagentDispatchId: event.subagentDispatchId
+    });
+    else if (event.kind === "tool") this.events.append(session, run, "tool.started", {
+      callId: event.callId,
+      toolName: event.name,
+      inputSummary: this.eventDetail(event.input, this.toolInputLimit(event.name)),
+      fileDiff: this.eventFileDiff(event.fileDiff),
+      subagent: subagentMeta(event.name, event.input),
+      subagentDispatchId: event.subagentDispatchId
+    });
     else if (event.kind === "command" && event.phase === "completed") this.events.append(session, run, "command.finished", {
       callId: event.callId,
       command: event.command,
       exitCode: event.exitCode ?? 0,
       durationMs: 0,
-      outputSummary: event.output ? this.redaction.text(event.output.slice(0, 2_000)) : undefined
+      outputSummary: event.output ? this.redaction.text(event.output.slice(0, 2_000)) : undefined,
+      subagentDispatchId: event.subagentDispatchId
     });
-    else if (event.kind === "command") this.events.append(session, run, "command.started", { callId: event.callId, command: event.command, cwd: context.workingDirectory ?? this.database.projects.get(session.projectId)?.rootPath ?? process.cwd() });
+    else if (event.kind === "command") this.events.append(session, run, "command.started", { callId: event.callId, command: event.command, cwd: context.workingDirectory ?? this.database.projects.get(session.projectId)?.rootPath ?? process.cwd(), subagentDispatchId: event.subagentDispatchId });
     else if (event.kind === "file") {
       const changeType = normalizeChangeType(event.changeType);
       const touched = this.touchedFiles.get(run.id) ?? new Map();
       touched.set(event.path, { path: event.path, changeType });
       this.touchedFiles.set(run.id, touched);
+      // Providers (e.g. Codex file_change) often ship only the unified patch,
+      // so derive the +/- counts from it when explicit numbers are missing.
+      const derived = diffLineCounts(event.diff);
       this.events.append(session, run, "file.changed", {
         path: event.path,
         changeType,
-        additions: event.additions,
-        deletions: event.deletions,
+        additions: event.additions ?? derived.additions,
+        deletions: event.deletions ?? derived.deletions,
         diff: event.diff ? this.redaction.text(event.diff) : undefined
       });
     }
@@ -436,6 +536,16 @@ export class RunService {
     this.outputTails.set(runId, `${this.outputTails.get(runId) ?? ""}${redacted}`.slice(-8_192));
   }
 
+  /**
+   * Todo-tracking tools (Kimi TodoList, Claude TodoWrite, Codex update_plan)
+   * carry the whole task list in their input; the desktop goal card needs the
+   * full JSON, so those inputs get a larger summary budget than other tools.
+   */
+  private toolInputLimit(toolName: string): number {
+    const normalized = toolName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    return ["todolist", "todo_list", "todowrite", "todo_write", "update_plan"].includes(normalized) ? 16_000 : 2_000;
+  }
+
   private eventDetail(value: unknown, limit: number): string | undefined {
     if (value === undefined || value === null) return undefined;
     let detail: string;
@@ -448,12 +558,28 @@ export class RunService {
     return this.redaction.text(detail.slice(0, limit));
   }
 
+  private eventFileDiff(value: AdapterFileDiff | undefined): AdapterFileDiff & { truncated?: boolean } | undefined {
+    if (!value) return undefined;
+    const limit = 20_000;
+    const truncated = value.before.length > limit || value.after.length > limit;
+    return {
+      operation: value.operation,
+      path: value.path,
+      before: value.before.slice(0, limit),
+      after: value.after.slice(0, limit),
+      truncated: truncated || undefined
+    };
+  }
+
   private async collectRunDiff(run: AgentRun, session: Session, context: RunContext): Promise<void> {
     const touched = [...(this.touchedFiles.get(run.id)?.values() ?? [])];
     if (!touched.length) return;
     const project = this.database.projects.get(session.projectId);
     const cwd = context.workingDirectory ?? project?.rootPath;
     if (!cwd) return;
+    // Persist the touched set for checkpoint revert scope, even when the run
+    // ends up with no net diff.
+    this.checkpoints?.recordTouched(run.id, cwd, touched.map((file) => file.path));
     const files = await this.diffCollector.collect(cwd, touched, this.workspaceBaselines.get(run.id)).catch(() => []);
     if (!files.length) return;
     const artifact = this.artifactService.save({
@@ -471,6 +597,18 @@ export class RunService {
       fileCount: files.length
     });
   }
+}
+
+function diffLineCounts(diff?: string): { additions?: number; deletions?: number } {
+  if (!diff) return {};
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) additions += 1;
+    else if (line.startsWith("-")) deletions += 1;
+  }
+  return { additions, deletions };
 }
 
 function normalizeChangeType(value?: string): GitChangedFile["changeType"] {

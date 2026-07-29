@@ -1,0 +1,14 @@
+{
+  "id": "template-cli",
+  "apiVersion": 1,
+  "main": "dist/index.js",
+  "version": "0.1.0",
+  "descriptor": {
+    "providerId": "template-cli",
+    "name": "Template CLI",
+    "vendor": "Example",
+    "capabilities": ["headless_text"],
+    "defaultExecutable": "template-cli",
+    "credentialEnv": ["TEMPLATE_API_KEY"]
+  }
+}

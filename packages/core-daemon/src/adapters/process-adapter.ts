@@ -1,6 +1,6 @@
 import type { AgentInstance } from "@agenthub/domain";
 import { ProcessRuntime, type ProcessHandle, type ProcessRequest } from "../process-runtime.js";
-import type { AdapterCapabilities, AdapterDetectionResult, AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest, AgentCliAdapter } from "./types.js";
+import type { AdapterCapabilities, AdapterDetectionResult, AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest, AgentCliAdapter, ProviderDescriptor } from "./types.js";
 import { normalizeJson } from "./normalize.js";
 import { EnvironmentPolicyService } from "../runtime/security/environment-policy.js";
 
@@ -40,6 +40,7 @@ export function streamEvents(process: ProcessHandle, structured: boolean, parse:
 
 export abstract class ProcessAdapter implements AgentCliAdapter {
   abstract readonly providerId: string;
+  abstract readonly descriptor: ProviderDescriptor;
   abstract readonly supportsStructuredOutput: boolean;
   abstract readonly supportsResume: boolean;
   get capabilities(): AdapterCapabilities {
