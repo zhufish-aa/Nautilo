@@ -186,6 +186,13 @@ test("B-047 marks interrupted persisted work as recoverable after daemon restart
   database.sessions.save(session({ projectRunId: "project-run", providerSessionId: "provider-session" }));
   database.tasks.save({ id: "task", projectRunId: "project-run", title: "Task", objective: "Work", taskType: "code", assignedMemberId: "main", dependencies: [], allowedPaths: [], acceptanceCriteria: [], status: "running", attempt: 1, priority: 0, createdAt: now, updatedAt: now });
   database.runs.save({ id: "agent-run", projectRunId: "project-run", taskId: "task", sessionId: "session", agentInstanceId: "agent", memberId: "main", mode: "headless_text", status: "running", startedAt: now });
+  // Simulate a run that died mid-turn: started, with a dangling tool step,
+  // but no terminal event in the log.
+  const appendEvent = (eventId, type, payload, sequence) => database.events.append({
+    schemaVersion: 1, eventId, sequence, projectId: "project", runId: "agent-run", projectRunId: "project-run", taskId: "task", sessionId: "session", type, timestamp: now, payload
+  });
+  appendEvent("ev-run-started", "run.started", { runId: "agent-run" }, 1);
+  appendEvent("ev-tool-started", "tool.started", { toolName: "Edit", inputSummary: "edit file" }, 2);
   database.close();
 
   const daemon = new CoreDaemon({ dataDir, databasePath, enableGitWorkflows: false });
@@ -194,6 +201,18 @@ test("B-047 marks interrupted persisted work as recoverable after daemon restart
   assert.equal(daemon.database.tasks.get("task")?.status, "waiting_user");
   assert.equal(daemon.database.projectRuns.get("project-run")?.status, "paused");
   assert.equal(daemon.recovery.list()[0]?.canResumeProviderSession, true);
+  // The dead run gets the terminal event it never emitted, so replayed
+  // timelines can settle dangling "running" steps.
+  const terminalEvents = daemon.database.events.replay({ sessionId: "session" })
+    .filter((event) => (event.type === "run.completed" || event.type === "run.failed") && event.runId === "agent-run");
+  assert.equal(terminalEvents.length, 1);
+  assert.equal(terminalEvents[0].type, "run.failed");
+  assert.equal(terminalEvents[0].payload.code, "DAEMON_RESTARTED");
+  // Re-running recovery must not append a duplicate terminal event.
+  daemon.recovery.recoverInterrupted();
+  const afterSecondPass = daemon.database.events.replay({ sessionId: "session" })
+    .filter((event) => (event.type === "run.completed" || event.type === "run.failed") && event.runId === "agent-run");
+  assert.equal(afterSecondPass.length, 1);
   await daemon.stop();
 });
 

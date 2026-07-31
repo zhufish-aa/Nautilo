@@ -17,6 +17,8 @@ export class CodexAdapter extends ProcessAdapter {
     capabilities: ["headless_structured", "long_running_stdin"],
     defaultExecutable: "codex",
     credentialEnv: ["OPENAI_API_KEY", "CODEX_API_KEY"],
+    envPassthrough: ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"],
+    baseUrlEnv: "OPENAI_BASE_URL",
     configProfile: true,
     permissionModes: [
       {

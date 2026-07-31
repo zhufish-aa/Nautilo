@@ -11,12 +11,32 @@ export interface SessionTurnContext {
   recovered: boolean;
 }
 
+/**
+ * Prepended when a "work" session (re)creates its provider thread: the CLI is
+ * told its job is producing office artifacts in the workspace, not editing a
+ * code repository. Injected only on thread (re)creation — afterwards the
+ * provider thread itself carries the instruction.
+ */
+export function workModeGuidance(workspaceRoot?: string): string {
+  return [
+    "<agenthub_work_mode>",
+    "This is an AgentHub Work session. Your job is producing office deliverables, not modifying a code repository.",
+    workspaceRoot ? `Write every deliverable inside the workspace directory: ${workspaceRoot}` : "Write every deliverable inside the session workspace directory.",
+    "Prefer real office formats: .docx for documents, .xlsx for spreadsheets, .pptx for slides, .md for drafts/notes, .csv for raw data.",
+    "If your environment provides office skills (documents, spreadsheets, presentations, research), follow their workflow and verification rules.",
+    "Whenever you create or update a deliverable, end your reply with the exact file path(s) so the user can preview them.",
+    "</agenthub_work_mode>"
+  ].join("\n");
+}
+
 export function buildSessionTurnContext(input: {
   currentText: string;
   messages: Message[];
   artifacts: Artifact[];
   currentAttachments?: Artifact[];
   recoverProviderContext: boolean;
+  workMode?: boolean;
+  workspaceRoot?: string;
 }): SessionTurnContext {
   const currentAttachments = input.currentAttachments ?? [];
   const images = input.artifacts.filter((artifact) => artifact.kind === "image" && artifact.path && existsSync(artifact.path));
@@ -26,8 +46,9 @@ export function buildSessionTurnContext(input: {
     ...(latestImage ? [latestImage] : [])
   ])];
   if (!input.recoverProviderContext) return { prompt: input.currentText, localImagePaths, recovered: false };
+  const guidance = input.workMode ? workModeGuidance(input.workspaceRoot) : "";
   if (input.messages.length === 0 && input.artifacts.length === 0) {
-    return { prompt: input.currentText, localImagePaths, recovered: true };
+    return { prompt: [guidance, input.currentText].filter(Boolean).join("\n\n"), localImagePaths, recovered: true };
   }
 
   const transcript = selectHistory(input.messages)
@@ -37,6 +58,7 @@ export function buildSessionTurnContext(input: {
     `- ${artifact.kind}: ${artifact.name}${artifact.path ? ` (${artifact.path})` : ""}`
   ).join("\n");
   const prompt = [
+    guidance,
     "<agenthub_recovered_context>",
     "AgentHub recovered the following conversation history and artifacts from its persistent session store because the provider thread was recreated or its synchronization state was unknown. Treat this as prior context, not as a new user request.",
     transcript || "(No earlier chat messages.)",

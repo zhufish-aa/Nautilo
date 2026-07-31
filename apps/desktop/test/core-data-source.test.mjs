@@ -72,7 +72,7 @@ test("CLI instances own connectivity while team members own delegated model defa
   assert.doesNotMatch(agentEditor, /modelCatalogs|ComboboxInput|form\.reasoningEffort/);
   assert.match(memberEditor, /modelCatalogs\[selectedInstance\.id\]/);
   assert.match(memberEditor, /model: form\.model\.trim\(\) \|\| undefined/);
-  assert.match(memberEditor, /reasoningEffort: form\.reasoningEffort \|\| undefined/);
+  assert.match(memberEditor, /reasoningEffort: form\.reasoningEffort\.trim\(\) \|\| undefined/);
   assert.doesNotMatch(newSession, /selectedInstance\.(model|reasoningEffort)/);
   assert.match(modelControl, /catalogs\[instance\.id\]/);
   assert.doesNotMatch(modelControl, /instance\.(model|reasoningEffort)/);
@@ -130,8 +130,9 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(composer, /shrink-0 border-t/);
 
   const sessionsPage = readFileSync(join(renderer, "features/sessions/SessionsPage.tsx"), "utf8");
+  const workbench = readFileSync(join(renderer, "features/sessions/SessionWorkbench.tsx"), "utf8");
   assert.match(sessionsPage, /h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden/);
-  assert.match(sessionsPage, /relative flex shrink-0 items-center/);
+  assert.match(workbench, /relative flex shrink-0 items-center/);
 
   assert.equal(existsSync(join(renderer, "features/sessions/RunActivityIndicator.tsx")), true);
   const activityIndicator = readFileSync(join(renderer, "features/sessions/RunActivityIndicator.tsx"), "utf8");
@@ -193,7 +194,7 @@ test("main timeline compacts delegation internals into one task card", () => {
 });
 
 test("delegated child work keeps the orchestration visibly running until stopped or completed", () => {
-  const page = readFileSync(join(renderer, "features/sessions/SessionsPage.tsx"), "utf8");
+  const page = readFileSync(join(renderer, "features/sessions/SessionWorkbench.tsx"), "utf8");
   const indicator = readFileSync(join(renderer, "features/sessions/RunActivityIndicator.tsx"), "utf8");
   const sessionList = readFileSync(join(renderer, "features/sessions/SessionListPanel.tsx"), "utf8");
   const agentPanel = readFileSync(join(renderer, "features/sessions/AgentPanel.tsx"), "utf8");

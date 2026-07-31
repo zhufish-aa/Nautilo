@@ -172,16 +172,23 @@ export function SessionListPanel({
   activeSessionId,
   onSelect,
   onNew,
-  onDelete
+  onDelete,
+  mode
 }: {
   activeSessionId?: string;
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (session: UiSession) => void;
+  /** When set, only sessions of this mode are listed (undefined means "code"). */
+  mode?: "code" | "work";
 }): JSX.Element {
   const { t } = useI18n();
-  const sessions = useSessionsStore((state) => state.sessions);
+  const allSessions = useSessionsStore((state) => state.sessions);
   const projects = useProjectsStore((state) => state.projects);
+  const sessions = useMemo(
+    () => mode ? allSessions.filter((session) => (session.mode ?? "code") === mode) : allSessions,
+    [allSessions, mode]
+  );
 
   const grouped = useMemo(() => {
     const map = new Map<string, SessionTreeEntry[]>();

@@ -360,6 +360,7 @@ function toDomainSession(session: UiSession, _team?: UiTeam): DomainSession {
     reasoningEffort: session.reasoningEffort,
     serviceTier: session.serviceTier,
     permissionMode: session.permissionMode,
+    mode: session.mode,
     title: session.title,
     status: session.status,
     unreadCount: session.unreadCount,
@@ -736,6 +737,9 @@ function appendRuntimeEvents(
   const latestTool = new Map<string, string>();
   const latestCommand = new Map<string, string>();
   const runningRows = new Map<number, string>();
+  // Streaming message rows per run; closed below once the run reaches a
+  // terminal event so a killed run cannot leave a row blinking forever.
+  const streamingMessageRows = new Map<number, string>();
 
   const push = (event: RuntimeEvent, data: TimelinePayload): number => {
     timeline.push({ id: event.eventId, sessionId: String(event.sessionId), sequence: event.sequence, timestamp: event.timestamp, data });
@@ -784,7 +788,9 @@ function appendRuntimeEvents(
       const key = `${runId}:${event.payload.messageId}`;
       const index = streaming.get(key);
       if (index === undefined) {
-        streaming.set(key, push(event, { kind: "message", sender: "agent", text: event.payload.text, streaming: true, messageId: event.payload.messageId }));
+        const row = push(event, { kind: "message", sender: "agent", text: event.payload.text, streaming: true, messageId: event.payload.messageId });
+        streaming.set(key, row);
+        streamingMessageRows.set(row, runId);
       } else {
         const current = timeline[index].data;
         if (current.kind === "message") timeline[index] = { ...timeline[index], data: { ...current, text: current.text + event.payload.text } };
@@ -926,6 +932,11 @@ function appendRuntimeEvents(
     if (!terminalRuns.has(runId)) continue;
     const current = timeline[index].data;
     if (current.kind === "reasoning") timeline[index] = { ...timeline[index], data: { ...current, streaming: false } };
+  }
+  for (const [index, runId] of streamingMessageRows) {
+    if (!terminalRuns.has(runId)) continue;
+    const current = timeline[index].data;
+    if (current.kind === "message" && current.streaming) timeline[index] = { ...timeline[index], data: { ...current, streaming: false } };
   }
 }
 
@@ -1103,6 +1114,7 @@ function toUiSession(session: DomainSession, projectRun: ProjectRun, team: UiTea
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     serviceTier: session.serviceTier,
+    mode: session.mode,
     // A ProjectRun may remain executing while delegated child sessions work in
     // the background. Preserve the provider session's own status so the main
     // conversation becomes available as soon as its planning turn finishes.

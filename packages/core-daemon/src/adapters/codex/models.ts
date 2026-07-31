@@ -16,11 +16,78 @@ interface CodexModelListResponse {
   nextCursor?: string | null;
 }
 
-/** Uses Codex's documented app-server model/list endpoint for the effective local catalog. */
+const DEFAULT_CODEX_API_BASE_URL = "https://api.openai.com/v1";
+
+/**
+ * Reasoning efforts offered as suggestions when the API catalog omits them.
+ * Codex treats the value as a free-form string advertised per model; the common
+ * levels are listed so API-discovered models stay configurable, and the UI still
+ * accepts custom values on top.
+ */
+const CODEX_API_MODEL_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"];
+
+/**
+ * API-first discovery: query the OpenAI-compatible GET {baseUrl}/models with the
+ * instance's stored credential; fall back to the local CLI app-server when no
+ * credential/base URL is configured or the request fails.
+ */
 export async function discoverCodexModels(instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<ProviderModelCatalog> {
-  const runtime = new ProcessRuntime();
   const environment = new EnvironmentPolicyService();
   const env = environment.build(undefined, context?.env);
+  let apiWarning: string | undefined;
+  try {
+    const apiCatalog = await discoverCodexModelsViaApi(instance, env);
+    if (apiCatalog) return apiCatalog;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[agenthub] codex API model discovery failed (${reason}); falling back to the local CLI`);
+    apiWarning = `模型列表 API 请求失败（${reason}），已回退到本机 CLI 获取。`;
+  }
+  const catalog = await discoverCodexModelsViaCli(instance, env);
+  return apiWarning ? { ...catalog, warning: apiWarning } : catalog;
+}
+
+async function discoverCodexModelsViaApi(instance: AgentInstance, env: Record<string, string>): Promise<ProviderModelCatalog | undefined> {
+  const configured = instance.providerOptions?.baseUrl;
+  const baseUrlOption = typeof configured === "string" && configured.trim() ? configured.trim() : env.OPENAI_BASE_URL?.trim();
+  const apiKey = env.OPENAI_API_KEY?.trim() || env.CODEX_API_KEY?.trim();
+  // Without an explicit base URL the API path only makes sense with a credential;
+  // local no-auth endpoints (env_key-less providers) are reachable by URL alone.
+  if (!baseUrlOption && !apiKey) return undefined;
+  const baseUrl = (baseUrlOption || DEFAULT_CODEX_API_BASE_URL).replace(/\/+$/, "");
+  const response = await fetch(`${baseUrl}/models`, {
+    headers: {
+      accept: "application/json",
+      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {})
+    },
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (!response.ok) throw new Error(`Codex API /models request failed (${response.status})`);
+  const catalog = parseCodexApiModelList(await response.json());
+  if (!catalog.models.length) throw new Error("Codex API /models returned an empty list");
+  return catalog;
+}
+
+export function parseCodexApiModelList(value: unknown): ProviderModelCatalog {
+  const data = asRecord(value).data;
+  const models = (Array.isArray(data) ? data : [])
+    .map((entry): ProviderModel | undefined => {
+      const id = stringValue(asRecord(entry).id);
+      if (!id) return undefined;
+      return { id, displayName: id, isDefault: false, capabilities: [], reasoningEfforts: [...CODEX_API_MODEL_REASONING_EFFORTS], serviceTiers: [] };
+    })
+    .filter((model): model is ProviderModel => model !== undefined);
+  return {
+    providerId: "codex",
+    models,
+    source: "provider_api",
+    fetchedAt: new Date().toISOString()
+  };
+}
+
+/** Uses Codex's documented app-server model/list endpoint for the effective local catalog. */
+async function discoverCodexModelsViaCli(instance: AgentInstance, env: Record<string, string>): Promise<ProviderModelCatalog> {
+  const runtime = new ProcessRuntime();
   const invocation = resolveCodexInvocation(instance.executable, buildCodexAppServerArgs(instance, env), env.PATH);
   const process = runtime.start({
     command: invocation.command,

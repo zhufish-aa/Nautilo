@@ -46,6 +46,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
   const [advancedDetails, setAdvancedDetails] = useState(false);
   const [previousStandardModelId, setPreviousStandardModelId] = useState<string>();
   const [customModelId, setCustomModelId] = useState("");
+  const [customEffort, setCustomEffort] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
   const instances = useAgentsStore((state) => state.instances);
@@ -136,6 +137,11 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
   const selectEffort = (nextEffort: string): void => {
     void configureWorkbenchSession(sessionId, { reasoningEffort: nextEffort });
     setView("summary");
+  };
+  const selectCustomEffort = (): void => {
+    const nextEffort = customEffort.trim();
+    if (!nextEffort) return;
+    selectEffort(nextEffort);
   };
   const selectPermission = (nextMode: string): void => {
     // Empty selection clears the session override so the instance setting applies.
@@ -373,6 +379,43 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
 
                 {view === "efforts" && (
                   <SelectionList title={t("agents.editor.basic.reasoning")} onBack={() => setView("summary")}>
+                    <form
+                      className="border-b border-line px-2 py-2"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        selectCustomEffort();
+                      }}
+                    >
+                      <div className="flex gap-2">
+                        <Input
+                          value={customEffort}
+                          onChange={(event) => setCustomEffort(event.target.value)}
+                          placeholder={t("agents.editor.basic.reasoningCustomPlaceholder")}
+                          aria-label={t("agents.editor.basic.reasoningCustomPlaceholder")}
+                          autoComplete="off"
+                          spellCheck={false}
+                          className="h-9 min-w-0 flex-1 font-mono text-xs"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!customEffort.trim()}
+                          className="shrink-0 rounded-lg bg-accent px-3 text-xs font-medium text-white outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {t("common.confirm")}
+                        </button>
+                      </div>
+                      <p className="mt-1.5 px-0.5 text-[11px] leading-4 text-ink-3">
+                        {t("agents.editor.basic.reasoningCustom")}
+                      </p>
+                    </form>
+                    {effort && !model?.reasoningEfforts.includes(effort) && (
+                      <SelectionItem
+                        label={effortLabel(effort)}
+                        description={t("agents.editor.basic.reasoningCustomCurrent")}
+                        selected
+                        onClick={() => selectEffort(effort)}
+                      />
+                    )}
                     {(model?.reasoningEfforts ?? []).map((item) => (
                       <SelectionItem
                         key={item}

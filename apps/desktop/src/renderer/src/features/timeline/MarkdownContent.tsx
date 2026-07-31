@@ -37,6 +37,24 @@ function renderWithFileRefs(children: ReactNode, inverted: boolean): ReactNode {
 }
 
 export function MarkdownContent({ source, inverted = false }: { source: string; inverted?: boolean }): JSX.Element {
+  // Remounts (mode switches, drawer toggles) would re-parse every message in
+  // the timeline; the rendered tree for a static source never changes, so
+  // cache it. Streaming messages churn through sources and simply miss.
+  const key = `${inverted ? "1" : "0"}${source}`;
+  const cached = markdownRenderCache.get(key);
+  if (cached) return cached;
+  const rendered = renderMarkdown(source, inverted);
+  if (markdownRenderCache.size >= 150) {
+    const oldest = markdownRenderCache.keys().next().value;
+    if (oldest !== undefined) markdownRenderCache.delete(oldest);
+  }
+  markdownRenderCache.set(key, rendered);
+  return rendered;
+}
+
+const markdownRenderCache = new Map<string, JSX.Element>();
+
+function renderMarkdown(source: string, inverted: boolean): JSX.Element {
   return (
     <div className={cn("min-w-0 break-words text-sm leading-relaxed", inverted ? "text-on-accent" : "text-ink")}>
       <ReactMarkdown

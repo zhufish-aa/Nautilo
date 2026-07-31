@@ -184,6 +184,7 @@ export function toStandaloneUiSession(session: Session): UiSession {
     reasoningEffort: session.reasoningEffort,
     serviceTier: session.serviceTier,
     permissionMode: session.permissionMode,
+    mode: session.mode,
     status: session.status,
     parentSessionId: session.parentSessionId,
     projectRunId: session.projectRunId,

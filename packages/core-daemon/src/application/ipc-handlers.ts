@@ -1,4 +1,5 @@
 import { IpcGateway } from "../ipc-gateway.js";
+import { join } from "node:path";
 import { Database } from "../database/index.js";
 import { AdapterRegistry } from "../adapters/index.js";
 import { EventService } from "../runtime/event-service.js";
@@ -19,6 +20,8 @@ import { CapabilityImportService } from "./capability-import/index.js";
 import { InteractionService } from "./interaction-service.js";
 import type { PluginService } from "../runtime/plugins/plugin-service.js";
 import type { CheckpointService } from "../runtime/checkpoint-service.js";
+import { readWorkspaceArtifact } from "./artifact-read.js";
+import { seedBuiltinCapabilities } from "./builtin-capabilities.js";
 
 export interface ApplicationServices {
   database: Database;
@@ -44,6 +47,7 @@ export interface ApplicationServices {
   interactions: InteractionService;
   plugins: PluginService;
   checkpoints: CheckpointService;
+  dataDir: string;
 }
 export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationServices): void {
   gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0" }));
@@ -68,7 +72,14 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   });
   gateway.register("plugin.uninstall", async ({ pluginId }) => services.plugins.uninstall(pluginId));
   gateway.register("plugin.setEnabled", async ({ pluginId, enabled }) => services.plugins.setEnabled(pluginId, enabled));
-  gateway.register("capability.list", async () => services.capabilities.list());
+  gateway.register("capability.list", async () => {
+    // Lazy seed: keeps CoreDaemon construction side-effect-free (tests never
+    // touch the real provider skill dirs) while the real app seeds on boot,
+    // since the renderer lists capabilities at startup. The bundled Python
+    // toolchain is materialized under <dataDir>/builtin-skills.
+    seedBuiltinCapabilities(services.capabilities, join(services.dataDir, "builtin-skills"));
+    return services.capabilities.list();
+  });
   gateway.register("capability.upsert", async (input) => services.capabilities.upsert(input));
   gateway.register("capability.remove", async ({ capabilityId }) => services.capabilities.remove(capabilityId));
   gateway.register("capability.parseImport", async (input) => services.capabilityImports.parse(input));
@@ -106,6 +117,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   ));
   gateway.register("task.list", async ({ projectRunId }) => services.database.tasks.list(projectRunId));
   gateway.register("artifact.list", async (input) => services.database.artifacts.list(input));
+  gateway.register("artifact.read", async (input) => readWorkspaceArtifact(services.database, input));
   gateway.register("verification.list", async ({ projectRunId, taskId }) => services.database.verifications.list(projectRunId, taskId));
   gateway.register("run.get", async ({ runId }) => services.database.runs.get(runId) ?? notFound("run", runId));
   gateway.register("policy.list", async () => services.commandPolicies.list());

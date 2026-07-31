@@ -71,7 +71,9 @@ export class SessionService {
       currentText: text,
       messages: existingMessages,
       artifacts,
-      recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt
+      recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt,
+      workMode: session.mode === "work",
+      workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
     this.database.sessions.saveMessage(followUpMessage(session, text));
     // RunService serializes turns per session. Do not await here: Queue must
@@ -146,7 +148,9 @@ export class SessionService {
       messages: existingMessages,
       artifacts,
       currentAttachments,
-      recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration
+      recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration,
+      workMode: session.mode === "work",
+      workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
     const message: Message = editedMessage
       ? { ...editedMessage, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), editedAt: new Date().toISOString() }

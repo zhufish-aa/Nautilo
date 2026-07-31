@@ -117,6 +117,14 @@ function skillTargets(): SkillTarget[] {
       providerId: "codex",
       filePath: (slug) => join(home, ".codex", "prompts", `${slug}.md`),
       render: plainSkill
+    },
+    {
+      // Codex also auto-loads directory-based skills (~/.codex/skills), which
+      // unlike flat prompts can carry the bundled script resources.
+      providerId: "codex",
+      filePath: (slug) => join(home, ".codex", "skills", slug, "SKILL.md"),
+      skillDir: (slug) => join(home, ".codex", "skills", slug),
+      render: frontmatterSkill
     }
   ];
 }

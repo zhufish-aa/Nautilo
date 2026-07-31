@@ -128,6 +128,9 @@ function MessageCard({ event, locale, onEditMessage, onRevertCheckpoint }: {
   const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
   const isSystem = sender === "system";
+  // Historical messages render statically on remounts (mode switches reopen the
+  // whole timeline); only fresh live-conversation rows pay for the spring-in.
+  const animateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
   if (isSystem) {
     return (
       <motion.p
@@ -141,7 +144,7 @@ function MessageCard({ event, locale, onEditMessage, onRevertCheckpoint }: {
   }
   return (
     <motion.div
-      initial={{ opacity: 0, y: 10 }}
+      initial={animateIn ? { opacity: 0, y: 10 } : false}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: "spring", stiffness: 320, damping: 28 }}
       className="group flex"

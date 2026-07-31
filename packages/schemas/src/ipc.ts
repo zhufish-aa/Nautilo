@@ -119,6 +119,7 @@ export interface IpcRequestMap {
   "run.list": { input: { sessionId?: string; projectRunId?: string }; output: AgentRun[] };
   "task.list": { input: { projectRunId: string }; output: Task[] };
   "artifact.list": { input: { projectRunId?: string; taskId?: string; sessionId?: string }; output: Artifact[] };
+  "artifact.read": { input: { projectId: string; path: string }; output: { base64: string; mimeType: string; size: number; modifiedAt: string } };
   "verification.list": { input: { projectRunId: string; taskId?: string }; output: VerificationResult[] };
   "run.get": { input: { runId: string }; output: AgentRun };
   "policy.list": { input: undefined; output: PermissionPolicy[] };

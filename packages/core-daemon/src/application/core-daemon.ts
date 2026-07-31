@@ -66,9 +66,11 @@ export class CoreDaemon {
   readonly interactions: InteractionService;
   readonly plugins: PluginService;
   readonly checkpoints: CheckpointService;
+  readonly dataDir: string;
 
   constructor(options: CoreDaemonOptions = {}) {
     const dataDir = options.dataDir ?? join(homedir(), ".agenthub");
+    this.dataDir = dataDir;
     this.database = new Database(options.databasePath ?? join(dataDir, "agenthub.sqlite"));
     this.adapters = new AdapterRegistry();
     this.gateway = new IpcGateway();
@@ -103,7 +105,7 @@ export class CoreDaemon {
     this.runs.setRuntimeToolProvider(new MainAgentRuntimeToolProvider(this.database, this.orchestration));
     this.metrics = new MetricsService(this.database);
     this.diagnostics = new DiagnosticsService(this.database, this.audit, this.metrics, this.redaction, dataDir);
-    this.recovery = new RecoveryService(this.database, this.audit);
+    this.recovery = new RecoveryService(this.database, this.audit, this.events);
     this.subscriptions = new EventSubscriptionService(this.events);
     this.slashCommands = new SlashCommandService(this.database, this.agents, this.audit, this.runs);
     this.capabilities = new CapabilityService(this.database);

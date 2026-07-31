@@ -251,8 +251,9 @@ const zh = {
         model: "模型",
         modelPlaceholder: "例如 gpt-5-codex",
         modelHint: "留空则使用 Provider 默认模型",
-        modelLoading: "正在从本机 CLI 获取可用模型…",
+        modelLoading: "正在获取可用模型…",
         modelLoaded: "已从本机 CLI 获取 {count} 个模型；默认模型：{default}",
+        modelLoadedApi: "已通过 API 获取 {count} 个模型",
         modelCustom: "当前为自定义模型标识，将按原值传给 CLI。",
         modelCustomPlaceholder: "输入任意模型 ID",
         modelUseCustom: "使用自定义模型 ID",
@@ -261,8 +262,12 @@ const zh = {
         refreshModels: "重新获取模型",
         reasoning: "推理深度",
         reasoningDefault: "使用模型默认值",
-        reasoningHint: "由本机 CLI 返回的 {model} 可用推理深度",
-        reasoningUnavailable: "选择模型后从本机 CLI 获取可用推理深度",
+        reasoningHint: "{model} 建议的推理深度，可输入自定义值",
+        reasoningUnavailable: "选择模型后显示建议值，也可直接输入自定义值",
+        reasoningUseCustom: "使用自定义推理深度",
+        reasoningCustom: "自定义值将按原值传给 CLI，未识别的取值可能被 Provider 拒绝。",
+        reasoningCustomPlaceholder: "输入自定义推理深度",
+        reasoningCustomCurrent: "当前自定义值",
         args: "启动参数",
         argsPlaceholder: "输入参数后回车，例如 --full-auto",
         argsHint: "作为 baseArgs 传递给 CLI，按顺序生效",
@@ -934,6 +939,29 @@ const zh = {
     open: "打开会话",
     soundToggle: "完成提示音",
     untitled: "未命名会话"
+  },
+  modeSwitch: {
+    label: "模式切换",
+    code: "Code",
+    work: "Work"
+  },
+  work: {
+    title: "办公",
+    empty: {
+      title: "Work 模式",
+      desc: "让 Agent 在工作目录里产出文档、表格、PPT 等办公产物，右侧实时预览，边聊边改。",
+      action: "新建 Work 会话"
+    },
+    preview: {
+      title: "产物预览",
+      empty: "还没有产物",
+      emptyHint: "Agent 生成文件后会出现在这里",
+      reload: "刷新预览",
+      openExternal: "用系统应用打开",
+      error: "预览加载失败",
+      pptxUnsupported: "PPT 暂不支持内联预览，请用系统应用打开",
+      binaryUnsupported: "该文件类型暂不支持预览"
+    }
   }
 };
 
@@ -1188,8 +1216,9 @@ const en: Messages = {
         model: "Model",
         modelPlaceholder: "e.g. gpt-5-codex",
         modelHint: "Leave empty to use the provider default",
-        modelLoading: "Loading available models from the local CLI…",
+        modelLoading: "Loading available models…",
         modelLoaded: "Loaded {count} models from the local CLI; default: {default}",
+        modelLoadedApi: "Loaded {count} models via the API",
         modelCustom: "This custom model ID will be passed to the CLI unchanged.",
         modelCustomPlaceholder: "Enter any model ID",
         modelUseCustom: "Use custom model ID",
@@ -1198,8 +1227,12 @@ const en: Messages = {
         refreshModels: "Refresh models",
         reasoning: "Reasoning effort",
         reasoningDefault: "Use model default",
-        reasoningHint: "Effort levels reported by the local CLI for {model}",
-        reasoningUnavailable: "Choose a model to load effort levels from the local CLI",
+        reasoningHint: "Suggested effort levels for {model}; custom values allowed",
+        reasoningUnavailable: "Pick a model to see suggestions, or type a custom value",
+        reasoningUseCustom: "Use custom reasoning effort",
+        reasoningCustom: "Custom values are passed to the CLI unchanged; unrecognized values may be rejected by the provider.",
+        reasoningCustomPlaceholder: "Enter a custom reasoning effort",
+        reasoningCustomCurrent: "Current custom value",
         args: "Startup arguments",
         argsPlaceholder: "Type an argument and press Enter, e.g. --full-auto",
         argsHint: "Passed to the CLI as baseArgs, in order",
@@ -1871,6 +1904,29 @@ const en: Messages = {
     open: "Open session",
     soundToggle: "Completion chime",
     untitled: "Untitled session"
+  },
+  modeSwitch: {
+    label: "Mode switch",
+    code: "Code",
+    work: "Work"
+  },
+  work: {
+    title: "Work",
+    empty: {
+      title: "Work mode",
+      desc: "Let the agent produce office deliverables (docs, sheets, slides) in a workspace and preview them live on the right as you iterate.",
+      action: "New Work session"
+    },
+    preview: {
+      title: "Deliverables",
+      empty: "No deliverables yet",
+      emptyHint: "Files the agent creates will show up here",
+      reload: "Reload preview",
+      openExternal: "Open with system app",
+      error: "Preview failed to load",
+      pptxUnsupported: "Slides can't be previewed inline yet — open them with the system app",
+      binaryUnsupported: "This file type can't be previewed yet"
+    }
   }
 };
 

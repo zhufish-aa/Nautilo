@@ -74,7 +74,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const { t } = useI18n();
   const location = useLocation();
   // The chat-first workbench uses the full width/height; other pages stay centered.
-  const fullBleed = location.pathname.startsWith("/sessions");
+  const fullBleed = location.pathname.startsWith("/sessions") || location.pathname.startsWith("/work");
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">
@@ -94,13 +94,10 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
           className={cn("min-w-0 flex-1 outline-none", fullBleed ? "overflow-hidden" : "overflow-y-auto")}
         >
           {fullBleed ? (
-            <div className="h-full overflow-hidden">
-              <AnimatePresence mode="wait" initial={false}>
-                <PageTransition key={location.pathname} className="h-full">
-                  {children}
-                </PageTransition>
-              </AnimatePresence>
-            </div>
+            // No exit/enter page transition here: Code↔Work switches remount a
+            // full timeline, and AnimatePresence mode="wait" would serialize an
+            // old-page exit animation before the new page even starts.
+            <div className="h-full overflow-hidden">{children}</div>
           ) : (
             <div className="mx-auto max-w-6xl px-7 py-7">
               <AnimatePresence mode="wait" initial={false}>

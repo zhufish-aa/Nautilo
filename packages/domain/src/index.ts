@@ -174,11 +174,29 @@ export interface AgentInstance {
   baseArgs: string[];
   profile?: string;
   providerOptions?: Record<string, string | number | boolean | string[]>;
+  /**
+   * User-curated model configuration for this instance. Each entry overrides
+   * (or supplements) the same model id from live discovery: reasoning efforts
+   * keep the configured order (first entry is the UI default) and an explicit
+   * contextWindow wins over the discovered value.
+   */
+  models?: InstanceModelConfig[];
   capabilities: string[];
   enabled: boolean;
   status: AgentStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface InstanceModelConfig {
+  /** Exact model id passed to the provider CLI's model option. */
+  id: string;
+  /** Optional display label override. */
+  displayName?: string;
+  /** Ordered reasoning efforts for this model; the first entry is the default. */
+  reasoningEfforts: string[];
+  /** Optional context window override in tokens. */
+  contextWindow?: number;
 }
 
 export interface ProviderModel {
@@ -205,7 +223,7 @@ export interface ProviderModelCatalog {
   providerId: string;
   models: ProviderModel[];
   defaultModel?: string;
-  source: "provider_cli" | "unavailable";
+  source: "provider_api" | "provider_cli" | "unavailable";
   fetchedAt: string;
   warning?: string;
 }
@@ -348,6 +366,11 @@ export interface Session {
   serviceTier?: string;
   /** CLI-native permission mode override; falls back to the agent instance setting. */
   permissionMode?: string;
+  /**
+   * "work" sessions produce office artifacts (docx/xlsx/md/…) in the project
+   * workspace instead of editing a code repository. Undefined means "code".
+   */
+  mode?: "code" | "work";
   title: string;
   status: SessionStatus;
   providerSessionId?: string;

@@ -48,6 +48,7 @@ interface SessionsState {
     serviceTier?: string;
     parentSessionId?: string;
     runId?: string;
+    mode?: "code" | "work";
   }) => UiSession;
   /** Runner-facing mutators (prefixed; UI components should not call these). */
   _append: (sessionId: string, payload: TimelinePayload) => TimelineEvent;
@@ -136,7 +137,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       startEditingMessage: (sessionId, messageId, text) => set({ editingMessage: { sessionId, messageId, text } }),
       cancelEditingMessage: () => set({ editingMessage: undefined }),
 
-      createSession: ({ projectId, target, title, model, reasoningEffort, serviceTier, parentSessionId, runId }) => {
+      createSession: ({ projectId, target, title, model, reasoningEffort, serviceTier, parentSessionId, runId, mode }) => {
         const now = new Date().toISOString();
         const session: UiSession = {
           id: newId("sess"),
@@ -146,6 +147,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           model,
           reasoningEffort,
           serviceTier,
+          mode,
           status: "idle",
           parentSessionId,
           runId,
@@ -169,6 +171,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             teamId: target.teamId,
             parentSessionId,
             agentInstanceId: target.type === "agent" ? target.instanceId : undefined,
+            mode,
             title,
             model,
             reasoningEffort,

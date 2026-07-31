@@ -142,11 +142,7 @@ export function MemberEditorDialog({
     description: model.description,
     badge: model.isDefault ? t("agents.editor.basic.modelDefault") : undefined
   })), [modelCatalog, t]);
-  const providerDefault = "__provider_default__";
-  const reasoningOptions = [
-    { value: providerDefault, label: t("agents.editor.basic.reasoningDefault") },
-    ...(selectedModel?.reasoningEfforts ?? []).map((effort) => ({ value: effort, label: effort }))
-  ];
+  const reasoningOptions = (selectedModel?.reasoningEfforts ?? []).map((effort) => ({ value: effort, label: effort }));
 
   useEffect(() => {
     if (!open || !selectedInstance || modelCatalog) return;
@@ -199,7 +195,7 @@ export function MemberEditorDialog({
       displayName: form.displayName.trim(),
       agentInstanceId: form.agentInstanceId,
       model: form.model.trim() || undefined,
-      reasoningEffort: form.reasoningEffort || undefined,
+      reasoningEffort: form.reasoningEffort.trim() || undefined,
       serviceTier: form.serviceTier || undefined,
       maxConcurrentTasks: form.maxConcurrentTasks,
       allowedTaskTypes: form.allowedTaskTypes,
@@ -283,7 +279,9 @@ export function MemberEditorDialog({
               hint={form.model.trim() && !selectedModel
                 ? t("agents.editor.basic.modelCustom")
                 : modelCatalog?.warning
-                ?? (modelCatalog?.source === "provider_cli"
+                ?? (modelCatalog?.source === "provider_api"
+                  ? t("agents.editor.basic.modelLoadedApi", { count: modelCatalog.models.length })
+                  : modelCatalog?.source === "provider_cli"
                   ? t("agents.editor.basic.modelLoaded", {
                     count: modelCatalog.models.length,
                     default: modelCatalog.defaultModel ?? t("agents.editor.basic.reasoningDefault")
@@ -329,11 +327,14 @@ export function MemberEditorDialog({
                 ? t("agents.editor.basic.reasoningHint", { model: selectedModel.displayName })
                 : t("agents.editor.basic.reasoningUnavailable")}
             >
-              <SelectField
-                aria-label={t("agents.editor.basic.reasoning")}
-                value={form.reasoningEffort || providerDefault}
-                onValueChange={(value) => patch({ reasoningEffort: value === providerDefault ? "" : value })}
+              <ComboboxInput
+                id="member-reasoning"
+                value={form.reasoningEffort}
+                onChange={(reasoningEffort) => patch({ reasoningEffort })}
                 options={reasoningOptions}
+                placeholder={t("agents.editor.basic.reasoningDefault")}
+                customOptionLabel={t("agents.editor.basic.reasoningUseCustom")}
+                className="font-mono text-[13px]"
               />
             </Field>
 

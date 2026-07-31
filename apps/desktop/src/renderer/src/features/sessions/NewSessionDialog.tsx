@@ -15,11 +15,14 @@ const NO_TEAM = "no-team";
 export function NewSessionDialog({
   open,
   onOpenChange,
-  onCreated
+  onCreated,
+  mode
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (sessionId: string) => void;
+  /** Stamp the new session as a Work (office deliverables) conversation. */
+  mode?: "code" | "work";
 }): JSX.Element {
   const { t } = useI18n();
   const projects = useProjectsStore((state) => state.projects);
@@ -77,7 +80,8 @@ export function NewSessionDialog({
     const session = createSession({
       projectId,
       target: { type: "agent", instanceId: defaultInstance.id, teamId: teamId === NO_TEAM ? undefined : teamId },
-      title: title.trim() || selectedProvider.name
+      title: title.trim() || selectedProvider.name,
+      mode
     });
     onCreated(session.id);
     onOpenChange(false);

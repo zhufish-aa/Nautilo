@@ -23,6 +23,7 @@ import {
   claudeRuntimeMcpArgs,
   createClaudeParseState,
   discoverClaudeModels,
+  discoverCodexModels,
   providerEnvironmentPassthrough,
   listClaudeModels,
   parseClaudeJsonEvent,
@@ -33,6 +34,7 @@ import {
   negotiateRunMode,
   parseCodexJsonEvent,
   parseCodexAppServerNotification,
+  parseCodexApiModelList,
   parseCodexModelList,
   parseKimiDefaultModel,
   parseKimiModelList,
@@ -490,6 +492,64 @@ test("Codex app-server model/list is normalized without hard-coded models", () =
   assert.equal(catalog.models[0].serviceTiers[0].id, "priority");
 });
 
+test("Codex API model list is normalized with provider_api source", () => {
+  const catalog = parseCodexApiModelList({ object: "list", data: [
+    { id: "deepseek-chat", object: "model", owned_by: "deepseek" },
+    { id: "deepseek-reasoner", object: "model", owned_by: "deepseek" },
+    { object: "model" }
+  ] });
+  assert.equal(catalog.providerId, "codex");
+  assert.equal(catalog.source, "provider_api");
+  assert.deepEqual(catalog.models.map((model) => model.id), ["deepseek-chat", "deepseek-reasoner"]);
+  assert.deepEqual(catalog.models[0].reasoningEfforts, ["minimal", "low", "medium", "high", "xhigh"]);
+  assert.equal(catalog.models[0].defaultReasoningEffort, undefined);
+  assert.equal(catalog.defaultModel, undefined);
+});
+
+test("Codex model discovery prefers the instance-configured API endpoint", async (t) => {
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    requests.push({ url, init });
+    return new Response(JSON.stringify({ data: [{ id: "deepseek-chat" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  });
+  const configured = {
+    ...instance,
+    baseArgs: [],
+    executable: "definitely-missing-codex-binary",
+    providerOptions: { baseUrl: "https://api.deepseek.com/" }
+  };
+  const catalog = await discoverCodexModels(configured, { env: { OPENAI_API_KEY: "sk-test", PATH: process.env.PATH } });
+  assert.equal(catalog.source, "provider_api");
+  assert.deepEqual(catalog.models.map((model) => model.id), ["deepseek-chat"]);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://api.deepseek.com/models");
+  assert.equal(requests[0].init.headers.authorization, "Bearer sk-test");
+});
+
+test("Codex model discovery falls back to the local CLI when the API fails", async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), "agenthub-codex-models-"));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("connection refused");
+  });
+  writeFileSync(join(workspace, "app-server"), readFileSync(fileURLToPath(new URL("./fixtures/fake-codex-app-server.mjs", import.meta.url)), "utf8"));
+  const previousCwd = process.cwd();
+  process.chdir(workspace);
+  try {
+    const configured = { ...instance, baseArgs: [], providerOptions: { baseUrl: "https://api.deepseek.com/" } };
+    const catalog = await discoverCodexModels(configured, { env: { PATH: process.env.PATH, OPENAI_API_KEY: "sk-test" } });
+    assert.equal(catalog.source, "provider_cli");
+    assert.equal(catalog.defaultModel, "gpt-fake-codex");
+    assert.deepEqual(catalog.models[0].reasoningEfforts, ["low", "medium"]);
+    assert.match(catalog.warning ?? "", /API 请求失败/);
+  } finally {
+    process.chdir(previousCwd);
+  }
+});
+
 test("Kimi configured aliases are normalized and preserve the full model alias", () => {
   const raw = JSON.stringify({
     providers: { "managed:kimi-code": { type: "kimi", apiKey: "must-not-leak" } },
@@ -734,6 +794,18 @@ test("provider environment passthrough forwards Anthropic vars and instance base
   assert.equal(withOption.ANTHROPIC_BASE_URL, "https://option.example.com");
 
   assert.deepEqual(providerEnvironmentPassthrough({ ...instance, providerId: "codex" }, shell, registry.find("codex").descriptor), {});
+
+  const codexShell = { OPENAI_API_KEY: "sk-shell", OPENAI_BASE_URL: "https://relay.example.com/v1", UNRELATED: "x" };
+  assert.deepEqual(providerEnvironmentPassthrough({ ...instance, providerId: "codex" }, codexShell, registry.find("codex").descriptor), {
+    OPENAI_API_KEY: "sk-shell",
+    OPENAI_BASE_URL: "https://relay.example.com/v1"
+  });
+  const codexWithOption = providerEnvironmentPassthrough(
+    { ...instance, providerId: "codex", providerOptions: { baseUrl: "https://api.deepseek.com/" } },
+    codexShell,
+    registry.find("codex").descriptor
+  );
+  assert.equal(codexWithOption.OPENAI_BASE_URL, "https://api.deepseek.com/");
 });
 
 test("Codex app-server compaction uses thread/compact/start instead of a chat turn", async (t) => {

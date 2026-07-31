@@ -4,6 +4,7 @@ import { hydrateWorkbenchSessions, resumeWorkbenchRuns } from "./orchestration-r
 import { useAgentsStore } from "../stores/agents";
 import { useProjectsStore } from "../stores/projects";
 import { useProvidersStore } from "../stores/providers";
+import { useProviderToolsStore } from "../stores/provider-tools";
 import { useTeamsStore } from "../stores/teams";
 
 let initialization: Promise<void> | undefined;
@@ -20,6 +21,8 @@ export function initializeCoreState(): Promise<void> {
       useAgentsStore.getState().hydrate(),
       useTeamsStore.getState().hydrate()
     ]);
+    // capability.list lazily seeds the built-in office skill pack daemon-side.
+    await useProviderToolsStore.getState().load();
     await hydrateWorkbenchSessions();
     await resumeWorkbenchRuns();
     startNotificationWatcher();

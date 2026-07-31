@@ -12,6 +12,7 @@ import { PlaceholderPage } from "./features/placeholder/PlaceholderPage";
 import { ProjectDetailPage } from "./features/projects/ProjectDetailPage";
 import { ProjectsPage } from "./features/projects/ProjectsPage";
 import { RunsPage } from "./features/runs/RunsPage";
+import { WorkPage } from "./features/work/WorkPage";
 import { SessionsPage } from "./features/sessions/SessionsPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { TeamEditorPage } from "./features/teams/TeamEditorPage";
@@ -74,6 +75,7 @@ export default function App(): JSX.Element {
               }
             />
             <Route path="/runs" element={<RunsPage />} />
+            <Route path="/work" element={<WorkPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/sessions" replace />} />
           </Routes>

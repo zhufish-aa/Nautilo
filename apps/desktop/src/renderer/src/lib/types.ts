@@ -214,6 +214,8 @@ export interface UiSession {
   serviceTier?: string;
   /** CLI-native permission mode override for this session; empty falls back to the instance setting. */
   permissionMode?: string;
+  /** "work" sessions produce office deliverables in the project workspace; undefined means "code". */
+  mode?: "code" | "work";
   status: SessionStatus;
   /** Set for sub-agent sessions spawned by a delegation: the owning run's main session. */
   parentSessionId?: string;
