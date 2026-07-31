@@ -1,3 +1,5 @@
+// @ts-ignore
+
 export * from ./types.js;
 export * from ./runtime-tools.js;
 export * from ./runtime-mcp-bridge.js;
