@@ -148,6 +148,8 @@ export interface AgentCliAdapter {
   listModels?(instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<ProviderModelCatalog>;
   start(request: AdapterStartRequest): AdapterRun;
   resume?(request: AdapterResumeRequest): AdapterRun;
+  /** Releases provider-owned long-lived processes when a plugin is reloaded or the host stops. */
+  dispose?(): void | Promise<void>;
 }
 
 /* ------------------------------------------------------------------ */

@@ -143,7 +143,7 @@ export class PluginService {
   }
 
   async uninstall(pluginId: string): Promise<{ removed: true }> {
-    this.unload(pluginId);
+    await this.unload(pluginId);
     this.records.delete(pluginId);
     await rm(join(this.pluginsDir, pluginId), { recursive: true, force: true });
     return { removed: true };
@@ -158,14 +158,20 @@ export class PluginService {
       return this.loadOne(pluginId);
     }
     await writeFile(join(dir, DISABLED_MARKER), new Date().toISOString(), "utf8");
-    this.unload(pluginId);
+    await this.unload(pluginId);
     const record: ProviderPluginRecord = { id: pluginId, enabled: false, status: "disabled", dir, manifest };
     this.records.set(pluginId, record);
     return record;
   }
 
-  private unload(pluginId: string): void {
+  async stop(): Promise<void> {
+    for (const pluginId of [...this.loadedIds]) await this.unload(pluginId);
+  }
+
+  private async unload(pluginId: string): Promise<void> {
     if (!this.loadedIds.delete(pluginId)) return;
+    const adapter = this.adapters.find(pluginId);
+    await adapter?.dispose?.();
     const previous = this.overridden.get(pluginId);
     if (previous) {
       // The plugin had replaced another adapter (e.g. a built-in): put it back.
@@ -197,7 +203,7 @@ export class PluginService {
     try {
       const manifest = await this.readManifest(dir);
       this.validateManifest(manifest, dir);
-      this.unload(pluginId);
+      await this.unload(pluginId);
       // Cache-buster so reinstalling the same plugin path picks up new code.
       const entryUrl = `${pathToFileURL(join(dir, manifest.main)).href}?v=${Date.now()}`;
       const module = await import(entryUrl) as { default?: ProviderPluginFactory };

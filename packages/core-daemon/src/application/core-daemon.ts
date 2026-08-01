@@ -30,7 +30,6 @@ import { CapabilityImportService } from "./capability-import/index.js";
 import { InteractionService } from "./interaction-service.js";
 import { MainAgentRuntimeToolProvider } from "../runtime/orchestration/index.js";
 import { PluginService } from "../runtime/plugins/plugin-service.js";
-import { CheckpointService } from "../runtime/checkpoint-service.js";
 
 export interface CoreDaemonOptions { dataDir?: string; databasePath?: string; worktreeRoot?: string; enableGitWorkflows?: boolean; }
 
@@ -65,7 +64,6 @@ export class CoreDaemon {
   readonly capabilityImports: CapabilityImportService;
   readonly interactions: InteractionService;
   readonly plugins: PluginService;
-  readonly checkpoints: CheckpointService;
   readonly dataDir: string;
 
   constructor(options: CoreDaemonOptions = {}) {
@@ -113,8 +111,6 @@ export class CoreDaemon {
     this.interactions = new InteractionService(this.database, this.events);
     this.runs.setInteractionService(this.interactions);
     this.plugins = new PluginService(dataDir, this.adapters);
-    this.checkpoints = new CheckpointService(this.database, dataDir, this.events);
-    this.runs.setCheckpointService(this.checkpoints);
     this.recovery.recoverInterrupted();
     this.gateway.setObserver((request, response) => {
       this.audit.ipc(
@@ -131,6 +127,7 @@ export class CoreDaemon {
     if (this.stopped) return;
     this.stopped = true;
     await this.gateway.stop();
+    await this.plugins.stop();
     this.database.close();
   }
 }

@@ -1,4 +1,5 @@
 import type { ProviderModel, ProviderModelCatalog } from "@agenthub/domain";
+import { discoverOpenAiCompatibleModels } from "../model-config.js";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const LARGE_CONTEXT_WINDOW = 1_000_000;
@@ -145,6 +146,26 @@ export async function discoverClaudeModels(env?: Record<string, string | undefin
     };
   }
   const reason = result.ok ? "empty_result" : result.reason;
+  // Anthropic-protocol shims (DeepSeek's /anthropic, ...) rarely implement the
+  // models route; the OpenAI-compatible catalog at the host root usually works.
+  const anthropicBase = (discoveryEnv.ANTHROPIC_BASE_URL?.trim() || "").replace(/\/+$/, "");
+  if (/\/anthropic$/i.test(anthropicBase)) {
+    const credential = discoveryEnv.ANTHROPIC_API_KEY?.trim() || discoveryEnv.ANTHROPIC_AUTH_TOKEN?.trim();
+    try {
+      const openAiCatalog = await discoverOpenAiCompatibleModels(anthropicBase.replace(/\/anthropic$/i, ""), credential);
+      if (openAiCatalog.models.length) {
+        return {
+          providerId: "claude-code",
+          defaultModel: "default",
+          source: "provider_api",
+          fetchedAt: new Date().toISOString(),
+          models: [fallbackEntry(), ...openAiCatalog.models.map((entry) => model(entry.id, entry.displayName))]
+        };
+      }
+    } catch {
+      // Fall through to the static alias catalog below.
+    }
+  }
   console.warn(`[agenthub] claude-code model discovery failed (${reason}); falling back to CLI alias catalog`);
   return { ...listClaudeModels(), warning: discoveryWarning(reason, discoveryEnv) };
 }

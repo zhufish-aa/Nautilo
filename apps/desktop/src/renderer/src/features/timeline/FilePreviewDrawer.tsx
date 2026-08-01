@@ -2,14 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FileCode2, FileWarning, FolderOpen, Loader2 } from "lucide-react";
 import { Drawer } from "../../components/ui/Drawer";
 import { useI18n } from "../../lib/i18n";
-import { highlightCode } from "../../lib/highlight";
+import { highlightCode, highlightLine, languageForPath } from "../../lib/highlight";
 import { useFilePreviewStore } from "../../stores/file-preview";
 
 type LoadState =
   | { status: "loading" }
   | { status: "error"; reason: "not-found" | "not-file" | "binary" | "read-failed" }
   | { status: "ambiguous"; candidates: string[] }
-  | { status: "done"; resolvedPath: string; lines: string[]; html: string; truncated: boolean };
+  // `html` is null in virtual mode: whole-file highlighting is skipped and
+  // rows are highlighted lazily per visible line instead.
+  | { status: "done"; resolvedPath: string; lines: string[]; html: string | null; truncated: boolean };
 
 function basename(path: string): string {
   return path.split(/[\\/]/).at(-1) ?? path;
@@ -17,6 +19,114 @@ function basename(path: string): string {
 
 /** Row height shared by the gutter and the code so both stay aligned. */
 const LINE_HEIGHT = 20;
+/** Vertical padding (py-2) of the code block, included in scroll offsets. */
+const BLOCK_PADDING = 8;
+/** Above this many lines (or bytes) the drawer switches to virtualized rows. */
+const VIRTUALIZE_LINES = 2000;
+const VIRTUALIZE_CHARS = 400_000;
+/** Extra rows rendered above/below the viewport to avoid blank flashes. */
+const OVERSCAN = 20;
+
+/**
+ * Virtualized code view for large files: only the visible window is rendered
+ * and each row is highlighted on demand (whole-file highlight.js on hundreds
+ * of thousands of lines would block the renderer for seconds).
+ */
+function VirtualizedCode({ lines, language, targetLine }: {
+  lines: string[];
+  language?: string;
+  targetLine?: number;
+}): JSX.Element {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef(0);
+  const highlightCacheRef = useRef(new Map<number, string>());
+  const [range, setRange] = useState({ start: 0, end: 80 });
+
+  const updateRange = useCallback((): void => {
+    cancelAnimationFrame(frameRef.current);
+    frameRef.current = requestAnimationFrame(() => {
+      const element = scrollRef.current;
+      if (!element) return;
+      const start = Math.max(0, Math.floor(element.scrollTop / LINE_HEIGHT) - OVERSCAN);
+      const end = Math.min(lines.length, Math.ceil((element.scrollTop + element.clientHeight) / LINE_HEIGHT) + OVERSCAN);
+      setRange((current) => (current.start === start && current.end === end ? current : { start, end }));
+    });
+  }, [lines.length]);
+
+  useEffect(() => {
+    highlightCacheRef.current.clear();
+    updateRange();
+    const element = scrollRef.current;
+    if (!element) return undefined;
+    const observer = new ResizeObserver(updateRange);
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frameRef.current);
+    };
+  }, [updateRange]);
+
+  // Center the referenced line once on mount (scrollIntoView cannot reach
+  // rows that are not rendered yet).
+  const targetScrollDoneRef = useRef(false);
+  useEffect(() => {
+    if (targetScrollDoneRef.current) return;
+    const element = scrollRef.current;
+    if (!element || targetLine === undefined || targetLine < 1 || targetLine > lines.length) return;
+    targetScrollDoneRef.current = true;
+    element.scrollTop = Math.max(0, (targetLine - 1) * LINE_HEIGHT - element.clientHeight / 2);
+    updateRange();
+  }, [targetLine, lines.length, updateRange]);
+
+  const htmlFor = (index: number): string => {
+    const cache = highlightCacheRef.current;
+    const cached = cache.get(index);
+    if (cached !== undefined) return cached;
+    const html = highlightLine(lines[index] ?? "", language);
+    if (cache.size > 5000) cache.clear();
+    cache.set(index, html);
+    return html;
+  };
+
+  const gutterRows: JSX.Element[] = [];
+  const codeRows: JSX.Element[] = [];
+  for (let index = range.start; index < range.end; index += 1) {
+    const lineNumber = index + 1;
+    const highlighted = targetLine === lineNumber;
+    gutterRows.push(
+      <div key={lineNumber} className={highlighted ? "font-semibold text-accent" : undefined}>
+        {lineNumber}
+      </div>
+    );
+    codeRows.push(
+      // eslint-disable-next-line react/no-danger -- html is escaped/built by highlight.js
+      <div key={lineNumber} className="whitespace-pre" dangerouslySetInnerHTML={{ __html: htmlFor(index) }} />
+    );
+  }
+
+  return (
+    <div ref={scrollRef} onScroll={updateRange} className="min-h-0 flex-1 overflow-auto">
+      <div className="relative flex min-w-fit" style={{ height: lines.length * LINE_HEIGHT + BLOCK_PADDING * 2 }}>
+        {targetLine !== undefined && targetLine >= 1 && targetLine <= lines.length && (
+          <div
+            aria-hidden
+            className="absolute inset-x-0 bg-accent-soft"
+            style={{ top: BLOCK_PADDING + (targetLine - 1) * LINE_HEIGHT, height: LINE_HEIGHT }}
+          />
+        )}
+        <div className="sticky left-0 z-10 shrink-0 select-none overflow-hidden border-r border-line bg-card pl-4 pr-3 text-right font-mono text-[12px] leading-[20px] text-ink-3/70">
+          <div style={{ transform: `translateY(${BLOCK_PADDING + range.start * LINE_HEIGHT}px)` }}>
+            {gutterRows}
+          </div>
+        </div>
+        <pre className="min-w-0 flex-1 pl-4 pr-4 font-mono text-[12px] leading-[20px] text-ink-2">
+          <div aria-hidden style={{ height: BLOCK_PADDING + range.start * LINE_HEIGHT }} />
+          {codeRows}
+        </pre>
+      </div>
+    </div>
+  );
+}
 
 /** Right-side code preview for file references clicked in the conversation. */
 export function FilePreviewDrawer(): JSX.Element {
@@ -47,11 +157,13 @@ export function FilePreviewDrawer(): JSX.Element {
             setState({ status: "error", reason: result.reason });
           }
         } else {
+          const lines = result.content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+          const virtual = lines.length > VIRTUALIZE_LINES || result.content.length > VIRTUALIZE_CHARS;
           setState({
             status: "done",
             resolvedPath: result.resolvedPath,
-            lines: result.content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n"),
-            html: highlightCode(result.content, result.resolvedPath),
+            lines,
+            html: virtual ? null : highlightCode(result.content, result.resolvedPath),
             truncated: result.truncated
           });
         }
@@ -66,11 +178,13 @@ export function FilePreviewDrawer(): JSX.Element {
     if (target) void load(target.path);
   }, [target, load]);
 
+  const virtual = state.status === "done" && state.html === null;
+
   useEffect(() => {
-    if (state.status === "done" && target?.line !== undefined) {
+    if (state.status === "done" && !virtual && target?.line !== undefined) {
       highlightRef.current?.scrollIntoView({ block: "center" });
     }
-  }, [state, target]);
+  }, [state, target, virtual]);
 
   const errorKey = state.status === "error"
     ? state.reason === "not-found"
@@ -102,6 +216,9 @@ export function FilePreviewDrawer(): JSX.Element {
             )}
             {state.status === "done" && state.truncated && (
               <span className="rounded bg-warn/10 px-1.5 py-0.5 text-warn">{t("sessions.filePreview.truncated")}</span>
+            )}
+            {state.status === "done" && virtual && (
+              <span className="rounded bg-info/10 px-1.5 py-0.5 text-info">{t("sessions.filePreview.largeFile")}</span>
             )}
             {state.status === "done" && (
               <button
@@ -152,7 +269,11 @@ export function FilePreviewDrawer(): JSX.Element {
             </div>
           )}
 
-          {state.status === "done" && (
+          {state.status === "done" && virtual && (
+            <VirtualizedCode lines={state.lines} language={languageForPath(state.resolvedPath)} targetLine={target.line} />
+          )}
+
+          {state.status === "done" && !virtual && (
             <div className="min-h-0 flex-1 overflow-auto">
               <div className="relative flex min-w-fit">
                 {target.line !== undefined && target.line >= 1 && target.line <= state.lines.length && (
@@ -178,7 +299,7 @@ export function FilePreviewDrawer(): JSX.Element {
                   })}
                 </div>
                 <pre className="min-w-0 flex-1 py-2 pl-4 pr-4 font-mono text-[12px] leading-[20px] text-ink-2">
-                  <code className="hljs whitespace-pre" dangerouslySetInnerHTML={{ __html: state.html }} />
+                  <code className="hljs whitespace-pre" dangerouslySetInnerHTML={{ __html: state.html ?? "" }} />
                 </pre>
               </div>
             </div>

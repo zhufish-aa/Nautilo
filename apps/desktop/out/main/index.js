@@ -382,6 +382,7 @@ async function searchFileReferences(queryPath, basePaths) {
   return matches;
 }
 const MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_TEXT_WRITE_BYTES = 8 * 1024 * 1024;
 function registerInteractionHandlers() {
   electron.ipcMain.handle("shell:open-path", (_event, path) => electron.shell.openPath(path));
   electron.ipcMain.handle("shell:show-item-in-folder", (_event, path) => {
@@ -469,6 +470,25 @@ function registerInteractionHandlers() {
       }
     }
     return { ok: true, resolvedPath, content: buffer.toString("utf8"), truncated, sizeBytes };
+  });
+  electron.ipcMain.handle("file:write-text", async (_event, payload) => {
+    if (!node_path.isAbsolute(payload.path)) return { ok: false, reason: "not-absolute" };
+    if (Buffer.byteLength(payload.content, "utf8") > MAX_TEXT_WRITE_BYTES) return { ok: false, reason: "too-large" };
+    try {
+      await promises.writeFile(payload.path, payload.content, "utf8");
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: "write-failed", message: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  electron.ipcMain.handle("file:delete", async (_event, payload) => {
+    if (!node_path.isAbsolute(payload.path)) return { ok: false, reason: "not-absolute" };
+    try {
+      await electron.shell.trashItem(payload.path);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: "delete-failed", message: error instanceof Error ? error.message : String(error) };
+    }
   });
 }
 const MAX_OUTPUT_BYTES = 256 * 1024;

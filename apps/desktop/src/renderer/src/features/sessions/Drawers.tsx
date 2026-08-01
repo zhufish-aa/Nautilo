@@ -1,21 +1,26 @@
 import { useEffect, useMemo, useRef, useState, Fragment } from "react";
-import { Bot, TerminalSquare } from "lucide-react";
+import { Bot, Loader2, Pencil, RotateCcw, TerminalSquare } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { collectChangedFiles, type ChangedFileEntry } from "../../lib/changed-files";
+import { patchFileImages, reverseApplyUnifiedPatch, revertFileDiffs, sameContent } from "../../lib/revert-change";
 import { formatDurationMs, parseSubagentInput, parseSubagentResult, type SubagentUsage } from "../../lib/subagent-result";
 import { highlightDiffLine } from "../../lib/highlight";
+import { useProgressiveRows } from "../../lib/use-progressive-rows";
 import { cn } from "../../lib/utils";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
 import { Drawer } from "../../components/ui/Drawer";
 import { TabBar } from "../../components/ui/Tabs";
+import { Button } from "../../components/ui/Button";
 import { StatusChip, Tag } from "../../components/ui/Badge";
 import { ToolFileDiffView } from "../timeline/ToolFileDiffView";
 import { MarkdownContent } from "../timeline/MarkdownContent";
 import { TimelineEventView } from "../timeline/Timeline";
 import { sessionTargetName } from "./SessionListPanel";
 import { useAgentsStore } from "../../stores/agents";
+import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
+import { toast } from "../../stores/toast";
 
 /* ---------------------------------------------------------------------------
  * F-033: raw terminal drawer — debug fallback only, never replaces chat.
@@ -64,10 +69,15 @@ export function TerminalDrawer({
  * F-035: diff / artifacts drawer.
  * ------------------------------------------------------------------------ */
 function DiffView({ content }: { content: string }): JSX.Element {
+  const { locale } = useI18n();
+  const lines = useMemo(() => content.split("\n"), [content]);
+  // Progressive mount, same as ToolFileDiffView: each row runs a highlight.js
+  // pass, so a large patch must not render all at once.
+  const { limit, sentinelRef, showAll } = useProgressiveRows(lines.length, lines);
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden">
       <pre className="min-w-full font-mono text-xs leading-relaxed">
-        {content.split("\n").map((line, index) => (
+        {lines.slice(0, limit).map((line, index) => (
           <div
             key={index}
             className={cn(
@@ -83,6 +93,18 @@ function DiffView({ content }: { content: string }): JSX.Element {
             dangerouslySetInnerHTML={{ __html: highlightDiffLine(line) }}
           />
         ))}
+        {limit < lines.length && (
+          <button
+            ref={sentinelRef}
+            type="button"
+            onClick={showAll}
+            className="my-1 w-full rounded-md py-1 text-center font-sans text-[11px] text-ink-3 transition-colors hover:bg-card-hover hover:text-ink"
+          >
+            {locale === "zh-CN"
+              ? `加载剩余 ${lines.length - limit} 行…（点击全部展开）`
+              : `Loading ${lines.length - limit} more rows… (click to expand all)`}
+          </button>
+        )}
       </pre>
     </div>
   );
@@ -107,6 +129,9 @@ export function ArtifactsDrawer({
   const allEvents = useSessionsStore((state) => state.events);
   const teams = useTeamsStore((state) => state.teams);
   const instances = useAgentsStore((state) => state.instances);
+  const projects = useProjectsStore((state) => state.projects);
+  const session = sessions.find((item) => item.id === sessionId);
+  const projectRoot = projects.find((item) => item.id === session?.projectId)?.rootPath;
 
   // Diff sources: this session's timeline plus every delegated sub-session's
   // timeline. kimi sessions surface edits via tool fileDiff, codex via
@@ -132,6 +157,164 @@ export function ArtifactsDrawer({
   ];
   const [tab, setTab] = useState("diff");
   const [selectedFile, setSelectedFile] = useState(0);
+
+  // In-diff file editor: loads the current on-disk content and writes back
+  // through the main-process bridge. The diff itself stays a historical record
+  // of what the agent changed; editing always starts from the live file.
+  const [editor, setEditor] = useState<{ path: string; resolvedPath: string; original: string; value: string; saving: boolean } | null>(null);
+  const [editLoading, setEditLoading] = useState(false);
+  // Per-change revert: two-click confirm (撤回 → 确认撤回), then the recorded
+  // change is reverse-applied to the live file (exact match; fails safely).
+  const [revertArmed, setRevertArmed] = useState(false);
+  const [reverting, setReverting] = useState(false);
+  useEffect(() => {
+    setEditor(null);
+    setRevertArmed(false);
+  }, [selectedFile, open]);
+
+  const revertChange = async (entry: ChangedFileEntry): Promise<void> => {
+    const bridge = window.agenthub;
+    if (!bridge) return;
+    const basePaths = projectRoot ? [projectRoot] : [];
+    setReverting(true);
+    try {
+      if (entry.kind === "fileDiff") {
+        if (entry.diffs.some((diff) => diff.truncated)) {
+          toast.error(t("sessions.drawers.revertTruncated"));
+          return;
+        }
+        const read = await bridge.files.readText({ path: entry.path, basePaths });
+        if (!read.ok) {
+          toast.error(t("sessions.drawers.revertFailed"));
+          return;
+        }
+        const result = revertFileDiffs(read.content, entry.diffs);
+        if (!result.ok) {
+          toast.error(t("sessions.drawers.revertFailed"));
+          return;
+        }
+        // The agent created the file (all fragments started from nothing) and
+        // the revert empties it → move it to trash instead of leaving a husk.
+        const createdByAgent = entry.diffs.every((diff) => !diff.before);
+        if (createdByAgent && result.content.trim() === "") {
+          const deleted = await bridge.files.delete({ path: read.resolvedPath });
+          if (!deleted.ok) {
+            toast.error(deleted.message ?? t("sessions.drawers.revertFailed"));
+            return;
+          }
+          toast.success(t("sessions.drawers.revertDeleted"));
+          return;
+        }
+        const write = await bridge.files.writeText({ path: read.resolvedPath, content: result.content });
+        if (!write.ok) {
+          toast.error(write.message ?? t("sessions.drawers.revertFailed"));
+          return;
+        }
+        toast.success(t("sessions.drawers.revertDone"));
+        return;
+      }
+
+      // Unified-patch entries (codex file_change events).
+      if (!entry.diff) return;
+      if (entry.changeType === "added") {
+        const read = await bridge.files.readText({ path: entry.path, basePaths });
+        if (!read.ok || !sameContent(read.content, patchFileImages(entry.diff).after)) {
+          toast.error(t("sessions.drawers.revertFailed"));
+          return;
+        }
+        const deleted = await bridge.files.delete({ path: read.resolvedPath });
+        if (!deleted.ok) {
+          toast.error(deleted.message ?? t("sessions.drawers.revertFailed"));
+          return;
+        }
+        toast.success(t("sessions.drawers.revertDeleted"));
+        return;
+      }
+      if (entry.changeType === "deleted") {
+        // The file is gone, so resolve the path without readText and restore it.
+        const absolute = /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(entry.path)
+          ? entry.path
+          : projectRoot
+            ? `${projectRoot.replace(/[\\/]+$/, "")}/${entry.path}`
+            : "";
+        if (!absolute) {
+          toast.error(t("sessions.drawers.revertFailed"));
+          return;
+        }
+        const write = await bridge.files.writeText({ path: absolute, content: patchFileImages(entry.diff).before });
+        if (!write.ok) {
+          toast.error(write.message ?? t("sessions.drawers.revertFailed"));
+          return;
+        }
+        toast.success(t("sessions.drawers.revertDone"));
+        return;
+      }
+      const read = await bridge.files.readText({ path: entry.path, basePaths });
+      if (!read.ok) {
+        toast.error(t("sessions.drawers.revertFailed"));
+        return;
+      }
+      const result = reverseApplyUnifiedPatch(read.content, entry.diff);
+      if (!result.ok) {
+        toast.error(t("sessions.drawers.revertFailed"));
+        return;
+      }
+      const write = await bridge.files.writeText({ path: read.resolvedPath, content: result.content });
+      if (!write.ok) {
+        toast.error(write.message ?? t("sessions.drawers.revertFailed"));
+        return;
+      }
+      toast.success(t("sessions.drawers.revertDone"));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("sessions.drawers.revertFailed"));
+    } finally {
+      setReverting(false);
+      setRevertArmed(false);
+    }
+  };
+
+  const startEdit = async (entry: ChangedFileEntry): Promise<void> => {
+    const bridge = window.agenthub;
+    if (!bridge) return;
+    setEditLoading(true);
+    try {
+      const result = await bridge.files.readText({ path: entry.path, basePaths: projectRoot ? [projectRoot] : [] });
+      if (!result.ok) {
+        toast.error(t("sessions.drawers.editReadFailed"));
+        return;
+      }
+      if (result.truncated) {
+        toast.error(t("sessions.drawers.editTooLarge"));
+        return;
+      }
+      setEditor({ path: entry.path, resolvedPath: result.resolvedPath, original: result.content, value: result.content, saving: false });
+    } catch {
+      toast.error(t("sessions.drawers.editReadFailed"));
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  const saveEdit = async (): Promise<void> => {
+    const bridge = window.agenthub;
+    if (!bridge || !editor) return;
+    // Textareas normalize line breaks to LF; restore the file's original CRLF.
+    const content = editor.original.includes("\r\n") ? editor.value.replace(/\r?\n/g, "\r\n") : editor.value;
+    setEditor({ ...editor, saving: true });
+    try {
+      const result = await bridge.files.writeText({ path: editor.resolvedPath, content });
+      if (result.ok) {
+        toast.success(t("sessions.drawers.editSaved"));
+        setEditor(null);
+      } else {
+        toast.error(result.message ?? t("sessions.drawers.editFailed"));
+        setEditor({ ...editor, saving: false });
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("sessions.drawers.editFailed"));
+      setEditor({ ...editor, saving: false });
+    }
+  };
 
   // Opening via a "view diff" entry jumps straight to the referenced file;
   // timeline refreshes keep the user's selection whenever it is still valid.
@@ -203,23 +386,91 @@ export function ArtifactsDrawer({
                   ));
                 })()}
               </ul>
-              <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 flex-1 flex-col">
                 {(() => {
                   const selected = changedFiles[selectedFile];
                   if (!selected) {
                     return <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noChanges")}</p>;
                   }
-                  if (selected.kind === "patch") {
-                    return selected.diff ? (
+                  const diffContent = selected.kind === "patch" ? (
+                    selected.diff ? (
                       <DiffView content={selected.diff} />
                     ) : (
                       <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noDiffDetail")}</p>
-                    );
-                  }
-                  return (
+                    )
+                  ) : (
                     <div className="h-full overflow-y-auto">
                       <ToolFileDiffView diff={selected.diff} locale={locale} scrollClassName="max-h-none" />
                     </div>
+                  );
+                  if (editor) {
+                    const dirty = editor.value !== editor.original.replace(/\r\n/g, "\n");
+                    return (
+                      <>
+                        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
+                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3" title={editor.resolvedPath}>
+                            {editor.resolvedPath}
+                          </span>
+                          <Button variant="ghost" size="sm" disabled={editor.saving} onClick={() => setEditor(null)}>
+                            {t("common.cancel")}
+                          </Button>
+                          <Button variant="primary" size="sm" disabled={editor.saving || !dirty} onClick={() => void saveEdit()}>
+                            {editor.saving && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
+                            {t("common.save")}
+                          </Button>
+                        </div>
+                        {/* The diff stays visible next to the editor so edits
+                            are made against the recorded change. */}
+                        <div className="flex min-h-0 flex-1">
+                          <div className="min-w-0 flex-1 overflow-hidden border-r border-line">
+                            {diffContent}
+                          </div>
+                          <textarea
+                            value={editor.value}
+                            onChange={(event) => setEditor((current) => (current ? { ...current, value: event.target.value } : current))}
+                            spellCheck={false}
+                            className="min-w-0 flex-1 resize-none bg-card/40 px-4 py-3 font-mono text-[12px] leading-5 text-ink-2 outline-none"
+                          />
+                        </div>
+                      </>
+                    );
+                  }
+                  return (
+                    <>
+                      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3" title={selected.path}>
+                          {selected.path}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={reverting}
+                          onClick={() => {
+                            if (!revertArmed) {
+                              setRevertArmed(true);
+                              return;
+                            }
+                            void revertChange(selected);
+                          }}
+                          className={cn(
+                            "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] transition-colors disabled:opacity-50",
+                            revertArmed ? "bg-warn/10 text-warn" : "text-ink-3 hover:bg-card-hover hover:text-ink"
+                          )}
+                        >
+                          {reverting ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden />}
+                          {revertArmed ? t("sessions.drawers.revertConfirm") : t("sessions.drawers.revert")}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={editLoading}
+                          onClick={() => void startEdit(selected)}
+                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-50"
+                        >
+                          {editLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Pencil className="h-3.5 w-3.5" aria-hidden />}
+                          {t("sessions.drawers.edit")}
+                        </button>
+                      </div>
+                      <div className="min-h-0 flex-1">{diffContent}</div>
+                    </>
                   );
                 })()}
               </div>

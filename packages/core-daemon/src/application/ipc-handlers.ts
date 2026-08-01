@@ -19,7 +19,6 @@ import { CapabilityService } from "./capability-service.js";
 import { CapabilityImportService } from "./capability-import/index.js";
 import { InteractionService } from "./interaction-service.js";
 import type { PluginService } from "../runtime/plugins/plugin-service.js";
-import type { CheckpointService } from "../runtime/checkpoint-service.js";
 import { readWorkspaceArtifact } from "./artifact-read.js";
 import { seedBuiltinCapabilities } from "./builtin-capabilities.js";
 
@@ -46,7 +45,6 @@ export interface ApplicationServices {
   capabilityImports: CapabilityImportService;
   interactions: InteractionService;
   plugins: PluginService;
-  checkpoints: CheckpointService;
   dataDir: string;
 }
 export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationServices): void {
@@ -86,7 +84,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("capability.discoverMcp", async (input) => services.capabilityImports.discoverMcp(input));
   gateway.register("capability.scanSkills", async ({ dir }) => services.capabilityImports.scanSkills({ dir }));
   gateway.register("capability.importMany", async (input) => services.capabilityImports.importMany(input));
-  gateway.register("provider.models", async (input) => services.agents.listModels(input.providerId, input.executable, input.agentInstanceId));
+  gateway.register("provider.models", async (input) => services.agents.listModels(input.providerId, input.executable, input.agentInstanceId, { baseUrl: input.baseUrl, apiKey: input.apiKey }));
   gateway.register("team.list", async () => services.teams.list());
   gateway.register("team.get", async ({ teamId }) => services.teams.get(teamId));
   gateway.register("team.upsert", async (input) => services.teams.upsert(input));
@@ -108,9 +106,6 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("slashCommand.list", async ({ sessionId }) => services.slashCommands.list(sessionId));
   gateway.register("slashCommand.execute", async (input) => services.slashCommands.execute(input.sessionId, input.commandId, input.argument));
   gateway.register("slashCommand.continue", async (input) => services.slashCommands.continue(input));
-  gateway.register("checkpoint.list", async ({ sessionId }) => services.checkpoints.list(sessionId));
-  gateway.register("checkpoint.preview", async ({ checkpointId }) => services.checkpoints.preview(checkpointId));
-  gateway.register("checkpoint.revert", async ({ checkpointId }) => services.checkpoints.revert(checkpointId));
   gateway.register("run.cancel", async ({ runId }) => { await services.runs.cancel(runId); return { cancelled: true }; });
   gateway.register("run.list", async ({ sessionId, projectRunId }) => services.database.runs.list().filter((run) =>
     (!sessionId || run.sessionId === sessionId) && (!projectRunId || run.projectRunId === projectRunId)

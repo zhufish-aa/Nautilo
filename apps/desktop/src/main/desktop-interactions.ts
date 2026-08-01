@@ -26,7 +26,22 @@ export type FileReadTextResult =
   | { ok: false; reason: "not-found" | "not-file" | "binary" }
   | { ok: false; reason: "ambiguous"; candidates: string[] };
 
+export interface FileWriteTextPayload {
+  /** Absolute path — typically the resolvedPath returned by file:read-text. */
+  path: string;
+  content: string;
+}
+
+export type FileWriteTextResult =
+  | { ok: true }
+  | { ok: false; reason: "not-absolute" | "too-large" | "write-failed"; message?: string };
+
+export type FileDeleteResult =
+  | { ok: true }
+  | { ok: false; reason: "not-absolute" | "delete-failed"; message?: string };
+
 const MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_TEXT_WRITE_BYTES = 8 * 1024 * 1024;
 
 /**
  * Chat-surface interactions: open/reveal files, copy or save images, and the
@@ -144,5 +159,31 @@ export function registerInteractionHandlers(): void {
       }
     }
     return { ok: true, resolvedPath, content: buffer.toString("utf8"), truncated, sizeBytes };
+  });
+
+  // Writes text back from the in-app diff editor. Absolute paths only — the
+  // renderer passes the resolvedPath it got from file:read-text, so no fuzzy
+  // resolution happens on the write path.
+  ipcMain.handle("file:write-text", async (_event, payload: FileWriteTextPayload): Promise<FileWriteTextResult> => {
+    if (!isAbsolute(payload.path)) return { ok: false, reason: "not-absolute" };
+    if (Buffer.byteLength(payload.content, "utf8") > MAX_TEXT_WRITE_BYTES) return { ok: false, reason: "too-large" };
+    try {
+      await writeFile(payload.path, payload.content, "utf8");
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: "write-failed", message: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // Moves a file to the OS trash (revert of an agent-created file). Trash, not
+  // unlink, so the action stays recoverable from the recycle bin.
+  ipcMain.handle("file:delete", async (_event, payload: { path: string }): Promise<FileDeleteResult> => {
+    if (!isAbsolute(payload.path)) return { ok: false, reason: "not-absolute" };
+    try {
+      await shell.trashItem(payload.path);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: "delete-failed", message: error instanceof Error ? error.message : String(error) };
+    }
   });
 }

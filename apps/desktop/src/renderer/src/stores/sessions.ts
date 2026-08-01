@@ -6,7 +6,6 @@ import type {
   ContextUsage,
   RunLifecycle,
   SessionArtifact,
-  SessionCheckpoint,
   SessionTask,
   SessionTarget,
   TimelineEvent,
@@ -27,7 +26,6 @@ interface SessionsState {
   artifacts: Record<string, SessionArtifact[]>;
   rawLog: Record<string, string[]>;
   contextUsage: Record<string, ContextUsage | undefined>;
-  checkpoints: Record<string, SessionCheckpoint[]>;
   /** The provider turn currently occupying this exact session. */
   foreground: Record<string, RunLifecycle | undefined>;
   running: Record<string, RunLifecycle | undefined>;
@@ -73,13 +71,12 @@ interface SessionsState {
   _replaceArtifacts: (sessionId: string, artifacts: SessionArtifact[]) => void;
   _replaceRawLog: (sessionId: string, lines: string[]) => void;
   _replaceContextUsage: (sessionId: string, usage: ContextUsage | undefined) => void;
-  _replaceCheckpoints: (sessionId: string, checkpoints: SessionCheckpoint[]) => void;
   _replaceSessions: (sessions: UiSession[]) => void;
 }
 
 function buildInitial(): Pick<
   SessionsState,
-  "sessions" | "events" | "tasks" | "artifacts" | "rawLog" | "contextUsage" | "checkpoints"
+  "sessions" | "events" | "tasks" | "artifacts" | "rawLog" | "contextUsage"
 > {
   return {
     sessions: [],
@@ -87,8 +84,7 @@ function buildInitial(): Pick<
     tasks: {},
     artifacts: {},
     rawLog: {},
-    contextUsage: {},
-    checkpoints: {}
+    contextUsage: {}
   };
 }
 
@@ -127,7 +123,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             artifacts: keep(state.artifacts),
             rawLog: keep(state.rawLog),
             contextUsage: keep(state.contextUsage),
-            checkpoints: keep(state.checkpoints),
             foreground: keep(state.foreground),
             running: keep(state.running),
             activeAgentRunIds: keep(state.activeAgentRunIds)
@@ -343,9 +338,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       _replaceContextUsage: (sessionId, usage) =>
         set((state) => ({ contextUsage: { ...state.contextUsage, [sessionId]: usage } })),
 
-      _replaceCheckpoints: (sessionId, checkpoints) =>
-        set((state) => ({ checkpoints: { ...state.checkpoints, [sessionId]: checkpoints } })),
-
       _replaceSessions: (sessions) => set((state) => {
         const ids = new Set(sessions.map((session) => session.id));
         return {
@@ -356,7 +348,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           artifacts: Object.fromEntries(sessions.map((session) => [session.id, state.artifacts[session.id] ?? []])),
           rawLog: Object.fromEntries(sessions.map((session) => [session.id, state.rawLog[session.id] ?? []])),
           contextUsage: Object.fromEntries(sessions.map((session) => [session.id, state.contextUsage[session.id]])),
-          checkpoints: Object.fromEntries(sessions.map((session) => [session.id, state.checkpoints[session.id] ?? []])),
           foreground: Object.fromEntries(sessions.map((session) => [session.id, state.foreground[session.id]]))
         };
       })

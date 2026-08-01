@@ -19,7 +19,6 @@ import { SessionRunQueue } from "./session-run-queue.js";
 import { RunDiffCollector } from "./run-diff-collector.js";
 import { subagentMeta } from "./subagent-detection.js";
 import { captureWorkspaceSnapshot, type WorkspaceSnapshot } from "./run-workspace-snapshot.js";
-import type { CheckpointService } from "./checkpoint-service.js";
 import { RUNTIME_TOOL_SCHEMA_VERSION, type RuntimeToolProvider } from "./runtime-tool-provider.js";
 import { capabilityToMcpServer } from "../application/capability-service.js";
 import type { InteractionService } from "../application/interaction-service.js";
@@ -38,6 +37,8 @@ export interface RunContext {
   providerCommand?: "compact";
   /** Internal marker persisted after a provider thread is created with runtime tools. */
   runtimeToolVersion?: number;
+  /** Instance-configured context window; wins over provider-reported values in usage events. */
+  contextWindowOverride?: number;
 }
 
 export interface RunCompletion {
@@ -70,7 +71,6 @@ export class RunService {
   private readonly sessionQueue = new SessionRunQueue();
   private runtimeToolProvider?: RuntimeToolProvider;
   private interactions?: InteractionService;
-  private checkpoints?: CheckpointService;
 
   constructor(
     private readonly database: Database,
@@ -92,10 +92,6 @@ export class RunService {
 
   setInteractionService(interactions: InteractionService): void {
     this.interactions = interactions;
-  }
-
-  setCheckpointService(checkpoints: CheckpointService): void {
-    this.checkpoints = checkpoints;
   }
 
   async cancel(runId: string): Promise<void> {
@@ -163,8 +159,12 @@ export class RunService {
     prompt: string,
     context: RunContext
   ): Promise<RunHandle> {
-    let contextWindow: number | undefined;
-    if (this.adapters.find(agent.providerId)?.descriptor?.contextWindowDiscovery) {
+    // An explicit per-model context window from the instance editor always wins;
+    // live discovery (kimi/claude) only runs when nothing is configured.
+    const configuredContextWindow = agent.models?.find((entry) => entry.id === session.model)?.contextWindow
+      ?? (!session.model && agent.models?.length === 1 ? agent.models[0].contextWindow : undefined);
+    let contextWindow: number | undefined = configuredContextWindow;
+    if (!contextWindow && this.adapters.find(agent.providerId)?.descriptor?.contextWindowDiscovery) {
       const catalog = await this.adapters.listModels(agent).catch(() => undefined);
       const modelId = session.model || catalog?.defaultModel;
       const discoveredContextWindow = catalog?.models.find((model) => model.id === modelId)?.contextWindow;
@@ -252,16 +252,9 @@ export class RunService {
     try {
       if (context.presentation !== "provider_command") {
         const isGitWorkspace = await this.diffCollector.isGitWorkspace(request.cwd).catch(() => false);
-        let snapshot: WorkspaceSnapshot | undefined;
         if (!isGitWorkspace) {
-          snapshot = await captureWorkspaceSnapshot(request.cwd).catch(() => undefined);
+          const snapshot = await captureWorkspaceSnapshot(request.cwd).catch(() => undefined);
           if (snapshot) this.workspaceBaselines.set(runId, snapshot);
-        }
-        // Per-turn checkpoint ("回滚到此轮之前"): same bounded snapshot, reused
-        // for the non-git diff baseline when both apply.
-        if (this.checkpoints) {
-          snapshot ??= await captureWorkspaceSnapshot(request.cwd).catch(() => undefined);
-          if (snapshot) await this.checkpoints.save(session, run, snapshot).catch(() => undefined);
         }
       }
       const currentSession = this.database.sessions.get(session.id) ?? session;
@@ -273,7 +266,8 @@ export class RunService {
         : this.adapters.start(request);
       const completion = this.consume(run, currentSession, adapterRun.events, {
         ...context,
-        runtimeToolVersion: runtimeToolBinding ? RUNTIME_TOOL_SCHEMA_VERSION : context.runtimeToolVersion
+        runtimeToolVersion: runtimeToolBinding ? RUNTIME_TOOL_SCHEMA_VERSION : context.runtimeToolVersion,
+        contextWindowOverride: configuredContextWindow ?? context.contextWindowOverride
       });
       this.active.set(runId, { sessionId: session.id, cancel: adapterRun.cancel, steer: adapterRun.steer, completion, projectRunId: context.projectRunId });
       void completion.finally(() => {
@@ -441,7 +435,7 @@ export class RunService {
       inputTokens: event.inputTokens,
       outputTokens: event.outputTokens,
       contextUsed: event.contextUsed,
-      contextWindow: event.contextWindow
+      contextWindow: context.contextWindowOverride ?? event.contextWindow
     });
     else if (event.kind === "commands") this.events.append(session, run, "provider.commands_updated", {
       providerId: this.database.agents.get(session.agentInstanceId ?? "")?.providerId ?? "unknown",
@@ -577,9 +571,6 @@ export class RunService {
     const project = this.database.projects.get(session.projectId);
     const cwd = context.workingDirectory ?? project?.rootPath;
     if (!cwd) return;
-    // Persist the touched set for checkpoint revert scope, even when the run
-    // ends up with no net diff.
-    this.checkpoints?.recordTouched(run.id, cwd, touched.map((file) => file.path));
     const files = await this.diffCollector.collect(cwd, touched, this.workspaceBaselines.get(run.id)).catch(() => []);
     if (!files.length) return;
     const artifact = this.artifactService.save({

@@ -1,6 +1,6 @@
 import type { AgentInstance, ProviderModelCatalog } from "@agenthub/domain";
 import type { AdapterDetectionResult } from "../adapters/index.js";
-import { AdapterRegistry } from "../adapters/index.js";
+import { AdapterRegistry, discoverOpenAiCompatibleModels, mergeInstanceModelConfig } from "../adapters/index.js";
 import { Database } from "../database/index.js";
 import { CoreError } from "../errors.js";
 import { CredentialService, EnvironmentPolicyService, providerEnvironmentPassthrough } from "../runtime/security/index.js";
@@ -57,7 +57,7 @@ export class AgentService {
     return { providerId, ...(await this.adapters.detect({ ...probe, executable: command })) };
   }
 
-  async listModels(providerId: string, executable?: string, agentInstanceId?: string): Promise<ProviderModelCatalog> {
+  async listModels(providerId: string, executable?: string, agentInstanceId?: string, options: { baseUrl?: string; apiKey?: string } = {}): Promise<ProviderModelCatalog> {
     const configured = agentInstanceId
       ? this.list().find((instance) => instance.id === agentInstanceId && instance.providerId === providerId)
       : this.list().find((instance) => instance.providerId === providerId && instance.executable.trim());
@@ -85,11 +85,32 @@ export class AgentService {
       updatedAt: now
     };
     try {
-      const instance = { ...probe, executable: command };
-      const credentialEnvironment = this.credentials?.environment(instance.id, instance.providerId) ?? {};
-      return await this.adapters.listModels(instance, {
-        env: this.environment.build(undefined, { ...providerEnvironmentPassthrough(instance, process.env, this.adapters.find(providerId)?.descriptor), ...credentialEnvironment })
-      });
+      const baseUrl = options.baseUrl?.trim();
+      const apiKey = options.apiKey?.trim();
+      const descriptor = this.adapters.find(providerId)?.descriptor;
+      const instance = {
+        ...probe,
+        executable: command,
+        providerOptions: { ...probe.providerOptions, ...(baseUrl ? { baseUrl } : {}) }
+      };
+      const credentialEnvironment = { ...(this.credentials?.environment(instance.id, instance.providerId) ?? {}) };
+      if (apiKey) for (const key of descriptor?.credentialEnv ?? []) credentialEnvironment[key] = apiKey;
+      const context = {
+        env: this.environment.build(undefined, { ...providerEnvironmentPassthrough(instance, process.env, descriptor), ...credentialEnvironment })
+      };
+      // Instance-editor quick fetch: with a base URL every provider goes through
+      // the generic OpenAI-compatible endpoint first; adapter discovery (which
+      // falls back to the local CLI) remains the default and the fallback.
+      if (baseUrl) {
+        const effectiveApiKey = apiKey || descriptor?.credentialEnv?.map((key) => credentialEnvironment[key]).find((value) => value?.trim());
+        try {
+          const generic = await discoverOpenAiCompatibleModels(baseUrl, effectiveApiKey);
+          return mergeInstanceModelConfig({ ...generic, providerId }, instance.models);
+        } catch {
+          // Fall through to adapter/CLI discovery below.
+        }
+      }
+      return await this.adapters.listModels(instance, context);
     } catch (error) {
       return {
         providerId,

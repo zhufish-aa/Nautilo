@@ -4,7 +4,6 @@ import { useI18n, type MessageKey } from "../../lib/i18n";
 import { TimelineEventView } from "../timeline/Timeline";
 import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
-import { Dialog } from "../../components/ui/Dialog";
 import { Composer } from "./Composer";
 import { ArtifactsDrawer, DagDrawer, SubagentDrawer, TerminalDrawer } from "./Drawers";
 import { RunActivityIndicator } from "./RunActivityIndicator";
@@ -15,12 +14,10 @@ import { useFilePreviewStore } from "../../stores/file-preview";
 import { useProjectsStore } from "../../stores/projects";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
-import { toast } from "../../stores/toast";
 import { hasRunningDelegatedTask, isActiveLifecycle, visibleSessionStatus } from "../../lib/session-lifecycle";
 import { collectChangedFiles } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
-import { requestCore } from "../../lib/bridge";
-import type { CheckpointRevertPreview, TimelineEvent } from "../../lib/types";
+import type { TimelineEvent } from "../../lib/types";
 import { TodoGoalCard } from "./TodoGoalCard";
 
 export type DrawerKind = "terminal" | "artifacts" | "dag" | null;
@@ -29,7 +26,6 @@ export type DrawerKind = "terminal" | "artifacts" | "dag" | null;
 // every store update and re-render subscribers of empty sessions each token.
 const NO_EVENTS: TimelineEvent[] = [];
 const NO_TASKS: never[] = [];
-const NO_CHECKPOINTS: never[] = [];
 
 export function SessionWorkbench({
   sessionId,
@@ -45,7 +41,7 @@ export function SessionWorkbench({
   onOpenDrawer: (drawer: DrawerKind) => void;
   onCloseDrawer: () => void;
   onOpenSession: (sessionId: string) => void;
-  /** "work" hides code-centric affordances (diffs, terminal, checkpoints). */
+  /** "work" hides code-centric affordances (diffs, terminal). */
   mode?: "code" | "work";
   /** Extra controls rendered on the right side of the header (e.g. ModeSwitch). */
   headerActions?: ReactNode;
@@ -58,7 +54,6 @@ export function SessionWorkbench({
   const foregroundLifecycle = useSessionsStore((state) => state.foreground[sessionId]);
   const orchestrationLifecycle = useSessionsStore((state) => state.running[sessionId]);
   const startEditingMessage = useSessionsStore((state) => state.startEditingMessage);
-  const checkpoints = useSessionsStore((state) => state.checkpoints[sessionId] ?? NO_CHECKPOINTS);
   const teams = useTeamsStore((state) => state.teams);
   const instances = useAgentsStore((state) => state.instances);
   const projects = useProjectsStore((state) => state.projects);
@@ -135,27 +130,6 @@ export function SessionWorkbench({
     return groups;
   }, [events]);
 
-  // Checkpoint revert ("回滚到此轮之前"): click → preview → confirm → revert.
-  // Reads the store imperatively so the callback stays referentially stable —
-  // memoized timeline rows keep their first-seen props, and a closure over
-  // `events`/`checkpoints` would go stale as history grows.
-  const [revertTarget, setRevertTarget] = useState<{ checkpointId: string; preview?: CheckpointRevertPreview; loading: boolean; reverting: boolean }>();
-  const openRevert = useCallback((messageId: string): void => {
-    const state = useSessionsStore.getState();
-    const eventsNow = state.events[sessionId] ?? [];
-    const checkpointsNow = state.checkpoints[sessionId] ?? [];
-    const event = eventsNow.find((item) => item.id === `message-${messageId}`);
-    const at = event?.timestamp ?? "";
-    // Checkpoints arrive newest-first; this message's run captured its
-    // snapshot right after the message landed, i.e. the first checkpoint at
-    // or after the message timestamp is "before this turn".
-    const checkpoint = [...checkpointsNow].reverse().find((item) => item.createdAt >= at) ?? checkpointsNow[0];
-    if (!checkpoint) return;
-    setRevertTarget((current) => current?.reverting ? current : { checkpointId: checkpoint.id, loading: true, reverting: false });
-    void requestCore<CheckpointRevertPreview>("checkpoint.preview", { checkpointId: checkpoint.id })
-      .then((preview) => setRevertTarget((current) => current?.checkpointId === checkpoint.id ? { checkpointId: checkpoint.id, preview, loading: false, reverting: false } : current))
-      .catch(() => setRevertTarget(undefined));
-  }, [sessionId]);
   const handleEditMessage = useCallback(
     (messageId: string, text: string): void => startEditingMessage(sessionId, messageId, text),
     [sessionId, startEditingMessage]
@@ -164,17 +138,6 @@ export function SessionWorkbench({
     (path?: string): void => { setDiffFocusPath(path ?? null); onOpenDrawer("artifacts"); },
     [onOpenDrawer]
   );
-  const confirmRevert = (): void => {
-    if (!revertTarget) return;
-    const checkpointId = revertTarget.checkpointId;
-    setRevertTarget((current) => current ? { ...current, reverting: true } : current);
-    void requestCore<CheckpointRevertPreview>("checkpoint.revert", { checkpointId })
-      .then((summary) => {
-        toast.success(t("sessions.checkpoint.revertDone", { restored: summary.restored.length, removed: summary.removed.length }));
-      })
-      .catch((error) => toast.error(error instanceof Error ? error.message : String(error)))
-      .finally(() => setRevertTarget(undefined));
-  };
 
   if (!session) return <div className="flex-1" />;
 
@@ -262,7 +225,6 @@ export function SessionWorkbench({
                   <TimelineEventView
                     event={turn.header}
                     onEditMessage={handleEditMessage}
-                    onRevertCheckpoint={!isWork && checkpoints.length > 0 ? openRevert : undefined}
                   />
                 )}
                 {turn.items.length > 0 && (
@@ -302,64 +264,6 @@ export function SessionWorkbench({
       {!isWork && <ArtifactsDrawer open={drawer === "artifacts"} onClose={onCloseDrawer} sessionId={sessionId} focusPath={diffFocusPath} />}
       <DagDrawer open={drawer === "dag"} onClose={onCloseDrawer} tasks={tasks} />
       <SubagentDrawer open={!!subagentEventId} onClose={() => setSubagentEventId(undefined)} sessionId={sessionId} eventId={subagentEventId} />
-      <Dialog
-        open={!!revertTarget}
-        onOpenChange={(open) => { if (!open && !revertTarget?.reverting) setRevertTarget(undefined); }}
-        title={t("sessions.checkpoint.title")}
-        description={t("sessions.checkpoint.desc")}
-        footer={
-          <>
-            <Button variant="ghost" size="sm" onClick={() => setRevertTarget(undefined)} disabled={revertTarget?.reverting}>
-              {t("common.cancel")}
-            </Button>
-            <Button variant="primary" size="sm" onClick={confirmRevert} disabled={!revertTarget || revertTarget.loading || revertTarget.reverting}>
-              {revertTarget?.reverting ? t("sessions.checkpoint.reverting") : t("sessions.checkpoint.confirm")}
-            </Button>
-          </>
-        }
-      >
-        {revertTarget?.loading && <p className="text-sm text-ink-3">{t("sessions.checkpoint.previewLoading")}</p>}
-        {revertTarget?.preview && (
-          <div className="flex flex-col gap-3 text-sm">
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="rounded-xl border border-line bg-card-hover/40 px-2 py-2.5">
-                <p className="text-lg font-semibold text-ok">{revertTarget.preview.restored.length}</p>
-                <p className="text-[11px] text-ink-3">{t("sessions.checkpoint.restoreCount")}</p>
-              </div>
-              <div className="rounded-xl border border-line bg-card-hover/40 px-2 py-2.5">
-                <p className="text-lg font-semibold text-danger">{revertTarget.preview.removed.length}</p>
-                <p className="text-[11px] text-ink-3">{t("sessions.checkpoint.removeCount")}</p>
-              </div>
-              <div className="rounded-xl border border-line bg-card-hover/40 px-2 py-2.5">
-                <p className="text-lg font-semibold text-ink-3">{revertTarget.preview.skipped.length}</p>
-                <p className="text-[11px] text-ink-3">{t("sessions.checkpoint.skipCount")}</p>
-              </div>
-            </div>
-            {revertTarget.preview.warning && (
-              <p className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">{t("sessions.checkpoint.truncatedWarning")}</p>
-            )}
-            {(revertTarget.preview.restored.length + revertTarget.preview.removed.length) === 0 && (
-              <p className="text-xs text-ink-3">{t("sessions.checkpoint.noChanges")}</p>
-            )}
-            {revertTarget.preview.removed.length > 0 && (
-              <div>
-                <p className="mb-1 text-xs font-medium text-danger">{t("sessions.checkpoint.removedFiles")}</p>
-                <ul className="max-h-32 overflow-y-auto rounded-lg border border-line bg-card-hover/30 px-3 py-2 font-mono text-[11px] text-ink-2">
-                  {revertTarget.preview.removed.map((path) => <li key={path} className="truncate">{path}</li>)}
-                </ul>
-              </div>
-            )}
-            {revertTarget.preview.restored.length > 0 && (
-              <div>
-                <p className="mb-1 text-xs font-medium text-ink-2">{t("sessions.checkpoint.restoredFiles")}</p>
-                <ul className="max-h-32 overflow-y-auto rounded-lg border border-line bg-card-hover/30 px-3 py-2 font-mono text-[11px] text-ink-2">
-                  {revertTarget.preview.restored.map((path) => <li key={path} className="truncate">{path}</li>)}
-                </ul>
-              </div>
-            )}
-          </div>
-        )}
-      </Dialog>
     </>
   );
 }

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { DesktopAttachment } from "../main/attachment-file-service";
-import type { FileReadTextPayload, FileReadTextResult, ImagePayload, NativeMenuItemPayload } from "../main/desktop-interactions";
+import type { FileDeleteResult, FileReadTextPayload, FileReadTextResult, FileWriteTextPayload, FileWriteTextResult, ImagePayload, NativeMenuItemPayload } from "../main/desktop-interactions";
 import type { ProviderUpdateStartPayload, ProviderUpdateStartResult } from "../main/provider-updates";
 
 export interface AppInfo {
@@ -59,7 +59,9 @@ const bridge = {
     popup: (items: NativeMenuItemPayload[]): Promise<string | null> => ipcRenderer.invoke("menu:popup", items)
   },
   files: {
-    readText: (input: FileReadTextPayload): Promise<FileReadTextResult> => ipcRenderer.invoke("file:read-text", input)
+    readText: (input: FileReadTextPayload): Promise<FileReadTextResult> => ipcRenderer.invoke("file:read-text", input),
+    writeText: (input: FileWriteTextPayload): Promise<FileWriteTextResult> => ipcRenderer.invoke("file:write-text", input),
+    delete: (input: { path: string }): Promise<FileDeleteResult> => ipcRenderer.invoke("file:delete", input)
   },
   providers: {
     startUpdate: (input: ProviderUpdateStartPayload): Promise<ProviderUpdateStartResult> => ipcRenderer.invoke("provider:update-start", input),

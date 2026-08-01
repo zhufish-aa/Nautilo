@@ -116,12 +116,10 @@ function CardShell({
   );
 }
 
-function MessageCard({ event, locale, onEditMessage, onRevertCheckpoint }: {
+function MessageCard({ event, locale, onEditMessage }: {
   event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> };
   locale: "zh-CN" | "en-US";
   onEditMessage?: (messageId: string, text: string) => void;
-  /** Present when a checkpoint exists at/after this message ("回滚到此轮之前"). */
-  onRevertCheckpoint?: (messageId: string) => void;
 }): JSX.Element {
   const { sender, authorName, text, streaming, messageId, attachments, editedAt } = event.data;
   const { t } = useI18n();
@@ -230,17 +228,6 @@ function MessageCard({ event, locale, onEditMessage, onRevertCheckpoint }: {
                 title={locale === "zh-CN" ? "编辑" : "Edit"}
               >
                 <Pencil className="h-3.5 w-3.5" aria-hidden />
-              </button>
-            )}
-            {isUser && messageId && onRevertCheckpoint && (
-              <button
-                type="button"
-                onClick={() => onRevertCheckpoint(messageId)}
-                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-card-hover hover:text-ink"
-                aria-label={locale === "zh-CN" ? "回滚到此轮之前" : "Revert to before this turn"}
-                title={locale === "zh-CN" ? "回滚到此轮之前" : "Revert to before this turn"}
-              >
-                <RotateCcw className="h-3.5 w-3.5" aria-hidden />
               </button>
             )}
           </div>
@@ -989,14 +976,12 @@ function TimelineEventViewImpl({
   onViewDiff,
   onOpenSession,
   onEditMessage,
-  onRevertCheckpoint,
   onOpenSubagent
 }: {
   event: TimelineEvent;
   onViewDiff?: (path?: string) => void;
   onOpenSession?: (id: string) => void;
   onEditMessage?: (messageId: string, text: string) => void;
-  onRevertCheckpoint?: (messageId: string) => void;
   onOpenSubagent?: (eventId: string) => void;
 }): JSX.Element | null {
   const { t, locale } = useI18n();
@@ -1004,7 +989,7 @@ function TimelineEventViewImpl({
 
   switch (data.kind) {
     case "message":
-      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onRevertCheckpoint={onRevertCheckpoint} />;
+      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} />;
     case "activity":
       // Transient per-turn phases (queued/starting/thinking/responding) are already
       // surfaced by the live run indicator; keep only the completed milestone so
@@ -1069,10 +1054,9 @@ function TimelineEventViewImpl({
 
 // Memoized on event identity: streaming deltas replace only the live event
 // object, so historical rows skip re-render (and markdown re-parse) entirely.
-// Callback props are stable dispatchers by convention; the only significant
-// prop change is the revert button appearing once a checkpoint exists. Locale
-// switches still re-render through the i18n context, bypassing this memo.
+// Callback props are stable dispatchers by convention. Locale switches still
+// re-render through the i18n context, bypassing this memo.
 export const TimelineEventView = memo(
   TimelineEventViewImpl,
-  (prev, next) => prev.event === next.event && !!prev.onRevertCheckpoint === !!next.onRevertCheckpoint
+  (prev, next) => prev.event === next.event
 );

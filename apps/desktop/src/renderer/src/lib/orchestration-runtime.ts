@@ -15,7 +15,7 @@ import type { RuntimeEvent } from "@agenthub/event-protocol";
 import { getBridge, requestCore } from "./bridge";
 import { toDomainAgent, toDomainProject, toDomainTeam, toStandaloneUiSession } from "./core-mappers";
 import type { DesktopAttachment } from "../types/bridge";
-import type { ApprovalScope, RunLifecycle, SessionArtifact, SessionCheckpoint, SessionTask, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
+import type { ApprovalScope, RunLifecycle, SessionArtifact, SessionTask, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
 import { compactOrchestrationTimeline, hiddenCompletionRunIds, hiddenInternalRunIds, isVisibleTimelineMessage } from "./orchestration-timeline-policy";
 import { groupToolTimeline } from "./tool-timeline-groups";
 import { collectSubagentActivities, subagentDispatchIdOf } from "./subagent-activities";
@@ -371,13 +371,11 @@ function toDomainSession(session: UiSession, _team?: UiTeam): DomainSession {
 }
 
 async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: string): Promise<AgentRun | undefined> {
-  const [detail, replay, runs, artifacts, checkpoints] = await Promise.all([
+  const [detail, replay, runs, artifacts] = await Promise.all([
     requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: uiSession.id }),
     replayStandaloneEvents(uiSession.id),
     requestCore<AgentRun[]>("run.list", { sessionId: uiSession.id }),
-    requestCore<Artifact[]>("artifact.list", { sessionId: uiSession.id }),
-    // Older daemons without the checkpoint API degrade to an empty list.
-    requestCore<SessionCheckpoint[]>("checkpoint.list", { sessionId: uiSession.id }).catch(() => [] as SessionCheckpoint[])
+    requestCore<Artifact[]>("artifact.list", { sessionId: uiSession.id })
   ]);
   const knownRun = knownRunId ? runs.find((item) => item.id === knownRunId) : undefined;
   const activeRun = runs.find(shouldPollAgentRun);
@@ -388,7 +386,6 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
   standaloneArtifactCache.set(uiSession.id, artifacts);
   ingestInteractionEvents(replay.events);
   store._upsertExternalSession(toStandaloneUiSession(detail.session));
-  store._replaceCheckpoints(uiSession.id, checkpoints);
   renderStandaloneCache(uiSession.id);
   store._setRunning(uiSession.id, standaloneLifecycle(detail.session, run));
   store._setForeground(uiSession.id, standaloneLifecycle(detail.session, run));

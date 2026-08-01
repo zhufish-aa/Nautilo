@@ -26,6 +26,8 @@ interface AgentsState {
   hydrate: () => Promise<void>;
   redetect: (providerId: string) => Promise<void>;
   loadModels: (agentInstanceId: string) => Promise<ProviderModelCatalog>;
+  /** Ad-hoc discovery for the instance editor form; nothing is persisted or cached. */
+  previewModels: (input: { providerId: string; agentInstanceId?: string; executable?: string; baseUrl?: string; apiKey?: string }) => Promise<ProviderModelCatalog>;
   createInstance: (draft: AgentInstanceDraft) => Promise<AgentInstanceConfig>;
   updateInstance: (id: string, draft: AgentInstanceDraft) => Promise<void>;
   setInstanceEnabled: (id: string, enabled: boolean) => Promise<void>;
@@ -106,6 +108,14 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       return catalog;
     }
   },
+
+  previewModels: async ({ providerId, agentInstanceId, executable, baseUrl, apiKey }) => requestCore<ProviderModelCatalog>("provider.models", {
+    providerId: providerId === "custom-cli" ? "custom" : providerId,
+    agentInstanceId,
+    executable: executable?.trim() || undefined,
+    baseUrl: baseUrl?.trim() || undefined,
+    apiKey: apiKey?.trim() || undefined
+  }),
 
   createInstance: async (draft) => {
     const now = new Date().toISOString();

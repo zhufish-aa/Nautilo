@@ -1,8 +1,8 @@
 /**
  * AgentHub provider plugin for OpenCode.
  *
- * Wraps `opencode run --format json`: one run = one spawned CLI process whose
- * stdout is a JSONL event stream. Behavior mirrors the daemon's built-in
+ * Uses OpenCode's headless server API and reuses one server per configured
+ * instance/workspace instead of paying a process cold start on every turn.
  * OpenCode adapter — installing this plugin overrides the built-in, and
  * disabling/uninstalling it restores the built-in.
  *
@@ -10,6 +10,7 @@
  * and resolves nothing from the host at runtime.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -69,6 +70,14 @@ const NATIVE_COMMANDS = [
   { name: "compact", description: "压缩当前会话上下文（OpenCode summarize）", providerCommand: "compact" as const }
 ];
 
+interface ManagedServer {
+  key: string;
+  baseUrl: string;
+  handle: ServerProcessHandle;
+  activeRuns: number;
+  retireWhenIdle: boolean;
+}
+
 class OpenCodePluginAdapter implements AgentCliAdapter {
   readonly providerId = "opencode";
   readonly descriptor = descriptor;
@@ -81,6 +90,8 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     nativeResume: true,
     pty: false
   };
+  private readonly servers = new Map<string, Promise<ManagedServer>>();
+  private disposed = false;
 
   async detect(instance: { executable: string }): Promise<AdapterDetectionResult> {
     const executable = instance.executable || descriptor.defaultExecutable || "opencode";
@@ -129,6 +140,19 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     return parseOpenCodeModels(result.text);
   }
 
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    const pending = [...new Set(this.servers.values())];
+    this.servers.clear();
+    const settled = await Promise.allSettled(pending);
+    await Promise.all(settled.flatMap((result) => {
+      if (result.status !== "fulfilled") return [];
+      result.value.retireWhenIdle = true;
+      return result.value.activeRuns === 0 ? [result.value.handle.cancel()] : [];
+    }));
+  }
+
   private spawnRun(request: AdapterStartRequest, args: string[]): AdapterRun {
     const env = (request.env ?? {}) as Record<string, string>;
     const resolved = resolveSpawnCommand(request.instance.executable || descriptor.defaultExecutable || "opencode", args, env);
@@ -159,32 +183,24 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
    * plugin can bridge question.asked to AgentHub and reply over HTTP.
    */
   private serverRun(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
-    let handle: PluginProcessHandle | undefined;
-    let baseUrl: string | undefined;
+    let server: ManagedServer | undefined;
     let sessionId = resume ? (request as AdapterResumeRequest).providerSessionId : undefined;
     let finished = false;
+    let cancelled = false;
+    let serverLease = false;
+    let closeEventStream: (() => void) | undefined;
+    const adapter = this;
 
     const events = async function* (): AsyncGenerator<AdapterEvent> {
       try {
         yield { kind: "commands", commands: NATIVE_COMMANDS };
-        const port = await availablePort();
-        const env = (request.env ?? {}) as Record<string, string>;
-        const args = ["serve", "--hostname", "127.0.0.1", "--port", String(port)];
-        const resolvedCommand = resolveSpawnCommand(request.instance.executable || descriptor.defaultExecutable || "opencode", args, env);
-        const child = spawn(resolvedCommand.command, resolvedCommand.args, {
-          cwd: request.cwd,
-          env,
-          windowsHide: true,
-          windowsVerbatimArguments: resolvedCommand.verbatim ?? false
-        });
-        handle = new PluginProcessHandle(child, {
-          timeoutMs: request.timeoutMs,
-          maxOutputBytes: request.maxOutputBytes ?? 20 * 1024 * 1024
-        });
-        baseUrl = `http://127.0.0.1:${port}`;
-        await waitForServer(baseUrl, request.cwd, child);
+        server = await adapter.serverFor(request);
+        server.activeRuns += 1;
+        serverLease = true;
+        const baseUrl = server.baseUrl;
 
         const stream = await openEventStream(baseUrl, request.cwd);
+        closeEventStream = stream.close;
         if (!sessionId) {
           const created = await apiJson(baseUrl, request.cwd, "/session", {
             method: "POST",
@@ -236,7 +252,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
         const childSessions = new Map<string, string>();
         const rejectedSessions = new Set<string>();
 
-        for await (const raw of stream) {
+        for await (const raw of stream.events) {
           const event = unwrapServerEvent(raw);
           const properties = asRecord(event.properties);
           const eventSessionId = String(properties.sessionID ?? "");
@@ -307,18 +323,26 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
               if (String(status.type ?? properties.status ?? "") !== "idle") break;
               finished = true;
               yield { kind: "status", phase: "turn_completed", raw };
-              await handle.cancel();
               yield { kind: "exit", exitCode: 0 };
+              closeEventStream();
               return;
             }
             case "session.error": {
               if (eventSessionId && eventSessionId !== sessionId) break;
               const error = asRecord(properties.error);
               const message = String(asRecord(error.data).message ?? error.message ?? "OpenCode session failed");
+              // POST /session/:id/abort emits MessageAbortedError on the same
+              // event stream. The host already records an explicit cancel, so
+              // do not misreport that acknowledgement as PROVIDER_ERROR.
+              if (cancelled) {
+                finished = true;
+                closeEventStream();
+                return;
+              }
               finished = true;
               yield { kind: "status", phase: "turn_failed", raw };
               yield { kind: "error", error: new Error(message) };
-              await handle.cancel();
+              closeEventStream();
               return;
             }
             default:
@@ -326,23 +350,93 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
           }
         }
       } catch (error) {
-        yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
-        if (!finished) await handle?.cancel().catch(() => undefined);
+        // Closing an SSE subscription rejects its fetch on Node/undici. Once a
+        // turn has reached a terminal state (or was explicitly cancelled),
+        // that transport error is expected cleanup rather than provider failure.
+        if (!finished && !cancelled) {
+          yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
+        }
+      } finally {
+        closeEventStream?.();
+        if (server && serverLease) {
+          server.activeRuns = Math.max(0, server.activeRuns - 1);
+          if (server.retireWhenIdle && server.activeRuns === 0) {
+            await server.handle.cancel().catch(() => undefined);
+          }
+        }
       }
     };
 
-    const deferred = deferredProcess(() => handle);
+    const deferred = deferredProcess(() => server?.handle);
     return {
       process: deferred,
       events: { [Symbol.asyncIterator]: events },
       cancel: async () => {
-        if (baseUrl && sessionId) {
-          await apiJson(baseUrl, request.cwd, `/session/${encodeURIComponent(sessionId)}/abort`, { method: "POST" }).catch(() => undefined);
+        cancelled = true;
+        if (server && sessionId) {
+          await apiJson(server.baseUrl, request.cwd, `/session/${encodeURIComponent(sessionId)}/abort`, { method: "POST" }).catch(() => undefined);
         }
-        await handle?.cancel();
+        closeEventStream?.();
       },
-      write: (input) => handle?.write(input)
+      write: (input) => server?.handle.write(input)
     };
+  }
+
+  private serverKey(request: AdapterStartRequest | AdapterResumeRequest): string {
+    const executable = request.instance.executable || descriptor.defaultExecutable || "opencode";
+    const environment = Object.entries(request.env ?? {}).sort(([left], [right]) => left.localeCompare(right));
+    const environmentHash = createHash("sha256").update(JSON.stringify(environment)).digest("hex");
+    return [request.instance.id, resolve(request.cwd), executable, environmentHash].join("\0");
+  }
+
+  private async serverFor(request: AdapterStartRequest | AdapterResumeRequest): Promise<ManagedServer> {
+    if (this.disposed) throw new Error("OpenCode adapter has been disposed");
+    const key = this.serverKey(request);
+    const existing = this.servers.get(key);
+    if (existing) {
+      const server = await existing;
+      if (server.handle.child.exitCode === null) return server;
+      if (this.servers.get(key) === existing) this.servers.delete(key);
+    }
+
+    const starting = this.launchServer(key, request);
+    this.servers.set(key, starting);
+    void starting.then((server) => server.handle.wait().then(() => {
+      if (this.servers.get(key) === starting) this.servers.delete(key);
+    }), () => undefined);
+    try {
+      const server = await starting;
+      if (this.disposed) {
+        await server.handle.cancel();
+        throw new Error("OpenCode adapter has been disposed");
+      }
+      return server;
+    } catch (error) {
+      if (this.servers.get(key) === starting) this.servers.delete(key);
+      throw error;
+    }
+  }
+
+  private async launchServer(key: string, request: AdapterStartRequest | AdapterResumeRequest): Promise<ManagedServer> {
+    const port = await availablePort();
+    const env = (request.env ?? {}) as Record<string, string>;
+    const args = ["serve", "--hostname", "127.0.0.1", "--port", String(port)];
+    const resolvedCommand = resolveSpawnCommand(request.instance.executable || descriptor.defaultExecutable || "opencode", args, env);
+    const child = spawn(resolvedCommand.command, resolvedCommand.args, {
+      cwd: request.cwd,
+      env,
+      windowsHide: true,
+      windowsVerbatimArguments: resolvedCommand.verbatim ?? false
+    });
+    const handle = new ServerProcessHandle(child);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    try {
+      await waitForServer(baseUrl, request.cwd, child);
+      return { key, baseUrl, handle, activeRuns: 0, retireWhenIdle: false };
+    } catch (error) {
+      await handle.cancel().catch(() => undefined);
+      throw error;
+    }
   }
 }
 
@@ -350,7 +444,7 @@ type RecordValue = Record<string, unknown>;
 const asRecord = (value: unknown): RecordValue =>
   typeof value === "object" && value !== null ? value as RecordValue : {};
 
-function deferredProcess(current: () => PluginProcessHandle | undefined): ProcessHandle {
+function deferredProcess(current: () => ProcessHandle | undefined): ProcessHandle {
   return {
     get pid() { return current()?.pid; },
     get child() {
@@ -397,7 +491,8 @@ async function apiJson(
   const response = await fetch(directoryUrl(baseUrl, cwd, path), {
     method: init.method,
     headers: init.body === undefined ? undefined : { "content-type": "application/json" },
-    body: init.body === undefined ? undefined : JSON.stringify(init.body)
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: AbortSignal.timeout(30_000)
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
@@ -409,11 +504,14 @@ async function apiJson(
 }
 
 async function waitForServer(baseUrl: string, cwd: string, child: ChildProcessWithoutNullStreams): Promise<void> {
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`OpenCode server exited before becoming ready (${child.exitCode})`);
     try {
-      const response = await fetch(directoryUrl(baseUrl, cwd, "/session/status"));
+      const remaining = Math.max(1, deadline - Date.now());
+      const response = await fetch(directoryUrl(baseUrl, cwd, "/session/status"), {
+        signal: AbortSignal.timeout(Math.min(5_000, remaining))
+      });
       if (response.ok) return;
     } catch { /* server is still starting */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 80));
@@ -421,12 +519,22 @@ async function waitForServer(baseUrl: string, cwd: string, child: ChildProcessWi
   throw new Error("Timed out waiting for OpenCode server");
 }
 
-async function openEventStream(baseUrl: string, cwd: string): Promise<AsyncGenerator<unknown>> {
-  const response = await fetch(directoryUrl(baseUrl, cwd, "/event"), {
-    headers: { accept: "text/event-stream" }
-  });
-  if (!response.ok || !response.body) throw new Error(`OpenCode event stream failed (${response.status})`);
-  return readSse(response.body);
+async function openEventStream(baseUrl: string, cwd: string): Promise<{ events: AsyncGenerator<unknown>; close: () => void }> {
+  const controller = new AbortController();
+  const startupTimer = setTimeout(() => controller.abort(new Error("Timed out opening OpenCode event stream")), 15_000);
+  try {
+    const response = await fetch(directoryUrl(baseUrl, cwd, "/event"), {
+      headers: { accept: "text/event-stream" },
+      signal: controller.signal
+    });
+    if (!response.ok || !response.body) {
+      controller.abort();
+      throw new Error(`OpenCode event stream failed (${response.status})`);
+    }
+    return { events: readSse(response.body), close: () => controller.abort() };
+  } finally {
+    clearTimeout(startupTimer);
+  }
 }
 
 async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown> {
@@ -864,7 +972,7 @@ function capture(command: string, args: string[], env?: Record<string, string | 
       env: env ? { ...process.env, ...env } as Record<string, string> : undefined
     });
     const timer = setTimeout(() => {
-      killTree(child);
+      void killTree(child);
       resolve({ text, exitCode: null });
     }, 8_000);
     child.stdout.on("data", (chunk) => { text += String(chunk); });
@@ -881,12 +989,19 @@ function capture(command: string, args: string[], env?: Record<string, string | 
 }
 
 /** SIGTERM does not kill a Windows process tree; taskkill /T does. */
-function killTree(child: ChildProcessWithoutNullStreams): void {
+function killTree(child: ChildProcessWithoutNullStreams): Promise<void> {
   if (platform() === "win32" && child.pid) {
-    spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
-  } else {
-    child.kill("SIGTERM");
+    return new Promise((resolveKill) => {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore"
+      });
+      killer.once("error", () => resolveKill());
+      killer.once("close", () => resolveKill());
+    });
   }
+  child.kill("SIGTERM");
+  return Promise.resolve();
 }
 
 /**
@@ -938,6 +1053,31 @@ interface HandleLimits {
   maxOutputBytes: number;
 }
 
+/** Lightweight process handle for a reused server; drains stdio without retaining an unbounded event queue. */
+class ServerProcessHandle implements ProcessHandle {
+  readonly events: AsyncIterable<ProcessEvent> = {
+    async *[Symbol.asyncIterator](): AsyncGenerator<ProcessEvent> { /* server output is intentionally drained */ }
+  };
+  private readonly exitPromise: Promise<{ exitCode: number | null; signal?: string }>;
+
+  constructor(readonly child: ChildProcessWithoutNullStreams) {
+    child.stdout.resume();
+    child.stderr.resume();
+    child.on("error", () => undefined);
+    this.exitPromise = new Promise((resolveExit) => {
+      child.once("close", (exitCode, signal) => resolveExit({ exitCode, signal: signal ?? undefined }));
+    });
+  }
+
+  get pid(): number | undefined { return this.child.pid; }
+  write(input: string): void { if (this.child.stdin.writable) this.child.stdin.write(input); }
+  wait(): Promise<{ exitCode: number | null; signal?: string }> { return this.exitPromise; }
+  async cancel(): Promise<void> {
+    if (this.child.exitCode === null) await killTree(this.child);
+    await this.exitPromise.catch(() => undefined);
+  }
+}
+
 /** ProcessHandle over a spawned child, with overall/idle/output limits. */
 class PluginProcessHandle implements ProcessHandle {
   readonly events: AsyncIterable<ProcessEvent>;
@@ -982,14 +1122,14 @@ class PluginProcessHandle implements ProcessHandle {
   wait(): Promise<{ exitCode: number | null; signal?: string }> { return this.exitPromise; }
 
   async cancel(): Promise<void> {
-    killTree(this.child);
+    await killTree(this.child);
     await this.exitPromise.catch(() => undefined);
   }
 
   private timeout(reason: "timeout" | "idle" | "max_output"): void {
     if (this.closed) return;
     this.push({ kind: "timeout", reason });
-    killTree(this.child);
+    void killTree(this.child);
   }
 
   private resetIdleTimer(idleTimeoutMs?: number): void {

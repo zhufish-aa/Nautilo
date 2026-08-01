@@ -20,7 +20,6 @@ export * from "./runtime/security/index.js";
 export * from "./runtime/observability/index.js";
 export * from "./runtime/recovery-service.js";
 export * from "./runtime/event-subscription-service.js";
-export * from "./runtime/checkpoint-service.js";
 export * from "./application/orchestration-service.js";
 export * from "./application/agent-service.js";
 export * from "./application/session-context.js";

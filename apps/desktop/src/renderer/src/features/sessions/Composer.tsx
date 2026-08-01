@@ -5,8 +5,7 @@ import { ArrowUp, FileText, ListPlus, Loader2, Paperclip, SendHorizontal, Square
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { sendWorkbenchFollowUp, sendWorkbenchMessage, stopWorkbenchRun } from "../../lib/orchestration-runtime";
-import { getBridge, requestCore } from "../../lib/bridge";
-import type { SessionCheckpoint } from "../../lib/types";
+import { getBridge } from "../../lib/bridge";
 import type { DesktopAttachment } from "../../types/bridge";
 import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
@@ -43,18 +42,6 @@ export function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editingMessage = useSessionsStore((state) => state.editingMessage?.sessionId === sessionId ? state.editingMessage : undefined);
   const cancelEditingMessage = useSessionsStore((state) => state.cancelEditingMessage);
-  const checkpoints = useSessionsStore((state) => sessionId && editingMessage ? state.checkpoints[sessionId] ?? EMPTY_LIST : EMPTY_LIST);
-  // The timeline is only needed to locate the checkpoint of the message being
-  // edited; subscribing to it unconditionally re-rendered the composer on
-  // every streaming token.
-  const timeline = useSessionsStore((state) => sessionId && editingMessage ? state.events[sessionId] ?? EMPTY_LIST : EMPTY_LIST);
-  // "编辑重发"时可勾选：先把该轮之后 Agent 改过的文件回滚，再发送修正。
-  const [revertOnEdit, setRevertOnEdit] = useState(false);
-  const editCheckpoint = useMemo((): SessionCheckpoint | undefined => {
-    if (!editingMessage || checkpoints.length === 0) return undefined;
-    const at = timeline.find((item) => item.id === `message-${editingMessage.messageId}`)?.timestamp ?? "";
-    return [...checkpoints].reverse().find((item) => item.createdAt >= at) ?? checkpoints[0];
-  }, [editingMessage, checkpoints, timeline]);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const slash = useSlashCommands(sessionId);
   const promptSnippets = useSettingsStore((state) => state.promptSnippets);
@@ -189,17 +176,9 @@ export function Composer({
     if (!canSend) return;
     const text = value.trim() || t("sessions.composer.attachmentPrompt");
     const edit = editingMessage;
-    const checkpoint = edit && revertOnEdit ? editCheckpoint : undefined;
     setValue("");
     setAttachments([]);
     if (edit) cancelEditingMessage();
-    if (checkpoint) {
-      // Revert files first so the corrected turn starts from the pre-turn state.
-      void requestCore("checkpoint.revert", { checkpointId: checkpoint.id })
-        .catch((error) => toast.error(error instanceof Error ? error.message : String(error)))
-        .finally(() => void sendWorkbenchMessage(sessionId, text, attachments, edit?.messageId));
-      return;
-    }
     void sendWorkbenchMessage(sessionId, text, attachments, edit?.messageId);
   };
   const submitFollowUp = (mode: "steer" | "queue"): void => {
@@ -334,17 +313,6 @@ export function Composer({
         {editingMessage && (
           <div className="mx-3 mt-3 flex items-center gap-2 rounded-xl border border-accent/20 bg-accent-soft px-3 py-2 text-xs text-ink-2">
             <span className="min-w-0 flex-1 truncate">{t("sessions.composer.editing")}</span>
-            {editCheckpoint && (
-              <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[11px] text-ink-3 transition-colors hover:text-ink">
-                <input
-                  type="checkbox"
-                  checked={revertOnEdit}
-                  onChange={(event) => setRevertOnEdit(event.target.checked)}
-                  className="h-3.5 w-3.5 accent-[var(--accent)]"
-                />
-                {t("sessions.composer.revertOnEdit")}
-              </label>
-            )}
             <button type="button" onClick={cancelEditingMessage} className="rounded-md p-1 text-ink-3 transition-colors hover:bg-card-hover hover:text-ink" aria-label={t("sessions.composer.cancelEdit")}>
               <X className="h-3.5 w-3.5" aria-hidden />
             </button>

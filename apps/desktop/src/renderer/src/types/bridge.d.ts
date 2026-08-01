@@ -39,6 +39,20 @@ export type FileReadTextResult =
   | { ok: false; reason: "not-found" | "not-file" | "binary" }
   | { ok: false; reason: "ambiguous"; candidates: string[] };
 
+export interface FileWriteTextPayload {
+  /** Absolute path — typically the resolvedPath returned by readText. */
+  path: string;
+  content: string;
+}
+
+export type FileWriteTextResult =
+  | { ok: true }
+  | { ok: false; reason: "not-absolute" | "too-large" | "write-failed"; message?: string };
+
+export type FileDeleteResult =
+  | { ok: true }
+  | { ok: false; reason: "not-absolute" | "delete-failed"; message?: string };
+
 export interface ProviderUpdateStartPayload {
   updateId: string;
   executable: string;
@@ -85,6 +99,10 @@ export interface AgentHubBridge {
   files: {
     /** Reads a UTF-8 text file for preview; relative paths resolve against basePaths. */
     readText(input: FileReadTextPayload): Promise<FileReadTextResult>;
+    /** Writes UTF-8 text back from the in-app diff editor; absolute paths only. */
+    writeText(input: FileWriteTextPayload): Promise<FileWriteTextResult>;
+    /** Moves a file to the OS trash (revert of an agent-created file). */
+    delete(input: { path: string }): Promise<FileDeleteResult>;
   };
   providers: {
     /** Spawns the provider CLI's self-update command; output streams via onUpdateOutput. */

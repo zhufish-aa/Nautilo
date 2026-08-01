@@ -40,7 +40,9 @@ const bridge = {
     popup: (items) => electron.ipcRenderer.invoke("menu:popup", items)
   },
   files: {
-    readText: (input) => electron.ipcRenderer.invoke("file:read-text", input)
+    readText: (input) => electron.ipcRenderer.invoke("file:read-text", input),
+    writeText: (input) => electron.ipcRenderer.invoke("file:write-text", input),
+    delete: (input) => electron.ipcRenderer.invoke("file:delete", input)
   },
   providers: {
     startUpdate: (input) => electron.ipcRenderer.invoke("provider:update-start", input),

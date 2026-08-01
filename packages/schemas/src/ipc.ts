@@ -52,21 +52,6 @@ import type {
   DiscoveredMcpSource
 } from "./capability-import.js";
 
-export interface CheckpointInfo {
-  id: string;
-  sessionId: string;
-  runId?: string;
-  createdAt: string;
-  truncated: boolean;
-}
-
-export interface CheckpointRevertPreview {
-  restored: string[];
-  removed: string[];
-  skipped: string[];
-  warning?: string;
-}
-
 export interface IpcRequestMap {
   "health.get": { input: undefined; output: { status: "ok"; version: string } };
   "project.list": { input: undefined; output: Project[] };
@@ -90,7 +75,7 @@ export interface IpcRequestMap {
   "capability.discoverMcp": { input: { projectRoot?: string }; output: { sources: DiscoveredMcpSource[] } };
   "capability.scanSkills": { input: { dir: string }; output: CapabilityScanResult };
   "capability.importMany": { input: { items: ProviderCapability[]; onConflict?: CapabilityImportConflictPolicy }; output: { results: CapabilityImportOutcome[] } };
-  "provider.models": { input: { providerId: string; agentInstanceId?: string; executable?: string }; output: ProviderModelCatalog };
+  "provider.models": { input: { providerId: string; agentInstanceId?: string; executable?: string; baseUrl?: string; apiKey?: string }; output: ProviderModelCatalog };
   "team.list": { input: undefined; output: TeamDefinition[] };
   "team.get": { input: { teamId: string }; output: TeamDefinition };
   "team.upsert": { input: TeamDefinition; output: TeamDefinition };
@@ -112,9 +97,6 @@ export interface IpcRequestMap {
   "slashCommand.list": { input: { sessionId: string }; output: SlashCommandDefinition[] };
   "slashCommand.execute": { input: { sessionId: string; commandId: string; argument?: string }; output: SlashCommandResult };
   "slashCommand.continue": { input: { sessionId: string; commandId: string; actionId: string; selectedOptionIds?: string[] }; output: SlashCommandResult };
-  "checkpoint.list": { input: { sessionId: string }; output: CheckpointInfo[] };
-  "checkpoint.preview": { input: { checkpointId: string }; output: CheckpointRevertPreview };
-  "checkpoint.revert": { input: { checkpointId: string }; output: CheckpointRevertPreview & { checkpointId: string } };
   "run.cancel": { input: { runId: string }; output: { cancelled: true } };
   "run.list": { input: { sessionId?: string; projectRunId?: string }; output: AgentRun[] };
   "task.list": { input: { projectRunId: string }; output: Task[] };

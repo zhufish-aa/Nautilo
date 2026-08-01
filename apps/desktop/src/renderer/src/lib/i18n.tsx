@@ -289,6 +289,21 @@ const zh = {
         showKey: "显示 API Key",
         hideKey: "隐藏 API Key"
       },
+      models: {
+        title: "模型列表（可选）",
+        hint: "留空则使用自动发现的模型；自定义后同名模型按此处的显示名、推理深度顺序与上下文长度生效，新 ID 追加到列表。",
+        fetch: "快速获取",
+        fetchEmpty: "未获取到模型",
+        fetched: "已获取 {count} 个模型",
+        add: "添加模型",
+        idPlaceholder: "模型 ID",
+        namePlaceholder: "显示名称（可选）",
+        contextPlaceholder: "上下文长度",
+        effortsPlaceholder: "推理深度，按顺序逗号分隔，如 low, medium, high",
+        moveUp: "上移模型",
+        moveDown: "下移模型",
+        remove: "删除模型"
+      },
       savedToast: "「{name}」已保存",
       createdToast: "「{name}」已创建",
       nameRequired: "请填写实例名称",
@@ -709,7 +724,6 @@ const zh = {
       removeAttachment: "移除附件",
       attachmentPrompt: "请查看我附加的文件。",
       editing: "正在编辑这条消息，发送后会在当前会话中修正它",
-      revertOnEdit: "同时回滚该轮改动",
       cancelEdit: "取消编辑",
       advanced: "Advanced",
       speed: "速度",
@@ -782,20 +796,10 @@ const zh = {
       taskAssigned: "任务分配"
     },
     checkpoint: {
-      title: "回滚到此轮之前",
-      desc: "将该轮对话之后 Agent 改动过的文件还原到该轮开始前的状态；你自己新建的文件不受影响。",
-      previewLoading: "正在计算将还原的改动…",
-      restoreCount: "将还原",
-      removeCount: "将删除",
-      skipCount: "无变化",
-      removedFiles: "将被删除的文件（该轮之后由 Agent 新建）",
-      restoredFiles: "将被还原的文件",
-      noChanges: "该轮之后没有可还原的文件改动。",
+      // Historical strings only: still referenced when rendering old sessions'
+      // "checkpoint_reverted" timeline events.
       truncatedWarning: "检查点快照超出大小上限，回滚可能不完整。",
-      confirm: "确认回滚",
-      reverting: "回滚中…",
-      reverted: "已回滚到检查点 · 还原 {restored} 个文件，删除 {removed} 个",
-      revertDone: "已回滚：还原 {restored} 个文件，删除 {removed} 个"
+      reverted: "已回滚到检查点 · 还原 {restored} 个文件，删除 {removed} 个"
     },
     interactions: {
       question: "Provider 提问",
@@ -860,6 +864,7 @@ const zh = {
       truncated: "文件过大，仅显示前 2 MB",
       lines: "{count} 行",
       lineHint: "第 {line} 行",
+      largeFile: "大文件模式：高亮已简化",
       showInFolder: "在文件夹中显示"
     },
     drawers: {
@@ -870,6 +875,17 @@ const zh = {
       noArtifacts: "该会话还没有产物",
       noChanges: "还没有文件改动",
       noDiffDetail: "该文件没有 diff 详情",
+      edit: "编辑文件",
+      editSaved: "已保存到文件",
+      editFailed: "保存失败",
+      editTooLarge: "文件超过 2 MB，无法在应用内编辑",
+      editReadFailed: "读取文件失败，无法编辑",
+      revert: "撤回改动",
+      revertConfirm: "确认撤回？",
+      revertDone: "已撤回该文件的改动",
+      revertDeleted: "已撤回：新建的文件已移入回收站",
+      revertFailed: "无法撤回：当前文件已不包含该改动（可能被后续修改）",
+      revertTruncated: "diff 内容被截断，无法安全撤回",
       dag: "任务流程",
       dagNote: "任务之间的先后与依赖关系，仅在主 Agent 制定计划后展示",
       subagent: "子 Agent 详情",
@@ -1253,6 +1269,21 @@ const en: Messages = {
         baseUrlHint: "For third-party relay/proxy services; empty uses the default endpoint",
         showKey: "Show API key",
         hideKey: "Hide API key"
+      },
+      models: {
+        title: "Model list (optional)",
+        hint: "Empty keeps live discovery; custom entries override the same model id (display name, ordered efforts, context window) and new ids are appended.",
+        fetch: "Quick fetch",
+        fetchEmpty: "No models returned",
+        fetched: "Fetched {count} models",
+        add: "Add model",
+        idPlaceholder: "Model ID",
+        namePlaceholder: "Display name (optional)",
+        contextPlaceholder: "Context window",
+        effortsPlaceholder: "Ordered efforts, comma-separated, e.g. low, medium, high",
+        moveUp: "Move model up",
+        moveDown: "Move model down",
+        remove: "Remove model"
       },
       savedToast: "“{name}” saved",
       createdToast: "“{name}” created",
@@ -1674,7 +1705,6 @@ const en: Messages = {
       removeAttachment: "Remove attachment",
       attachmentPrompt: "Please inspect the attached files.",
       editing: "Editing this message; sending will correct it in the current session",
-      revertOnEdit: "Also revert this turn's changes",
       cancelEdit: "Cancel editing",
       advanced: "Advanced",
       speed: "Speed",
@@ -1747,20 +1777,10 @@ const en: Messages = {
       taskAssigned: "Task assigned"
     },
     checkpoint: {
-      title: "Revert to before this turn",
-      desc: "Restore files the agent changed after this turn back to their pre-turn state. Files you created yourself are untouched.",
-      previewLoading: "Computing affected changes…",
-      restoreCount: "To restore",
-      removeCount: "To delete",
-      skipCount: "Unchanged",
-      removedFiles: "Files to delete (created by the agent after this turn)",
-      restoredFiles: "Files to restore",
-      noChanges: "No revertible file changes after this turn.",
+      // Historical strings only: still referenced when rendering old sessions'
+      // "checkpoint_reverted" timeline events.
       truncatedWarning: "The checkpoint snapshot hit a size limit; the revert may be incomplete.",
-      confirm: "Revert",
-      reverting: "Reverting…",
-      reverted: "Reverted to checkpoint · restored {restored} files, removed {removed}",
-      revertDone: "Reverted: restored {restored} files, removed {removed}"
+      reverted: "Reverted to checkpoint · restored {restored} files, removed {removed}"
     },
     interactions: {
       question: "Provider question",
@@ -1825,6 +1845,7 @@ const en: Messages = {
       truncated: "Large file — showing the first 2 MB only",
       lines: "{count} lines",
       lineHint: "Line {line}",
+      largeFile: "Large file: simplified highlighting",
       showInFolder: "Show in folder"
     },
     drawers: {
@@ -1835,6 +1856,17 @@ const en: Messages = {
       noArtifacts: "No artifacts in this session yet",
       noChanges: "No file changes yet",
       noDiffDetail: "No diff details available for this file",
+      edit: "Edit file",
+      editSaved: "Saved to file",
+      editFailed: "Save failed",
+      editTooLarge: "Files over 2 MB can't be edited in the app",
+      editReadFailed: "Failed to read the file for editing",
+      revert: "Revert change",
+      revertConfirm: "Confirm revert?",
+      revertDone: "Reverted this file's changes",
+      revertDeleted: "Reverted: the new file was moved to trash",
+      revertFailed: "Can't revert: the file no longer contains this change (later edits?)",
+      revertTruncated: "The diff is truncated; reverting would be unsafe",
       dag: "Task dependency graph",
       dagNote: "Shown only when the main agent creates a plan",
       subagent: "Sub-agent detail",

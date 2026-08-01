@@ -44,7 +44,9 @@ export type ChangedFileEntry =
       diff?: string;
       edits: number;
     }
-  | { kind: "fileDiff"; path: string; diff: ToolFileDiff; edits: number };
+  // `diff` is the latest fragment (what the drawer renders); `diffs` keeps
+  // every fragment oldest→newest so a per-file revert can unwind them all.
+  | { kind: "fileDiff"; path: string; diff: ToolFileDiff; diffs: ToolFileDiff[]; edits: number };
 
 export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[] {
   const byPath = new Map<string, ChangedFileEntry>();
@@ -82,7 +84,13 @@ export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[]
           byPath.set(path, { ...existing, edits: existing.edits + 1 });
           continue;
         }
-        byPath.set(path, { kind: "fileDiff", path, diff: fileDiff, edits: (existing?.edits ?? 0) + 1 });
+        byPath.set(path, {
+          kind: "fileDiff",
+          path,
+          diff: fileDiff,
+          diffs: [...(existing?.kind === "fileDiff" ? existing.diffs : []), fileDiff],
+          edits: (existing?.edits ?? 0) + 1
+        });
       }
     }
   };

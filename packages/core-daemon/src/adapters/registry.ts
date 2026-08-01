@@ -2,6 +2,7 @@ import { ClaudeCodeAdapter } from "./claude/index.js";
 import { CodexAdapter } from "./codex/index.js";
 import { CustomCliAdapter } from "./custom.js";
 import { KimiCodeAdapter } from "./kimi/index.js";
+import { mergeInstanceModelConfig } from "./model-config.js";
 import type { AdapterCapabilities, AdapterDiscoveryContext, AdapterResumeRequest, AdapterStartRequest, AgentCliAdapter } from "./types.js";
 import type { AgentInstance, ProviderModelCatalog } from "@agenthub/domain";
 
@@ -25,15 +26,16 @@ export class AdapterRegistry {
   listModels(instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<ProviderModelCatalog> {
     const adapter = this.get(instance.providerId);
     if (!adapter.listModels) {
-      return Promise.resolve({
+      return Promise.resolve(mergeInstanceModelConfig({
         providerId: instance.providerId,
         models: [],
         source: "unavailable",
         fetchedAt: new Date().toISOString(),
         warning: "该 Provider 暂不支持自动获取模型，可继续手动填写。"
-      });
+      }, instance.models));
     }
-    return adapter.listModels(instance, context);
+    return adapter.listModels(instance, context)
+      .then((catalog) => mergeInstanceModelConfig(catalog, instance.models));
   }
   start(request: AdapterStartRequest): ReturnType<AgentCliAdapter["start"]> { return this.get(request.instance.providerId).start(request); }
   resume(request: AdapterResumeRequest): ReturnType<AgentCliAdapter["start"]> {

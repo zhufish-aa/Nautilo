@@ -1,6 +1,7 @@
 import type {
   AgentStatus,
   DelegationPolicy,
+  InstanceModelConfig,
   RunMode,
   SessionStatus,
   TaskStatus,
@@ -57,6 +58,8 @@ export interface AgentInstanceConfig {
   apiKey?: string;
   credentialStored?: boolean;
   baseUrl?: string;
+  /** User-curated model list; empty/undefined means live discovery is used as-is. */
+  models?: InstanceModelConfig[];
   enabled: boolean;
   status: AgentStatus;
   createdAt: string;
@@ -272,22 +275,6 @@ export interface ContextUsage {
   contextWindow?: number;
 }
 
-/** Per-turn workspace checkpoint metadata (checkpoint.list IPC). */
-export interface SessionCheckpoint {
-  id: string;
-  sessionId: string;
-  runId?: string;
-  createdAt: string;
-  truncated: boolean;
-}
-
-export interface CheckpointRevertPreview {
-  restored: string[];
-  removed: string[];
-  skipped: string[];
-  warning?: string;
-}
-
 export interface MessageAttachmentView {
   id?: string;
   name: string;
@@ -336,6 +323,8 @@ export type TimelinePayload =
     }
   | { kind: "approval"; approval: ApprovalRequest }
   | { kind: "approval_resolved"; approvalId: string; decision: "approved" | "rejected"; scope: ApprovalScope }
+  // Historical only: per-turn checkpoints were removed; old sessions may still
+  // replay this event, so the timeline keeps a read-only rendering for it.
   | { kind: "checkpoint_reverted"; checkpointId: string; restored: string[]; removed: string[]; skipped: string[]; warning?: string }
   | { kind: "error"; code: string; message: string; retryable: boolean }
   | { kind: "run_status"; run: RunLifecycle };

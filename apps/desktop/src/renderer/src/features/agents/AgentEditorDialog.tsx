@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { ArrowDown, ArrowUp, Eye, EyeOff, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { ENV_POLICIES, permissionModesFor, supportsConfigProfile, useProviderMetas } from "../../lib/provider-catalog";
 import type { AgentInstanceConfig } from "../../lib/types";
@@ -9,13 +9,29 @@ import { Field, Input } from "../../components/ui/Input";
 import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { TagInput } from "../../components/ui/TagInput";
+import { newId } from "../../lib/utils";
 import { useAgentsStore, type AgentInstanceDraft } from "../../stores/agents";
 import { toast } from "../../stores/toast";
 
 /**
- * Instance editor: how AgentHub connects to a CLI. Execution choices such as
- * model and reasoning effort belong to TeamMember or Session, never here.
+ * Instance editor: how AgentHub connects to a CLI, plus an optional curated
+ * model catalog (ids, ordered efforts, context windows). Per-run execution
+ * choices still belong to TeamMember or Session.
  */
+interface ModelRow {
+  key: string;
+  id: string;
+  displayName: string;
+  /** Token count as editable text; parsed on save. */
+  contextWindow: string;
+  /** Ordered effort values, comma-separated (first is the UI default). */
+  efforts: string;
+}
+
+function emptyModelRow(): ModelRow {
+  return { key: newId("model"), id: "", displayName: "", contextWindow: "", efforts: "" };
+}
+
 interface FormState {
   displayName: string;
   providerId: string;
@@ -26,6 +42,7 @@ interface FormState {
   permissionMode: string;
   apiKey: string;
   baseUrl: string;
+  models: ModelRow[];
   enabled: boolean;
 }
 
@@ -40,6 +57,7 @@ function emptyForm(): FormState {
     permissionMode: "",
     apiKey: "",
     baseUrl: "",
+    models: [],
     enabled: true
   };
 }
@@ -55,6 +73,13 @@ function formFromInstance(instance: AgentInstanceConfig): FormState {
     permissionMode: instance.permissionMode ?? "",
     apiKey: instance.apiKey ?? "",
     baseUrl: instance.baseUrl ?? "",
+    models: (instance.models ?? []).map((model) => ({
+      key: newId("model"),
+      id: model.id,
+      displayName: model.displayName ?? "",
+      contextWindow: model.contextWindow ? String(model.contextWindow) : "",
+      efforts: model.reasoningEfforts.join(", ")
+    })),
     enabled: instance.enabled
   };
 }
@@ -71,21 +96,73 @@ export function AgentEditorDialog({
   const { t, locale } = useI18n();
   const createInstance = useAgentsStore((state) => state.createInstance);
   const updateInstance = useAgentsStore((state) => state.updateInstance);
+  const previewModels = useAgentsStore((state) => state.previewModels);
   const installations = useAgentsStore((state) => state.installations);
 
   const [form, setForm] = useState<FormState>(emptyForm);
   const [showApiKey, setShowApiKey] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
   const [errors, setErrors] = useState<{ name?: string; provider?: string; executable?: string }>({});
 
   useEffect(() => {
     if (open) {
       setForm(instance ? formFromInstance(instance) : emptyForm());
       setShowApiKey(false);
+      setFetchingModels(false);
       setErrors({});
     }
   }, [open, instance]);
 
   const patch = (changes: Partial<FormState>): void => setForm((prev) => ({ ...prev, ...changes }));
+
+  const patchModel = (key: string, changes: Partial<ModelRow>): void =>
+    setForm((prev) => ({ ...prev, models: prev.models.map((row) => (row.key === key ? { ...row, ...changes } : row)) }));
+  const moveModel = (key: string, offset: -1 | 1): void =>
+    setForm((prev) => {
+      const index = prev.models.findIndex((row) => row.key === key);
+      const target = index + offset;
+      if (index < 0 || target < 0 || target >= prev.models.length) return prev;
+      const models = [...prev.models];
+      const [row] = models.splice(index, 1);
+      models.splice(target, 0, row);
+      return { ...prev, models };
+    });
+  const removeModel = (key: string): void =>
+    setForm((prev) => ({ ...prev, models: prev.models.filter((row) => row.key !== key) }));
+  const addModel = (): void => setForm((prev) => ({ ...prev, models: [...prev.models, emptyModelRow()] }));
+
+  /** Quick fetch: with a base URL the daemon queries it directly; otherwise the provider CLI catalog is used. */
+  const quickFetchModels = async (): Promise<void> => {
+    setFetchingModels(true);
+    try {
+      const catalog = await previewModels({
+        providerId: form.providerId,
+        agentInstanceId: instance?.id,
+        executable: form.executable,
+        baseUrl: form.baseUrl,
+        apiKey: form.apiKey
+      });
+      if (!catalog.models.length) {
+        toast.error(catalog.warning ?? t("agents.editor.models.fetchEmpty"));
+        return;
+      }
+      patch({
+        models: catalog.models.map((model) => ({
+          key: newId("model"),
+          id: model.id,
+          displayName: model.displayName && model.displayName !== model.id ? model.displayName : "",
+          contextWindow: model.contextWindow ? String(model.contextWindow) : "",
+          efforts: model.reasoningEfforts.join(", ")
+        }))
+      });
+      toast.success(t("agents.editor.models.fetched", { count: catalog.models.length }));
+      if (catalog.warning) toast.info(catalog.warning);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFetchingModels(false);
+    }
+  };
 
   const providers = useProviderMetas();
   const providerOptions = useMemo(
@@ -129,6 +206,18 @@ export function AgentEditorDialog({
     setErrors(nextErrors);
     if (nextErrors.name || nextErrors.provider || nextErrors.executable) return;
 
+    const models = form.models
+      .map((row) => {
+        const size = Number.parseInt(row.contextWindow, 10);
+        return {
+          id: row.id.trim(),
+          displayName: row.displayName.trim() || undefined,
+          reasoningEfforts: row.efforts.split(/[,，]/).map((effort) => effort.trim()).filter(Boolean),
+          contextWindow: Number.isFinite(size) && size > 0 ? size : undefined
+        };
+      })
+      .filter((model) => model.id);
+
     const draft: AgentInstanceDraft = {
       displayName: form.displayName.trim(),
       providerId: form.providerId,
@@ -139,6 +228,7 @@ export function AgentEditorDialog({
       permissionMode: form.permissionMode || undefined,
       apiKey: form.apiKey.trim() || undefined,
       baseUrl: form.baseUrl.trim() || undefined,
+      models: models.length ? models : undefined,
       enabled: form.enabled
     };
 
@@ -310,6 +400,83 @@ export function AgentEditorDialog({
               />
             </Field>
           </div>
+        </div>
+        <div className="sm:col-span-2 rounded-xl border border-line bg-card-hover/50 p-3.5">
+          <div className="mb-1 flex items-center justify-between gap-3">
+            <p className="text-[13px] font-medium text-ink-2">{t("agents.editor.models.title")}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={fetchingModels || !form.providerId}
+              onClick={() => void quickFetchModels()}
+            >
+              {fetchingModels
+                ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                : <RefreshCw className="h-3.5 w-3.5" aria-hidden />}
+              {t("agents.editor.models.fetch")}
+            </Button>
+          </div>
+          <p className="mb-3 text-xs text-ink-3">{t("agents.editor.models.hint")}</p>
+          <div className="space-y-2.5">
+            {form.models.map((row, index) => (
+              <div key={row.key} className="space-y-2 rounded-lg border border-line bg-card p-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    value={row.id}
+                    onChange={(event) => patchModel(row.key, { id: event.target.value })}
+                    placeholder={t("agents.editor.models.idPlaceholder")}
+                    aria-label={t("agents.editor.models.idPlaceholder")}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="min-w-40 flex-1 font-mono text-[13px]"
+                  />
+                  <Input
+                    value={row.displayName}
+                    onChange={(event) => patchModel(row.key, { displayName: event.target.value })}
+                    placeholder={t("agents.editor.models.namePlaceholder")}
+                    aria-label={t("agents.editor.models.namePlaceholder")}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="w-36 text-[13px]"
+                  />
+                  <Input
+                    value={row.contextWindow}
+                    onChange={(event) => patchModel(row.key, { contextWindow: event.target.value })}
+                    placeholder={t("agents.editor.models.contextPlaceholder")}
+                    aria-label={t("agents.editor.models.contextPlaceholder")}
+                    inputMode="numeric"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="w-28 font-mono text-[13px]"
+                  />
+                  <div className="flex items-center">
+                    <Button variant="ghost" size="icon" disabled={index === 0} onClick={() => moveModel(row.key, -1)} aria-label={t("agents.editor.models.moveUp")}>
+                      <ArrowUp className="h-4 w-4" aria-hidden />
+                    </Button>
+                    <Button variant="ghost" size="icon" disabled={index === form.models.length - 1} onClick={() => moveModel(row.key, 1)} aria-label={t("agents.editor.models.moveDown")}>
+                      <ArrowDown className="h-4 w-4" aria-hidden />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => removeModel(row.key)} aria-label={t("agents.editor.models.remove")}>
+                      <Trash2 className="h-4 w-4" aria-hidden />
+                    </Button>
+                  </div>
+                </div>
+                <Input
+                  value={row.efforts}
+                  onChange={(event) => patchModel(row.key, { efforts: event.target.value })}
+                  placeholder={t("agents.editor.models.effortsPlaceholder")}
+                  aria-label={t("agents.editor.models.effortsPlaceholder")}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono text-[13px]"
+                />
+              </div>
+            ))}
+          </div>
+          <Button variant="ghost" size="sm" className="mt-2.5" onClick={addModel}>
+            <Plus className="h-3.5 w-3.5" aria-hidden />
+            {t("agents.editor.models.add")}
+          </Button>
         </div>
       </div>
     </Dialog>

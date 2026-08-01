@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { ToolFileDiff } from "@agenthub/event-protocol";
 import { diffLines, type DiffRow } from "../../lib/line-diff";
 import { highlightLine, languageForPath } from "../../lib/highlight";
+import { useProgressiveRows } from "../../lib/use-progressive-rows";
 import { cn } from "../../lib/utils";
 
 /** One syntax-highlighted text fragment (line or intra-line segment). */
@@ -60,6 +61,9 @@ export function ToolFileDiffView({ diff, locale, scrollClassName = "max-h-72" }:
   const removed = diff.before ? diff.before.split(/\r?\n/).length : 0;
   const added = diff.after ? diff.after.split(/\r?\n/).length : 0;
   const rows = useMemo(() => diffLines(diff.before, diff.after), [diff.before, diff.after]);
+  // Progressive mount: a big write can produce thousands of rows, each with
+  // its own highlight.js pass — render them in batches as the user scrolls.
+  const { limit, sentinelRef, showAll } = useProgressiveRows(rows.length, rows);
   const language = languageForPath(diff.path);
   const title = diff.operation === "write"
     ? (locale === "zh-CN" ? "写入内容" : "Written content")
@@ -75,7 +79,19 @@ export function ToolFileDiffView({ diff, locale, scrollClassName = "max-h-72" }:
         )}
       </div>
       <div className={`${scrollClassName} overflow-auto py-1 font-mono text-[11px] leading-relaxed`}>
-        {rows.map((row, index) => <DiffRowView key={index} row={row} language={language} />)}
+        {rows.slice(0, limit).map((row, index) => <DiffRowView key={index} row={row} language={language} />)}
+        {limit < rows.length && (
+          <button
+            ref={sentinelRef}
+            type="button"
+            onClick={showAll}
+            className="my-1 w-full rounded-md py-1 text-center font-sans text-[11px] text-ink-3 transition-colors hover:bg-card-hover hover:text-ink"
+          >
+            {locale === "zh-CN"
+              ? `加载剩余 ${rows.length - limit} 行…（点击全部展开）`
+              : `Loading ${rows.length - limit} more rows… (click to expand all)`}
+          </button>
+        )}
       </div>
     </div>
   );

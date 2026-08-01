@@ -20,6 +20,7 @@ export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
     executable: instance.executable,
     baseArgs: instance.baseArgs,
     profile: instance.profile,
+    models: instance.models?.length ? instance.models : undefined,
     providerOptions: {
       envPolicyId: instance.envPolicyId,
       ...(instance.permissionMode ? { permissionMode: instance.permissionMode } : {}),
@@ -44,6 +45,7 @@ export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
     envPolicyId: typeof instance.providerOptions?.envPolicyId === "string" ? instance.providerOptions.envPolicyId : "env-standard",
     permissionMode: typeof instance.providerOptions?.permissionMode === "string" ? instance.providerOptions.permissionMode : undefined,
     baseUrl: typeof instance.providerOptions?.baseUrl === "string" ? instance.providerOptions.baseUrl : undefined,
+    models: instance.models,
     enabled: instance.enabled,
     status: instance.status,
     createdAt: instance.createdAt,
