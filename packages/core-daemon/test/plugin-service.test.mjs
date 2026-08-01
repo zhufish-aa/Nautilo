@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -120,6 +120,36 @@ test("disable unregisters the adapter and marks the plugin; enable reloads it", 
   const enabled = await restarted.setEnabled("demo-cli", true);
   assert.equal(enabled.status, "loaded");
   assert.ok(adapters.has("demo-cli"));
+});
+
+test("disabling a plugin disposes its long-lived adapter resources", async (t) => {
+  const dataDir = tempDir(t, "agenthub-plugins-");
+  const marker = join(dataDir, "disposed.txt");
+  writePlugin(join(dataDir, "plugins", "demo-cli"), {
+    entry: `
+      import { writeFileSync } from "node:fs";
+      export default function createAdapter() {
+        return {
+          providerId: "demo-cli",
+          descriptor: { providerId: "demo-cli", name: "Demo CLI", vendor: "Test", capabilities: ["headless_text"], credentialEnv: ["DEMO_API_KEY"] },
+          supportsStructuredOutput: false,
+          supportsResume: false,
+          capabilities: { structuredOutput: false, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+          detect: async () => ({ installed: true, executable: "demo" }),
+          start() { throw new Error("fixture adapter does not run"); },
+          dispose() { writeFileSync(${JSON.stringify(marker)}, "disposed", "utf8"); }
+        };
+      }
+    `
+  });
+  const adapters = new AdapterRegistry([]);
+  const service = new PluginService(dataDir, adapters);
+  await service.ready;
+
+  await service.setEnabled("demo-cli", false);
+
+  assert.equal(readFileSync(marker, "utf8"), "disposed");
+  assert.ok(!adapters.has("demo-cli"));
 });
 
 test("installLocal copies the directory and loads it; uninstall removes both", async (t) => {
@@ -269,6 +299,150 @@ test("the real opencode plugin installs, registers the provider and streams even
   // Uninstalling removes the provider entirely — there is no built-in fallback.
   await service.uninstall("opencode");
   assert.ok(!adapters.has("opencode"));
+});
+
+test("the opencode server transport reuses a server, ignores terminal SSE errors and recovers after exit", async (t) => {
+  const pluginDist = join(import.meta.dirname, "..", "..", "provider-plugin-opencode", "dist", "index.js");
+  if (!existsSync(pluginDist)) {
+    t.skip("provider-plugin-opencode is not built");
+    return;
+  }
+
+  const bin = tempDir(t, "agenthub-fake-opencode-server-");
+  const fakeServer = join(bin, "fake-opencode-server.mjs");
+  writeFileSync(fakeServer, `
+    import { createServer } from "node:http";
+
+    const portIndex = process.argv.indexOf("--port");
+    const port = Number(process.argv[portIndex + 1]);
+    let eventResponse;
+    const server = createServer(async (request, response) => {
+      const url = new URL(request.url, "http://127.0.0.1");
+      if (request.method === "GET" && url.pathname === "/session/status") {
+        response.setHeader("content-type", "application/json");
+        response.end("{}");
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/event") {
+        eventResponse = response;
+        response.writeHead(200, { "content-type": "text/event-stream", connection: "keep-alive" });
+        response.write(": connected\\n\\n");
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/session") {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ id: "s-fixture" }));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/session/s-fixture/prompt_async") {
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        const prompt = JSON.parse(body).parts?.find((part) => part.type === "text")?.text;
+        response.writeHead(204).end();
+        setTimeout(() => {
+          const target = eventResponse;
+          const sendEvent = (event) => target?.write(\`data: \${JSON.stringify(event)}\\n\\n\`);
+          sendEvent({
+            type: "message.part.updated",
+            properties: { part: { type: "text", sessionID: "s-fixture", messageID: "m1", text: prompt === "cancel me" ? "ready" : "Hi", time: { end: 1 } } }
+          });
+          if (prompt === "cancel me") return;
+          sendEvent({
+            type: "session.status",
+            properties: { sessionID: "s-fixture", status: { type: "idle" } }
+          });
+          setTimeout(() => target?.socket.destroy(), 5);
+        }, 10);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/session/s-fixture/abort") {
+        eventResponse?.write(\`data: \${JSON.stringify({
+          type: "session.error",
+          properties: { sessionID: "s-fixture", error: { name: "MessageAbortedError", data: { message: "Aborted" } } }
+        })}\\n\\n\`);
+        setTimeout(() => response.writeHead(204).end(), 10);
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    server.listen(port, "127.0.0.1");
+  `, "utf8");
+
+  let executable;
+  if (process.platform === "win32") {
+    executable = join(bin, "fake-opencode.cmd");
+    writeFileSync(executable, `@"${process.execPath}" "${fakeServer}" %*\r\n`, "utf8");
+  } else {
+    executable = join(bin, "fake-opencode");
+    writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${fakeServer}" "$@"\n`, "utf8");
+    chmodSync(executable, 0o755);
+  }
+
+  const { default: createAdapter } = await import(`${pathToFileURL(pluginDist).href}?server-termination-test`);
+  const adapter = createAdapter();
+  const within = async (promise, label) => {
+    let timer;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out`)), 5_000); })
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const instance = { id: "opencode-fixture", providerId: "opencode", executable, baseArgs: [], providerOptions: {} };
+  const collect = async (prompt) => {
+    const events = [];
+    const run = adapter.start({ instance, prompt, cwd: bin, env: process.env });
+    for await (const event of run.events) events.push(event);
+    return { events, pid: run.process.pid, process: run.process };
+  };
+  const first = await within(collect("hello"), "first turn");
+  const second = await within(collect("again"), "second turn");
+  const cancelledEvents = [];
+  let markReady;
+  const ready = new Promise((resolve) => { markReady = resolve; });
+  const cancelledRun = adapter.start({ instance, prompt: "cancel me", cwd: bin, env: process.env });
+  const consumeCancelled = (async () => {
+    for await (const event of cancelledRun.events) {
+      cancelledEvents.push(event);
+      if (event.kind === "message" && event.text === "ready") markReady();
+    }
+  })();
+  await within(ready, "cancel fixture readiness");
+  await within(cancelledRun.cancel(), "run cancellation");
+  await within(consumeCancelled, "cancelled event stream shutdown");
+  await within(second.process.cancel(), "server shutdown");
+  const third = await within(collect("after restart"), "restarted turn");
+  const activeEvents = [];
+  let markActiveReady;
+  const activeReady = new Promise((resolve) => { markActiveReady = resolve; });
+  const activeRun = adapter.start({ instance, prompt: "cancel me", cwd: bin, env: process.env });
+  const consumeActive = (async () => {
+    for await (const event of activeRun.events) {
+      activeEvents.push(event);
+      if (event.kind === "message" && event.text === "ready") markActiveReady();
+    }
+  })();
+  await within(activeReady, "active dispose fixture readiness");
+  await within(Promise.resolve(adapter.dispose?.()), "adapter dispose");
+  assert.equal(activeRun.process.child.exitCode, null, "disposing an adapter must not kill an active turn");
+  await within(activeRun.cancel(), "active run cancellation");
+  await within(consumeActive, "active event stream shutdown");
+  await within(activeRun.process.wait(), "retired server shutdown");
+
+  assert.equal(first.events.find((event) => event.kind === "message")?.text, "Hi");
+  assert.ok(first.events.some((event) => event.kind === "status" && event.phase === "turn_completed"));
+  assert.deepEqual(first.events.filter((event) => event.kind === "error"), []);
+  assert.equal(first.events.at(-1)?.kind, "exit");
+  assert.equal(first.events.at(-1)?.exitCode, 0);
+  assert.equal(second.events.find((event) => event.kind === "message")?.text, "Hi");
+  assert.equal(second.pid, first.pid, "consecutive turns should reuse one OpenCode server process");
+  assert.deepEqual(cancelledEvents.filter((event) => event.kind === "error"), [], "an explicit cancel must not surface Aborted as a provider error");
+  assert.notEqual(third.pid, second.pid, "a dead shared server should be replaced on the next turn");
+  assert.equal(third.events.find((event) => event.kind === "message")?.text, "Hi");
+  assert.deepEqual(activeEvents.filter((event) => event.kind === "error"), []);
 });
 
 test("the opencode plugin normalizes the verbose model list", async (t) => {

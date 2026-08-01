@@ -152,11 +152,14 @@ function MessageCard({ event, locale, onEditMessage }: {
           <span className={cn("text-[11px] font-medium tracking-wide", isUser && "text-accent")}>
             {isUser ? (locale === "zh-CN" ? "你" : "You") : authorName ?? "Agent"}
           </span>
-          <time className="text-[11px]">{formatDateTime(event.timestamp, locale)}</time>
-          {editedAt && <span className="text-[11px]">{locale === "zh-CN" ? "已编辑" : "Edited"}</span>}
+          <time className="text-[10px] tabular-nums opacity-70">{formatDateTime(event.timestamp, locale)}</time>
+          {editedAt && <span className="text-[10px] opacity-70">{locale === "zh-CN" ? "已编辑" : "Edited"}</span>}
         </div>
         <div
-          className={cn("mt-1.5 text-[15px] leading-7 text-ink", isUser && "max-w-[85%] text-right")}
+          className={cn(
+            "mt-1.5 text-[15px] leading-7 text-ink",
+            isUser && "max-w-[85%] rounded-2xl rounded-tr-md border border-accent/20 bg-accent-soft/60 px-4 py-2.5"
+          )}
           onContextMenu={(event) => {
             event.preventDefault();
             void popupTextMenu(window.getSelection()?.toString() ?? "", t);
@@ -242,18 +245,27 @@ function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind
   const labels = zh
     ? { queued: "请求已发送", starting: "正在启动 Agent", thinking: "正在思考", responding: "正在整理回复", completed: "本轮已完成" }
     : { queued: "Request sent", starting: "Starting agent", thinking: "Thinking", responding: "Preparing response", completed: "Turn completed" };
+  const time = formatDateTime(event.timestamp, locale);
+  // Completed turns read as quiet section dividers between turns, not rows.
+  if (event.data.phase === "completed") {
+    return (
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line flex items-center gap-3 py-1.5 text-ink-3">
+        <span className="h-px flex-1 bg-line/70" aria-hidden />
+        <Check className="h-3 w-3 shrink-0 text-ok" aria-hidden />
+        <span>{labels.completed}</span>
+        <time className="text-[10px] tabular-nums opacity-70">{time}</time>
+        <span className="h-px flex-1 bg-line/70" aria-hidden />
+      </motion.div>
+    );
+  }
   return (
     <motion.div initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} className="log-line flex items-center gap-2 py-0.5 text-ink-3">
-      {event.data.phase === "completed"
-        ? <Check className="h-3 w-3 text-ok" aria-hidden />
-        : (
-          <span className="relative mx-1 flex h-1.5 w-1.5" aria-hidden>
-            <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" />
-            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-br from-accent to-info" />
-          </span>
-        )}
-      <span className={event.data.phase === "completed" ? undefined : "shimmer-text"}>{labels[event.data.phase]}</span>
-      <time className="ml-auto">{formatDateTime(event.timestamp, locale)}</time>
+      <span className="relative mx-1 flex h-1.5 w-1.5" aria-hidden>
+        <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" />
+        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-br from-accent to-info" />
+      </span>
+      <span className="shimmer-text">{labels[event.data.phase]}</span>
+      <time className="text-[10px] tabular-nums opacity-70">{time}</time>
     </motion.div>
   );
 }
@@ -656,7 +668,7 @@ function ToolGroupCard({ event, t, locale, onViewDiff }: {
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="w-full px-3.5 py-2.5 text-left outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/45"
+        className="w-full px-3.5 py-2 text-left outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/45"
       >
         <span className="flex items-center gap-2.5 text-[13px] font-medium text-ink-2">
           {/* Status node: the only glowing element while the track is alive. */}

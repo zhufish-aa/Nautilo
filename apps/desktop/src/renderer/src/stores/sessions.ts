@@ -4,6 +4,7 @@ import { getBridge, requestCore } from "../lib/bridge";
 import { newId } from "../lib/utils";
 import type {
   ContextUsage,
+  QueuedFollowUp,
   RunLifecycle,
   SessionArtifact,
   SessionTask,
@@ -30,6 +31,8 @@ interface SessionsState {
   foreground: Record<string, RunLifecycle | undefined>;
   running: Record<string, RunLifecycle | undefined>;
   activeAgentRunIds: Record<string, string | undefined>;
+  /** Follow-ups waiting in the daemon queue, oldest first (F: queued messages). */
+  queuedFollowUps: Record<string, QueuedFollowUp[]>;
   activeSessionId?: string;
   editingMessage?: { sessionId: string; messageId: string; text: string };
 
@@ -72,6 +75,11 @@ interface SessionsState {
   _replaceRawLog: (sessionId: string, lines: string[]) => void;
   _replaceContextUsage: (sessionId: string, usage: ContextUsage | undefined) => void;
   _replaceSessions: (sessions: UiSession[]) => void;
+  _replaceQueuedFollowUps: (sessionId: string, items: QueuedFollowUp[]) => void;
+  _addQueuedFollowUp: (sessionId: string, item: QueuedFollowUp) => void;
+  _removeQueuedFollowUp: (sessionId: string, messageId: string) => void;
+  /** Drops the oldest queued follow-up (its turn just started). */
+  _shiftQueuedFollowUp: (sessionId: string) => void;
 }
 
 function buildInitial(): Pick<
@@ -93,6 +101,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       running: {},
       foreground: {},
       activeAgentRunIds: {},
+      queuedFollowUps: {},
       activeSessionId: undefined,
       editingMessage: undefined,
 
@@ -125,7 +134,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             contextUsage: keep(state.contextUsage),
             foreground: keep(state.foreground),
             running: keep(state.running),
-            activeAgentRunIds: keep(state.activeAgentRunIds)
+            activeAgentRunIds: keep(state.activeAgentRunIds),
+            queuedFollowUps: keep(state.queuedFollowUps)
           };
         }),
 
@@ -348,7 +358,33 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           artifacts: Object.fromEntries(sessions.map((session) => [session.id, state.artifacts[session.id] ?? []])),
           rawLog: Object.fromEntries(sessions.map((session) => [session.id, state.rawLog[session.id] ?? []])),
           contextUsage: Object.fromEntries(sessions.map((session) => [session.id, state.contextUsage[session.id]])),
-          foreground: Object.fromEntries(sessions.map((session) => [session.id, state.foreground[session.id]]))
+          foreground: Object.fromEntries(sessions.map((session) => [session.id, state.foreground[session.id]])),
+          queuedFollowUps: Object.fromEntries(sessions.map((session) => [session.id, state.queuedFollowUps[session.id] ?? []]))
         };
-      })
+      }),
+
+      _replaceQueuedFollowUps: (sessionId, items) =>
+        set((state) => ({ queuedFollowUps: { ...state.queuedFollowUps, [sessionId]: items } })),
+
+      _addQueuedFollowUp: (sessionId, item) =>
+        set((state) => {
+          const current = state.queuedFollowUps[sessionId] ?? [];
+          if (current.some((queued) => queued.messageId === item.messageId)) return state;
+          return { queuedFollowUps: { ...state.queuedFollowUps, [sessionId]: [...current, item] } };
+        }),
+
+      _removeQueuedFollowUp: (sessionId, messageId) =>
+        set((state) => ({
+          queuedFollowUps: {
+            ...state.queuedFollowUps,
+            [sessionId]: (state.queuedFollowUps[sessionId] ?? []).filter((queued) => queued.messageId !== messageId)
+          }
+        })),
+
+      _shiftQueuedFollowUp: (sessionId) =>
+        set((state) => {
+          const current = state.queuedFollowUps[sessionId];
+          if (!current?.length) return state;
+          return { queuedFollowUps: { ...state.queuedFollowUps, [sessionId]: current.slice(1) } };
+        })
 }));

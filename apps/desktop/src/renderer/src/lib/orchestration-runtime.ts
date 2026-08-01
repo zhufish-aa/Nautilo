@@ -15,7 +15,7 @@ import type { RuntimeEvent } from "@agenthub/event-protocol";
 import { getBridge, requestCore } from "./bridge";
 import { toDomainAgent, toDomainProject, toDomainTeam, toStandaloneUiSession } from "./core-mappers";
 import type { DesktopAttachment } from "../types/bridge";
-import type { ApprovalScope, RunLifecycle, SessionArtifact, SessionTask, SessionTarget, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
+import type { ApprovalScope, QueuedFollowUp, RunLifecycle, SessionArtifact, SessionTask, SessionTarget, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
 import type { ActiveRunSummary } from "./types";
 import { compactOrchestrationTimeline, hiddenCompletionRunIds, hiddenInternalRunIds, isVisibleTimelineMessage } from "./orchestration-timeline-policy";
 import { groupToolTimeline } from "./tool-timeline-groups";
@@ -40,7 +40,9 @@ const standaloneArtifactCache = new Map<string, Artifact[]>();
 const standaloneRenderFrames = new Map<string, number>();
 const standalonePendingDeltas = new Map<string, RuntimeEvent[]>();
 const standaloneRenderDirty = new Set<string>();
-const queuedFollowUps = new Map<string, number>();
+// Sessions whose daemon queue has been fetched once; afterwards the
+// session.follow_up_queued/cancelled events keep the store list in sync.
+const followUpListSynced = new Set<string>();
 // Poll-activity bookkeeping: a monotonically increasing counter per run that
 // hydrateProjectRun bumps whenever a poll tick actually changed something, so
 // the scheduler can back off while a run is idle.
@@ -181,10 +183,49 @@ export async function sendWorkbenchFollowUp(sessionId: string, text: string, mod
   const { mode: appliedMode } = await requestCore<{ accepted: true; mode: "steer" | "queue" }>("session.followUp", { sessionId, text, mode });
   store._append(sessionId, { kind: "message", sender: "user", text });
   if (appliedMode === "queue") {
-    queuedFollowUps.set(sessionId, (queuedFollowUps.get(sessionId) ?? 0) + 1);
+    // The daemon's session.follow_up_queued event adds the entry to the
+    // store-backed queue list; nothing to track locally anymore.
     store._append(sessionId, { kind: "activity", phase: "queued", detail: "Follow-up queued" });
   }
   return appliedMode;
+}
+
+/** Withdraws a queued follow-up; the daemon deletes its saved message too. */
+export async function cancelWorkbenchFollowUp(sessionId: string, messageId: string): Promise<void> {
+  if (!getBridge()) throw new Error("Core Daemon is only available in the desktop shell");
+  useSessionsStore.getState()._removeQueuedFollowUp(sessionId, messageId);
+  try {
+    await requestCore<{ cancelled: true }>("session.followUp.cancel", { sessionId, messageId });
+  } catch (error) {
+    // Resync from the daemon so a failed withdraw restores the entry.
+    followUpListSynced.delete(sessionId);
+    await syncQueuedFollowUps(sessionId);
+    throw error;
+  }
+}
+
+/** Mirrors daemon queue events into the store-backed queued-follow-up list. */
+function ingestFollowUpEvents(sessionId: string, events: RuntimeEvent[]): void {
+  const store = useSessionsStore.getState();
+  for (const event of events) {
+    if (event.type === "session.follow_up_queued") {
+      store._addQueuedFollowUp(sessionId, { messageId: event.payload.messageId, text: event.payload.text, queuedAt: event.timestamp });
+    } else if (event.type === "session.follow_up_cancelled") {
+      store._removeQueuedFollowUp(sessionId, event.payload.messageId);
+    }
+  }
+}
+
+/** Fetches the authoritative queue once per session; events keep it in sync after. */
+async function syncQueuedFollowUps(sessionId: string): Promise<void> {
+  if (followUpListSynced.has(sessionId)) return;
+  followUpListSynced.add(sessionId);
+  try {
+    const { items } = await requestCore<{ items: QueuedFollowUp[] }>("session.followUp.list", { sessionId });
+    useSessionsStore.getState()._replaceQueuedFollowUps(sessionId, items);
+  } catch (error) {
+    console.warn(`Failed to load queued follow-ups for session ${sessionId}`, error);
+  }
 }
 
 export async function resolveWorkbenchApproval(sessionId: string, approvalId: string, approved: boolean, scope: ApprovalScope): Promise<void> {
@@ -335,7 +376,7 @@ function clearSessionRuntime(sessionId: string): void {
   projectSessionSequences.delete(sessionId);
   projectSessionEventCache.delete(sessionId);
   projectSessionBuilt.delete(sessionId);
-  queuedFollowUps.delete(sessionId);
+  followUpListSynced.delete(sessionId);
   useInteractionsStore.getState()._removeSessions([sessionId]);
 }
 
@@ -403,12 +444,15 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
   standaloneEventCache.set(uiSession.id, replay.events);
   standaloneArtifactCache.set(uiSession.id, artifacts);
   ingestInteractionEvents(replay.events);
+  ingestFollowUpEvents(uiSession.id, replay.events);
+  await syncQueuedFollowUps(uiSession.id);
   store._upsertExternalSession(toStandaloneUiSession(detail.session));
   renderStandaloneCache(uiSession.id);
   store._setRunning(uiSession.id, standaloneLifecycle(detail.session, run));
   store._setForeground(uiSession.id, standaloneLifecycle(detail.session, run));
   store._setActiveAgentRun(uiSession.id, run && shouldPollAgentRun(run) ? run.id : undefined);
-  if (run && shouldPollAgentRun(run) && knownRunId && run.id !== knownRunId) decrementQueuedFollowUp(uiSession.id);
+  // A new run after the known one means the oldest queued follow-up started.
+  if (run && shouldPollAgentRun(run) && knownRunId && run.id !== knownRunId) store._shiftQueuedFollowUp(uiSession.id);
   return run;
 }
 
@@ -420,6 +464,7 @@ function mergeStandaloneEvents(sessionId: string, events: RuntimeEvent[]): void 
   if (!fresh.length) return;
   standaloneEventCache.set(sessionId, [...current, ...fresh]);
   ingestInteractionEvents(fresh);
+  ingestFollowUpEvents(sessionId, fresh);
   // Streaming deltas only append text to the newest streaming row; queue them
   // and flush once per animation frame instead of writing the store per batch.
   if (fresh.every((event) => STREAMING_DELTA_TYPES.has(event.type))) {
@@ -615,7 +660,8 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   for (const session of sessions) {
     const [detail, feed] = await Promise.all([
       requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: session.id }),
-      projectSessionEvents(session.id)
+      projectSessionEvents(session.id),
+      syncQueuedFollowUps(session.id)
     ]);
     const uiSession = toUiSession(detail.session, projectRun, team);
     const sessionArtifacts = artifacts.filter((artifact) => artifact.sessionId === session.id);
@@ -658,7 +704,10 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
       changed = true;
       store._setActiveAgentRun(session.id, activeRun?.id);
     }
-    if (activeRun && (queuedFollowUps.get(session.id) ?? 0) > 0) decrementQueuedFollowUp(session.id);
+    // A transition to a different run id means the oldest queued follow-up
+    // started its turn; previousRunId undefined is first hydrate (no shift).
+    const previousRunId = store.activeAgentRunIds[session.id];
+    if (activeRun && previousRunId && activeRun.id !== previousRunId) store._shiftQueuedFollowUp(session.id);
   }
   const root = projectRun.mainSessionId;
   if (root) {
@@ -705,7 +754,10 @@ async function projectSessionEvents(sessionId: string): Promise<{ events: Runtim
   if (!replay.events.length) return { events: cached, hasNew: false };
   const known = new Set(cached.map((event) => event.eventId));
   const fresh = replay.events.filter((event) => !known.has(event.eventId));
-  if (fresh.length) ingestInteractionEvents(fresh);
+  if (fresh.length) {
+    ingestInteractionEvents(fresh);
+    ingestFollowUpEvents(sessionId, fresh);
+  }
   const events = fresh.length ? [...cached, ...fresh] : cached;
   projectSessionEventCache.set(sessionId, events);
   return { events, hasNew: fresh.length > 0 };
@@ -771,7 +823,7 @@ function scheduleStandalonePoll(sessionId: string, runId: string): void {
         if (needsPersistenceSync) {
           const run = await hydrateStandaloneSession(session, runId);
           if (!run || !shouldPollAgentRun(run)) {
-            if (queuedFollowUps.has(sessionId)) {
+            if ((useSessionsStore.getState().queuedFollowUps[sessionId]?.length ?? 0) > 0) {
               await new Promise((resolve) => setTimeout(resolve, 200));
               continue;
             }
@@ -789,15 +841,10 @@ function scheduleStandalonePoll(sessionId: string, runId: string): void {
   })();
 }
 
-function decrementQueuedFollowUp(sessionId: string): void {
-  const pending = queuedFollowUps.get(sessionId) ?? 0;
-  if (pending <= 1) queuedFollowUps.delete(sessionId);
-  else queuedFollowUps.set(sessionId, pending - 1);
-}
-
 function hasQueuedFollowUpForProject(projectRunId: string): boolean {
-  return useSessionsStore.getState().sessions.some((session) =>
-    session.projectRunId === projectRunId && (queuedFollowUps.get(session.id) ?? 0) > 0
+  const state = useSessionsStore.getState();
+  return state.sessions.some((session) =>
+    session.projectRunId === projectRunId && (state.queuedFollowUps[session.id]?.length ?? 0) > 0
   );
 }
 

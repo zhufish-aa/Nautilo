@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, Fragment } from "react";
+import { useEffect, useMemo, useRef, useState, Fragment, lazy, Suspense } from "react";
 import { Bot, Loader2, Pencil, RotateCcw, TerminalSquare } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { collectChangedFiles, type ChangedFileEntry } from "../../lib/changed-files";
@@ -21,6 +21,9 @@ import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
 import { toast } from "../../stores/toast";
+
+// Monaco is heavy; it only loads when the user actually opens the file editor.
+const DiffCodeEditor = lazy(() => import("../../components/ui/DiffCodeEditor"));
 
 /* ---------------------------------------------------------------------------
  * F-033: raw terminal drawer — debug fallback only, never replaces chat.
@@ -158,10 +161,18 @@ export function ArtifactsDrawer({
   const [tab, setTab] = useState("diff");
   const [selectedFile, setSelectedFile] = useState(0);
 
-  // In-diff file editor: loads the current on-disk content and writes back
-  // through the main-process bridge. The diff itself stays a historical record
-  // of what the agent changed; editing always starts from the live file.
-  const [editor, setEditor] = useState<{ path: string; resolvedPath: string; original: string; value: string; saving: boolean } | null>(null);
+  // In-diff file editor, VS Code-style (monaco diff editor): left shows the
+  // reconstructed pre-change file (read-only), right the live file (editable).
+  // `before` is undefined when the pre-change content can no longer be
+  // reconstructed exactly; a plain editor is shown in that case.
+  const [editor, setEditor] = useState<{
+    path: string;
+    resolvedPath: string;
+    original: string;
+    value: string;
+    saving: boolean;
+    before?: string;
+  } | null>(null);
   const [editLoading, setEditLoading] = useState(false);
   // Per-change revert: two-click confirm (撤回 → 确认撤回), then the recorded
   // change is reverse-applied to the live file (exact match; fails safely).
@@ -287,7 +298,19 @@ export function ArtifactsDrawer({
         toast.error(t("sessions.drawers.editTooLarge"));
         return;
       }
-      setEditor({ path: entry.path, resolvedPath: result.resolvedPath, original: result.content, value: result.content, saving: false });
+      // Reconstruct the pre-change content for the diff editor's left side.
+      const before = ((): string | undefined => {
+        if (entry.kind === "fileDiff") {
+          if (entry.diffs.some((diff) => diff.truncated)) return undefined;
+          const reverted = revertFileDiffs(result.content, entry.diffs);
+          return reverted.ok ? reverted.content : undefined;
+        }
+        if (!entry.diff) return undefined;
+        if (entry.changeType === "added") return "";
+        const reverted = reverseApplyUnifiedPatch(result.content, entry.diff);
+        return reverted.ok ? reverted.content : undefined;
+      })();
+      setEditor({ path: entry.path, resolvedPath: result.resolvedPath, original: result.content, value: result.content, saving: false, before });
     } catch {
       toast.error(t("sessions.drawers.editReadFailed"));
     } finally {
@@ -419,18 +442,35 @@ export function ArtifactsDrawer({
                             {t("common.save")}
                           </Button>
                         </div>
-                        {/* The diff stays visible next to the editor so edits
-                            are made against the recorded change. */}
-                        <div className="flex min-h-0 flex-1">
-                          <div className="min-w-0 flex-1 overflow-hidden border-r border-line">
-                            {diffContent}
-                          </div>
-                          <textarea
-                            value={editor.value}
-                            onChange={(event) => setEditor((current) => (current ? { ...current, value: event.target.value } : current))}
-                            spellCheck={false}
-                            className="min-w-0 flex-1 resize-none bg-card/40 px-4 py-3 font-mono text-[12px] leading-5 text-ink-2 outline-none"
-                          />
+                        {/* VS Code-style monaco diff editor: reconstructed
+                            pre-change file (read-only) | live file (editable). */}
+                        <div className="flex min-h-0 flex-1 flex-col">
+                          {editor.before === undefined ? (
+                            <p className="shrink-0 border-b border-line px-3 py-1 text-[11px] text-warn">
+                              {t("sessions.drawers.beforeUnavailable")}
+                            </p>
+                          ) : (
+                            <div className="flex shrink-0 border-b border-line text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                              <span className="flex-1 border-r border-line px-3 py-1">{t("sessions.drawers.beforeLabel")}</span>
+                              <span className="flex-1 px-3 py-1">{t("sessions.drawers.afterLabel")}</span>
+                            </div>
+                          )}
+                          <Suspense
+                            fallback={
+                              <div className="flex flex-1 items-center justify-center gap-2 text-sm text-ink-3">
+                                <Loader2 className="h-4 w-4 animate-spin text-accent" aria-hidden />
+                                {t("sessions.filePreview.loading")}
+                              </div>
+                            }
+                          >
+                            <DiffCodeEditor
+                              key={`${editor.resolvedPath}|${editor.before === undefined ? "single" : "diff"}`}
+                              before={editor.before}
+                              value={editor.value}
+                              onChange={(next) => setEditor((current) => (current ? { ...current, value: next } : current))}
+                              filePath={editor.resolvedPath}
+                            />
+                          </Suspense>
                         </div>
                       </>
                     );

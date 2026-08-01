@@ -93,7 +93,7 @@ export class CoreDaemon {
     this.projects = new ProjectService(this.database);
     this.agents = new AgentService(this.database, this.adapters, this.credentials, this.environment);
     this.teams = new TeamService(this.database);
-    this.sessions = new SessionService(this.database, this.runs);
+    this.sessions = new SessionService(this.database, this.runs, this.events);
     this.projections = new ProjectionService(this.database);
     this.maintenance = new MaintenanceService(this.database);
     this.gitWorkflows = options.enableGitWorkflows === false

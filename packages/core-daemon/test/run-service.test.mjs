@@ -71,6 +71,42 @@ test("RunService starts a new provider session and resumes subsequent messages",
   database.close();
 });
 
+
+test("RunService prefers the instance-configured context window over provider-reported usage", async () => {
+  const requests = [];
+  const adapter = {
+    providerId: "fake",
+    supportsStructuredOutput: true,
+    supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }),
+    start: (request) => {
+      requests.push(request);
+      async function* events() {
+        yield { kind: "usage", contextUsed: 80220, contextWindow: 258400 };
+        yield { kind: "message", text: "ok" };
+        yield { kind: "exit", exitCode: 0 };
+      }
+      return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+    }
+  };
+  const database = new Database(":memory:");
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  const project = { id: "p1", name: "Project", rootPath: process.cwd(), repositoryType: "none", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const session = { id: "s1", projectId: "p1", memberId: "a1", model: "deepseek-v4-flash", title: "Session", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+  const agent = { id: "a1", providerId: "fake", displayName: "Fake", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now, models: [{ id: "deepseek-v4-flash", reasoningEfforts: [], contextWindow: 1000000 }] };
+  database.projects.save(project, now);
+  database.sessions.save(session);
+
+  const runId = await service.start(session, agent, "hello");
+  await waitForRun(database, runId);
+  assert.equal(requests[0].contextWindow, 1000000);
+  const usage = database.events.replay({ sessionId: session.id }).find((event) => event.type === "usage.updated");
+  assert.equal(usage?.payload.contextWindow, 1000000);
+  assert.equal(usage?.payload.contextUsed, 80220);
+  database.close();
+});
+
 test("RunService serializes turns in one session without blocking another session", async () => {
   let releaseFirst;
   const firstGate = new Promise((resolve) => { releaseFirst = resolve; });

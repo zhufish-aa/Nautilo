@@ -10,14 +10,13 @@ import { SessionWorkbench, type DrawerKind } from "../sessions/SessionWorkbench"
 import { useSessionsStore } from "../../stores/sessions";
 import { toast } from "../../stores/toast";
 import { deleteWorkbenchSession } from "../../lib/orchestration-runtime";
-import { ModeSwitch } from "./ModeSwitch";
 import { WorkPreviewPane } from "./WorkPreviewPane";
 
 /**
  * Work mode: office deliverables. Chat on the left/center (same workbench as
  * Code mode), live artifact preview on the right. No git, diffs or checkpoints.
  */
-export function WorkPage(): JSX.Element {
+export function WorkPage({ active = true }: { active?: boolean }): JSX.Element {
   const { t } = useI18n();
   const allSessions = useSessionsStore((state) => state.sessions);
   // Filter in useMemo, not in the selector (fresh array identity per store
@@ -48,22 +47,21 @@ export function WorkPage(): JSX.Element {
     }
   };
 
-  // Default to the most recent work session.
+  // Default to the most recent work session. Both workbenches stay mounted
+  // (keep-alive); only the visible page may claim the shared activeSessionId.
   useEffect(() => {
+    if (!active) return;
     if ((!activeSessionId || !activeSession) && sessions.length > 0) {
       const latest = [...sessions].sort((a, b) =>
         (b.lastMessageAt ?? b.updatedAt).localeCompare(a.lastMessageAt ?? a.updatedAt)
       )[0];
       setActiveSession(latest.id);
     }
-  }, [activeSessionId, activeSession, sessions, setActiveSession]);
-
-  const header = <ModeSwitch mode="work" />;
+  }, [active, activeSessionId, activeSession, sessions, setActiveSession]);
 
   if (sessions.length === 0) {
     return (
       <div className="relative flex h-full items-center justify-center p-8">
-        <div className="absolute left-1/2 top-3 -translate-x-1/2">{header}</div>
         <EmptyState
           icon={Briefcase}
           title={t("work.empty.title")}
@@ -94,11 +92,11 @@ export function WorkPage(): JSX.Element {
           <SessionWorkbench
             mode="work"
             sessionId={activeSession.id}
+            active={active}
             drawer={drawer}
             onOpenDrawer={setDrawer}
             onCloseDrawer={() => setDrawer(null)}
             onOpenSession={setActiveSession}
-            headerActions={header}
           />
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-ink-3">

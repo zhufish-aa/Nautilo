@@ -102,6 +102,8 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("session.upsert", async (input) => services.sessions.upsert(input));
   gateway.register("session.delete", async (input) => services.sessions.delete(input));
   gateway.register("session.followUp", async (input) => services.sessions.followUp(input));
+  gateway.register("session.followUp.list", async (input) => services.sessions.followUpList(input));
+  gateway.register("session.followUp.cancel", async (input) => services.sessions.followUpCancel(input));
   gateway.register("session.send", async (input) => services.sessions.send(input));
   gateway.register("slashCommand.list", async ({ sessionId }) => services.slashCommands.list(sessionId));
   gateway.register("slashCommand.execute", async (input) => services.slashCommands.execute(input.sessionId, input.commandId, input.argument));

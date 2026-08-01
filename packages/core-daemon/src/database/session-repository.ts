@@ -48,4 +48,5 @@ export class SessionRepository {
   }
   saveMessage(message: Message): void { this.db.prepare("INSERT OR REPLACE INTO messages(id, session_id, data, created_at) VALUES(?, ?, ?, ?)").run(message.id, message.sessionId, JSON.stringify(message), message.createdAt); }
   messages(sessionId: string): Message[] { return (this.db.prepare("SELECT data FROM messages WHERE session_id = ? ORDER BY created_at").all(sessionId) as Row[]).map((row) => JSON.parse(String(row.data)) as Message); }
+  deleteMessage(sessionId: string, messageId: string): void { this.db.prepare("DELETE FROM messages WHERE session_id = ? AND id = ?").run(sessionId, messageId); }
 }

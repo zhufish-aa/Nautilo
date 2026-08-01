@@ -24,8 +24,11 @@ import {
   createClaudeParseState,
   discoverClaudeModels,
   discoverCodexModels,
+  discoverOpenAiCompatibleModels,
   providerEnvironmentPassthrough,
   listClaudeModels,
+  mergeInstanceModelConfig,
+  parseOpenAiCompatibleModelList,
   parseClaudeJsonEvent,
   CODEX_APP_SERVER_INITIALIZE_PARAMS,
   Database,
@@ -218,6 +221,80 @@ test("model discovery uses the exact CLI instance and its sanitized credential e
     assert.equal(captured.configured.providerOptions.baseUrl, "https://proxy.example.test/v1");
     assert.equal(captured.context.env.OPENAI_API_KEY, "pixel-codex:codex:secret");
     assert.ok(captured.context.env.PATH);
+  } finally {
+    database.close();
+  }
+});
+
+test("instance model config overrides and extends the discovered catalog", () => {
+  const base = {
+    providerId: "codex",
+    models: [
+      { id: "gpt-a", displayName: "GPT A", isDefault: true, capabilities: [], reasoningEfforts: ["low", "high"], serviceTiers: [], contextWindow: 1000 },
+      { id: "gpt-b", displayName: "GPT B", isDefault: false, capabilities: [], reasoningEfforts: [], serviceTiers: [] }
+    ],
+    defaultModel: "gpt-a",
+    source: "provider_cli",
+    fetchedAt: now
+  };
+  const merged = mergeInstanceModelConfig(base, [
+    { id: "gpt-a", reasoningEfforts: ["medium", "high", "xhigh"], contextWindow: 2000 },
+    { id: "custom-model", displayName: "Custom", reasoningEfforts: ["low"] }
+  ]);
+  assert.deepEqual(merged.models.map((model) => model.id), ["gpt-a", "gpt-b", "custom-model"]);
+  assert.deepEqual(merged.models[0].reasoningEfforts, ["medium", "high", "xhigh"]);
+  assert.equal(merged.models[0].contextWindow, 2000);
+  assert.equal(merged.models[0].displayName, "GPT A");
+  assert.equal(merged.models[2].displayName, "Custom");
+  assert.equal(mergeInstanceModelConfig(base, []), base);
+});
+
+test("registry applies instance model config to every discovered catalog", async () => {
+  const registry = new AdapterRegistry([{
+    providerId: "codex",
+    listModels: async () => ({
+      providerId: "codex",
+      models: [{ id: "gpt-a", displayName: "gpt-a", isDefault: false, capabilities: [], reasoningEfforts: [], serviceTiers: [] }],
+      source: "provider_cli",
+      fetchedAt: now
+    })
+  }]);
+  const catalog = await registry.listModels({ ...instance, baseArgs: [], models: [{ id: "gpt-a", reasoningEfforts: ["high", "low"] }] });
+  assert.deepEqual(catalog.models[0].reasoningEfforts, ["high", "low"]);
+});
+
+test("generic OpenAI-compatible model list parses data and models payloads", () => {
+  const fromData = parseOpenAiCompatibleModelList({ data: [{ id: "m1", display_name: "Model One" }] });
+  assert.equal(fromData.source, "provider_api");
+  assert.equal(fromData.models[0].displayName, "Model One");
+  assert.deepEqual(fromData.models[0].reasoningEfforts, ["low", "medium", "high"]);
+  const fromModels = parseOpenAiCompatibleModelList({ models: [{ id: "m2", name: "Model Two" }] });
+  assert.equal(fromModels.models[0].displayName, "Model Two");
+  assert.equal(parseOpenAiCompatibleModelList({}).models.length, 0);
+});
+
+test("quick fetch with a base URL prefers the generic endpoint and applies instance config", async (t) => {
+  const database = new Database(":memory:");
+  const configured = {
+    ...instance,
+    id: "deepseek",
+    executable: "codex",
+    baseArgs: [],
+    providerOptions: { baseUrl: "https://api.deepseek.com" },
+    models: [{ id: "deepseek-chat", reasoningEfforts: ["fast", "slow"] }]
+  };
+  database.agents.save(configured, configured.updatedAt);
+  t.mock.method(globalThis, "fetch", async () => new Response(
+    JSON.stringify({ data: [{ id: "deepseek-chat" }, { id: "deepseek-reasoner" }] }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  ));
+  try {
+    const service = new AgentService(database, new AdapterRegistry(), undefined, new EnvironmentPolicyService());
+    const catalog = await service.listModels("codex", undefined, "deepseek", { baseUrl: "https://api.deepseek.com", apiKey: "sk-x" });
+    assert.equal(catalog.providerId, "codex");
+    assert.equal(catalog.source, "provider_api");
+    assert.deepEqual(catalog.models.map((model) => model.id), ["deepseek-chat", "deepseek-reasoner"]);
+    assert.deepEqual(catalog.models[0].reasoningEfforts, ["fast", "slow"]);
   } finally {
     database.close();
   }
@@ -780,6 +857,32 @@ test("Claude model discovery reports HTTP failures and parses live model lists",
   assert.equal(discovered.models[0].id, "default");
   // Sorted newest-first after the fallback entry.
   assert.deepEqual(discovered.models.slice(1).map((model) => model.id), ["claude-opus-9", "claude-sonnet-9"]);
+});
+
+test("Anthropic-protocol shims fall back to the OpenAI-compatible catalog at the host root", async (t) => {
+  const { createServer } = await import("node:http");
+  const server = createServer((req, res) => {
+    if (req.url === "/models") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+        data: [{ id: "deepseek-v4-flash" }, { id: "deepseek-v4-pro" }]
+      }));
+      return;
+    }
+    res.writeHead(404).end("not found");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const shimBaseUrl = `http://127.0.0.1:${server.address().port}/anthropic`;
+
+  const generic = await discoverOpenAiCompatibleModels(shimBaseUrl, "test-key");
+  assert.deepEqual(generic.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+
+  const claude = await discoverClaudeModels({ ANTHROPIC_API_KEY: "test-key", ANTHROPIC_BASE_URL: shimBaseUrl });
+  assert.equal(claude.source, "provider_api");
+  assert.equal(claude.models[0].id, "default");
+  const flash = claude.models.find((model) => model.id === "deepseek-v4-flash");
+  assert.ok(flash);
+  assert.deepEqual(flash.reasoningEfforts, ["low", "medium", "high", "max"]);
 });
 
 test("provider environment passthrough forwards Anthropic vars and instance baseUrl", () => {

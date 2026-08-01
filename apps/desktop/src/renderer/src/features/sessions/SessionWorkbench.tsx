@@ -5,6 +5,7 @@ import { TimelineEventView } from "../timeline/Timeline";
 import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Composer } from "./Composer";
+import { QueuedFollowUpBar } from "./QueuedFollowUpBar";
 import { ArtifactsDrawer, DagDrawer, SubagentDrawer, TerminalDrawer } from "./Drawers";
 import { RunActivityIndicator } from "./RunActivityIndicator";
 import { sessionTargetName } from "./SessionListPanel";
@@ -15,6 +16,7 @@ import { useProjectsStore } from "../../stores/projects";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
 import { hasRunningDelegatedTask, isActiveLifecycle, visibleSessionStatus } from "../../lib/session-lifecycle";
+import { cn } from "../../lib/utils";
 import { collectChangedFiles } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
 import type { TimelineEvent } from "../../lib/types";
@@ -29,6 +31,7 @@ const NO_TASKS: never[] = [];
 
 export function SessionWorkbench({
   sessionId,
+  active = true,
   drawer,
   onOpenDrawer,
   onCloseDrawer,
@@ -37,6 +40,8 @@ export function SessionWorkbench({
   headerActions
 }: {
   sessionId: string;
+  /** False while the page is kept alive but hidden; gates side effects. */
+  active?: boolean;
   drawer: DrawerKind;
   onOpenDrawer: (drawer: DrawerKind) => void;
   onCloseDrawer: () => void;
@@ -92,11 +97,13 @@ export function SessionWorkbench({
   }, [sessionId]);
 
   // Relative file references in messages resolve against the project root.
+  // Both workbenches stay mounted; only the visible one owns the resolver.
   const previewRootPath = projects.find((item) => item.id === session?.projectId)?.rootPath;
   const setPreviewBasePaths = useFilePreviewStore((state) => state.setBasePaths);
   useEffect(() => {
+    if (!active) return;
     setPreviewBasePaths(previewRootPath ? [previewRootPath] : []);
-  }, [previewRootPath, setPreviewBasePaths]);
+  }, [active, previewRootPath, setPreviewBasePaths]);
 
   // File the artifacts drawer should focus when opened via a "view diff" entry.
   const [diffFocusPath, setDiffFocusPath] = useState<string | null>(null);
@@ -227,7 +234,7 @@ export function SessionWorkbench({
         className="relative h-full overflow-y-auto"
         aria-live="polite"
       >
-        <div className="mx-auto flex w-full max-w-4xl flex-col gap-9 px-5 py-7">
+        <div className={cn("mx-auto flex w-full flex-col px-5 py-7", isWork ? "max-w-3xl gap-8" : "max-w-4xl gap-9")}>
           {turns.map((turn, index) => {
             const live = index === turns.length - 1
               ? waitingForApproval ? "waiting" : workbenchRunning ? "running" : undefined
@@ -266,6 +273,7 @@ export function SessionWorkbench({
       {todoGoal && <TodoGoalCard todos={todoGoal} />}
       </div>
 
+      <QueuedFollowUpBar sessionId={sessionId} />
       <Composer
         sessionId={sessionId}
         targetName={targetName}

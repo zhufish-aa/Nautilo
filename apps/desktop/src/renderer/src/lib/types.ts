@@ -268,6 +268,13 @@ export interface RunLifecycle {
   startedAt?: string;
 }
 
+/** A follow-up message waiting in the daemon queue for the next turn. */
+export interface QueuedFollowUp {
+  messageId: string;
+  text: string;
+  queuedAt: string;
+}
+
 export interface ContextUsage {
   inputTokens?: number;
   outputTokens?: number;

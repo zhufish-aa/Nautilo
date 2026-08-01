@@ -39,6 +39,8 @@ export interface RunContext {
   runtimeToolVersion?: number;
   /** Instance-configured context window; wins over provider-reported values in usage events. */
   contextWindowOverride?: number;
+  /** Key marking this turn as withdrawable while it waits in the per-session queue. */
+  queueKey?: string;
 }
 
 export interface RunCompletion {
@@ -150,7 +152,12 @@ export class RunService {
     prompt: string,
     context: RunContext = {}
   ): Promise<RunHandle> {
-    return this.sessionQueue.enqueue(session.id, () => this.launchNow(session, agent, prompt, context));
+    return this.sessionQueue.enqueue(session.id, () => this.launchNow(session, agent, prompt, context), context.queueKey);
+  }
+
+  /** Withdraws a queued (not yet started) turn by its queue key. */
+  cancelQueued(sessionId: string, key: string): boolean {
+    return this.sessionQueue.cancelPending(sessionId, key);
   }
 
   private async launchNow(

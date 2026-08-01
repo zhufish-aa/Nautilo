@@ -3,6 +3,7 @@ import type { Message, Session } from "@agenthub/domain";
 import type { IpcRequestMap } from "@agenthub/schemas";
 import { Database } from "../database/index.js";
 import { RunService } from "../runtime/run-service.js";
+import { EventService } from "../runtime/event-service.js";
 import { CoreError } from "../errors.js";
 import { MemberRouter } from "../runtime/orchestration/member-router.js";
 import { buildSessionTurnContext } from "./session-context.js";
@@ -11,7 +12,9 @@ import { RUNTIME_TOOL_SCHEMA_VERSION } from "../runtime/runtime-tool-provider.js
 export class SessionService {
   private readonly members: MemberRouter;
   private readonly attachments: MessageAttachmentService;
-  constructor(private readonly database: Database, private readonly runs: RunService) {
+  /** Follow-ups waiting for the active turn to settle, keyed by session id. */
+  private readonly pendingFollowUps = new Map<string, Array<{ messageId: string; text: string; queuedAt: string }>>();
+  constructor(private readonly database: Database, private readonly runs: RunService, private readonly events: EventService) {
     this.members = new MemberRouter(database);
     this.attachments = new MessageAttachmentService(database);
   }
@@ -75,16 +78,53 @@ export class SessionService {
       workMode: session.mode === "work",
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
-    this.database.sessions.saveMessage(followUpMessage(session, text));
+    const message = followUpMessage(session, text);
+    this.database.sessions.saveMessage(message);
+    this.trackPendingFollowUp(session.id, { messageId: message.id, text, queuedAt: message.createdAt });
+    this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_queued", { messageId: message.id, text });
     // RunService serializes turns per session. Do not await here: Queue must
     // acknowledge immediately while the active turn continues uninterrupted.
+    // The queueKey lets a withdrawn follow-up skip its launch entirely.
     void this.runs.start(session, agent, turnContext.prompt, {
       projectRunId: session.projectRunId,
       taskId: session.taskId,
       memberId: session.memberId,
-      synchronizeProviderContext: turnContext.recovered
-    }).catch((error) => console.error("Failed to start queued session follow-up", error));
+      synchronizeProviderContext: turnContext.recovered,
+      queueKey: message.id
+    }).catch((error) => {
+      if (error instanceof Error && error.message.includes("withdrawn")) return;
+      console.error("Failed to start queued session follow-up", error);
+    }).finally(() => this.untrackPendingFollowUp(session.id, message.id));
     return { accepted: true, mode: "queue" };
+  }
+  followUpList(input: IpcRequestMap["session.followUp.list"]["input"]): { items: Array<{ messageId: string; text: string; queuedAt: string }> } {
+    return { items: [...(this.pendingFollowUps.get(input.sessionId) ?? [])] };
+  }
+  followUpCancel(input: IpcRequestMap["session.followUp.cancel"]["input"]): { cancelled: true } {
+    const session = this.database.sessions.get(input.sessionId);
+    if (!session) throw new CoreError("IPC_NOT_FOUND", { resource: "session", id: input.sessionId });
+    const pending = this.pendingFollowUps.get(input.sessionId);
+    const entry = pending?.find((item) => item.messageId === input.messageId);
+    if (!entry) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is no longer queued; it may have already started." });
+    }
+    this.runs.cancelQueued(input.sessionId, input.messageId);
+    this.untrackPendingFollowUp(input.sessionId, input.messageId);
+    this.database.sessions.deleteMessage(input.sessionId, input.messageId);
+    this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_cancelled", { messageId: input.messageId });
+    return { cancelled: true };
+  }
+  private trackPendingFollowUp(sessionId: string, entry: { messageId: string; text: string; queuedAt: string }): void {
+    const items = this.pendingFollowUps.get(sessionId) ?? [];
+    items.push(entry);
+    this.pendingFollowUps.set(sessionId, items);
+  }
+  private untrackPendingFollowUp(sessionId: string, messageId: string): void {
+    const items = this.pendingFollowUps.get(sessionId);
+    if (!items) return;
+    const next = items.filter((item) => item.messageId !== messageId);
+    if (next.length) this.pendingFollowUps.set(sessionId, next);
+    else this.pendingFollowUps.delete(sessionId);
   }
   /**
    * Applies renderer-owned session metadata without erasing provider runtime state.

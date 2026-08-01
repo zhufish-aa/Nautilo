@@ -18,6 +18,8 @@ interface SettingsState {
   notificationSound: boolean;
   /** Composer "//" prompt snippets. */
   promptSnippets: PromptSnippet[];
+  /** Session-list groups (by projectId) the user collapsed. */
+  collapsedProjects: string[];
   setTheme: (theme: ThemePreference) => void;
   setLocale: (locale: LocaleCode) => void;
   setReduceMotion: (reduce: boolean) => void;
@@ -26,6 +28,7 @@ interface SettingsState {
   setNotificationSound: (enabled: boolean) => void;
   upsertSnippet: (snippet: PromptSnippet) => void;
   removeSnippet: (id: string) => void;
+  toggleProjectCollapsed: (projectId: string) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -37,6 +40,7 @@ export const useSettingsStore = create<SettingsState>()(
       hiddenNav: [],
       notificationsEnabled: true,
       notificationSound: true,
+      collapsedProjects: [],
       promptSnippets: [
         { id: "seed-test-fix", title: "跑测试并修红", text: "运行本项目的测试，定位失败的用例并修复，直到全部通过。" },
         { id: "seed-review", title: "审查本次改动", text: "审查当前工作区的改动，指出潜在 bug、回归风险和可简化之处，按严重程度排序。" },
@@ -55,6 +59,12 @@ export const useSettingsStore = create<SettingsState>()(
         })),
       removeSnippet: (id) =>
         set((state) => ({ promptSnippets: state.promptSnippets.filter((item) => item.id !== id) })),
+      toggleProjectCollapsed: (projectId) =>
+        set((state) => ({
+          collapsedProjects: state.collapsedProjects.includes(projectId)
+            ? state.collapsedProjects.filter((item) => item !== projectId)
+            : [...state.collapsedProjects, projectId]
+        })),
       setNavVisible: (key, visible) =>
         set((state) => ({
           hiddenNav: visible

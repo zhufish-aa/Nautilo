@@ -37,6 +37,8 @@ export type RuntimeEventType =
   | "usage.updated"
   | "provider.commands_updated"
   | "session.checkpoint_reverted"
+  | "session.follow_up_queued"
+  | "session.follow_up_cancelled"
   | "artifact.created"
   | "run.waiting"
   | "run.completed"
@@ -240,6 +242,13 @@ export interface RuntimeEventPayloadMap {
     code: string;
     message: string;
     retryable: boolean;
+  };
+  "session.follow_up_queued": {
+    messageId: string;
+    text: string;
+  };
+  "session.follow_up_cancelled": {
+    messageId: string;
   };
 }
 

@@ -1,13 +1,16 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { motion } from "framer-motion";
 import { Briefcase, Code2 } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../../components/ui/Tooltip";
 
 /**
- * Claude-style Code/Work segmented switch, shown in the workbench header.
- * Ctrl+1 → Code (/sessions), Ctrl+2 → Work (/work).
+ * Claude-style Code/Work segmented switch. Mounted once by AppShell above the
+ * /sessions and /work routes, so the control itself never remounts on a mode
+ * switch — only the active pill slides between the two tabs (layoutId shared
+ * layout animation). Ctrl+1 → Code (/sessions), Ctrl+2 → Work (/work).
  */
 export function ModeSwitch({ mode }: { mode: "code" | "work" }): JSX.Element {
   const { t } = useI18n();
@@ -37,7 +40,7 @@ export function ModeSwitch({ mode }: { mode: "code" | "work" }): JSX.Element {
     <div
       role="tablist"
       aria-label={t("modeSwitch.label")}
-      className="flex items-center gap-0.5 rounded-full border border-line bg-card/80 p-0.5 backdrop-blur-xl"
+      className="pointer-events-auto flex items-center gap-0.5 rounded-full border border-line bg-card/80 p-0.5 shadow-sm backdrop-blur-xl"
     >
       {entries.map((entry) => {
         const active = entry.key === mode;
@@ -50,12 +53,22 @@ export function ModeSwitch({ mode }: { mode: "code" | "work" }): JSX.Element {
               aria-selected={active}
               onClick={() => navigate(entry.path)}
               className={cn(
-                "flex h-6 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium transition-colors",
-                active ? "bg-ink text-canvas shadow-sm" : "text-ink-3 hover:bg-card-hover hover:text-ink"
+                "relative flex h-6 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium transition-colors",
+                active ? "text-canvas" : "text-ink-3 hover:bg-card-hover hover:text-ink"
               )}
             >
-              <Icon className="h-3 w-3" aria-hidden />
-              {entry.label}
+              {active && (
+                <motion.span
+                  layoutId="mode-switch-active-pill"
+                  aria-hidden
+                  className="absolute inset-0 rounded-full bg-ink shadow-sm"
+                  transition={{ type: "spring", stiffness: 480, damping: 38 }}
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-1.5">
+                <Icon className="h-3 w-3" aria-hidden />
+                {entry.label}
+              </span>
             </button>
           </Tooltip>
         );

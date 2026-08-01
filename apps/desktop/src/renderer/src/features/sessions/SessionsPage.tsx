@@ -11,9 +11,8 @@ import { SessionWorkbench, type DrawerKind } from "./SessionWorkbench";
 import { useSessionsStore } from "../../stores/sessions";
 import { toast } from "../../stores/toast";
 import { deleteWorkbenchSession } from "../../lib/orchestration-runtime";
-import { ModeSwitch } from "../work/ModeSwitch";
 
-export function SessionsPage(): JSX.Element {
+export function SessionsPage({ active = true }: { active?: boolean }): JSX.Element {
   const { t } = useI18n();
   const allSessions = useSessionsStore((state) => state.sessions);
   // Filter in useMemo, not in the selector: a filtered array is a fresh
@@ -45,21 +44,21 @@ export function SessionsPage(): JSX.Element {
   };
 
   // Default to the most recent session so chat is the entry point (F-023).
+  // Both workbenches stay mounted (keep-alive); only the visible page may
+  // claim the shared activeSessionId, otherwise the two pages fight over it.
   useEffect(() => {
+    if (!active) return;
     if ((!activeSessionId || !activeSession) && sessions.length > 0) {
       const latest = [...sessions].sort((a, b) =>
         (b.lastMessageAt ?? b.updatedAt).localeCompare(a.lastMessageAt ?? a.updatedAt)
       )[0];
       setActiveSession(latest.id);
     }
-  }, [activeSessionId, activeSession, sessions, setActiveSession]);
-
-  const header = <ModeSwitch mode="code" />;
+  }, [active, activeSessionId, activeSession, sessions, setActiveSession]);
 
   if (sessions.length === 0) {
     return (
       <div className="relative flex h-full items-center justify-center p-8">
-        <div className="absolute left-1/2 top-3 -translate-x-1/2">{header}</div>
         <EmptyState
           icon={MessagesSquare}
           title={t("sessions.empty.title")}
@@ -89,11 +88,11 @@ export function SessionsPage(): JSX.Element {
         {activeSession ? (
           <SessionWorkbench
             sessionId={activeSession.id}
+            active={active}
             drawer={drawer}
             onOpenDrawer={setDrawer}
             onCloseDrawer={() => setDrawer(null)}
             onOpenSession={setActiveSession}
-            headerActions={header}
           />
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-ink-3">

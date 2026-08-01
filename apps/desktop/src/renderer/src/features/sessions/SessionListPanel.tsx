@@ -1,5 +1,6 @@
-import { useMemo } from "react";
-import { CornerDownRight, MessageSquarePlus, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { ChevronDown, CornerDownRight, MessageSquarePlus, Trash2 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn, formatRelativeTime } from "../../lib/utils";
 import type { UiSession } from "../../lib/types";
@@ -7,6 +8,7 @@ import { flattenSessionForest, type SessionTreeEntry } from "../../lib/session-t
 import { Button } from "../../components/ui/Button";
 import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore } from "../../stores/sessions";
+import { useSettingsStore } from "../../stores/settings";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
 import { visibleSessionStatus } from "../../lib/session-lifecycle";
@@ -185,6 +187,8 @@ export function SessionListPanel({
   const { t } = useI18n();
   const allSessions = useSessionsStore((state) => state.sessions);
   const projects = useProjectsStore((state) => state.projects);
+  const collapsedProjects = useSettingsStore((state) => state.collapsedProjects);
+  const toggleProjectCollapsed = useSettingsStore((state) => state.toggleProjectCollapsed);
   const sessions = useMemo(
     () => mode ? allSessions.filter((session) => (session.mode ?? "code") === mode) : allSessions,
     [allSessions, mode]
@@ -200,6 +204,19 @@ export function SessionListPanel({
     return [...map.entries()];
   }, [sessions]);
 
+  // Auto-expand the group holding the active session exactly once per
+  // selection change (covers first load / persisted-state restore and jumps
+  // from other entry points). It is NOT a render-time condition: an explicit
+  // click on the group header always wins afterwards.
+  const autoExpandedForRef = useRef<string>();
+  useEffect(() => {
+    if (!activeSessionId || autoExpandedForRef.current === activeSessionId) return;
+    const session = sessions.find((item) => item.id === activeSessionId);
+    if (!session) return; // sessions not hydrated yet; retry on the next update
+    autoExpandedForRef.current = activeSessionId;
+    if (collapsedProjects.includes(session.projectId)) toggleProjectCollapsed(session.projectId);
+  }, [activeSessionId, sessions, collapsedProjects, toggleProjectCollapsed]);
+
   return (
     <aside
       aria-label={t("sessions.title")}
@@ -214,23 +231,51 @@ export function SessionListPanel({
       <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-2 pt-1 pb-3">
         {grouped.map(([projectId, projectEntries]) => {
           const project = projects.find((item) => item.id === projectId);
+          const containsActive = projectEntries.some((entry) => entry.session.id === activeSessionId);
+          const expanded = !collapsedProjects.includes(projectId);
           return (
             <section key={projectId} className="min-w-0 overflow-hidden mt-3.5 first:mt-1">
-              <h3 className="mb-1 flex items-baseline justify-between gap-2 px-2 text-[11px] font-medium tracking-wide text-ink-3">
-                <span className="truncate">{project?.name ?? projectId}</span>
+              <button
+                type="button"
+                onClick={() => toggleProjectCollapsed(projectId)}
+                aria-expanded={expanded}
+                title={t(expanded ? "sessions.panel.collapseGroup" : "sessions.panel.expandGroup")}
+                className="mb-1 flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] font-medium tracking-wide text-ink-3 transition-colors outline-none hover:bg-card-hover hover:text-ink-2 focus-visible:ring-2 focus-visible:ring-accent/70"
+              >
+                <ChevronDown
+                  className={cn("h-3 w-3 shrink-0 transition-transform duration-200", !expanded && "-rotate-90")}
+                  aria-hidden
+                />
+                <span className="min-w-0 flex-1 truncate">{project?.name ?? projectId}</span>
+                {!expanded && containsActive && (
+                  // The active session lives inside this collapsed group.
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
+                )}
                 <span className="shrink-0 tabular-nums opacity-70">{projectEntries.length}</span>
-              </h3>
-              <ul className="min-w-0 space-y-0.5" role="tree">
-                {projectEntries.map((entry) => (
-                  <SessionItem
-                    key={entry.session.id}
-                    entry={entry}
-                    active={entry.session.id === activeSessionId}
-                    onSelect={() => onSelect(entry.session.id)}
-                    onDelete={() => onDelete(entry.session)}
-                  />
-                ))}
-              </ul>
+              </button>
+              <AnimatePresence initial={false}>
+                {expanded && (
+                  <motion.ul
+                    key="list"
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.18, ease: "easeOut" }}
+                    className="min-w-0 space-y-0.5 overflow-hidden"
+                    role="tree"
+                  >
+                    {projectEntries.map((entry) => (
+                      <SessionItem
+                        key={entry.session.id}
+                        entry={entry}
+                        active={entry.session.id === activeSessionId}
+                        onSelect={() => onSelect(entry.session.id)}
+                        onDelete={() => onDelete(entry.session)}
+                      />
+                    ))}
+                  </motion.ul>
+                )}
+              </AnimatePresence>
             </section>
           );
         })}

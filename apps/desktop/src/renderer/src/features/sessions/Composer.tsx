@@ -87,7 +87,7 @@ export function Composer({
     [compactCommand, slash.execute, sessionId, t]
   );
 
-  const [queuedCounts, setQueuedCounts] = useState<Record<string, number>>({});
+  const queuedCount = useSessionsStore((state) => (sessionId ? state.queuedFollowUps[sessionId]?.length ?? 0 : 0));
 
   useEffect(() => setActiveCommandIndex(0), [commandQuery, snippetQ, sessionId]);
   useEffect(() => {
@@ -101,14 +101,9 @@ export function Composer({
     textareaRef.current?.focus();
     textareaRef.current?.setSelectionRange(editingMessage.text.length, editingMessage.text.length);
   }, [editingMessage]);
-  // Queued follow-ups are consumed by the runtime once the run settles; clear the local badge.
-  useEffect(() => {
-    if (running || !sessionId) return;
-    setQueuedCounts((current) => (current[sessionId] ? { ...current, [sessionId]: 0 } : current));
-  }, [running, sessionId]);
+  // Queued follow-ups live in the sessions store (daemon queue + events).
 
   const canSend = !!sessionId && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled;
-  const queuedCount = sessionId ? queuedCounts[sessionId] ?? 0 : 0;
   const canFollowUp = !!sessionId && running && !importing && !disabled && !editingMessage && attachments.length === 0 && value.trim().length > 0;
 
   const appendAttachments = (next: DesktopAttachment[]): void => {
@@ -189,7 +184,7 @@ export function Composer({
     void sendWorkbenchFollowUp(targetSessionId, text, mode)
       .then((appliedMode) => {
         // Steer may have been downgraded to queue by the daemon (non-Codex CLIs).
-        if (appliedMode === "queue") setQueuedCounts((current) => ({ ...current, [targetSessionId]: (current[targetSessionId] ?? 0) + 1 }));
+        if (mode === "steer" && appliedMode === "queue") toast.info(t("sessions.composer.steerDowngraded"));
       })
       .catch((error) => setAttachmentError(error instanceof Error ? error.message : String(error)));
   };

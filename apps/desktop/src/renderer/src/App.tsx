@@ -12,8 +12,6 @@ import { PlaceholderPage } from "./features/placeholder/PlaceholderPage";
 import { ProjectDetailPage } from "./features/projects/ProjectDetailPage";
 import { ProjectsPage } from "./features/projects/ProjectsPage";
 import { RunsPage } from "./features/runs/RunsPage";
-import { WorkPage } from "./features/work/WorkPage";
-import { SessionsPage } from "./features/sessions/SessionsPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { TeamEditorPage } from "./features/teams/TeamEditorPage";
 import { TeamsPage } from "./features/teams/TeamsPage";
@@ -58,7 +56,10 @@ export default function App(): JSX.Element {
           <Routes>
             {/* F-023: chat-first — the workbench is the default entry */}
             <Route path="/" element={<Navigate to="/sessions" replace />} />
-            <Route path="/sessions" element={<SessionsPage />} />
+            {/* Code/Work workbenches are rendered keep-alive by AppShell so a
+                mode switch never remounts them; the routes only mark the URL. */}
+            <Route path="/sessions" element={null} />
+            <Route path="/work" element={null} />
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
             <Route path="/agents" element={<AgentsPage />} />
@@ -75,7 +76,6 @@ export default function App(): JSX.Element {
               }
             />
             <Route path="/runs" element={<RunsPage />} />
-            <Route path="/work" element={<WorkPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/sessions" replace />} />
           </Routes>

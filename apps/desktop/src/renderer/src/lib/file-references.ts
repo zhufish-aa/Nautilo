@@ -5,7 +5,7 @@
  * - parseFileReference: validates a whole string (inline code content), bare
  *   filenames like `Timeline.tsx:42` are accepted.
  * - findFileReferences: scans plain text; only paths containing a separator
- *   and ending in a known code extension are matched, so ordinary English
+ *   and ending in a known file extension are matched, so ordinary English
  *   phrases are never turned into chips.
  */
 
@@ -20,17 +20,31 @@ const CODE_EXTENSIONS = [
   "py", "rs", "go", "java", "kt", "kts", "c", "h", "cc", "cpp", "hpp", "cs",
   "rb", "php", "swift", "vue", "svelte", "html", "htm", "xml",
   "yaml", "yml", "toml", "ini", "sql", "sh", "bash", "zsh", "ps1", "bat",
-  "prisma", "graphql", "gql", "proto", "txt", "log"
+  "prisma", "graphql", "gql", "proto", "txt", "log",
+  // Office deliverables (Work mode outputs): detected so message text turns
+  // them into chips; they open with the system app instead of the preview.
+  "pptx", "ppt", "docx", "doc", "xlsx", "xls", "csv", "pdf"
 ];
+
+/** Extensions whose files open with the OS default app rather than the in-app preview. */
+const EXTERNAL_OPEN_EXTENSIONS = new Set(["pptx", "ppt", "docx", "doc", "xlsx", "xls", "csv", "pdf"]);
+
+/** True when a referenced path should be opened externally (Office documents etc.). */
+export function isExternalOpenPath(path: string): boolean {
+  const name = path.split(/[\\/]/).at(-1) ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && EXTERNAL_OPEN_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+}
 
 const CODE_EXTENSION_SET = new Set(CODE_EXTENSIONS);
 const EXTENSION_PATTERN = CODE_EXTENSIONS.join("|");
 
 // dir/segments/file.ext with an optional drive letter and an optional
-// :line or :start-end suffix.
+// :line or :start-end suffix. Segment characters are Unicode-aware so
+// non-ASCII (e.g. Chinese) folder names match.
 const PLAIN_REF_REGEX = new RegExp(
-  `(?:^|(?<=[\\s"'\`(\\[{<]))((?:[A-Za-z]:[\\\\/]?)?(?:[\\w@.~+-]+[\\\\/])+[\\w@.~+-]+\\.(?:${EXTENSION_PATTERN}))(?::(\\d+)(?:-\\d+)?)?(?![\\w./\\\\-])`,
-  "gi"
+  `(?:^|(?<=[\\s"'\`(\\[{<]))((?:[A-Za-z]:[\\\\/]?)?(?:[\\p{L}\\p{N}_@.~+-]+[\\\\/])+[\\p{L}\\p{N}_@.~+-]+\\.(?:${EXTENSION_PATTERN}))(?::(\\d+)(?:-\\d+)?)?(?![\\p{L}\\p{N}_./\\\\-])`,
+  "giu"
 );
 
 const LINE_SUFFIX_REGEX = /:(\d+)(?:-\d+)?$/;

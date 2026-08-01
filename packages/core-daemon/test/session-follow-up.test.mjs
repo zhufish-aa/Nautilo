@@ -121,3 +121,53 @@ test("steer falls back to queue when the provider has no mid-turn channel", asyn
   await waitFor(() => daemon.database.runs.list().every((run) => ["completed", "failed", "timed_out", "crashed", "cancelled"].includes(run.status)));
   await daemon.stop();
 });
+
+test("queued follow-up can be listed and withdrawn before its turn starts", async () => {
+  const { daemon, session } = fixture();
+  const releases = [];
+  const prompts = [];
+  daemon.adapters.register({
+    providerId: "follow-up-test",
+    supportsStructuredOutput: true,
+    supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    detect: async () => ({ installed: true, executable: "follow-up-test" }),
+    start: (request) => {
+      prompts.push(request.prompt);
+      let release;
+      const done = new Promise((resolve) => { release = resolve; });
+      releases.push(release);
+      async function* events() { yield { kind: "session", providerSessionId: `thread-${prompts.length}` }; await done; yield { kind: "exit", exitCode: 0 }; }
+      return { process: {}, events: events(), cancel: async () => { release(); }, write: () => {} };
+    }
+  });
+
+  await daemon.sessions.send({ sessionId: session.id, text: "initial task" });
+  const result = await daemon.sessions.followUp({ sessionId: session.id, text: "maybe do this later", mode: "queue" });
+  assert.deepEqual(result, { accepted: true, mode: "queue" });
+
+  const listed = daemon.sessions.followUpList({ sessionId: session.id });
+  assert.equal(listed.items.length, 1);
+  assert.equal(listed.items[0].text, "maybe do this later");
+  const queuedMessageId = listed.items[0].messageId;
+  assert.ok(daemon.database.events.replay({ sessionId: session.id }).some((event) => event.type === "session.follow_up_queued" && event.payload.messageId === queuedMessageId));
+
+  const cancelled = daemon.sessions.followUpCancel({ sessionId: session.id, messageId: queuedMessageId });
+  assert.deepEqual(cancelled, { cancelled: true });
+  assert.equal(daemon.sessions.followUpList({ sessionId: session.id }).items.length, 0);
+  assert.ok(!daemon.database.sessions.messages(session.id).some((message) => message.id === queuedMessageId));
+  assert.ok(daemon.database.events.replay({ sessionId: session.id }).some((event) => event.type === "session.follow_up_cancelled" && event.payload.messageId === queuedMessageId));
+
+  // Withdrawing again reports that it is no longer queued.
+  assert.throws(
+    () => daemon.sessions.followUpCancel({ sessionId: session.id, messageId: queuedMessageId }),
+    (error) => error?.descriptor?.code === "IPC_INVALID_REQUEST"
+  );
+
+  // The withdrawn turn never launches after the active turn settles.
+  releases[0]();
+  await waitFor(() => daemon.database.runs.list().every((run) => ["completed", "failed", "timed_out", "crashed", "cancelled"].includes(run.status)));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(prompts.length, 1);
+  await daemon.stop();
+});
