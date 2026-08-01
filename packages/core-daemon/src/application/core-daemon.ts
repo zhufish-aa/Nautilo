@@ -128,6 +128,7 @@ export class CoreDaemon {
     this.stopped = true;
     await this.gateway.stop();
     await this.plugins.stop();
+    try { this.audit.flush(); } catch { /* database may already be unavailable */ }
     this.database.close();
   }
 }

@@ -4,25 +4,30 @@ import { CoreError } from "../errors.js";
 import { EventService } from "./event-service.js";
 
 interface SubscriptionScope { projectRunId?: string; sessionId?: string; }
+interface SubscriptionEntry { scope: SubscriptionScope; lastUsedAt: number; }
+
+// Desktop clients never explicitly unsubscribe, so idle subscriptions would
+// accumulate forever. Entries unused for this long are pruned lazily.
+const SUBSCRIPTION_TTL_MS = 10 * 60_000;
 
 export class EventSubscriptionService {
-  private readonly subscriptions = new Map<string, SubscriptionScope>();
+  private readonly subscriptions = new Map<string, SubscriptionEntry>();
   constructor(private readonly events: EventService) {}
   subscribe(scope: SubscriptionScope): { subscriptionId: string } {
     if (!scope.projectRunId && !scope.sessionId) throw new CoreError("IPC_INVALID_REQUEST", { field: "event scope" });
+    this.prune();
     const subscriptionId = randomUUID();
-    this.subscriptions.set(subscriptionId, { ...scope });
+    this.subscriptions.set(subscriptionId, { scope: { ...scope }, lastUsedAt: Date.now() });
     return { subscriptionId };
   }
   replay(subscriptionId: string, afterSequence: number): { events: RuntimeEvent[]; lastSequence: number } {
-    const scope = this.subscriptions.get(subscriptionId);
-    if (!scope) throw new CoreError("IPC_NOT_FOUND", { resource: "eventSubscription", id: subscriptionId });
+    const { scope } = this.touch(subscriptionId);
     const events = this.events.replay({ ...scope, afterSequence });
     return { events, lastSequence: events.at(-1)?.sequence ?? afterSequence };
   }
   async wait(subscriptionId: string, afterSequence: number, timeoutMs = 20_000): Promise<{ events: RuntimeEvent[]; lastSequence: number }> {
-    const scope = this.subscriptions.get(subscriptionId);
-    if (!scope) throw new CoreError("IPC_NOT_FOUND", { resource: "eventSubscription", id: subscriptionId });
+    this.prune();
+    const { scope } = this.touch(subscriptionId);
     return new Promise((resolve) => {
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
@@ -48,5 +53,17 @@ export class EventSubscriptionService {
       }
       timer = setTimeout(() => finish({ events: [], lastSequence: afterSequence }), Math.min(Math.max(timeoutMs, 250), 25_000));
     });
+  }
+  private touch(subscriptionId: string): SubscriptionEntry {
+    const entry = this.subscriptions.get(subscriptionId);
+    if (!entry) throw new CoreError("IPC_NOT_FOUND", { resource: "eventSubscription", id: subscriptionId });
+    entry.lastUsedAt = Date.now();
+    return entry;
+  }
+  private prune(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.subscriptions) {
+      if (now - entry.lastUsedAt > SUBSCRIPTION_TTL_MS) this.subscriptions.delete(id);
+    }
   }
 }

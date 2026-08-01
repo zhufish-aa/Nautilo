@@ -60,18 +60,31 @@ export function SessionWorkbench({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true);
+  const scrollFrameRef = useRef<number | undefined>(undefined);
   // Depend on the last event object, not just its id: tool-group and streaming
   // rows update in place (stable id, growing content) and must also trigger
   // the scroll-to-bottom.
   const lastEvent = events[events.length - 1];
 
   useEffect(() => {
-    if (nearBottomRef.current) {
-      // "auto", not "smooth": deltas arrive many times per second and queued
-      // smooth animations are a major source of streaming jank.
-      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "auto" });
-    }
+    if (!nearBottomRef.current) return;
+    // Coalesce to one scroll per animation frame: deltas update the last row
+    // many times per second and each scrollTo forces a layout read.
+    if (scrollFrameRef.current !== undefined) return;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = undefined;
+      // Re-check at flush time: the user may have scrolled up since scheduling.
+      if (nearBottomRef.current) {
+        // "auto", not "smooth": deltas arrive many times per second and queued
+        // smooth animations are a major source of streaming jank.
+        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "auto" });
+      }
+    });
   }, [lastEvent]);
+
+  useEffect(() => () => {
+    if (scrollFrameRef.current !== undefined) cancelAnimationFrame(scrollFrameRef.current);
+  }, []);
 
   useEffect(() => {
     nearBottomRef.current = true;

@@ -290,7 +290,7 @@ test("B-050 audits IPC actions with outcomes and redacted inputs", async (t) => 
   const daemon = new CoreDaemon({ dataDir, enableGitWorkflows: false });
   await daemon.gateway.dispatch({ method: "credential.set", input: { agentInstanceId: "agent", apiKey: "audit-secret-value" } });
   await daemon.gateway.dispatch({ method: "health.get", input: undefined });
-  const records = daemon.database.audit.list({ limit: 10 });
+  const records = daemon.audit.list({ limit: 10 });
   assert.ok(records.some((record) => record.action === "ipc.health.get" && record.outcome === "success"));
   assert.doesNotMatch(JSON.stringify(records), /audit-secret-value/);
   await daemon.stop();

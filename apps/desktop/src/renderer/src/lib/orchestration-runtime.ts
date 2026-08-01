@@ -15,7 +15,8 @@ import type { RuntimeEvent } from "@agenthub/event-protocol";
 import { getBridge, requestCore } from "./bridge";
 import { toDomainAgent, toDomainProject, toDomainTeam, toStandaloneUiSession } from "./core-mappers";
 import type { DesktopAttachment } from "../types/bridge";
-import type { ApprovalScope, RunLifecycle, SessionArtifact, SessionTask, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
+import type { ApprovalScope, RunLifecycle, SessionArtifact, SessionTask, SessionTarget, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
+import type { ActiveRunSummary } from "./types";
 import { compactOrchestrationTimeline, hiddenCompletionRunIds, hiddenInternalRunIds, isVisibleTimelineMessage } from "./orchestration-timeline-policy";
 import { groupToolTimeline } from "./tool-timeline-groups";
 import { collectSubagentActivities, subagentDispatchIdOf } from "./subagent-activities";
@@ -37,7 +38,14 @@ const standaloneEventCache = new Map<string, RuntimeEvent[]>();
 const standaloneMessageCache = new Map<string, Message[]>();
 const standaloneArtifactCache = new Map<string, Artifact[]>();
 const standaloneRenderFrames = new Map<string, number>();
+const standalonePendingDeltas = new Map<string, RuntimeEvent[]>();
+const standaloneRenderDirty = new Set<string>();
 const queuedFollowUps = new Map<string, number>();
+// Poll-activity bookkeeping: a monotonically increasing counter per run that
+// hydrateProjectRun bumps whenever a poll tick actually changed something, so
+// the scheduler can back off while a run is idle.
+const projectRunActivity = new Map<string, number>();
+const projectRunUpdatedAt = new Map<string, string>();
 
 const STREAMING_DELTA_TYPES = new Set(["agent.message_delta", "agent.thinking_delta"]);
 
@@ -316,7 +324,17 @@ function clearSessionRuntime(sessionId: string): void {
   standaloneEventCache.delete(sessionId);
   standaloneMessageCache.delete(sessionId);
   standaloneArtifactCache.delete(sessionId);
+  // Cancel a coalesced render still waiting for its animation frame; letting it
+  // fire would rebuild a timeline for a session that no longer exists.
+  const frame = standaloneRenderFrames.get(sessionId);
+  if (frame !== undefined) cancelAnimationFrame(frame);
+  standaloneRenderFrames.delete(sessionId);
+  standalonePendingDeltas.delete(sessionId);
+  standaloneRenderDirty.delete(sessionId);
   projectSessionSubscriptions.delete(sessionId);
+  projectSessionSequences.delete(sessionId);
+  projectSessionEventCache.delete(sessionId);
+  projectSessionBuilt.delete(sessionId);
   queuedFollowUps.delete(sessionId);
   useInteractionsStore.getState()._removeSessions([sessionId]);
 }
@@ -402,30 +420,51 @@ function mergeStandaloneEvents(sessionId: string, events: RuntimeEvent[]): void 
   if (!fresh.length) return;
   standaloneEventCache.set(sessionId, [...current, ...fresh]);
   ingestInteractionEvents(fresh);
-  // Streaming deltas only append text to the newest streaming row; applying
-  // them in place avoids a full O(history) timeline rebuild per batch.
-  if (fresh.every((event) => STREAMING_DELTA_TYPES.has(event.type)) && applyStandaloneDeltas(sessionId, fresh)) return;
+  // Streaming deltas only append text to the newest streaming row; queue them
+  // and flush once per animation frame instead of writing the store per batch.
+  if (fresh.every((event) => STREAMING_DELTA_TYPES.has(event.type))) {
+    standalonePendingDeltas.set(sessionId, [...(standalonePendingDeltas.get(sessionId) ?? []), ...fresh]);
+  } else {
+    // A full rebuild from the event cache already covers any pending deltas.
+    standalonePendingDeltas.delete(sessionId);
+    standaloneRenderDirty.add(sessionId);
+  }
   scheduleStandaloneRender(sessionId);
 }
 
 /**
- * Coalesces full timeline rebuilds to one per animation frame. Structural
- * events (tools, commands) can arrive in bursts, and each rebuild walks the
- * whole event history — without coalescing the UI thread saturates mid-run.
+ * Coalesces timeline updates to one per animation frame. Structural events
+ * (tools, commands) and streaming deltas can both arrive in bursts — without
+ * coalescing, each rebuild walks the whole event history or each delta batch
+ * writes the store, and the UI thread saturates mid-run.
  */
 function scheduleStandaloneRender(sessionId: string): void {
   if (standaloneRenderFrames.has(sessionId)) return;
   const frame = requestAnimationFrame(() => {
     standaloneRenderFrames.delete(sessionId);
-    renderStandaloneCache(sessionId);
+    flushStandaloneRender(sessionId);
   });
   standaloneRenderFrames.set(sessionId, frame);
+}
+
+/** Applies whatever the frame coalesced: a full rebuild wins over pending deltas. */
+function flushStandaloneRender(sessionId: string): void {
+  if (standaloneRenderDirty.delete(sessionId)) {
+    standalonePendingDeltas.delete(sessionId);
+    renderStandaloneCache(sessionId);
+    return;
+  }
+  const pending = standalonePendingDeltas.get(sessionId);
+  if (!pending?.length) return;
+  standalonePendingDeltas.delete(sessionId);
+  // No streaming row to append to: fall back to a full rebuild from the cache.
+  if (!applyStandaloneDeltas(sessionId, pending)) renderStandaloneCache(sessionId);
 }
 
 /**
  * Applies a delta-only batch to the newest streaming timeline row. Returns
  * false when no matching streaming row exists (a full rebuild must create it),
- * so callers can fall back to scheduleStandaloneRender.
+ * so callers can fall back to renderStandaloneCache.
  */
 function applyStandaloneDeltas(sessionId: string, events: RuntimeEvent[]): boolean {
   const store = useSessionsStore.getState();
@@ -487,18 +526,82 @@ async function replayStandaloneEvents(sessionId: string): Promise<{ events: Runt
   }
 }
 
+/**
+ * Cheap equality helpers for poll-tick store writes. Polls rebuild these
+ * values from scratch every tick, so unchanged data would arrive as fresh
+ * object identities and notify every Zustand subscriber; comparing by content
+ * lets hydrateProjectRun skip no-op writes and detect real activity.
+ */
+function sameLifecycle(current: RunLifecycle | undefined, next: RunLifecycle | undefined): boolean {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return current.status === next.status && current.reason === next.reason && current.startedAt === next.startedAt;
+}
+
+function sameTasks(current: SessionTask[] | undefined, next: SessionTask[]): boolean {
+  return !!current && current.length === next.length && current.every((task, index) => {
+    const other = next[index];
+    return task.id === other.id && task.title === other.title && task.objective === other.objective
+      && task.memberId === other.memberId && task.memberName === other.memberName && task.status === other.status
+      && task.dependencies.join("") === other.dependencies.join("");
+  });
+}
+
+function sameArtifacts(current: SessionArtifact[] | undefined, next: SessionArtifact[]): boolean {
+  return !!current && current.length === next.length && current.every((artifact, index) => {
+    const other = next[index];
+    return artifact.id === other.id && artifact.kind === other.kind && artifact.name === other.name && artifact.content === other.content;
+  });
+}
+
+function sameActiveRun(current: ActiveRunSummary | undefined, next: ActiveRunSummary | undefined): boolean {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return current.id === next.id && current.goal === next.goal && current.status === next.status
+    && current.agentName === next.agentName && current.startedAt === next.startedAt;
+}
+
+function sameTarget(current: SessionTarget, next: SessionTarget): boolean {
+  if (current.type !== next.type) return false;
+  if (current.type === "agent" && next.type === "agent") return current.instanceId === next.instanceId && current.teamId === next.teamId;
+  if (current.type === "member" && next.type === "member") return current.teamId === next.teamId && current.memberId === next.memberId;
+  if (current.type === "team" && next.type === "team") return current.teamId === next.teamId;
+  return false;
+}
+
+/** Compares only the fields toUiSession produces; user-configured extras (e.g. permissionMode) survive upserts and must not force one. */
+function sameUiSession(current: UiSession, next: UiSession): boolean {
+  return current.title === next.title && current.model === next.model
+    && current.reasoningEffort === next.reasoningEffort && current.serviceTier === next.serviceTier
+    && current.mode === next.mode && current.status === next.status
+    && current.parentSessionId === next.parentSessionId && current.projectRunId === next.projectRunId
+    && current.runId === next.runId && current.unreadCount === next.unreadCount
+    && current.lastMessageAt === next.lastMessageAt && current.updatedAt === next.updatedAt
+    && sameTarget(current.target, next.target);
+}
+
 async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   const { projectRun } = await requestCore<{ projectRun: ProjectRun; mainSession: DomainSession }>("projectRun.get", { projectRunId });
   const team = requireUiTeam(String(projectRun.teamId));
   const legacyMain = team.members.find((member) => member.id === projectRun.mainMemberId);
   const mainAgent = useAgentsStore.getState().instances.find((instance) => instance.id === (projectRun.mainAgentInstanceId ?? legacyMain?.agentInstanceId));
-  useProjectsStore.getState().setActiveRun(projectRun.projectId, ["completed", "failed", "cancelled"].includes(projectRun.status) ? undefined : {
+  // Tracks whether this tick observed anything new; bumps the activity counter
+  // the poll scheduler uses for idle backoff.
+  let changed = projectRunUpdatedAt.get(projectRunId) !== projectRun.updatedAt;
+  projectRunUpdatedAt.set(projectRunId, projectRun.updatedAt);
+  const nextActiveRun = ["completed", "failed", "cancelled"].includes(projectRun.status) ? undefined : {
     id: projectRun.id,
     goal: projectRun.goal,
     status: toActiveRunStatus(projectRun),
     agentName: mainAgent?.displayName ?? legacyMain?.displayName ?? projectRun.mainMemberId,
     startedAt: projectRun.createdAt
-  });
+  };
+  const projectsState = useProjectsStore.getState();
+  const currentActiveRun = projectsState.projects.find((project) => project.id === projectRun.projectId)?.activeRun;
+  if (!sameActiveRun(currentActiveRun, nextActiveRun)) {
+    changed = true;
+    projectsState.setActiveRun(projectRun.projectId, nextActiveRun);
+  }
   const [allSessions, tasks, artifacts, verifications, runs] = await Promise.all([
     requestCore<DomainSession[]>("session.list", { projectId: projectRun.projectId }),
     requestCore<Task[]>("task.list", { projectRunId }),
@@ -516,7 +619,12 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     ]);
     const uiSession = toUiSession(detail.session, projectRun, team);
     const sessionArtifacts = artifacts.filter((artifact) => artifact.sessionId === session.id);
-    store._upsertExternalSession(uiSession);
+    const currentSession = store.sessions.find((item) => item.id === session.id);
+    if (!currentSession || !sameUiSession(currentSession, uiSession)) {
+      changed = true;
+      store._upsertExternalSession(uiSession);
+    }
+    if (feed.hasNew) changed = true;
     // Rebuilding the timeline walks the full event history; skip it entirely
     // on poll ticks that delivered no new events for this session.
     const timelineDirty = feed.hasNew || !projectSessionBuilt.has(session.id);
@@ -526,18 +634,41 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
       store._replaceRawLog(session.id, buildRawLog(feed.events, sessionArtifacts));
       projectSessionBuilt.add(session.id);
     }
-    store._replaceTasks(session.id, session.id === projectRun.mainSessionId ? tasks.map((task) => toUiTask(task, team)) : tasks.filter((task) => task.id === session.taskId).map((task) => toUiTask(task, team)));
-    store._replaceArtifacts(session.id, sessionArtifacts.flatMap(toUiArtifact));
+    // Poll ticks rarely change tasks/artifacts/foreground; writing identical
+    // data would still notify every Zustand subscriber, so skip no-op writes.
+    const nextTasks = session.id === projectRun.mainSessionId ? tasks.map((task) => toUiTask(task, team)) : tasks.filter((task) => task.id === session.taskId).map((task) => toUiTask(task, team));
+    if (!sameTasks(store.tasks[session.id], nextTasks)) {
+      changed = true;
+      store._replaceTasks(session.id, nextTasks);
+    }
+    const nextArtifacts = sessionArtifacts.flatMap(toUiArtifact);
+    if (!sameArtifacts(store.artifacts[session.id], nextArtifacts)) {
+      changed = true;
+      store._replaceArtifacts(session.id, nextArtifacts);
+    }
     // Runs in one provider session are serialized. A newer terminal run must
     // supersede any stale historical row that was left marked as running.
     const latestRun = runs.find((run) => run.sessionId === session.id);
     const activeRun = latestRun && shouldPollAgentRun(latestRun) ? latestRun : undefined;
-    store._setForeground(session.id, activeRun ? standaloneLifecycle(detail.session, activeRun) : undefined);
-    store._setActiveAgentRun(session.id, activeRun?.id);
+    if (!sameLifecycle(store.foreground[session.id], activeRun ? standaloneLifecycle(detail.session, activeRun) : undefined)) {
+      changed = true;
+      store._setForeground(session.id, activeRun ? standaloneLifecycle(detail.session, activeRun) : undefined);
+    }
+    if (store.activeAgentRunIds[session.id] !== activeRun?.id) {
+      changed = true;
+      store._setActiveAgentRun(session.id, activeRun?.id);
+    }
     if (activeRun && (queuedFollowUps.get(session.id) ?? 0) > 0) decrementQueuedFollowUp(session.id);
   }
   const root = projectRun.mainSessionId;
-  if (root) store._setRunning(root, projectLifecycle(projectRun));
+  if (root) {
+    const nextRunning = projectLifecycle(projectRun);
+    if (!sameLifecycle(store.running[root], nextRunning)) {
+      changed = true;
+      store._setRunning(root, nextRunning);
+    }
+  }
+  if (changed) projectRunActivity.set(projectRunId, (projectRunActivity.get(projectRunId) ?? 0) + 1);
   return projectRun;
 }
 
@@ -580,22 +711,38 @@ async function projectSessionEvents(sessionId: string): Promise<{ events: Runtim
   return { events, hasNew: fresh.length > 0 };
 }
 
+const POLL_FIRST_TICK_MS = 250;
+const POLL_BASE_MS = 500;
+const POLL_MAX_MS = 2000;
+// Idle ticks tolerated at the base interval before the backoff starts.
+const POLL_IDLE_THRESHOLD = 4;
+
 function schedulePoll(projectRunId: string): void {
   const existing = projectPollers.get(projectRunId);
   if (existing) clearTimeout(existing);
+  let idleStreak = 0;
   const tick = async (): Promise<void> => {
     try {
+      const activityBefore = projectRunActivity.get(projectRunId) ?? 0;
       const projectRun = await hydrateProjectRun(projectRunId);
       if (!shouldPollProjectRun(projectRun) && !hasQueuedFollowUpForProject(projectRunId)) {
         projectPollers.delete(projectRunId);
+        projectRunActivity.delete(projectRunId);
+        projectRunUpdatedAt.delete(projectRunId);
         return;
       }
+      // Any change observed by the tick resets the streak; otherwise back off
+      // gradually (500ms → 1s → 2s cap) so idle runs stop hammering the daemon.
+      idleStreak = (projectRunActivity.get(projectRunId) ?? 0) !== activityBefore ? 0 : idleStreak + 1;
     } catch (error) {
       console.error("Failed to synchronize orchestration run", error);
     }
-    projectPollers.set(projectRunId, setTimeout(() => void tick(), 500));
+    const interval = idleStreak < POLL_IDLE_THRESHOLD
+      ? POLL_BASE_MS
+      : Math.min(POLL_BASE_MS * 2 ** (idleStreak - POLL_IDLE_THRESHOLD + 1), POLL_MAX_MS);
+    projectPollers.set(projectRunId, setTimeout(() => void tick(), interval));
   };
-  projectPollers.set(projectRunId, setTimeout(() => void tick(), 250));
+  projectPollers.set(projectRunId, setTimeout(() => void tick(), POLL_FIRST_TICK_MS));
 }
 
 function scheduleStandalonePoll(sessionId: string, runId: string): void {
