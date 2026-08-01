@@ -116,10 +116,13 @@ export class OrchestrationPromptBuilder {
   finalSynthesis(goal: string, tasks: Task[], results: Array<{ taskId: string; memberName?: string; result?: string }>): string {
     return [
       "[AGENTHUB_FINAL_SYNTHESIS]",
-      "All runnable delegated tasks have finished. Produce the final user-facing response for the original goal.",
+      "This turn was triggered because all runnable delegated tasks finished. It does not mean the original goal is complete, and it is not the end of the conversation.",
+      "Compare the task outcomes against the original goal and handle exactly one of these cases:",
+      "1. The goal is fully addressed: produce the final user-facing response.",
+      "2. Work remains or a task failed: report progress, failures, and what is still missing, then end the turn. Continue in the next normal turn.",
+      "Do not dispatch new delegated tasks, retry, reassign, or take over failed work in this synthesis turn; those decisions belong to the next normal turn.",
       "Treat member results as reports, not proof. Verify important completion or artifact claims before presenting them as successful.",
       "If a delegated task failed, state the failure clearly and do not claim that task succeeded.",
-      "Do not automatically retry, reassign, or take over a failed task in this synthesis turn. The main Agent may choose a next action in a later normal turn.",
       `Goal:\n${goal}`,
       `Task outcomes:\n${JSON.stringify(tasks.map((task) => {
         const outcome = results.find((item) => item.taskId === task.id);
