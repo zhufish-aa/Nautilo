@@ -38,6 +38,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       whileTap={disabled ? undefined : { scale: 0.97 }}
       transition={{ type: "spring", stiffness: 500, damping: 30 }}
       className={cn(
+        "ui-button",
+        `ui-button-${variant}`,
         "inline-flex select-none items-center justify-center font-medium whitespace-nowrap outline-none transition-[background-color,border-color,color,box-shadow,filter] duration-150",
         "focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas",
         "disabled:pointer-events-none disabled:opacity-45",

@@ -180,6 +180,10 @@ export class OrchestrationService {
   async cancel(projectRunId: string): Promise<ProjectRun> {
     const projectRun = this.requireProjectRun(projectRunId);
     await this.runs.cancelProjectRun(projectRunId);
+    // Stopping an already terminal run is a no-op (lingering active runs above
+    // are still cancelled): clients must be able to "stop" a stale UI without
+    // tripping the invalid-transition guard.
+    if (["completed", "failed", "cancelled"].includes(projectRun.status)) return projectRun;
     const mainSession = this.requireMainSession(projectRun);
     for (const task of this.database.tasks.list(projectRunId)) {
       if (!["completed", "cancelled"].includes(task.status)) this.updateTask(mainSession, task, "cancelled");
@@ -465,6 +469,12 @@ export class OrchestrationService {
       if (failed) throw failed.reason;
     }
 
+    // A runtime-tool delegation only owns its taskIds subset; sibling waves may
+    // still be running. Never finalize the project run while any task anywhere
+    // is unresolved, or clients stop polling mid-run.
+    const allUnresolved = this.database.tasks.list(projectRunId)
+      .filter((task) => !["completed", "failed", "cancelled", "blocked_dependency"].includes(task.status));
+    const canFinalize = options.finalizeProjectRun !== false && allUnresolved.length === 0;
     const tasks = this.database.tasks.list(projectRunId).filter((task) => !options.taskIds || options.taskIds.has(task.id));
     const unresolved = tasks.filter((task) => !["completed", "failed", "cancelled", "blocked_dependency"].includes(task.status));
     if (unresolved.length > 0) throw new CoreError("RECOVERY_REQUIRED", { projectRunId, taskIds: unresolved.map((task) => task.id) });
@@ -472,7 +482,7 @@ export class OrchestrationService {
     // A task assigned to the main Agent already produced its user-facing result
     // in that provider turn. Another synthesis would only duplicate the answer.
     if (tasks.length === 1 && tasks[0]?.status === "completed" && tasks[0].completedByMemberId === projectRun.mainMemberId) {
-      if (options.finalizeProjectRun !== false) await this.finishRun(projectRunId, mainSession);
+      if (canFinalize) await this.finishRun(projectRunId, mainSession);
       return;
     }
 
@@ -493,7 +503,7 @@ export class OrchestrationService {
     const completion = await handle.completion;
     this.assertCompleted(completion, "final synthesis");
 
-    if (options.finalizeProjectRun === false) return;
+    if (!canFinalize) return;
 
     const latestRun = this.requireProjectRun(projectRunId);
     const failedTaskIds = tasks

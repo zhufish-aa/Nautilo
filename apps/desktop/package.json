@@ -11,6 +11,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@aiden0z/pptx-renderer": "1.2.4",
     "@radix-ui/react-dialog": "^1.1.4",
     "@radix-ui/react-label": "^2.1.1",
     "@radix-ui/react-radio-group": "^1.2.2",
@@ -19,11 +20,13 @@
     "@radix-ui/react-tabs": "^1.1.2",
     "@radix-ui/react-tooltip": "^1.1.6",
     "clsx": "^2.1.1",
+    "docx-preview": "0.4.0",
     "framer-motion": "^11.15.0",
     "highlight.js": "^11.11.1",
     "lucide-react": "^0.469.0",
     "mammoth": "^1.12.0",
     "monaco-editor": "^0.56.0",
+    "pdfjs-dist": "5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",

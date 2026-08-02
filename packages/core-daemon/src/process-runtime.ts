@@ -48,7 +48,17 @@ export class ProcessRuntime {
     const terminate = (): void => {
       if (finished) return;
       if (platform() === "win32" && child.pid) {
-        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+        // Some dev shells cannot taskkill a child created by another token
+        // (the command exits with access denied). Do not leave the adapter
+        // waiting forever in that case; Node's direct termination still
+        // reliably closes the process handle on Windows.
+        killer.once("error", () => {
+          if (!finished) child.kill();
+        });
+        killer.once("close", (exitCode) => {
+          if (exitCode !== 0 && !finished) child.kill();
+        });
       } else {
         child.kill("SIGTERM");
       }

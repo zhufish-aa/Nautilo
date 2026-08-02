@@ -1,9 +1,10 @@
-import { FileCode2 } from "lucide-react";
+import { FileCode2, ImageIcon } from "lucide-react";
 import { cn } from "../../lib/utils";
-import { isExternalOpenPath, type FileReference } from "../../lib/file-references";
+import { isImagePath, resolveFileOpenTarget, type FileReference } from "../../lib/file-references";
 import { openFilePreview } from "../../stores/file-preview";
+import { openLightbox } from "../../stores/lightbox";
 import { useI18n } from "../../lib/i18n";
-import { openFileWithToast, popupFileMenu } from "./media-actions";
+import { artifactUrlForPath, openFileWithToast, popupFileMenu } from "./media-actions";
 
 function basename(path: string): string {
   return path.split(/[\\/]/).at(-1) ?? path;
@@ -26,26 +27,35 @@ function shortenPathLabel(label: string, maxLength = 44): string {
 export function FileRefChip({
   reference,
   label,
-  inverted = false
+  inverted = false,
+  onOpenLocalFile
 }: {
   reference: FileReference;
   label?: string;
   inverted?: boolean;
+  /** Work mode only: previewable project files route to the preview pane. */
+  onOpenLocalFile?: (path: string) => void;
 }): JSX.Element {
   const { t } = useI18n();
   const rawLabel = label ?? `${basename(reference.path)}${reference.line !== undefined ? `:${reference.line}` : ""}`;
   const name = shortenPathLabel(rawLabel);
-  // Office deliverables and other binaries open with the system default app;
-  // previewable code/text files keep the in-app preview drawer. Right-click
-  // offers the native menu (open / show in folder / copy path).
-  const openExternally = isExternalOpenPath(reference.path);
+  const imagePath = isImagePath(reference.path);
+  // Work mode (handler present): previewable files (PDF/Office/text/image…)
+  // open in the right-hand preview pane; legacy .doc/.ppt keep the system
+  // app. Without a handler the Code-mode behavior is untouched: Office opens
+  // externally, code/text keeps the preview drawer. Right-click offers the
+  // native menu (open / show in folder / copy path).
+  const target = resolveFileOpenTarget(reference.path, onOpenLocalFile !== undefined);
   return (
     <button
       type="button"
       title={reference.path}
       onClick={(event) => {
         event.stopPropagation();
-        if (openExternally) void openFileWithToast(reference.path, t);
+        if (imagePath && !onOpenLocalFile) {
+          openLightbox({ src: artifactUrlForPath(reference.path), name: basename(reference.path), path: reference.path });
+        } else if (target === "local-preview") onOpenLocalFile!(reference.path);
+        else if (target === "external") void openFileWithToast(reference.path, t);
         else openFilePreview(reference);
       }}
       onContextMenu={(event) => {
@@ -60,7 +70,7 @@ export function FileRefChip({
           : "border-line bg-card-hover text-accent hover:border-accent/50 hover:bg-accent-soft"
       )}
     >
-      <FileCode2 className="h-3 w-3 shrink-0" aria-hidden />
+      {imagePath ? <ImageIcon className="h-3 w-3 shrink-0" aria-hidden /> : <FileCode2 className="h-3 w-3 shrink-0" aria-hidden />}
       <span className="truncate">{name}</span>
     </button>
   );

@@ -43,7 +43,7 @@ export function StatusChip({
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium whitespace-nowrap",
+        "ui-chip inline-flex h-6 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium whitespace-nowrap",
         toneClasses[tone].chip,
         className
       )}
@@ -79,7 +79,7 @@ export function Tag({
     <span
       title={title ?? label}
       className={cn(
-        "inline-flex h-6 max-w-full items-center rounded-md border border-line bg-card-hover px-2 text-xs break-all text-ink-2",
+        "ui-tag inline-flex h-6 max-w-full items-center rounded-md border border-line bg-card-hover px-2 text-xs break-all text-ink-2",
         className
       )}
     >

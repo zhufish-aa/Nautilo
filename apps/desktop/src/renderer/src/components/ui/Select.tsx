@@ -31,13 +31,17 @@ export function SelectField({
       <SelectPrimitive.Trigger
         aria-label={ariaLabel}
         className={cn(
-          "flex h-9.5 w-full items-center justify-between gap-2 rounded-xl border border-line-strong bg-card px-3 text-sm text-ink outline-none transition-colors",
+          "ui-select flex h-9.5 w-full items-center justify-between gap-2 rounded-xl border border-line-strong bg-card px-3 text-sm text-ink outline-none transition-colors",
           "hover:border-accent/50 focus-visible:ring-2 focus-visible:ring-accent/70",
           "disabled:cursor-not-allowed disabled:opacity-45 data-[placeholder]:text-ink-3",
           className
         )}
       >
-        <SelectPrimitive.Value placeholder={placeholder} className="min-w-0 truncate [&_.select-hint]:hidden [&_span]:truncate" />
+        {/* Radix SelectValue silently drops className, so the truncation/hint-hiding
+            classes must live on this wrapper span instead of on SelectPrimitive.Value. */}
+        <span className="min-w-0 flex-1 truncate [&_.select-hint]:hidden [&_span]:truncate">
+          <SelectPrimitive.Value placeholder={placeholder} />
+        </span>
         <SelectPrimitive.Icon>
           <ChevronDown className="h-4 w-4 shrink-0 text-ink-3" aria-hidden />
         </SelectPrimitive.Icon>
@@ -47,7 +51,7 @@ export function SelectField({
           position="popper"
           sideOffset={6}
           className={cn(
-            "z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-xl border border-line bg-card shadow-pop",
+            "ui-select-content z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-xl border border-line bg-card shadow-pop",
             "data-[state=open]:animate-pop-in"
           )}
         >

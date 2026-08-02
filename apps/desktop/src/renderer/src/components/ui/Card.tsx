@@ -10,7 +10,7 @@ export const Card = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(f
     <div
       ref={ref}
       className={cn(
-        "rounded-2xl border border-line bg-card shadow-card transition-colors duration-200",
+        "ui-card rounded-2xl border border-line bg-card shadow-card transition-colors duration-200",
         className
       )}
       {...rest}
@@ -36,7 +36,7 @@ export const MotionCard = forwardRef<HTMLDivElement, MotionCardProps>(function M
       }}
       whileHover={interactive ? { y: -3, transition: { type: "spring", stiffness: 400, damping: 25 } } : undefined}
       className={cn(
-        "rounded-2xl border border-line bg-card shadow-card transition-[background-color,border-color,box-shadow] duration-200",
+        "ui-card rounded-2xl border border-line bg-card shadow-card transition-[background-color,border-color,box-shadow] duration-200",
         interactive && "cursor-pointer hover:border-accent/40 hover:bg-card-hover hover:shadow-glow",
         className
       )}

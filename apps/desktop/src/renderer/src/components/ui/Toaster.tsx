@@ -30,7 +30,7 @@ export function Toaster(): JSX.Element {
               animate={{ opacity: 1, x: 0, scale: 1 }}
               exit={{ opacity: 0, x: 32, scale: 0.96 }}
               transition={{ type: "spring", stiffness: 420, damping: 32 }}
-              className="pointer-events-auto relative flex items-center gap-3 overflow-hidden rounded-xl border border-line bg-card py-3 pr-3 pl-4 shadow-pop"
+              className="ui-toast pointer-events-auto relative flex items-center gap-3 overflow-hidden rounded-xl border border-line bg-card py-3 pr-3 pl-4 shadow-pop"
             >
               <span aria-hidden className={cn("absolute inset-y-0 left-0 w-0.5", style.bar)} />
               <Icon className={cn("h-4.5 w-4.5 shrink-0", style.iconColor)} aria-hidden />

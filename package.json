@@ -20,6 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "rcedit": "^5.0.2",
     "typescript": "^5.8.3"
   },
   "pnpm": {

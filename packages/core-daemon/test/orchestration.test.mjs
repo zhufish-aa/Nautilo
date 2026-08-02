@@ -590,3 +590,108 @@ test("desktop-facing IPC persists configuration and drives a real orchestration 
   assert.equal(fetched.data.projectRun.status, "completed");
   await daemon.stop();
 });
+
+test("runtime delegation wave does not finalize the project run while a sibling task is still running", async () => {
+  const daemon = new CoreDaemon({ databasePath: ":memory:", enableGitWorkflows: false });
+  let releaseSlowChild;
+  const slowChildGate = new Promise((resolve) => { releaseSlowChild = resolve; });
+  const runFor = (request) => {
+    async function* events() {
+      yield { kind: "session", providerSessionId: `${request.instance.id}-native-thread` };
+      if (request.instance.id === "wave-main" && request.prompt.includes("[AGENTHUB_MAIN_TURN]")) {
+        await request.executeRuntimeTool({
+          providerId: "wave-fake",
+          callId: "call-slow",
+          name: "agenthub_delegate",
+          arguments: { memberId: "slow", task: "Slow sibling task" }
+        });
+        await request.executeRuntimeTool({
+          providerId: "wave-fake",
+          callId: "call-fast",
+          name: "agenthub_delegate",
+          arguments: { memberId: "fast", task: "Fast sibling task" }
+        });
+        yield { kind: "message", text: "Both siblings dispatched" };
+      } else if (request.instance.id === "wave-slow") {
+        await slowChildGate;
+        yield { kind: "message", text: "Slow sibling done" };
+      } else {
+        yield { kind: "message", text: "Quick answer" };
+      }
+      yield { kind: "exit", exitCode: 0 };
+    }
+    return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+  };
+  daemon.adapters.register({
+    providerId: "wave-fake",
+    supportsStructuredOutput: true,
+    supportsResume: true,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: true, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }),
+    start: runFor,
+    resume: runFor
+  });
+  daemon.database.projects.save({ id: "wave-project", name: "Wave", rootPath: process.cwd(), repositoryType: "none", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" }, now);
+  for (const id of ["wave-main", "wave-slow", "wave-fast"]) {
+    daemon.database.agents.save({ id, providerId: "wave-fake", displayName: id, executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now }, now);
+  }
+  daemon.database.teams.save({
+    id: "wave-team",
+    name: "Sibling waves",
+    delegationPolicy: "autonomous",
+    members: [
+      { id: "slow", displayName: "Slow child", agentInstanceId: "wave-slow", roleId: "api", strengths: {}, allowedTaskTypes: [], maxConcurrentTasks: 1, enabled: true },
+      { id: "fast", displayName: "Fast child", agentInstanceId: "wave-fast", roleId: "api", strengths: {}, allowedTaskTypes: [], maxConcurrentTasks: 1, enabled: true }
+    ],
+    createdAt: now,
+    updatedAt: now
+  }, now);
+
+  const started = daemon.orchestration.start({
+    projectId: "wave-project",
+    teamId: "wave-team",
+    agentInstanceId: "wave-main",
+    goal: "Run two sibling delegations"
+  });
+  try {
+    // The fast sibling finishes and its wave runs a final synthesis; the slow
+    // sibling is still gated, so the project run must stay non-terminal.
+    await waitUntil(
+      () => daemon.database.tasks.list(started.projectRun.id).some((task) => task.assignedMemberId === "fast" && task.status === "completed")
+        && daemon.database.runs.list().some((run) => run.sessionId === started.mainSession.id && run.status === "completed"),
+      "fast sibling wave did not finish"
+    );
+    await waitUntil(
+      () => daemon.database.runs.list()
+        .filter((run) => run.sessionId === started.mainSession.id)
+        .every((run) => ["completed", "failed", "timed_out", "cancelled", "crashed"].includes(run.status)),
+      "final synthesis turn did not settle"
+    );
+    assert.notEqual(daemon.database.projectRuns.get(started.projectRun.id)?.status, "completed");
+
+    releaseSlowChild();
+    await waitUntil(
+      () => daemon.database.projectRuns.get(started.projectRun.id)?.status === "completed",
+      "project run did not finalize after the slow sibling finished"
+    );
+  } finally {
+    releaseSlowChild();
+    await daemon.stop();
+  }
+});
+
+test("cancelling an already terminal project run is a no-op success", async () => {
+  const fixture = setup({
+    responder: ({ prompt }) => prompt.includes("[AGENTHUB_PLANNER_DECISION]")
+      ? { text: JSON.stringify({ mode: "direct", rationale: "I can handle this" }) }
+      : { text: "Direct work finished" }
+  });
+  const started = fixture.orchestration.start({ projectId: "project", teamId: "team", goal: "Do it" });
+  await fixture.orchestration.wait(started.projectRun.id);
+  assert.equal(fixture.database.projectRuns.get(started.projectRun.id)?.status, "completed");
+
+  const cancelled = await fixture.orchestration.cancel(started.projectRun.id);
+  assert.equal(cancelled.status, "completed");
+  assert.equal(fixture.database.projectRuns.get(started.projectRun.id)?.status, "completed");
+  fixture.database.close();
+});

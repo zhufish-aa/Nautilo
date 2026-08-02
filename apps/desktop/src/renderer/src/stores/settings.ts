@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 import type { LocaleCode } from "../lib/utils";
 import type { NavKey, ThemePreference } from "../lib/types";
 import type { PromptSnippet } from "../lib/snippets";
+import { isValidTheme, type ThemeDefinition } from "../lib/themes";
 
 /** Modules the user may hide from the sidebar; the rest stay pinned (F-003). */
 export const TOGGLABLE_NAV_KEYS: NavKey[] = ["teams", "tasks", "sessions", "runs"];
@@ -20,6 +21,8 @@ interface SettingsState {
   promptSnippets: PromptSnippet[];
   /** Session-list groups (by projectId) the user collapsed. */
   collapsedProjects: string[];
+  /** Installed theme packs (theme market / user-made), overlaid on builtins. */
+  customThemes: ThemeDefinition[];
   setTheme: (theme: ThemePreference) => void;
   setLocale: (locale: LocaleCode) => void;
   setReduceMotion: (reduce: boolean) => void;
@@ -29,6 +32,9 @@ interface SettingsState {
   upsertSnippet: (snippet: PromptSnippet) => void;
   removeSnippet: (id: string) => void;
   toggleProjectCollapsed: (projectId: string) => void;
+  /** Install (or replace) a theme pack; rejects malformed definitions. */
+  installTheme: (theme: ThemeDefinition) => boolean;
+  uninstallTheme: (id: string) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -41,6 +47,7 @@ export const useSettingsStore = create<SettingsState>()(
       notificationsEnabled: true,
       notificationSound: true,
       collapsedProjects: [],
+      customThemes: [],
       promptSnippets: [
         { id: "seed-test-fix", title: "跑测试并修红", text: "运行本项目的测试，定位失败的用例并修复，直到全部通过。" },
         { id: "seed-review", title: "审查本次改动", text: "审查当前工作区的改动，指出潜在 bug、回归风险和可简化之处，按严重程度排序。" },
@@ -64,6 +71,21 @@ export const useSettingsStore = create<SettingsState>()(
           collapsedProjects: state.collapsedProjects.includes(projectId)
             ? state.collapsedProjects.filter((item) => item !== projectId)
             : [...state.collapsedProjects, projectId]
+        })),
+      installTheme: (theme) => {
+        if (!isValidTheme(theme)) return false;
+        set((state) => ({
+          customThemes: state.customThemes.some((item) => item.id === theme.id)
+            ? state.customThemes.map((item) => (item.id === theme.id ? theme : item))
+            : [...state.customThemes, theme]
+        }));
+        return true;
+      },
+      uninstallTheme: (id) =>
+        set((state) => ({
+          customThemes: state.customThemes.filter((item) => item.id !== id),
+          // Fall back to system if the active theme got removed.
+          theme: state.theme === id ? "system" : state.theme
         })),
       setNavVisible: (key, visible) =>
         set((state) => ({

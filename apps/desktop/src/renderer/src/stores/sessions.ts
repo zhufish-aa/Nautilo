@@ -253,7 +253,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       _configureSession: (sessionId, patch) => {
         const session = get().sessions.find((item) => item.id === sessionId);
         if (!session) return undefined;
-        const updated = { ...session, ...patch, updatedAt: new Date().toISOString() };
+        const normalizedPatch = Object.prototype.hasOwnProperty.call(patch, "permissionMode")
+          ? { ...patch, permissionMode: patch.permissionMode?.trim() || undefined }
+          : patch;
+        const updated = { ...session, ...normalizedPatch, updatedAt: new Date().toISOString() };
         set((state) => ({
           sessions: state.sessions.map((item) => item.id === sessionId ? updated : item)
         }));

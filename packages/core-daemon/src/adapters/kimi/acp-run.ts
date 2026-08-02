@@ -2,6 +2,7 @@ import type { ProcessEvent } from "../../process-runtime.js";
 import { ProcessRuntime } from "../../process-runtime.js";
 import { JsonRpcProcessClient } from "../json-rpc-process.js";
 import type { AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest } from "../types.js";
+import { resolvePermissionMode } from "../permission-mode.js";
 import { parseKimiAcpUpdate, type KimiAcpParseState } from "./acp-events.js";
 import { KimiAcpTurnSegments } from "./acp-segments.js";
 import { readKimiSessionUsage } from "./session-usage.js";
@@ -32,10 +33,7 @@ async function applyConfig(rpc: JsonRpcProcessClient, sessionId: string, respons
   // Permission mode must match exactly — a fuzzy "mode" hint would also hit the model option.
   // Session-level override wins; otherwise fall back to the instance setting
   // (same precedence as the codex/claude adapters).
-  const instanceMode = typeof request.instance.providerOptions?.permissionMode === "string"
-    ? request.instance.providerOptions.permissionMode
-    : undefined;
-  const mode = request.permissionMode ?? instanceMode;
+  const mode = resolvePermissionMode(request.instance, request);
   if (mode) {
     const option = options.find((item) => {
       const id = String(item.id ?? "").toLowerCase();

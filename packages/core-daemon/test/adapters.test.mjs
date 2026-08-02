@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,9 +14,11 @@ import {
   AGENTHUB_CODEX_PROVIDER_ID,
   buildCodexAppServerArgs,
   buildCodexDynamicTools,
+  CODEX_IMAGE_GENERATION_TOOL_NAME,
   buildCodexProviderConfigArgs,
   buildCodexResumeArgs,
   buildCodexStartArgs,
+  codexPermissionConfig,
   buildClaudeResumeArgs,
   buildClaudeStartArgs,
   buildKimiResumeArgs,
@@ -46,7 +49,9 @@ import {
   KimiAcpTurnSegments,
   parseKimiWireContextUsed,
   startCodexAppServer,
+  executeCodexImageGeneration,
   startKimiRuntimeMcpBridge,
+  resolvePermissionMode,
   resumeStrategy
 } from "../dist/index.js";
 
@@ -127,6 +132,21 @@ test("Codex permission mode maps to approval policy and sandbox flags", () => {
   assert.ok(!buildCodexStartArgs(customBase, "hello").includes("--ask-for-approval"));
 });
 
+test("empty session permission mode falls back to the instance setting", () => {
+  const configured = { ...instance, baseArgs: [], providerOptions: { permissionMode: "ask" } };
+  const request = { instance: configured, prompt: "hello", cwd: process.cwd(), permissionMode: "" };
+  assert.equal(resolvePermissionMode(configured, request), "ask");
+  assert.deepEqual(codexPermissionConfig(configured, request), { approvalPolicy: "on-request", sandbox: "workspace-write" });
+  assert.deepEqual(buildCodexStartArgs(configured, "hello", request).slice(0, 6), [
+    "exec", "--json", "--ask-for-approval", "on-request", "--sandbox", "workspace-write"
+  ]);
+
+  // A real session override still wins over the instance default.
+  const explicit = { ...request, permissionMode: "full-access" };
+  assert.equal(resolvePermissionMode(configured, explicit), "full-access");
+  assert.deepEqual(codexPermissionConfig(configured, explicit), { approvalPolicy: "never", sandbox: "danger-full-access" });
+});
+
 test("Codex custom API base URL is applied as an invocation-scoped model provider", () => {
   const secret = "must-not-appear-in-process-arguments";
   const configured = {
@@ -168,6 +188,8 @@ test("Codex custom API base URL is applied as an invocation-scoped model provide
     assert.doesNotMatch(JSON.stringify(args), new RegExp(secret));
   }
   assert.deepEqual(appServerArgs.slice(0, 2), ["app-server", "--stdio"]);
+  assert.ok(appServerArgs.includes("--enable"));
+  assert.ok(appServerArgs.includes("image_generation"));
 
   const profiledAppServerArgs = buildCodexAppServerArgs({ ...configured, profile: "work" }, environment);
   assert.deepEqual(profiledAppServerArgs.slice(0, 4), ["--profile", "work", "app-server", "--stdio"]);
@@ -356,6 +378,38 @@ test("Codex app-server maps AgentHub runtime tools to dynamic function tools", (
     description: "Invalid dotted name",
     inputSchema: { type: "object" }
   }]), /Invalid Codex dynamic tool name: agenthub\.delegate/);
+});
+
+test("Codex app-server exposes an executable image bridge and persists its result", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "agenthub-image-"));
+  const previousFetch = globalThis.fetch;
+  let captured;
+  const imageBytes = Buffer.from("fake-png");
+  globalThis.fetch = async (url, options) => {
+    captured = { url: String(url), options };
+    return new Response(JSON.stringify({ data: [{ b64_json: imageBytes.toString("base64") }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const dynamic = buildCodexDynamicTools(undefined, true);
+    assert.equal(dynamic?.[0]?.name, CODEX_IMAGE_GENERATION_TOOL_NAME);
+    const result = await executeCodexImageGeneration({
+      instance: { ...instance, providerOptions: { baseUrl: "https://pixel.example/v1" } },
+      prompt: "generate",
+      cwd: workspace,
+      env: { OPENAI_API_KEY: "secret" }
+    }, { prompt: "A simple blue square", filename: "blue-square" });
+    assert.equal(captured.url, "https://pixel.example/v1/images/generations");
+    assert.equal(JSON.parse(captured.options.body).prompt, "A simple blue square");
+    assert.equal(JSON.parse(captured.options.body).output_format, "png");
+    assert.deepEqual(readFileSync(result.path), imageBytes);
+    assert.match(result.path, /output[\\/]imagegen[\\/]blue-square\.png$/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("Kimi runtime tools are injected through a run-scoped MCP endpoint", async (t) => {
@@ -662,6 +716,12 @@ test("Claude commands match headless stream-json, resume, and effort surface", (
   // The catalog's "default" entry must not leak into the CLI as a --model value.
   const defaultModel = buildClaudeStartArgs(configured, "hello", { ...request, model: "default" });
   assert.ok(!defaultModel.includes("--model"));
+  // Clearing the session override must not hide the instance's plan mode.
+  const inherited = buildClaudeStartArgs(configured, "hello", { ...request, permissionMode: "" });
+  assert.deepEqual(inherited.slice(-3), ["--permission-mode", "plan", "hello"]);
+  // A non-empty session value still overrides the instance setting.
+  const overridden = buildClaudeStartArgs(configured, "hello", { ...request, permissionMode: "default" });
+  assert.deepEqual(overridden.slice(-3), ["--permission-mode", "default", "hello"]);
   // Custom baseArgs own the whole CLI surface.
   const custom = { ...configured, baseArgs: ["-p", "--output-format", "stream-json"] };
   assert.deepEqual(buildClaudeStartArgs(custom, "hello", request), ["-p", "--output-format", "stream-json", "hello"]);
@@ -950,4 +1010,85 @@ test("Codex app-server compaction uses thread/compact/start instead of a chat tu
   assert.ok(methods.includes("thread/resume"));
   assert.ok(methods.includes("thread/compact/start"));
   assert.ok(!methods.includes("turn/start"));
+});
+
+test("Codex app-server executes image_gen through the configured Images API", async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), "agenthub-codex-image-e2e-"));
+  const fixture = readFileSync(fileURLToPath(new URL("./fixtures/fake-codex-image-app-server.mjs", import.meta.url)), "utf8");
+  writeFileSync(join(workspace, "app-server"), fixture);
+  const logPath = join(workspace, "rpc.ndjson");
+  const imageBytes = Buffer.from("fake-e2e-png");
+  const imageRequests = [];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      imageRequests.push({
+        method: req.method,
+        url: req.url,
+        authorization: req.headers.authorization,
+        body: JSON.parse(Buffer.concat(chunks).toString("utf8"))
+      });
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ data: [{ b64_json: imageBytes.toString("base64") }] }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  const instance = {
+    id: "codex-image",
+    providerId: "codex",
+    displayName: "Codex",
+    executable: process.execPath,
+    baseArgs: [],
+    providerOptions: { baseUrl },
+    capabilities: [],
+    enabled: true,
+    status: "available",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const run = startCodexAppServer({
+    instance,
+    prompt: "make an image",
+    cwd: workspace,
+    env: { ...process.env, OPENAI_API_KEY: "test-image-key", CODEX_FAKE_LOG: logPath },
+    timeoutMs: 10_000
+  }, false);
+
+  const events = [];
+  for await (const event of run.events) events.push(event);
+
+  const rpcMessages = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const threadStart = rpcMessages.find((message) => message.method === "thread/start");
+  assert.equal(threadStart.params.dynamicTools[0].name, "image_gen");
+  assert.equal(threadStart.params.dynamicTools[0].type, "function");
+  assert.equal(rpcMessages.some((message) => message.id === "image-call-1" && message.method === undefined), true);
+  assert.equal(imageRequests.length, 1);
+  assert.deepEqual(imageRequests[0], {
+    method: "POST",
+    url: "/v1/images/generations",
+    authorization: "Bearer test-image-key",
+    body: {
+      model: "gpt-image-2",
+      prompt: "A small blue square",
+      n: 1,
+      size: "auto",
+      quality: "medium",
+      output_format: "png"
+    }
+  });
+  const artifact = events.find((event) => event.kind === "artifact" && event.artifactType === "image");
+  assert.ok(artifact);
+  assert.deepEqual(readFileSync(artifact.path), imageBytes);
+  assert.match(artifact.path, /output[\\/]imagegen[\\/]e2e-blue-square\.png$/);
+  assert.equal(events.find((event) => event.kind === "exit")?.exitCode, 0);
 });

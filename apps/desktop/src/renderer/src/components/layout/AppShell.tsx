@@ -116,7 +116,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const isWork = location.pathname.startsWith("/work");
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">
+    <div className="flex h-screen flex-col overflow-hidden text-ink">
       <a
         href="#main-content"
         className="sr-only z-50 rounded-lg bg-accent px-3 py-2 text-sm text-on-accent focus:not-sr-only focus:absolute focus:top-2 focus:left-2"

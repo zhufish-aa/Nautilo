@@ -220,7 +220,7 @@ export function SessionListPanel({
   return (
     <aside
       aria-label={t("sessions.title")}
-      className="flex w-64 shrink-0 flex-col overflow-hidden border-r border-line/80 bg-card/95 backdrop-blur-xl"
+      className="session-list-panel flex w-64 shrink-0 flex-col overflow-hidden border-r border-line/80 bg-card/95 backdrop-blur-xl"
     >
       <div className="p-2.5 pb-1.5">
         <Button variant="outline" size="sm" className="w-full" onClick={onNew}>

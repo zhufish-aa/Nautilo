@@ -51,12 +51,12 @@ function SessionCard({
       aria-label={`${t("runsPage.open")}: ${session.title || t("runsPage.untitled")}`}
       className="group flex w-full flex-col gap-1.5 rounded-2xl border border-line bg-card px-4 py-3.5 text-left transition-all hover:border-accent/50 hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45"
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex w-full items-center justify-between gap-3">
         <span className="min-w-0 truncate text-sm font-medium text-ink">{session.title || t("runsPage.untitled")}</span>
         <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${toneClass}`}>{badge}</span>
       </div>
-      <p className="truncate text-[11px] text-ink-3">{meta}</p>
-      <p className="truncate text-xs text-ink-2">{snippet || "—"}</p>
+      <p className="w-full truncate text-[11px] text-ink-3">{meta}</p>
+      <p className="w-full truncate text-xs text-ink-2">{snippet || "—"}</p>
       <time className="text-[10px] text-ink-3">{formatDateTime(session.lastMessageAt ?? session.updatedAt, locale)}</time>
     </button>
   );

@@ -1,5 +1,6 @@
 import type { AgentInstance } from "@agenthub/domain";
 import type { AdapterMcpServer, AdapterResumeRequest, AdapterStartRequest } from "../types.js";
+import { resolvePermissionMode } from "../permission-mode.js";
 import { PERMISSION_PROMPT_TOOL_NAME, type RuntimeMcpBridge } from "../runtime-mcp-bridge.js";
 import { CLAUDE_EFFORT_LEVELS } from "./models.js";
 
@@ -10,8 +11,7 @@ export const CLAUDE_RUNTIME_MCP_SERVER = "agenthub";
 
 /** CLI-native permission mode → claude's --permission-mode flag; session override wins. */
 export function claudePermissionArgs(instance: AgentInstance, request?: AdapterStartRequest): string[] {
-  const instanceMode = typeof instance.providerOptions?.permissionMode === "string" ? instance.providerOptions.permissionMode : undefined;
-  const mode = request?.permissionMode ?? instanceMode;
+  const mode = resolvePermissionMode(instance, request);
   return mode && CLAUDE_PERMISSION_MODES.has(mode) ? ["--permission-mode", mode] : [];
 }
 

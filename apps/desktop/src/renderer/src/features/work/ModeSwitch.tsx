@@ -40,7 +40,7 @@ export function ModeSwitch({ mode }: { mode: "code" | "work" }): JSX.Element {
     <div
       role="tablist"
       aria-label={t("modeSwitch.label")}
-      className="pointer-events-auto flex items-center gap-0.5 rounded-full border border-line bg-card/80 p-0.5 shadow-sm backdrop-blur-xl"
+      className="mode-switch pointer-events-auto flex items-center gap-0.5 rounded-full border border-line bg-card/80 p-0.5 shadow-sm backdrop-blur-xl"
     >
       {entries.map((entry) => {
         const active = entry.key === mode;

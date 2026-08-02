@@ -38,8 +38,6 @@ const standaloneEventCache = new Map<string, RuntimeEvent[]>();
 const standaloneMessageCache = new Map<string, Message[]>();
 const standaloneArtifactCache = new Map<string, Artifact[]>();
 const standaloneRenderFrames = new Map<string, number>();
-const standalonePendingDeltas = new Map<string, RuntimeEvent[]>();
-const standaloneRenderDirty = new Set<string>();
 // Sessions whose daemon queue has been fetched once; afterwards the
 // session.follow_up_queued/cancelled events keep the store list in sync.
 const followUpListSynced = new Set<string>();
@@ -48,15 +46,25 @@ const followUpListSynced = new Set<string>();
 // the scheduler can back off while a run is idle.
 const projectRunActivity = new Map<string, number>();
 const projectRunUpdatedAt = new Map<string, string>();
+// Sessions with an active AgentRun per project run, refreshed by every
+// hydrateProjectRun tick. The daemon can keep delegated child sessions running
+// after it finalizes the project run, so liveness must come from the sessions,
+// not the project run status alone.
+const projectRunActiveRuns = new Map<string, number>();
 
 const STREAMING_DELTA_TYPES = new Set(["agent.message_delta", "agent.thinking_delta"]);
 
 export async function resumeWorkbenchRuns(): Promise<void> {
   if (!getBridge()) return;
+  // A terminal-looking project run can still own live child sessions (the
+  // daemon finalizes delegation waves independently), so resume polling for any
+  // run with an active AgentRun, not just non-terminal statuses.
+  const agentRuns = await requestCore<AgentRun[]>("run.list", {}).catch(() => [] as AgentRun[]);
+  const activeProjectRunIds = new Set(agentRuns.filter(shouldPollAgentRun).map((run) => run.projectRunId).filter(Boolean));
   for (const project of useProjectsStore.getState().projects) {
     try {
       const runs = await requestCore<ProjectRun[]>("projectRun.list", { projectId: project.id });
-      for (const projectRun of runs.filter((run) => !["completed", "failed", "cancelled"].includes(run.status))) {
+      for (const projectRun of runs.filter((run) => !["completed", "failed", "cancelled"].includes(run.status) || activeProjectRunIds.has(run.id))) {
         const hydrated = await hydrateProjectRun(projectRun.id);
         if (shouldPollProjectRun(hydrated)) schedulePoll(projectRun.id);
       }
@@ -266,7 +274,10 @@ export async function stopWorkbenchRun(sessionId: string): Promise<void> {
   if (!session) return;
   const store = useSessionsStore.getState();
   if (session.projectRunId && !session.parentSessionId) {
-    await requestCore<ProjectRun>("orchestration.cancel", { projectRunId: session.projectRunId });
+    // Cancelling can fail (e.g. the daemon already finalized the run); the
+    // rehydrate below is what repairs local state, so never bail out early.
+    await requestCore<ProjectRun>("orchestration.cancel", { projectRunId: session.projectRunId })
+      .catch((error) => console.error("Failed to cancel orchestration run", error));
     store._setForeground(sessionId, { status: "cancelled" });
     await hydrateProjectRun(session.projectRunId);
     return;
@@ -284,7 +295,8 @@ export async function stopWorkbenchRun(sessionId: string): Promise<void> {
       return;
     }
   } else if (session.projectRunId) {
-    await requestCore<ProjectRun>("orchestration.cancel", { projectRunId: session.projectRunId });
+    await requestCore<ProjectRun>("orchestration.cancel", { projectRunId: session.projectRunId })
+      .catch((error) => console.error("Failed to cancel orchestration run", error));
     await hydrateProjectRun(session.projectRunId);
     return;
   }
@@ -370,8 +382,6 @@ function clearSessionRuntime(sessionId: string): void {
   const frame = standaloneRenderFrames.get(sessionId);
   if (frame !== undefined) cancelAnimationFrame(frame);
   standaloneRenderFrames.delete(sessionId);
-  standalonePendingDeltas.delete(sessionId);
-  standaloneRenderDirty.delete(sessionId);
   projectSessionSubscriptions.delete(sessionId);
   projectSessionSequences.delete(sessionId);
   projectSessionEventCache.delete(sessionId);
@@ -414,11 +424,12 @@ function toDomainSession(session: UiSession, _team?: UiTeam): DomainSession {
     teamId: session.target.teamId,
     projectRunId: session.projectRunId,
     parentSessionId: session.parentSessionId,
+    taskId: session.taskId,
     agentInstanceId: session.target.type === "agent" ? session.target.instanceId : undefined,
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     serviceTier: session.serviceTier,
-    permissionMode: session.permissionMode,
+    permissionMode: session.permissionMode?.trim() || undefined,
     mode: session.mode,
     title: session.title,
     status: session.status,
@@ -465,45 +476,27 @@ function mergeStandaloneEvents(sessionId: string, events: RuntimeEvent[]): void 
   standaloneEventCache.set(sessionId, [...current, ...fresh]);
   ingestInteractionEvents(fresh);
   ingestFollowUpEvents(sessionId, fresh);
-  // Streaming deltas only append text to the newest streaming row; queue them
-  // and flush once per animation frame instead of writing the store per batch.
-  if (fresh.every((event) => STREAMING_DELTA_TYPES.has(event.type))) {
-    standalonePendingDeltas.set(sessionId, [...(standalonePendingDeltas.get(sessionId) ?? []), ...fresh]);
-  } else {
-    // A full rebuild from the event cache already covers any pending deltas.
-    standalonePendingDeltas.delete(sessionId);
-    standaloneRenderDirty.add(sessionId);
-  }
+  // Keep the event -> render edge synchronous for streaming text. The
+  // workbench follows the rendered timeline height; queueing deltas here can
+  // leave the UI with a stale event array for a frame and, more importantly,
+  // makes nested reasoning updates invisible to a last-row scroll trigger.
+  // Structural bursts still use the coalesced full rebuild below.
+  if (fresh.every((event) => STREAMING_DELTA_TYPES.has(event.type)) && applyStandaloneDeltas(sessionId, fresh)) return;
   scheduleStandaloneRender(sessionId);
 }
 
 /**
- * Coalesces timeline updates to one per animation frame. Structural events
- * (tools, commands) and streaming deltas can both arrive in bursts — without
- * coalescing, each rebuild walks the whole event history or each delta batch
- * writes the store, and the UI thread saturates mid-run.
+ * Coalesces structural timeline rebuilds to one per animation frame. Streaming
+ * deltas take the direct patch path above so the live text and its scroll
+ * height are observable immediately.
  */
 function scheduleStandaloneRender(sessionId: string): void {
   if (standaloneRenderFrames.has(sessionId)) return;
   const frame = requestAnimationFrame(() => {
     standaloneRenderFrames.delete(sessionId);
-    flushStandaloneRender(sessionId);
+    renderStandaloneCache(sessionId);
   });
   standaloneRenderFrames.set(sessionId, frame);
-}
-
-/** Applies whatever the frame coalesced: a full rebuild wins over pending deltas. */
-function flushStandaloneRender(sessionId: string): void {
-  if (standaloneRenderDirty.delete(sessionId)) {
-    standalonePendingDeltas.delete(sessionId);
-    renderStandaloneCache(sessionId);
-    return;
-  }
-  const pending = standalonePendingDeltas.get(sessionId);
-  if (!pending?.length) return;
-  standalonePendingDeltas.delete(sessionId);
-  // No streaming row to append to: fall back to a full rebuild from the cache.
-  if (!applyStandaloneDeltas(sessionId, pending)) renderStandaloneCache(sessionId);
 }
 
 /**
@@ -614,12 +607,14 @@ function sameTarget(current: SessionTarget, next: SessionTarget): boolean {
   return false;
 }
 
-/** Compares only the fields toUiSession produces; user-configured extras (e.g. permissionMode) survive upserts and must not force one. */
+/** Compares the persisted fields rendered by the workbench. */
 function sameUiSession(current: UiSession, next: UiSession): boolean {
   return current.title === next.title && current.model === next.model
     && current.reasoningEffort === next.reasoningEffort && current.serviceTier === next.serviceTier
+    && current.permissionMode === next.permissionMode
     && current.mode === next.mode && current.status === next.status
-    && current.parentSessionId === next.parentSessionId && current.projectRunId === next.projectRunId
+    && current.parentSessionId === next.parentSessionId && current.taskId === next.taskId
+    && current.projectRunId === next.projectRunId
     && current.runId === next.runId && current.unreadCount === next.unreadCount
     && current.lastMessageAt === next.lastMessageAt && current.updatedAt === next.updatedAt
     && sameTarget(current.target, next.target);
@@ -656,6 +651,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   ]);
   const sessions = allSessions.filter((session) => session.projectRunId === projectRunId);
   const store = useSessionsStore.getState();
+  let activeRunCount = 0;
 
   for (const session of sessions) {
     const [detail, feed] = await Promise.all([
@@ -696,6 +692,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     // supersede any stale historical row that was left marked as running.
     const latestRun = runs.find((run) => run.sessionId === session.id);
     const activeRun = latestRun && shouldPollAgentRun(latestRun) ? latestRun : undefined;
+    if (activeRun) activeRunCount += 1;
     if (!sameLifecycle(store.foreground[session.id], activeRun ? standaloneLifecycle(detail.session, activeRun) : undefined)) {
       changed = true;
       store._setForeground(session.id, activeRun ? standaloneLifecycle(detail.session, activeRun) : undefined);
@@ -710,6 +707,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     if (activeRun && previousRunId && activeRun.id !== previousRunId) store._shiftQueuedFollowUp(session.id);
   }
   const root = projectRun.mainSessionId;
+  projectRunActiveRuns.set(projectRunId, activeRunCount);
   if (root) {
     const nextRunning = projectLifecycle(projectRun);
     if (!sameLifecycle(store.running[root], nextRunning)) {
@@ -781,6 +779,7 @@ function schedulePoll(projectRunId: string): void {
         projectPollers.delete(projectRunId);
         projectRunActivity.delete(projectRunId);
         projectRunUpdatedAt.delete(projectRunId);
+        projectRunActiveRuns.delete(projectRunId);
         return;
       }
       // Any change observed by the tick resets the streak; otherwise back off
@@ -1305,12 +1304,14 @@ function toUiSession(session: DomainSession, projectRun: ProjectRun, team: UiTea
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     serviceTier: session.serviceTier,
+    permissionMode: session.permissionMode?.trim() || undefined,
     mode: session.mode,
     // A ProjectRun may remain executing while delegated child sessions work in
     // the background. Preserve the provider session's own status so the main
     // conversation becomes available as soon as its planning turn finishes.
     status: session.status,
     parentSessionId: session.parentSessionId,
+    taskId: session.taskId,
     projectRunId: projectRun.id,
     runId: projectRun.id,
     unreadCount: session.unreadCount,
@@ -1342,7 +1343,9 @@ function shouldPollProjectRun(projectRun: ProjectRun): boolean {
   const activeAgentRunId = mainSessionId
     ? useSessionsStore.getState().activeAgentRunIds[mainSessionId]
     : undefined;
-  return Boolean(activeAgentRunId) || shouldPoll(projectRun);
+  // The daemon may finalize the project run while delegated child sessions are
+  // still working; keep polling while any session of the run is active.
+  return Boolean(activeAgentRunId) || (projectRunActiveRuns.get(projectRun.id) ?? 0) > 0 || shouldPoll(projectRun);
 }
 
 function shouldPollAgentRun(run: AgentRun): boolean {

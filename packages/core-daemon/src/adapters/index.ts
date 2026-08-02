@@ -5,6 +5,7 @@ export * from "./normalize.js";
 export * from "./capabilities.js";
 export * from "./process-adapter.js";
 export * from "./plan-interaction.js";
+export * from "./permission-mode.js";
 export * from "./model-config.js";
 export * from "./codex/index.js";
 export * from "./claude/index.js";

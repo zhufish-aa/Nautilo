@@ -8,11 +8,14 @@ function WindowButton({
   label,
   onClick,
   danger,
+  windowAction,
   children
 }: {
   label: string;
   onClick: () => void;
   danger?: boolean;
+  /** Stable hook for theme styling (e.g. macOS traffic lights). */
+  windowAction: "minimize" | "maximize" | "close";
   children: React.ReactNode;
 }): JSX.Element {
   return (
@@ -20,6 +23,7 @@ function WindowButton({
       aria-label={label}
       title={label}
       onClick={onClick}
+      data-window={windowAction}
       className={cn(
         "no-drag flex h-full w-11 items-center justify-center text-ink-3 transition-colors outline-none",
         "focus-visible:bg-accent-soft focus-visible:text-ink",
@@ -43,18 +47,18 @@ export function TitleBar(): JSX.Element {
   }, [bridge]);
 
   return (
-    <header className="drag-region relative z-30 flex h-11 shrink-0 items-stretch justify-between border-b border-line bg-panel backdrop-blur-xl">
-      <div className="flex items-center gap-2.5 pl-4">
+    <header className="titlebar-root drag-region relative z-30 flex h-11 shrink-0 items-stretch justify-between border-b border-line bg-panel backdrop-blur-xl">
+      <div className="titlebar-brand flex items-center gap-2.5 pl-4">
         <span
           aria-hidden
-          className="flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-2 shadow-[0_0_16px_-2px_var(--accent)]"
+          className="titlebar-logo flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-2 shadow-[0_0_16px_-2px_var(--accent)]"
         >
           <Zap className="h-3.5 w-3.5 text-white" strokeWidth={2.5} />
         </span>
-        <span className="text-[13px] font-semibold tracking-tight text-ink">
+        <span className="titlebar-name text-[13px] font-semibold tracking-tight text-ink">
           {t("app.name")}
         </span>
-        <span className="hidden text-xs text-ink-3 sm:inline">{t("app.tagline")}</span>
+        <span className="titlebar-tagline hidden text-xs text-ink-3 sm:inline">{t("app.tagline")}</span>
         {!isElectron && (
           <span className="ml-2 rounded-md border border-warn/30 bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn">
             {t("app.browserBadge")}
@@ -63,12 +67,13 @@ export function TitleBar(): JSX.Element {
       </div>
 
       {bridge && (
-        <div className="flex items-stretch" role="group" aria-label="Window">
-          <WindowButton label={t("app.windowMinimize")} onClick={() => void bridge.window.minimize()}>
+        <div className="titlebar-controls flex items-stretch" role="group" aria-label="Window">
+          <WindowButton label={t("app.windowMinimize")} windowAction="minimize" onClick={() => void bridge.window.minimize()}>
             <Minus className="h-4 w-4" aria-hidden />
           </WindowButton>
           <WindowButton
             label={maximized ? t("app.windowRestore") : t("app.windowMaximize")}
+            windowAction="maximize"
             onClick={() => void bridge.window.toggleMaximize()}
           >
             {maximized ? (
@@ -77,7 +82,7 @@ export function TitleBar(): JSX.Element {
               <Square className="h-3.5 w-3.5" aria-hidden />
             )}
           </WindowButton>
-          <WindowButton label={t("app.windowClose")} danger onClick={() => void bridge.window.close()}>
+          <WindowButton label={t("app.windowClose")} danger windowAction="close" onClick={() => void bridge.window.close()}>
             <X className="h-4 w-4" aria-hidden />
           </WindowButton>
         </div>

@@ -15,7 +15,11 @@ export class CoreDaemonClient {
     if (this.process) return;
     const daemonEntry = this.resolveDaemonEntry();
     const nodeCommand = this.resolveNodeCommand();
-    const socketPath = process.platform === "win32" ? "\\\\.\\pipe\\agenthub-core" : join(userDataPath, "core.sock");
+    // A development shell and a portable build can run at the same time. Each
+    // Electron main process therefore needs its own Windows named pipe.
+    const socketPath = process.platform === "win32"
+      ? `\\\\.\\pipe\\agenthub-core-${process.pid}`
+      : join(userDataPath, "core.sock");
     this.tokenPath = join(userDataPath, "core.token");
     this.process = spawn(nodeCommand, [daemonEntry, "--serve"], {
       cwd: userDataPath,
@@ -32,7 +36,7 @@ export class CoreDaemonClient {
       // Development/build layout: apps/desktop/out/main -> repository root.
       join(__dirname, "../../../../packages/core-daemon/dist/index.js"),
       // Packaged layout reserved for the release bundle.
-      join(process.resourcesPath, "core-daemon/index.js")
+      join(process.resourcesPath, "core-daemon/dist/index.js")
     ];
     const entry = candidates.find((candidate) => existsSync(candidate));
     if (!entry) throw new Error(`Core Daemon entry was not found: ${candidates.join(", ")}`);

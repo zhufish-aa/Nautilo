@@ -10,6 +10,12 @@ import { resolveCodexInvocation } from "./executable.js";
 import { buildCodexMcpConfigArgs } from "./mcp-config.js";
 import { buildCodexProviderConfigArgs } from "./provider-config.js";
 import {
+  CODEX_IMAGE_GENERATION_TOOL,
+  CODEX_IMAGE_GENERATION_TOOL_NAME,
+  executeCodexImageGeneration,
+  isCodexImageGenerationConfigured
+} from "./image-generation.js";
+import {
   extractInteractionPlan,
   isPlanExitTool,
   looksLikePlanApprovalQuestion,
@@ -32,9 +38,15 @@ function transportEvent(event: ProcessEvent): AdapterEvent | undefined {
   return event;
 }
 
-export function buildCodexDynamicTools(tools: RuntimeToolSpec[] | undefined): RecordValue[] | undefined {
-  if (!tools?.length) return undefined;
-  return tools.map((tool) => {
+export function buildCodexDynamicTools(
+  tools: RuntimeToolSpec[] | undefined,
+  includeImageGeneration = false
+): RecordValue[] | undefined {
+  const source = includeImageGeneration
+    ? [...(tools ?? []).filter((tool) => tool.name !== CODEX_IMAGE_GENERATION_TOOL_NAME), CODEX_IMAGE_GENERATION_TOOL]
+    : tools;
+  if (!source?.length) return undefined;
+  return source.map((tool) => {
     if (!CODEX_DYNAMIC_TOOL_NAME.test(tool.name)) {
       throw new Error(`Invalid Codex dynamic tool name: ${tool.name}`);
     }
@@ -55,7 +67,9 @@ function threadOptions(request: AdapterStartRequest | AdapterResumeRequest, incl
     serviceTier: request.serviceTier || undefined,
     approvalPolicy: permission.approvalPolicy,
     sandbox: permission.sandbox,
-    dynamicTools: includeDynamicTools ? buildCodexDynamicTools(request.runtimeTools) : undefined
+    dynamicTools: includeDynamicTools
+      ? buildCodexDynamicTools(request.runtimeTools, isCodexImageGenerationConfigured(request))
+      : undefined
   };
 }
 
@@ -63,7 +77,7 @@ async function handleDynamicToolCall(
   rpc: JsonRpcProcessClient,
   request: AdapterStartRequest | AdapterResumeRequest,
   event: { id: string | number; params?: unknown }
-): Promise<void> {
+): Promise<AdapterEvent[]> {
   const params = record(event.params);
   const tool = String(params.tool ?? "");
   if (isPlanExitTool(tool) && request.requestInteraction) {
@@ -91,14 +105,37 @@ async function handleDynamicToolCall(
         contentItems: [{ type: "inputText", text: error instanceof Error ? error.message : String(error) }]
       });
     }
-    return;
+    return [];
+  }
+  if (tool === CODEX_IMAGE_GENERATION_TOOL_NAME) {
+    try {
+      const result = await executeCodexImageGeneration(request, params.arguments);
+      rpc.respond(event.id, {
+        success: true,
+        contentItems: [{ type: "inputText", text: result.content }]
+      });
+      return [{
+        kind: "artifact",
+        artifactType: "image",
+        name: result.name,
+        mimeType: result.mimeType,
+        path: result.path,
+        raw: params
+      }];
+    } catch (error) {
+      rpc.respond(event.id, {
+        success: false,
+        contentItems: [{ type: "inputText", text: error instanceof Error ? error.message : String(error) }]
+      });
+      return [];
+    }
   }
   if (!tool || !request.executeRuntimeTool) {
     rpc.respond(event.id, {
       success: false,
       contentItems: [{ type: "inputText", text: `AgentHub runtime tool is unavailable: ${tool || "unknown"}` }]
     });
-    return;
+    return [];
   }
   try {
     const result = await request.executeRuntimeTool({
@@ -111,11 +148,13 @@ async function handleDynamicToolCall(
       success: result.success,
       contentItems: [{ type: "inputText", text: result.content }]
     });
+    return [];
   } catch (error) {
     rpc.respond(event.id, {
       success: false,
       contentItems: [{ type: "inputText", text: error instanceof Error ? error.message : String(error) }]
     });
+    return [];
   }
 }
 
@@ -227,7 +266,19 @@ export function buildCodexAppServerArgs(
   mcpServers?: AdapterMcpServer[]
 ): string[] {
   const profileArgs = instance.profile ? ["--profile", instance.profile] : [];
-  return [...profileArgs, "app-server", "--stdio", ...buildCodexProviderConfigArgs(instance, environment), ...buildCodexMcpConfigArgs(mcpServers)];
+  // Codex ships image generation as a feature-gated native extension.  The
+  // app-server inherits the feature state from its invocation/config; without
+  // explicitly enabling it, a custom model provider can still work for text
+  // while the image_gen tool is omitted from the session's tool set.
+  return [
+    ...profileArgs,
+    "app-server",
+    "--stdio",
+    "--enable",
+    "image_generation",
+    ...buildCodexProviderConfigArgs(instance, environment),
+    ...buildCodexMcpConfigArgs(mcpServers)
+  ];
 }
 
 export function startCodexAppServer(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
@@ -257,7 +308,7 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
       await rpc.request("initialize", CODEX_APP_SERVER_INITIALIZE_PARAMS);
       rpc.notify("initialized", {});
       const threadResponse = record(await rpc.request(resume ? "thread/resume" : "thread/start", resume
-        ? { threadId: (request as AdapterResumeRequest).providerSessionId, ...threadOptions(request) }
+        ? { threadId: (request as AdapterResumeRequest).providerSessionId, ...threadOptions(request, true) }
         : threadOptions(request, true)));
       const thread = record(threadResponse.thread);
       threadId = String(thread.id ?? (resume ? (request as AdapterResumeRequest).providerSessionId : ""));
@@ -315,7 +366,7 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
             return;
           }
         } else if (event.kind === "request" && event.method === "item/tool/call") {
-          await handleDynamicToolCall(rpc, request, event);
+          for (const emitted of await handleDynamicToolCall(rpc, request, event)) yield emitted;
         } else if (event.kind === "request" && event.method === "item/tool/requestUserInput") {
           await handleRequestUserInput(rpc, request, event);
         } else if (event.kind === "request" && (event.method === "item/commandExecution/requestApproval" || event.method === "item/fileChange/requestApproval")) {

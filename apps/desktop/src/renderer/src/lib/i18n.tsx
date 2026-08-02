@@ -495,8 +495,6 @@ const zh = {
     appearance: {
       title: "外观",
       desc: "选择界面主题，偏好会保存在本机",
-      dark: "深色",
-      light: "浅色",
       system: "跟随系统"
     },
     language: {
@@ -722,6 +720,10 @@ const zh = {
       editTeam: "编辑团队",
       single: "单 Agent 会话",
       instanceInfo: "当前实例"
+    },
+    taskContext: {
+      heading: "主 Agent 发送的任务",
+      details: "任务说明"
     },
     composer: {
       placeholder: "向 {name} 发送消息…",
@@ -982,13 +984,37 @@ const zh = {
     },
     preview: {
       title: "产物预览",
+      collapse: "收起预览",
+      expand: "展开预览",
+      resize: "拖拽调整预览宽度",
       empty: "还没有产物",
       emptyHint: "Agent 生成文件后会出现在这里",
       reload: "刷新预览",
       openExternal: "用系统应用打开",
       error: "预览加载失败",
-      pptxUnsupported: "PPT 暂不支持内联预览，请用系统应用打开",
-      binaryUnsupported: "该文件类型暂不支持预览"
+      parsing: "正在解析…",
+      retry: "重试",
+      prev: "上一项",
+      next: "下一项",
+      jumpTo: "输入序号后回车跳转",
+      zoomOut: "缩小",
+      zoomIn: "放大",
+      fitWidth: "适合宽度",
+      navPage: "第 {index} 页，共 {count} 页",
+      navSlide: "第 {index} 张，共 {count} 张",
+      navSheet: "工作表 {index} / {count}",
+      legacyUnsupported: "旧版 Office 格式（.doc/.ppt）需用系统应用打开",
+      binaryUnsupported: "该文件类型暂不支持预览",
+      sheetEmpty: "空工作表",
+      sheetTruncated: "内容过多，当前显示 {shown} / {total} 行",
+      sheetLoadMore: "加载更多",
+      docxFallback: "已切换为降级排版预览，格式可能与原文有差异",
+      reason: {
+        "too-large": "文件超过 20MB 预览上限",
+        encrypted: "文件已加密，无法解析",
+        corrupted: "文件已损坏或格式不受支持",
+        "engine-load": "预览引擎加载失败，请重试"
+      }
     }
   }
 };
@@ -1488,8 +1514,6 @@ const en: Messages = {
     appearance: {
       title: "Appearance",
       desc: "Pick a theme; the preference is stored locally",
-      dark: "Dark",
-      light: "Light",
       system: "System"
     },
     language: {
@@ -1715,6 +1739,10 @@ const en: Messages = {
       editTeam: "Edit team",
       single: "Single-agent session",
       instanceInfo: "Current instance"
+    },
+    taskContext: {
+      heading: "Task sent by the main agent",
+      details: "Task details"
     },
     composer: {
       placeholder: "Message {name}…",
@@ -1975,13 +2003,37 @@ const en: Messages = {
     },
     preview: {
       title: "Deliverables",
+      collapse: "Collapse preview",
+      expand: "Expand preview",
+      resize: "Drag to resize preview",
       empty: "No deliverables yet",
       emptyHint: "Files the agent creates will show up here",
       reload: "Reload preview",
       openExternal: "Open with system app",
       error: "Preview failed to load",
-      pptxUnsupported: "Slides can't be previewed inline yet — open them with the system app",
-      binaryUnsupported: "This file type can't be previewed yet"
+      parsing: "Parsing…",
+      retry: "Retry",
+      prev: "Previous",
+      next: "Next",
+      jumpTo: "Type a number and press Enter to jump",
+      zoomOut: "Zoom out",
+      zoomIn: "Zoom in",
+      fitWidth: "Fit width",
+      navPage: "Page {index} of {count}",
+      navSlide: "Slide {index} of {count}",
+      navSheet: "Sheet {index} of {count}",
+      legacyUnsupported: "Legacy Office formats (.doc/.ppt) need the system app to open",
+      binaryUnsupported: "This file type can't be previewed yet",
+      sheetEmpty: "Empty sheet",
+      sheetTruncated: "Large content — showing {shown} of {total} rows",
+      sheetLoadMore: "Load more",
+      docxFallback: "Fallback layout preview — formatting may differ from the original",
+      reason: {
+        "too-large": "The file exceeds the 20MB preview limit",
+        encrypted: "The file is encrypted and can't be parsed",
+        corrupted: "The file is corrupted or its format is unsupported",
+        "engine-load": "The preview engine failed to load — try again"
+      }
     }
   }
 };

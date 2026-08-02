@@ -90,7 +90,9 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
     [instance, instances]
   );
   const modelGroups = useMemo(() => groupModelsBySource(models), [models]);
-  const effectivePermissionMode = session?.permissionMode ?? instance?.permissionMode ?? "";
+  const sessionPermissionMode = session?.permissionMode?.trim();
+  const instancePermissionMode = instance?.permissionMode?.trim();
+  const effectivePermissionMode = sessionPermissionMode || instancePermissionMode || "";
   const permissionModeOption = permissionModes.find((mode) => mode.value === effectivePermissionMode);
   const displayPermissionMode = permissionModeOption
     ? permissionModeOption.name[locale]
@@ -145,7 +147,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
   };
   const selectPermission = (nextMode: string): void => {
     // Empty selection clears the session override so the instance setting applies.
-    void configureWorkbenchSession(sessionId, { permissionMode: nextMode || undefined });
+    void configureWorkbenchSession(sessionId, { permissionMode: nextMode.trim() || undefined });
     setView("summary");
   };
   const selectSpeed = (nextTierId: string): void => {
@@ -250,7 +252,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                             animate={{ width: `${progress}%` }}
                             transition={{ type: "spring", stiffness: 420, damping: 36 }}
                           >
-                            {fastActive && <span className="session-speed-particles" aria-hidden />}
+                            <span className="session-speed-particles" aria-hidden />
                           </motion.div>
                         </div>
                         <input
@@ -445,7 +447,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                   <SelectionList title={t("agents.editor.basic.permissionMode")} onBack={() => setView("summary")}>
                     <SelectionItem
                       label={t("sessions.composer.permissionModeDefault")}
-                      selected={!session?.permissionMode}
+                      selected={!sessionPermissionMode}
                       onClick={() => selectPermission("")}
                     />
                     {permissionModes.map((mode) => (
@@ -453,7 +455,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                         key={mode.value}
                         label={mode.name[locale]}
                         description={mode.description[locale]}
-                        selected={session?.permissionMode === mode.value}
+                        selected={sessionPermissionMode === mode.value}
                         onClick={() => selectPermission(mode.value)}
                       />
                     ))}

@@ -17,7 +17,7 @@ export function Tooltip({
         <TooltipPrimitive.Content
           side={side}
           sideOffset={6}
-          className="z-50 max-w-64 rounded-lg border border-line bg-card-hover px-2.5 py-1.5 text-xs text-ink shadow-pop data-[state=delayed-open]:animate-pop-in"
+          className="ui-tooltip z-50 max-w-64 rounded-lg border border-line bg-card-hover px-2.5 py-1.5 text-xs text-ink shadow-pop data-[state=delayed-open]:animate-pop-in"
         >
           {content}
           <TooltipPrimitive.Arrow className="fill-line" />

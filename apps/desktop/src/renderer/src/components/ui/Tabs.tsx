@@ -25,7 +25,7 @@ export function Tabs({
     <TabsPrimitive.Root value={value} onValueChange={onValueChange} className={className}>
       <TabsPrimitive.List
         aria-label={ariaLabel}
-        className="inline-flex h-10 items-center gap-1 rounded-xl border border-line bg-card p-1"
+        className="ui-tabs inline-flex h-10 items-center gap-1 rounded-xl border border-line bg-card p-1"
       >
         {items.map((item) => (
           <TabsPrimitive.Trigger
@@ -66,7 +66,7 @@ export function TabBar({
     <div
       role="tablist"
       aria-label={ariaLabel}
-      className="inline-flex h-10 items-center gap-1 rounded-xl border border-line bg-card p-1"
+      className="ui-tabs inline-flex h-10 items-center gap-1 rounded-xl border border-line bg-card p-1"
     >
       {items.map((item) => {
         const active = item.value === value;

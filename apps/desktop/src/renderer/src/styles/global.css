@@ -276,7 +276,10 @@
       radial-gradient(circle, rgba(255, 255, 255, 0.58) 0 1px, transparent 1.5px);
     background-position: 2px 4px, 13px 15px;
     background-size: 22px 22px, 31px 22px;
-    animation: session-speed-particles 0.75s linear infinite;
+    animation: session-speed-particles 1.6s linear infinite;
+  }
+  .session-effort-fill.is-fast .session-speed-particles {
+    animation-duration: 0.75s;
   }
 }
 
@@ -603,4 +606,24 @@
   to {
     --ef-angle: 360deg;
   }
+}
+
+/* Work-mode office previews: isolate third-party generated DOM. */
+.work-docx-root .work-docx-wrapper {
+  background: transparent;
+  padding: 0;
+}
+.work-docx-root .work-docx-wrapper > section.work-docx {
+  background: #fff;
+  color: #1a1a1a;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.18);
+  margin: 0 auto 12px;
+  overflow: hidden;
+}
+.pptx-preview-root {
+  font: initial;
+  color: initial;
+}
+.pptx-preview-root * {
+  box-sizing: border-box;
 }

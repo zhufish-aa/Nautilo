@@ -8,6 +8,9 @@ import { registerInteractionHandlers } from "./desktop-interactions";
 import { registerProviderUpdateHandlers } from "./provider-updates";
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
+const appIcon = isDev
+  ? join(__dirname, "../../resources/agenthub-icon-512.png")
+  : join(process.resourcesPath, "app", "resources", "agenthub-icon.png");
 const coreDaemon = new CoreDaemonClient();
 registerArtifactScheme();
 
@@ -19,7 +22,7 @@ function applyContentSecurityPolicy(): void {
       responseHeaders: {
         ...details.responseHeaders,
         "Content-Security-Policy": [
-          `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: ${ARTIFACT_SCHEME}:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'`
+          `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: ${ARTIFACT_SCHEME}:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'`
         ]
       }
     });
@@ -93,6 +96,16 @@ function registerIpcHandlers(): void {
   registerProviderUpdateHandlers();
 }
 
+async function registeredProjectRoots(): Promise<string[]> {
+  try {
+    const projects = await coreDaemon.request({ method: "project.list" }) as Array<{ rootPath?: unknown }>;
+    return projects.flatMap((project) => typeof project.rootPath === "string" && project.rootPath.trim() ? [project.rootPath] : []);
+  } catch {
+    // The fixed roots still work while the daemon is restarting or unavailable.
+    return [];
+  }
+}
+
 function createMainWindow(): BrowserWindow {
   const state = readWindowState();
 
@@ -107,6 +120,7 @@ function createMainWindow(): BrowserWindow {
     frame: false,
     autoHideMenuBar: true,
     backgroundColor: "#090b10",
+    icon: appIcon,
     title: "AgentHub",
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
@@ -163,7 +177,7 @@ if (!gotSingleInstanceLock) {
 
   void app.whenReady().then(async () => {
     applyContentSecurityPolicy();
-    registerArtifactProtocol();
+    registerArtifactProtocol(registeredProjectRoots);
     await coreDaemon.start(app.getPath("userData"));
     registerIpcHandlers();
     createMainWindow();

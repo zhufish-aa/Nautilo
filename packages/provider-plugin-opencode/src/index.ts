@@ -222,9 +222,9 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
             body: model
           });
         } else {
-          const mode = request.permissionMode
-            ?? (typeof request.instance.providerOptions?.permissionMode === "string"
-              ? request.instance.providerOptions.permissionMode
+          const mode = request.permissionMode?.trim()
+            || (typeof request.instance.providerOptions?.permissionMode === "string"
+              ? request.instance.providerOptions.permissionMode.trim() || undefined
               : undefined);
           await apiJson(baseUrl, request.cwd, `/session/${encodeURIComponent(sessionId)}/prompt_async`, {
             method: "POST",

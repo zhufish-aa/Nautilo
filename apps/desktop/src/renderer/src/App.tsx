@@ -17,24 +17,48 @@ import { TeamEditorPage } from "./features/teams/TeamEditorPage";
 import { TeamsPage } from "./features/teams/TeamsPage";
 import { useSettingsStore } from "./stores/settings";
 import { initializeCoreState } from "./lib/core-bootstrap";
+import { buildThemeCss, getTheme, SYSTEM_THEME_ID } from "./lib/themes";
 
-/** Applies theme class + <html lang> to the document root. */
+/** Style element holding the active theme's generated CSS (registry-driven). */
+function ensureThemeStyleElement(): HTMLStyleElement {
+  let el = document.head.querySelector<HTMLStyleElement>("style[data-theme-style]");
+  if (!el) {
+    el = document.createElement("style");
+    el.setAttribute("data-theme-style", "");
+    // Appended last so generated theme rules win ties over the bundle CSS.
+    document.head.appendChild(el);
+  }
+  return el;
+}
+
+/** Applies the active theme (registry), dark class + <html lang> to the root. */
 function useDocumentPreferences(): void {
   const theme = useSettingsStore((state) => state.theme);
+  const customThemes = useSettingsStore((state) => state.customThemes);
   const locale = useSettingsStore((state) => state.locale);
 
   useEffect(() => {
     const root = document.documentElement;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const styleEl = ensureThemeStyleElement();
     const apply = (): void => {
-      const dark = theme === "dark" || (theme === "system" && media.matches);
+      // "system" (or an unknown id) resolves to no definition: base palettes
+      // from global.css drive light/dark via the media query.
+      const def = theme === SYSTEM_THEME_ID ? undefined : getTheme(theme, customThemes);
+      const dark = def ? def.base === "dark" : media.matches;
       root.classList.toggle("dark", dark);
+      if (def) {
+        root.dataset.theme = def.id;
+      } else {
+        delete root.dataset.theme;
+      }
       root.style.colorScheme = dark ? "dark" : "light";
+      styleEl.textContent = def ? buildThemeCss(def) : "";
     };
     apply();
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
-  }, [theme]);
+  }, [theme, customThemes]);
 
   useEffect(() => {
     document.documentElement.lang = locale;

@@ -44,7 +44,7 @@ export function Dialog({
                 exit={{ opacity: 0, scale: 0.97, y: 8 }}
                 transition={{ type: "spring", stiffness: 380, damping: 30 }}
                 className={cn(
-                  "fixed top-1/2 left-1/2 z-50 flex max-h-[86vh] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-line bg-card shadow-pop outline-none",
+                  "ui-dialog fixed top-1/2 left-1/2 z-50 flex max-h-[86vh] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-line bg-card shadow-pop outline-none",
                   widthClass
                 )}
               >

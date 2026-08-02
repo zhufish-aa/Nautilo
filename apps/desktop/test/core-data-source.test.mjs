@@ -234,7 +234,7 @@ test("a foreground Agent turn keeps syncing after its orchestration enters revie
   const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
   assert.match(runtime, /function shouldPollProjectRun\(projectRun: ProjectRun\)/);
   assert.match(runtime, /activeAgentRunIds\[mainSessionId\]/);
-  assert.match(runtime, /Boolean\(activeAgentRunId\) \|\| shouldPoll\(projectRun\)/);
+  assert.match(runtime, /Boolean\(activeAgentRunId\) \|\| \(projectRunActiveRuns\.get\(projectRun\.id\) \?\? 0\) > 0 \|\| shouldPoll\(projectRun\)/);
   assert.match(runtime, /if \(!shouldPollProjectRun\(projectRun\)/);
   assert.match(runtime, /if \(shouldPollProjectRun\(hydrated\)\) schedulePoll/);
 });
@@ -245,6 +245,7 @@ test("generated images use a restricted streaming protocol instead of base64 IPC
   assert.match(protocol, /\.codex", "generated_images/);
   assert.match(protocol, /isWithin\(root, candidate\)/);
   assert.match(protocol, /net\.fetch\(pathToFileURL\(candidate\)\.toString\(\)\)/);
+  assert.match(protocol, /getWorkspaceRoots/);
   assert.doesNotMatch(protocol, /readFileSync/);
 });
 

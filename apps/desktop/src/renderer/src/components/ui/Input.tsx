@@ -2,7 +2,7 @@ import { forwardRef, type InputHTMLAttributes, type TextareaHTMLAttributes } fro
 import { cn } from "../../lib/utils";
 
 const fieldClasses =
-  "w-full rounded-xl border border-line-strong bg-card px-3 text-sm text-ink placeholder:text-ink-3/70 outline-none transition-colors hover:border-accent/40 focus:border-accent/60 focus:ring-2 focus:ring-accent/25 disabled:cursor-not-allowed disabled:opacity-45";
+  "ui-field w-full rounded-xl border border-line-strong bg-card px-3 text-sm text-ink placeholder:text-ink-3/70 outline-none transition-colors hover:border-accent/40 focus:border-accent/60 focus:ring-2 focus:ring-accent/25 disabled:cursor-not-allowed disabled:opacity-45";
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
   function Input({ className, ...rest }, ref) {

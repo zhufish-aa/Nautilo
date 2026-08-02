@@ -13,6 +13,7 @@ import { useSettingsStore, PINNED_NAV_KEYS, TOGGLABLE_NAV_KEYS } from "../../sto
 import { newId } from "../../lib/utils";
 import { NAV_ENTRIES } from "../../components/layout/nav";
 import type { ThemePreference } from "../../lib/types";
+import { getTheme, listThemes, SYSTEM_THEME_ID, type ThemePreviewSpec } from "../../lib/themes";
 import { SectionHeader } from "./parts";
 import { RuntimeOperationsCard } from "./RuntimeOperationsCard";
 import { PermissionPolicyCard } from "./PermissionPolicyCard";
@@ -56,44 +57,51 @@ function GroupLabel({ label }: { label: string }): JSX.Element {
   );
 }
 
-function MiniChrome({ dark }: { dark: boolean }): JSX.Element {
-  const line = dark ? "bg-white/25" : "bg-black/25";
-  const faint = dark ? "bg-white/10" : "bg-black/10";
+/** Mini window mock painted with the theme's raw-color preview spec (inline
+ * styles, no Tailwind — so runtime-installed theme packs preview correctly). */
+function MiniChrome({ scheme }: { scheme: ThemePreviewSpec }): JSX.Element {
+  const dots = scheme.dots ?? [scheme.line, scheme.line, scheme.line];
   return (
-    <div className={`flex h-full w-full flex-col gap-1.5 rounded-md p-2 ${dark ? "bg-[#0d1017]" : "bg-[#f2f4f9]"}`}>
+    <div className="flex h-full w-full flex-col gap-1.5 rounded-md p-2" style={{ background: scheme.bg }}>
       <div className="flex gap-1">
-        <span className={`h-1 w-1 rounded-full ${line}`} />
-        <span className={`h-1 w-1 rounded-full ${line}`} />
-        <span className={`h-1 w-1 rounded-full ${line}`} />
+        {dots.map((dot, index) => (
+          <span key={index} className="h-1 w-1 rounded-full" style={{ background: dot }} />
+        ))}
       </div>
       <div className="flex flex-1 gap-1.5">
-        <div className={`w-1/4 rounded-sm ${faint}`} />
+        <div className="w-1/4 rounded-sm" style={{ background: scheme.faint }} />
         <div className="flex-1 space-y-1 pt-0.5">
-          <div className={`h-1.5 w-2/3 rounded-full ${line}`} />
-          <div className={`h-1.5 w-1/2 rounded-full ${faint}`} />
-          <div className={`h-1.5 w-3/5 rounded-full ${faint}`} />
+          <div className="h-1.5 w-2/3 rounded-full" style={{ background: scheme.line }} />
+          <div className="h-1.5 w-1/2 rounded-full" style={{ background: scheme.faint }} />
+          <div className="h-1.5 w-3/5 rounded-full" style={{ background: scheme.faint }} />
         </div>
       </div>
     </div>
   );
 }
 
-function ThemePreview({ variant }: { variant: "dark" | "light" | "system" }): JSX.Element {
-  if (variant === "system") {
+function ThemePreview({ themeId }: { themeId: string }): JSX.Element {
+  const customThemes = useSettingsStore((state) => state.customThemes);
+  if (themeId === SYSTEM_THEME_ID) {
+    const dark = getTheme("dark", customThemes);
+    const light = getTheme("light", customThemes);
     return (
       <div className="flex h-20 w-full gap-1 overflow-hidden rounded-lg border border-line" aria-hidden>
-        <MiniChrome dark />
-        <MiniChrome dark={false} />
+        {dark && <MiniChrome scheme={dark.preview} />}
+        {light && <MiniChrome scheme={light.preview} />}
       </div>
     );
   }
-  const dark = variant === "dark";
+  const def = getTheme(themeId, customThemes);
+  if (!def) {
+    return <div className="h-20 w-full rounded-lg border border-line" aria-hidden />;
+  }
   return (
     <div
       aria-hidden
-      className={`h-20 w-full rounded-lg border ${dark ? "border-white/10" : "border-black/10"}`}
+      className={`h-20 w-full rounded-lg border ${def.base === "light" ? "border-black/10" : "border-white/10"}`}
     >
-      <MiniChrome dark={dark} />
+      <MiniChrome scheme={def.preview} />
     </div>
   );
 }
@@ -101,6 +109,7 @@ function ThemePreview({ variant }: { variant: "dark" | "light" | "system" }): JS
 export function SettingsPage(): JSX.Element {
   const { t } = useI18n();
   const theme = useSettingsStore((state) => state.theme);
+  const customThemes = useSettingsStore((state) => state.customThemes);
   const locale = useSettingsStore((state) => state.locale);
   const reduceMotion = useSettingsStore((state) => state.reduceMotion);
   const hiddenNav = useSettingsStore((state) => state.hiddenNav);
@@ -135,20 +144,15 @@ export function SettingsPage(): JSX.Element {
             value={theme}
             onValueChange={(value) => setTheme(value as ThemePreference)}
             items={[
+              ...listThemes(customThemes).map((def) => ({
+                value: def.id,
+                label: def.name[locale] ?? def.name["en-US"],
+                preview: <ThemePreview themeId={def.id} />
+              })),
               {
-                value: "dark",
-                label: t("settings.appearance.dark"),
-                preview: <ThemePreview variant="dark" />
-              },
-              {
-                value: "light",
-                label: t("settings.appearance.light"),
-                preview: <ThemePreview variant="light" />
-              },
-              {
-                value: "system",
+                value: SYSTEM_THEME_ID,
                 label: t("settings.appearance.system"),
-                preview: <ThemePreview variant="system" />
+                preview: <ThemePreview themeId={SYSTEM_THEME_ID} />
               }
             ]}
           />

@@ -85,7 +85,7 @@ function SessionEntryRow({
       >
         <span
           aria-hidden
-          className="relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-gradient-to-br from-violet-500/25 to-fuchsia-500/15 text-violet-400"
+          className="agent-avatar relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-gradient-to-br from-violet-500/25 to-fuchsia-500/15 text-violet-400"
         >
           <Bot className="h-4 w-4" />
           <span

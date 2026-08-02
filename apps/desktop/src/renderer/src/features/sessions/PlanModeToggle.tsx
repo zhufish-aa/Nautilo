@@ -20,11 +20,13 @@ export function PlanModeToggle({ sessionId, disabled }: { sessionId?: string; di
   if (!sessionId || !instance) return null;
   if (!permissionModesFor(instance.providerId).some((mode) => mode.value === PLAN_MODE)) return null;
 
-  const active = (session?.permissionMode ?? instance.permissionMode) === PLAN_MODE;
+  const sessionPermissionMode = session?.permissionMode?.trim();
+  const instancePermissionMode = instance.permissionMode?.trim();
+  const active = (sessionPermissionMode || instancePermissionMode) === PLAN_MODE;
   const toggle = (): void => {
     // Turning plan off normally just drops the session override, but an instance
     // that itself defaults to plan needs an explicit non-plan override instead.
-    const next = active ? (instance.permissionMode === PLAN_MODE ? "default" : undefined) : PLAN_MODE;
+    const next = active ? (instancePermissionMode === PLAN_MODE ? "default" : undefined) : PLAN_MODE;
     void configureWorkbenchSession(sessionId, { permissionMode: next });
   };
 

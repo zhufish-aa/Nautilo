@@ -14,15 +14,17 @@ export function registerArtifactScheme(): void {
 }
 
 /** Streams only AgentHub-owned images; arbitrary file:// access stays blocked. */
-export function registerArtifactProtocol(): void {
-  const allowedRoots = [
+export function registerArtifactProtocol(getWorkspaceRoots?: () => Promise<string[]>): void {
+  const fixedRoots = [
     resolve(homedir(), ".codex", "generated_images"),
     resolve(app.getPath("userData"), "attachments")
   ];
-  protocol.handle(ARTIFACT_SCHEME, (request) => {
+  protocol.handle(ARTIFACT_SCHEME, async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");
     if (!requestedPath) return new Response("Missing artifact path", { status: 400 });
     const candidate = resolve(requestedPath);
+    const workspaceRoots = await getWorkspaceRoots?.().catch(() => []) ?? [];
+    const allowedRoots = [...fixedRoots, ...workspaceRoots.map((root) => resolve(root))];
     if (!allowedRoots.some((root) => isWithin(root, candidate))) return new Response("Forbidden", { status: 403 });
     if (!existsSync(candidate)) return new Response("Artifact not found", { status: 404 });
     return net.fetch(pathToFileURL(candidate).toString());

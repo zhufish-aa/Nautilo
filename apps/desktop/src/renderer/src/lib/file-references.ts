@@ -14,15 +14,18 @@ export interface FileReference {
   line?: number;
 }
 
-const CODE_EXTENSIONS = [
+export const CODE_EXTENSIONS = [
   "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts",
   "css", "scss", "less", "json", "md", "mdx",
   "py", "rs", "go", "java", "kt", "kts", "c", "h", "cc", "cpp", "hpp", "cs",
   "rb", "php", "swift", "vue", "svelte", "html", "htm", "xml",
   "yaml", "yml", "toml", "ini", "sql", "sh", "bash", "zsh", "ps1", "bat",
   "prisma", "graphql", "gql", "proto", "txt", "log",
+  // Image paths are rendered as lightbox chips instead of inert code text.
+  "png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "svg", "ico",
   // Office deliverables (Work mode outputs): detected so message text turns
-  // them into chips; they open with the system app instead of the preview.
+  // them into chips; routing (preview pane vs system app) is decided per
+  // mode by resolveFileOpenTarget.
   "pptx", "ppt", "docx", "doc", "xlsx", "xls", "csv", "pdf"
 ];
 
@@ -38,6 +41,7 @@ export function isExternalOpenPath(path: string): boolean {
 
 const CODE_EXTENSION_SET = new Set(CODE_EXTENSIONS);
 const EXTENSION_PATTERN = CODE_EXTENSIONS.join("|");
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "svg", "ico"]);
 
 // dir/segments/file.ext with an optional drive letter and an optional
 // :line or :start-end suffix. Segment characters are Unicode-aware so
@@ -56,6 +60,17 @@ function hasKnownExtension(path: string): boolean {
   const dot = name.lastIndexOf(".");
   if (dot <= 0) return false;
   return CODE_EXTENSION_SET.has(name.slice(dot + 1).toLowerCase());
+}
+
+/** True when a path can be displayed by the conversation image viewer. */
+export function isImagePath(path: string): boolean {
+  return IMAGE_EXTENSIONS.has(extensionOf(path));
+}
+
+function extensionOf(path: string): string {
+  const name = path.split(/[\\/]/).at(-1) ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
 function sanitizePath(raw: string): string | undefined {
@@ -128,4 +143,102 @@ export function splitTextByFileReferences(text: string): Array<{ kind: "text"; v
   }
   if (cursor < text.length) segments.push({ kind: "text", value: text.slice(cursor) });
   return segments;
+}
+
+/** Legacy Office formats never preview inline — always the system app. */
+const LEGACY_OFFICE_EXTENSIONS = new Set(["doc", "ppt"]);
+
+/** True for old binary Office formats (.doc/.ppt) that need the system app. */
+export function isLegacyOfficePath(path: string): boolean {
+  return LEGACY_OFFICE_EXTENSIONS.has(extensionOf(path));
+}
+
+/**
+ * Markdown treats a Windows drive prefix (`C:`) as a URL scheme and drops the
+ * destination before ReactMarkdown hands it to the renderer. Use a relative,
+ * app-owned marker while parsing; the renderer turns it back into the original
+ * path after ReactMarkdown has produced the link.
+ */
+const LOCAL_MARKDOWN_HREF = "?agenthub-local-path=";
+
+function isWindowsPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\") || (value.includes("\\") && hasKnownExtension(value));
+}
+
+/** Encodes raw Windows paths in Markdown links without changing visible text. */
+export function normalizeMarkdownLocalLinks(source: string): string {
+  const markdownLink = /(\[[^\]\r\n]+\])\(\s*(<[^>\r\n]+>|[^)\r\n]+?)\s*\)/g;
+  return source.replace(markdownLink, (match, label: string, destination: string) => {
+    const raw = destination.trim().replace(/^<|>$/g, "");
+    if (!isWindowsPath(raw)) return match;
+    return `${label}(${LOCAL_MARKDOWN_HREF}${encodeURIComponent(raw)})`;
+  });
+}
+
+export type FileOpenTarget = "local-preview" | "external" | "drawer";
+
+/**
+ * Decides where a clicked file reference opens. Work mode passes
+ * hasLocalPreview=true: every previewable project file (PDF/Office/text/
+ * image/…) routes to the preview pane; legacy .doc/.ppt stay external.
+ * Without a local-preview handler the historical behavior is unchanged
+ * (Office → system app, everything else → preview drawer).
+ */
+export function resolveFileOpenTarget(path: string, hasLocalPreview: boolean): FileOpenTarget {
+  if (hasLocalPreview && !isLegacyOfficePath(path)) return "local-preview";
+  if (isExternalOpenPath(path)) return "external";
+  return "drawer";
+}
+
+export type LocalHrefClassification =
+  | { kind: "local"; path: string }
+  | { kind: "external" }
+  | { kind: "none" };
+
+const WINDOWS_DRIVE_HREF = /^([A-Za-z]):[/\\]/;
+const ABSOLUTE_OR_UNC = /^(?:[A-Za-z]:[/\\]|\\\\|\/)/;
+
+/**
+ * Classifies a Markdown link href for the chat timeline. Local absolute
+ * Windows paths, UNC paths, file:// URLs and project-relative file paths
+ * classify as "local" (safe-decoded); http(s)/mailto/data/blob and every
+ * other scheme stay "external" so they keep the target=_blank behavior.
+ */
+export function classifyLocalHref(href: string | undefined | null): LocalHrefClassification {
+  if (!href) return { kind: "none" };
+  let value = href.trim();
+  if (!value) return { kind: "none" };
+
+  if (value.startsWith(LOCAL_MARKDOWN_HREF)) {
+    try {
+      const path = decodeURIComponent(value.slice(LOCAL_MARKDOWN_HREF.length));
+      return path ? { kind: "local", path } : { kind: "none" };
+    } catch {
+      return { kind: "none" };
+    }
+  }
+  if (value.startsWith("#")) return { kind: "none" };
+
+  const scheme = value.match(/^([A-Za-z][A-Za-z0-9+.-]*):/);
+  if (scheme && !WINDOWS_DRIVE_HREF.test(value)) {
+    const name = scheme[1]!.toLowerCase();
+    if (name === "file") {
+      // file:///C:/dir/a.pptx → C:/dir/a.pptx ; file://server/share → UNC.
+      value = value.replace(/^file:\/\//i, "").replace(/^\/(?=[A-Za-z]:[/\\])/, "");
+    } else {
+      return { kind: "external" };
+    }
+  }
+
+  // Spaces and non-ASCII segments arrive URL-encoded; never throw on bad input.
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    /* keep the raw href — artifact.read will reject undecodable junk */
+  }
+
+  if (ABSOLUTE_OR_UNC.test(value) || value.includes("/") || value.includes("\\") || hasKnownExtension(value)) {
+    return { kind: "local", path: value };
+  }
+  return { kind: "none" };
 }

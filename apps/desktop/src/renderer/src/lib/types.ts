@@ -123,7 +123,10 @@ export interface UiProject {
 
 export type NavKey = "projects" | "agents" | "teams" | "tasks" | "sessions" | "runs" | "settings";
 
-export type ThemePreference = "dark" | "light" | "system";
+export type BuiltinThemeId = "dark" | "light" | "aurora" | "ukiyoe" | "macos";
+
+/** "system" or any registered theme id (builtin or installed theme pack). */
+export type ThemePreference = "system" | BuiltinThemeId | (string & {});
 
 export const TASK_TYPE_KEYS = [
   "code",
@@ -222,6 +225,8 @@ export interface UiSession {
   status: SessionStatus;
   /** Set for sub-agent sessions spawned by a delegation: the owning run's main session. */
   parentSessionId?: string;
+  /** The delegated task that owns this sub-agent session. */
+  taskId?: string;
   /** Persistent Core Daemon orchestration aggregate. */
   projectRunId?: string;
   /** Groups all sessions of one run (main + sub-agent sessions). */

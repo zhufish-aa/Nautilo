@@ -6,3 +6,4 @@ export * from "./models.js";
 export * from "./app-server-events.js";
 export * from "./app-server-run.js";
 export * from "./provider-config.js";
+export * from "./image-generation.js";

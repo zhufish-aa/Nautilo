@@ -1,5 +1,6 @@
 import type { AgentInstance } from "@agenthub/domain";
 import type { AdapterStartRequest } from "../types.js";
+import { resolvePermissionMode } from "../permission-mode.js";
 import { buildCodexProviderConfigArgs } from "./provider-config.js";
 
 /**
@@ -9,8 +10,7 @@ import { buildCodexProviderConfigArgs } from "./provider-config.js";
  * or the app-server defaults below.
  */
 export function codexPermissionConfig(instance: AgentInstance, request?: AdapterStartRequest): { approvalPolicy: "on-request" | "on-failure" | "never"; sandbox: "workspace-write" | "danger-full-access" } | undefined {
-  const instanceMode = typeof instance.providerOptions?.permissionMode === "string" ? instance.providerOptions.permissionMode : undefined;
-  const mode = request?.permissionMode ?? instanceMode;
+  const mode = resolvePermissionMode(instance, request);
   switch (mode) {
     case "ask": return { approvalPolicy: "on-request", sandbox: "workspace-write" };
     case "auto": return { approvalPolicy: "on-failure", sandbox: "workspace-write" };

@@ -225,7 +225,7 @@ export function AgentEditorDialog({
       baseArgs: form.baseArgs,
       profile: supportsConfigProfile(form.providerId) ? form.profile.trim() || undefined : undefined,
       envPolicyId: form.envPolicyId,
-      permissionMode: form.permissionMode || undefined,
+      permissionMode: form.permissionMode.trim() || undefined,
       apiKey: form.apiKey.trim() || undefined,
       baseUrl: form.baseUrl.trim() || undefined,
       models: models.length ? models : undefined,

@@ -9,6 +9,7 @@ import { getBridge } from "../../lib/bridge";
 import type { DesktopAttachment } from "../../types/bridge";
 import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
+import { useIconOverrides } from "../../lib/use-icon-overrides";
 import { filterSnippets, snippetQuery } from "../../lib/snippets";
 import { toast } from "../../stores/toast";
 import { PlanModeToggle } from "./PlanModeToggle";
@@ -35,6 +36,9 @@ export function Composer({
   disabled?: boolean;
 }): JSX.Element {
   const { t } = useI18n();
+  const iconOverrides = useIconOverrides();
+  const QueueIcon = iconOverrides?.["composer.queue"] ?? ListPlus;
+  const SteerIcon = iconOverrides?.["composer.steer"] ?? SendHorizontal;
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<DesktopAttachment[]>([]);
   const [importing, setImporting] = useState(false);
@@ -256,10 +260,10 @@ export function Composer({
     void importClipboardFiles(files);
   };
   return (
-    <div className="shrink-0 border-t border-line/70 bg-panel/95 px-5 pb-4 pt-3 backdrop-blur-xl">
+    <div className="composer shrink-0 border-t border-line/70 bg-panel/95 px-5 pb-4 pt-3 backdrop-blur-xl">
       <div
         className={cn(
-          "relative mx-auto w-full max-w-4xl rounded-2xl border bg-card transition-[border-color,box-shadow] duration-300",
+          "composer-box relative mx-auto w-full max-w-4xl rounded-2xl border bg-card transition-[border-color,box-shadow] duration-300",
           running
             ? "run-border border-accent/40 shadow-[0_18px_52px_-18px_var(--accent)]"
             : "border-line-strong shadow-[0_12px_36px_-24px_rgba(15,23,42,0.42)] focus-within:border-accent/50 focus-within:shadow-[0_0_0_1px_var(--accent-soft),0_18px_48px_-20px_var(--accent)]"
@@ -347,7 +351,7 @@ export function Composer({
         />
         {attachmentError && <p className="px-4 pb-1 text-[11px] text-danger">{attachmentError}</p>}
         <div className="flex min-h-11 items-center gap-3 px-3 pb-2.5">
-          <button type="button" onClick={() => void pickFiles()} disabled={!sessionId || disabled || importing || running} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
+          <button type="button" onClick={() => void pickFiles()} disabled={!sessionId || disabled || importing || running} className="composer-attach flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
             {importing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Paperclip className="h-4 w-4" aria-hidden />}
           </button>
           <p className="min-w-0 flex-1 truncate px-1 text-[11px] text-ink-3">{running ? t("sessions.composer.runningHint") : t("sessions.composer.hint")}</p>
@@ -368,9 +372,9 @@ export function Composer({
                 disabled={!canFollowUp}
                 aria-label={t("sessions.composer.queue")}
                 title={t("sessions.composer.queueTitle")}
-                className="relative flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-line-strong bg-card px-3 text-xs font-medium text-ink-2 transition-colors hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:cursor-not-allowed disabled:opacity-40"
+                className="composer-queue relative flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-line-strong bg-card px-3 text-xs font-medium text-ink-2 transition-colors hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <ListPlus className="h-3.5 w-3.5" aria-hidden />
+                <QueueIcon className="h-3.5 w-3.5" aria-hidden />
                 {t("sessions.composer.queue")}
                 {queuedCount > 0 && (
                   <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-info px-1 text-[10px] font-semibold text-white">
@@ -384,9 +388,9 @@ export function Composer({
                 disabled={!canFollowUp}
                 aria-label={t("sessions.composer.steer")}
                 title={t("sessions.composer.steerTitle")}
-                className="flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 text-xs font-medium text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
+                className="composer-steer flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 text-xs font-medium text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
               >
-                <SendHorizontal className="h-3.5 w-3.5 stroke-[2.4]" aria-hidden />
+                <SteerIcon className="h-3.5 w-3.5 stroke-[2.4]" aria-hidden />
                 {t("sessions.composer.steer")}
               </button>
               <button
@@ -394,7 +398,7 @@ export function Composer({
                 onClick={() => sessionId && void stopWorkbenchRun(sessionId)}
                 aria-label={t("sessions.composer.stop")}
                 title={t("sessions.composer.stop")}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-danger/35 bg-danger/10 text-danger shadow-[0_0_18px_-6px_var(--danger)] transition-colors hover:bg-danger/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/35"
+                className="composer-stop flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-danger/35 bg-danger/10 text-danger shadow-[0_0_18px_-6px_var(--danger)] transition-colors hover:bg-danger/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/35"
               >
                 <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
               </button>
@@ -406,7 +410,7 @@ export function Composer({
               disabled={!canSend}
               aria-label={t("sessions.composer.send")}
               title={t("sessions.composer.send")}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
+              className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
             >
               <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden />
             </button>

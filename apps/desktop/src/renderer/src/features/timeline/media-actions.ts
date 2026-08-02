@@ -9,6 +9,11 @@ export interface ImageSource {
 
 type Translate = (key: MessageKey, values?: Record<string, string | number>) => string;
 
+/** Builds the renderer-safe URL used to stream a permitted local artifact. */
+export function artifactUrlForPath(path: string): string {
+  return `agenthub-artifact://local/?path=${encodeURIComponent(path)}`;
+}
+
 /** Extracts the local file path from an agenthub-artifact://…?path= URL. */
 export function artifactPathFromSrc(src: string): string | undefined {
   if (!src.startsWith("agenthub-artifact:")) return undefined;

@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -36,7 +36,150 @@ import { ToolFileDiffView } from "./ToolFileDiffView";
 import { TimelineImage } from "./TimelineImage";
 import { openFileWithToast, popupFileMenu, popupTextMenu } from "./media-actions";
 import { openFilePreview } from "../../stores/file-preview";
+import { resolveFileOpenTarget } from "../../lib/file-references";
 import { fileChangeCounts } from "../../lib/changed-files";
+
+const FOLLOW_TAIL_THRESHOLD = 120;
+
+/**
+ * Owns the vertical viewport for a timeline. TimelineEventView below is a
+ * card renderer; this component is the layer that can actually observe and
+ * control the scrolling element.
+ */
+export function TimelineViewport({
+  children,
+  sessionKey,
+  contentKey,
+  forceFollowKey,
+  active = true,
+  className
+}: {
+  children: ReactNode;
+  sessionKey: string;
+  contentKey?: unknown;
+  forceFollowKey?: string;
+  active?: boolean;
+  className?: string;
+}): JSX.Element {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const followTailRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const scrollbarDragRef = useRef(false);
+  const scrollbarDragStartTopRef = useRef(0);
+  const previousForceFollowKeyRef = useRef(forceFollowKey);
+
+  const scrollToTail = useCallback(() => {
+    if (!active || !followTailRef.current) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    // Run after the DOM commit, but do not add another rAF layer: the caller
+    // is already a layout effect or ResizeObserver callback. The extra frame
+    // was the part that could be skipped while a streaming row was changing.
+    element.scrollTop = element.scrollHeight;
+    lastScrollTopRef.current = element.scrollTop;
+  }, [active]);
+
+  // A newly opened session (or a page becoming visible again) starts at the
+  // tail. This runs after the layout has a real height, unlike a one-time
+  // scroll in the parent workbench.
+  useLayoutEffect(() => {
+    if (!active) return;
+    followTailRef.current = true;
+    scrollToTail();
+  }, [active, scrollToTail, sessionKey]);
+
+  // Event arrays are replaced for both appended events and streaming patches.
+  // The ResizeObserver below covers height changes caused by markdown,
+  // images, and framer-motion after the event array itself has rendered.
+  useLayoutEffect(() => {
+    scrollToTail();
+  }, [active, contentKey, scrollToTail]);
+
+  useLayoutEffect(() => {
+    if (forceFollowKey === previousForceFollowKeyRef.current) return;
+    previousForceFollowKeyRef.current = forceFollowKey;
+    if (forceFollowKey === undefined) return;
+    followTailRef.current = true;
+    scrollToTail();
+  }, [forceFollowKey, scrollToTail]);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!active || !content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => scrollToTail());
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [active, scrollToTail]);
+
+  return (
+    <div
+      ref={scrollRef}
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
+        if (gap < FOLLOW_TAIL_THRESHOLD) {
+          // Reaching the tail by any means re-engages follow mode.
+          followTailRef.current = true;
+        } else if (scrollbarDragRef.current && element.scrollTop < lastScrollTopRef.current - 1) {
+          // A scrollbar thumb dragged upward is explicit user intent.
+          followTailRef.current = false;
+        }
+        lastScrollTopRef.current = element.scrollTop;
+      }}
+      onWheel={(event) => {
+        // Wheel input is the other explicit way to pause follow mode.
+        if (event.deltaY < 0) followTailRef.current = false;
+      }}
+      onPointerDownCapture={(event) => {
+        const element = event.currentTarget;
+        scrollbarDragRef.current =
+          element.scrollHeight > element.clientHeight &&
+          event.clientX >= element.getBoundingClientRect().right - 14;
+        scrollbarDragStartTopRef.current = element.scrollTop;
+      }}
+      onPointerUpCapture={() => {
+        const element = scrollRef.current;
+        if (element && scrollbarDragRef.current) {
+          const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
+          if (gap < FOLLOW_TAIL_THRESHOLD) followTailRef.current = true;
+          else if (element.scrollTop < scrollbarDragStartTopRef.current - 1) followTailRef.current = false;
+        }
+        scrollbarDragRef.current = false;
+      }}
+      style={{ overflowAnchor: "none" }}
+      className={cn("relative h-full overflow-y-auto", className)}
+      aria-live="polite"
+    >
+      <div ref={contentRef}>{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Unified click path for files referenced in the timeline. Work mode passes
+ * onOpenLocalFile: previewable project files (PDF/Office/text/image…) open
+ * in the right-hand preview pane, legacy .doc/.ppt stay on the system app.
+ * Without the handler the exact Code-mode fallback (external app or preview
+ * drawer, depending on the call site) is preserved.
+ */
+function openTimelineFile(
+  path: string,
+  t: (key: MessageKey, values?: Record<string, string | number>) => string,
+  onOpenLocalFile: ((path: string) => void) | undefined,
+  fallback: "external" | "drawer"
+): void {
+  if (onOpenLocalFile) {
+    if (resolveFileOpenTarget(path, true) === "local-preview") {
+      onOpenLocalFile(path);
+      return;
+    }
+    void openFileWithToast(path, t);
+    return;
+  }
+  if (fallback === "external") void openFileWithToast(path, t);
+  else openFilePreview({ path });
+}
 
 function LatestActivityLabel({
   label,
@@ -116,10 +259,11 @@ function CardShell({
   );
 }
 
-function MessageCard({ event, locale, onEditMessage }: {
+function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
   event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> };
   locale: "zh-CN" | "en-US";
   onEditMessage?: (messageId: string, text: string) => void;
+  onOpenLocalFile?: (path: string) => void;
 }): JSX.Element {
   const { sender, authorName, text, streaming, messageId, attachments, editedAt } = event.data;
   const { t } = useI18n();
@@ -158,14 +302,14 @@ function MessageCard({ event, locale, onEditMessage }: {
         <div
           className={cn(
             "mt-1.5 text-[15px] leading-7 text-ink",
-            isUser && "max-w-[85%] rounded-2xl rounded-tr-md border border-accent/20 bg-accent-soft/60 px-4 py-2.5"
+            isUser && "chat-bubble-user max-w-[85%] rounded-2xl rounded-tr-md border border-accent/20 bg-accent-soft/60 px-4 py-2.5"
           )}
           onContextMenu={(event) => {
             event.preventDefault();
             void popupTextMenu(window.getSelection()?.toString() ?? "", t);
           }}
         >
-          <MarkdownContent source={text} inverted={false} />
+          <MarkdownContent source={text} inverted={false} onOpenLocalFile={onOpenLocalFile} />
           {attachments && attachments.length > 0 && (
             <div className={cn("mt-2.5 grid gap-2", attachments.length > 1 && "sm:grid-cols-2")}>
               {attachments.map((attachment) => attachment.kind === "image" && attachment.path ? (
@@ -186,10 +330,10 @@ function MessageCard({ event, locale, onEditMessage }: {
                   tabIndex={attachment.path ? 0 : undefined}
                   title={attachment.path}
                   onClick={() => {
-                    if (attachment.path) void openFileWithToast(attachment.path, t);
+                    if (attachment.path) openTimelineFile(attachment.path, t, onOpenLocalFile, "external");
                   }}
                   onKeyDown={(event) => {
-                    if (attachment.path && (event.key === "Enter" || event.key === " ")) void openFileWithToast(attachment.path, t);
+                    if (attachment.path && (event.key === "Enter" || event.key === " ")) openTimelineFile(attachment.path, t, onOpenLocalFile, "external");
                   }}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -240,23 +384,15 @@ function MessageCard({ event, locale, onEditMessage }: {
   );
 }
 
-function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind: "activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
+function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind: "activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element | null {
   const zh = locale === "zh-CN";
   const labels = zh
     ? { queued: "请求已发送", starting: "正在启动 Agent", thinking: "正在思考", responding: "正在整理回复", completed: "本轮已完成" }
     : { queued: "Request sent", starting: "Starting agent", thinking: "Thinking", responding: "Preparing response", completed: "Turn completed" };
   const time = formatDateTime(event.timestamp, locale);
-  // Completed turns read as quiet section dividers between turns, not rows.
+  // Turn-completion dividers are hidden: the fold row already marks the end.
   if (event.data.phase === "completed") {
-    return (
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line flex items-center gap-3 py-1.5 text-ink-3">
-        <span className="h-px flex-1 bg-line/70" aria-hidden />
-        <Check className="h-3 w-3 shrink-0 text-ok" aria-hidden />
-        <span>{labels.completed}</span>
-        <time className="text-[10px] tabular-nums opacity-70">{time}</time>
-        <span className="h-px flex-1 bg-line/70" aria-hidden />
-      </motion.div>
-    );
+    return null;
   }
   return (
     <motion.div initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} className="log-line flex items-center gap-2 py-0.5 text-ink-3">
@@ -274,7 +410,7 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
   const [open, setOpen] = useState(false);
   const zh = locale === "zh-CN";
   return (
-    <motion.article initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl border border-line bg-card/70">
+    <motion.article initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="reasoning-card rounded-xl border border-line bg-card/70">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -404,7 +540,11 @@ function SubagentCard({ event, locale, onOpenSubagent }: { event: TimelineEvent 
   );
 }
 
-function ArtifactCard({ event, locale }: { event: TimelineEvent & { data: { kind: "artifact" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
+function ArtifactCard({ event, locale, onOpenLocalFile }: {
+  event: TimelineEvent & { data: { kind: "artifact" } };
+  locale: "zh-CN" | "en-US";
+  onOpenLocalFile?: (path: string) => void;
+}): JSX.Element {
   const { artifactType, name, mimeType, content, path } = event.data;
   const { t } = useI18n();
   const source = artifactType === "image"
@@ -434,10 +574,10 @@ function ArtifactCard({ event, locale }: { event: TimelineEvent & { data: { kind
           tabIndex={path ? 0 : undefined}
           title={path}
           onClick={() => {
-            if (path) void openFileWithToast(path, t);
+            if (path) openTimelineFile(path, t, onOpenLocalFile, "external");
           }}
           onKeyDown={(event) => {
-            if (path && (event.key === "Enter" || event.key === " ")) void openFileWithToast(path, t);
+            if (path && (event.key === "Enter" || event.key === " ")) openTimelineFile(path, t, onOpenLocalFile, "external");
           }}
           onContextMenu={(event) => {
             event.preventDefault();
@@ -602,11 +742,12 @@ function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { ki
   );
 }
 
-function ToolGroupCard({ event, t, locale, onViewDiff }: {
+function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
   event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> };
   t: (k: MessageKey, v?: Record<string, string | number>) => string;
   locale: "zh-CN" | "en-US";
   onViewDiff?: (path?: string) => void;
+  onOpenLocalFile?: (path: string) => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
   const { items, stepCount, callCount, running } = event.data;
@@ -715,7 +856,7 @@ function ToolGroupCard({ event, t, locale, onViewDiff }: {
               if (item.data.kind === "reasoning") return <ReasoningCard key={item.id} event={item as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
               if (item.data.kind === "tool_activity") return <ToolActivityCard key={item.id} event={item as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
               if (item.data.kind === "command") return <CommandCard key={item.id} event={item as TimelineEvent & { data: { kind: "command" } }} t={t} locale={locale} />;
-              if (item.data.kind === "file_change") return <FileChangeCard key={item.id} event={item as TimelineEvent & { data: { kind: "file_change" } }} t={t} locale={locale} onViewDiff={onViewDiff} />;
+              if (item.data.kind === "file_change") return <FileChangeCard key={item.id} event={item as TimelineEvent & { data: { kind: "file_change" } }} t={t} locale={locale} onViewDiff={onViewDiff} onOpenLocalFile={onOpenLocalFile} />;
               if (item.data.kind === "verification") return <VerificationCard key={item.id} event={item as TimelineEvent & { data: { kind: "verification" } }} t={t} locale={locale} />;
               return null;
             })}
@@ -731,12 +872,14 @@ function FileChangeCard({
   event,
   t,
   locale,
-  onViewDiff
+  onViewDiff,
+  onOpenLocalFile
 }: {
   event: TimelineEvent & { data: { kind: "file_change" } };
   t: (k: MessageKey, v?: Record<string, string | number>) => string;
   locale: string;
   onViewDiff?: (path?: string) => void;
+  onOpenLocalFile?: (path: string) => void;
 }): JSX.Element {
   const { files } = event.data;
   return (
@@ -762,9 +905,9 @@ function FileChangeCard({
             role="button"
             tabIndex={0}
             title={file.path}
-            onClick={() => openFilePreview({ path: file.path })}
+            onClick={() => openTimelineFile(file.path, t, onOpenLocalFile, "drawer")}
             onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") openFilePreview({ path: file.path });
+              if (event.key === "Enter" || event.key === " ") openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
             }}
             className="flex cursor-pointer items-center gap-2.5 border-b border-line px-3.5 py-2 transition-colors last:border-0 hover:bg-card-hover"
           >
@@ -988,20 +1131,23 @@ function TimelineEventViewImpl({
   onViewDiff,
   onOpenSession,
   onEditMessage,
-  onOpenSubagent
+  onOpenSubagent,
+  onOpenLocalFile
 }: {
   event: TimelineEvent;
   onViewDiff?: (path?: string) => void;
   onOpenSession?: (id: string) => void;
   onEditMessage?: (messageId: string, text: string) => void;
   onOpenSubagent?: (eventId: string) => void;
+  /** Work mode only: local file clicks route to the session's preview pane. */
+  onOpenLocalFile?: (path: string) => void;
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const data = event.data;
 
   switch (data.kind) {
     case "message":
-      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} />;
+      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} />;
     case "activity":
       // Transient per-turn phases (queued/starting/thinking/responding) are already
       // surfaced by the live run indicator; keep only the completed milestone so
@@ -1014,11 +1160,11 @@ function TimelineEventViewImpl({
       if (data.subagent) return <SubagentCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} onOpenSubagent={onOpenSubagent} />;
       return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
     case "tool_group":
-      return <ToolGroupCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> }} t={t} locale={locale} onViewDiff={onViewDiff} />;
+      return <ToolGroupCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> }} t={t} locale={locale} onViewDiff={onViewDiff} onOpenLocalFile={onOpenLocalFile} />;
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
     case "artifact":
-      return <ArtifactCard event={event as TimelineEvent & { data: { kind: "artifact" } }} locale={locale} />;
+      return <ArtifactCard event={event as TimelineEvent & { data: { kind: "artifact" } }} locale={locale} onOpenLocalFile={onOpenLocalFile} />;
     case "planner_decision":
       return <PlannerDecisionCard event={event as TimelineEvent & { data: { kind: "planner_decision" } }} t={t} locale={locale} />;
     case "recovery_decision":
@@ -1028,7 +1174,7 @@ function TimelineEventViewImpl({
     case "command":
       return <CommandCard event={event as TimelineEvent & { data: { kind: "command" } }} t={t} locale={locale} />;
     case "file_change":
-      return <FileChangeCard event={event as TimelineEvent & { data: { kind: "file_change" } }} t={t} locale={locale} onViewDiff={onViewDiff} />;
+      return <FileChangeCard event={event as TimelineEvent & { data: { kind: "file_change" } }} t={t} locale={locale} onViewDiff={onViewDiff} onOpenLocalFile={onOpenLocalFile} />;
     case "verification":
       return <VerificationCard event={event as TimelineEvent & { data: { kind: "verification" } }} t={t} locale={locale} />;
     case "git_merge":
@@ -1040,6 +1186,7 @@ function TimelineEventViewImpl({
     case "handoff":
       return <HandoffCard event={event as TimelineEvent & { data: { kind: "handoff" } }} t={t} locale={locale} onOpenSession={onOpenSession} />;
     case "run_status":
+      if (data.run.status === "completed") return null;
       return (
         <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line py-0.5 text-center text-ink-3">
           — {t(`sessions.status.${data.run.status === "waiting_approval" ? "waiting_approval" : data.run.status}` as MessageKey)}
