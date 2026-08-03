@@ -1,9 +1,9 @@
 import type { SlashCommandDefinition } from "@agenthub/domain";
 
 export const KIMI_SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
-  { id: "kimi-code.model", name: "/model", aliases: [], title: "模型", description: "AgentHub 本地设置：选择下一轮 Kimi ACP 会话使用的模型", icon: "model", availability: "always", execution: "agenthub" },
-  { id: "kimi-code.thinking", name: "/thinking", aliases: [], title: "思考强度", description: "AgentHub 本地设置：选择下一轮使用的 Thinking 等级", icon: "reasoning", availability: "always", execution: "agenthub" },
-  { id: "kimi-code.rename", name: "/title", aliases: ["/rename"], title: "重命名会话", description: "AgentHub 本地设置：修改当前工作台会话标题", icon: "rename", availability: "always", execution: "agenthub", argumentHint: "新标题", argumentRequired: true },
+  { id: "kimi-code.model", name: "/model", aliases: [], title: "模型", description: "Nautilo 本地设置：选择下一轮 Kimi ACP 会话使用的模型", icon: "model", availability: "always", execution: "agenthub" },
+  { id: "kimi-code.thinking", name: "/thinking", aliases: [], title: "思考强度", description: "Nautilo 本地设置：选择下一轮使用的 Thinking 等级", icon: "reasoning", availability: "always", execution: "agenthub" },
+  { id: "kimi-code.rename", name: "/title", aliases: ["/rename"], title: "重命名会话", description: "Nautilo 本地设置：修改当前工作台会话标题", icon: "rename", availability: "always", execution: "agenthub", argumentHint: "新标题", argumentRequired: true },
   { id: "kimi-code.native.compact", name: "/compact", aliases: [], title: "压缩上下文", description: "压缩当前会话上下文，可附加保留内容说明", icon: "usage", availability: "idle", execution: "provider", argumentHint: "可选的压缩说明" },
   { id: "kimi-code.native.status", name: "/status", aliases: [], title: "会话状态", description: "由 Kimi ACP 返回当前会话状态", icon: "status", availability: "always", execution: "provider" },
   { id: "kimi-code.native.usage", name: "/usage", aliases: [], title: "上下文用量", description: "由 Kimi ACP 返回会话 Token 用量", icon: "usage", availability: "always", execution: "provider" },

@@ -226,6 +226,6 @@ test("Claude Code exposes a provider-scoped catalog with dynamic native commands
   assert.equal(review.argumentHint, "PR number");
   assert.ok(!withNative.some((command) => command.name === "/login"));
   assert.ok(!withNative.some((command) => command.name === "/clear"));
-  // AgentHub-local /status stays authoritative over a provider /status.
+  // Nautilo-local /status stays authoritative over a provider /status.
   assert.equal(withNative.filter((command) => command.name === "/status").length, 1);
 });

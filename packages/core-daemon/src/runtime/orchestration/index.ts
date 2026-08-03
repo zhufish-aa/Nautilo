@@ -10,3 +10,4 @@ export * from "./conversation-continuity.js";
 export * from "./runtime-tool-provider.js";
 export * from "./runtime-tool-decision.js";
 export * from "./runtime-tool-names.js";
+export * from "./official-web-search.js";

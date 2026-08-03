@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AgentHub provider plugin for Trae (official traecli over ACP, open-source trae-agent CLI as fallback).",
+  "description": "Nautilo provider plugin for Trae (official traecli over ACP, open-source trae-agent CLI as fallback).",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

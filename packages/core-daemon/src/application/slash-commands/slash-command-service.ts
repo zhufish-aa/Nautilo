@@ -175,7 +175,7 @@ export class SlashCommandService {
     return {
       commandId: `${providerId}.help`,
       title: `${providerLabel(providerId)} 指令`,
-      description: "这里只展示 AgentHub 已接入并可执行的 Provider 指令。",
+      description: "这里只展示 Nautilo 已接入并可执行的 Provider 指令。",
       sections: [{ kind: "list", items: this.list(sessionId).map((command) => ({
         label: command.name,
         description: command.description

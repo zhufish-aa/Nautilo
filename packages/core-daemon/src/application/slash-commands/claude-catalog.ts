@@ -1,12 +1,12 @@
 import type { SlashCommandDefinition } from "@agenthub/domain";
 
 export const CLAUDE_SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
-  { id: "claude-code.help", name: "/help", aliases: ["/?"], title: "帮助", description: "查看 AgentHub 当前支持的 Claude Code 会话指令", icon: "help", availability: "always" },
-  { id: "claude-code.model", name: "/model", aliases: [], title: "模型", description: "AgentHub 本地设置：选择下一轮 Claude Code 会话使用的模型", icon: "model", availability: "always" },
-  { id: "claude-code.reasoning", name: "/effort", aliases: ["/thinking"], title: "思考强度", description: "AgentHub 本地设置：选择下一轮使用的 effort 等级（low / medium / high / max）", icon: "reasoning", availability: "always" },
+  { id: "claude-code.help", name: "/help", aliases: ["/?"], title: "帮助", description: "查看 Nautilo 当前支持的 Claude Code 会话指令", icon: "help", availability: "always" },
+  { id: "claude-code.model", name: "/model", aliases: [], title: "模型", description: "Nautilo 本地设置：选择下一轮 Claude Code 会话使用的模型", icon: "model", availability: "always" },
+  { id: "claude-code.reasoning", name: "/effort", aliases: ["/thinking"], title: "思考强度", description: "Nautilo 本地设置：选择下一轮使用的 effort 等级（low / medium / high / max）", icon: "reasoning", availability: "always" },
   { id: "claude-code.status", name: "/status", aliases: [], title: "会话状态", description: "查看模型、思考强度和 Provider 会话状态", icon: "status", availability: "always" },
   { id: "claude-code.usage", name: "/usage", aliases: [], title: "上下文用量", description: "查看当前上下文窗口和已用 Token", icon: "usage", availability: "always" },
-  { id: "claude-code.rename", name: "/title", aliases: ["/rename"], title: "重命名会话", description: "AgentHub 本地设置：修改当前工作台会话标题", icon: "rename", availability: "always", argumentHint: "新标题", argumentRequired: true }
+  { id: "claude-code.rename", name: "/title", aliases: ["/rename"], title: "重命名会话", description: "Nautilo 本地设置：修改当前工作台会话标题", icon: "rename", availability: "always", argumentHint: "新标题", argumentRequired: true }
 ];
 
 const CLAUDE_NATIVE_TITLES: Readonly<Record<string, string>> = {

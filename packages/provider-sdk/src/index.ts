@@ -1,5 +1,5 @@
 /**
- * @agenthub/provider-sdk — public contract for AgentHub provider plugins.
+ * @agenthub/provider-sdk — public contract for Nautilo provider plugins.
  *
  * Version policy: PROVIDER_API_VERSION is bumped on incompatible changes to
  * AgentCliAdapter / AdapterEvent / ProviderPluginManifest. The daemon refuses

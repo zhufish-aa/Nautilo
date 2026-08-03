@@ -7,6 +7,7 @@ import { Toaster } from "./components/ui/Toaster";
 import { TooltipProvider } from "./components/ui/Tooltip";
 import { ImageLightbox } from "./features/timeline/ImageLightbox";
 import { FilePreviewDrawer } from "./features/timeline/FilePreviewDrawer";
+import { OnboardingTour } from "./features/onboarding/OnboardingTour";
 import { AgentsPage } from "./features/agents/AgentsPage";
 import { PlaceholderPage } from "./features/placeholder/PlaceholderPage";
 import { ProjectDetailPage } from "./features/projects/ProjectDetailPage";
@@ -105,6 +106,7 @@ export default function App(): JSX.Element {
           </Routes>
         </AppShell>
         <Toaster />
+        <OnboardingTour />
         <ImageLightbox />
         <FilePreviewDrawer />
       </TooltipProvider>

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Template for AgentHub provider plugins — wrap any agent CLI as a provider.",
+  "description": "Template for Nautilo provider plugins — wrap any agent CLI as a provider.",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

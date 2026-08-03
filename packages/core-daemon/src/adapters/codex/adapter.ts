@@ -7,6 +7,8 @@ import { resolveCodexInvocation } from "./executable.js";
 import { discoverCodexModels } from "./models.js";
 import type { AdapterResumeRequest, AdapterRun } from "../types.js";
 import { startCodexAppServer } from "./app-server-run.js";
+import { resolveCodexWireApi } from "./provider-config.js";
+import { startCodexChatCompatAppServer } from "./chat-compat-proxy.js";
 
 export class CodexAdapter extends ProcessAdapter {
   readonly providerId = "codex";
@@ -67,9 +69,11 @@ export class CodexAdapter extends ProcessAdapter {
     return parseCodexJsonEvent(value);
   }
   override start(request: AdapterStartRequest): AdapterRun {
+    if (resolveCodexWireApi(request.instance) === "chat") return startCodexChatCompatAppServer(request, false);
     return request.instance.baseArgs.length ? super.start(request) : startCodexAppServer(request, false);
   }
   override resume(request: AdapterResumeRequest): AdapterRun {
+    if (resolveCodexWireApi(request.instance) === "chat") return startCodexChatCompatAppServer(request, true);
     return request.instance.baseArgs.length ? super.resume(request) : startCodexAppServer(request, true);
   }
   listModels(instance: AgentInstance, context?: AdapterDiscoveryContext) { return discoverCodexModels(instance, context); }

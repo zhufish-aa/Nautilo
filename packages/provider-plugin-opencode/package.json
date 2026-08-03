@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AgentHub provider plugin for OpenCode (opencode run --format json).",
+  "description": "Nautilo provider plugin for OpenCode (opencode run --format json).",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

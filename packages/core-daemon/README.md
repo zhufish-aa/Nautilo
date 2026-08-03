@@ -1,6 +1,6 @@
 # @agenthub/core-daemon
 
-AgentHub 的本地控制面。它负责持久化、IPC、CLI 进程和 Provider Adapter，不负责页面渲染或主 Agent 的任务规划策略。
+Nautilo 的本地控制面。它负责持久化、IPC、CLI 进程和 Provider Adapter，不负责页面渲染或主 Agent 的任务规划策略。
 
 ## 目录边界
 
@@ -53,7 +53,7 @@ pnpm build:desktop
 
 桌面端通过 `credential.*`、`approval.*`、`recovery.list`、`orchestration.recover`、`metrics.get`、`audit.list`、`policy.list` 和 `diagnostics.export` 联调。Renderer 不读凭证明文，也不直接操作进程或恢复数据库状态。
 
-命令策略控制 AgentHub 自己启动的 CLI、注册验收命令和系统进程。Provider CLI 内部工具的事前授权仍使用 Provider 原生 sandbox/approval；运行事件只用于持久化和审计，不假装能够撤销已经发生的命令。
+命令策略控制 Nautilo 自己启动的 CLI、注册验收命令和系统进程。Provider CLI 内部工具的事前授权仍使用 Provider 原生 sandbox/approval；运行事件只用于持久化和审计，不假装能够撤销已经发生的命令。
 
 对应测试：`test/security-recovery-observability.test.mjs`。
 

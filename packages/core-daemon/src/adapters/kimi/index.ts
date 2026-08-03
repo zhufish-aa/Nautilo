@@ -6,4 +6,5 @@ export * from "./session-usage.js";
 export * from "./runtime-mcp-server.js";
 export * from "./acp-events.js";
 export * from "./acp-segments.js";
+export * from "./subagent-wire.js";
 export * from "./interaction.js";

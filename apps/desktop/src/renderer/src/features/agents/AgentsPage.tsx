@@ -21,7 +21,7 @@ export function AgentsPage(): JSX.Element {
   const [tab, setTab] = useState("instances");
 
   return (
-    <>
+    <div data-tour="agents-page">
       <PageHeader
         title={t("agents.title")}
         subtitle={t("agents.subtitle")}
@@ -40,6 +40,6 @@ export function AgentsPage(): JSX.Element {
         }
       />
       {tab === "instances" ? <InstancesPanel /> : tab === "providers" ? <ProvidersPanel /> : tab === "tools" ? <ProviderToolsPanel /> : <PluginMarketPanel />}
-    </>
+    </div>
   );
 }

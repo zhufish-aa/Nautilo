@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,9 +13,12 @@ import {
   AGENTHUB_CODEX_API_KEY_ENV,
   AGENTHUB_CODEX_PROVIDER_ID,
   buildCodexAppServerArgs,
+  buildCodexCustomModelCatalog,
   buildCodexDynamicTools,
   CODEX_IMAGE_GENERATION_TOOL_NAME,
   buildCodexProviderConfigArgs,
+  startChatCompatProxy,
+  startCodexChatCompletions,
   buildCodexResumeArgs,
   buildCodexStartArgs,
   codexPermissionConfig,
@@ -46,10 +49,16 @@ import {
   parseKimiModelList,
   parseKimiJsonEvent,
   parseKimiAcpUpdate,
+  createKimiSubagentWireParseState,
+  KimiSubagentWireWatcher,
+  parseKimiSubagentWireLine,
   KimiAcpTurnSegments,
   parseKimiWireContextUsed,
   startCodexAppServer,
   executeCodexImageGeneration,
+  executeOfficialWebSearch,
+  RUNTIME_TOOL_NAMES,
+  CredentialService,
   startKimiRuntimeMcpBridge,
   resolvePermissionMode,
   resumeStrategy
@@ -160,12 +169,18 @@ test("Codex custom API base URL is applied as an invocation-scoped model provide
   assert.equal(AGENTHUB_CODEX_PROVIDER_ID, "agenthub_proxy");
   assert.deepEqual(providerArgs, [
     "--config", 'model_provider="agenthub_proxy"',
-    "--config", 'model_providers.agenthub_proxy.name="AgentHub custom endpoint"',
+    "--config", 'model_providers.agenthub_proxy.name="Nautilo custom endpoint"',
     "--config", 'model_providers.agenthub_proxy.base_url="https://proxy.example.test/v1"',
     "--config", 'model_providers.agenthub_proxy.wire_api="responses"',
     "--config", 'model_providers.agenthub_proxy.env_key="OPENAI_API_KEY"'
   ]);
   assert.doesNotMatch(JSON.stringify(providerArgs), new RegExp(secret));
+
+  const chatProviderArgs = buildCodexProviderConfigArgs({
+    ...configured,
+    providerOptions: { ...configured.providerOptions, wireApi: "chat" }
+  }, environment);
+  assert.ok(chatProviderArgs.includes('model_providers.agenthub_proxy.wire_api="chat"'));
 
   const startArgs = buildCodexStartArgs(configured, "hello", {
     instance: configured,
@@ -190,6 +205,41 @@ test("Codex custom API base URL is applied as an invocation-scoped model provide
   assert.deepEqual(appServerArgs.slice(0, 2), ["app-server", "--stdio"]);
   assert.ok(appServerArgs.includes("--enable"));
   assert.ok(appServerArgs.includes("image_generation"));
+  assert.ok(appServerArgs.includes('web_search="live"'));
+
+  const customCatalog = buildCodexCustomModelCatalog({
+    ...configured,
+    models: [{ id: "gpt-5.6-luna", displayName: "Luna", reasoningEfforts: ["medium"], contextWindow: 128000 }]
+  }, "gpt-5.6-luna");
+  assert.equal(customCatalog.models.length, 1);
+  assert.equal(customCatalog.models[0].slug, "gpt-5.6-luna");
+  assert.equal(customCatalog.models[0].supports_search_tool, true);
+  assert.equal(customCatalog.models[0].web_search_tool_type, "text");
+  assert.equal(customCatalog.models[0].default_verbosity, "low");
+  assert.equal(customCatalog.models[0].apply_patch_tool_type, "freeform");
+  assert.equal(customCatalog.models[0].default_reasoning_level, "medium");
+
+  const noSearchCatalog = buildCodexCustomModelCatalog({
+    ...configured,
+    providerOptions: { ...configured.providerOptions, webSearch: false },
+    models: [{ id: "gpt-5.6-luna" }]
+  }, "gpt-5.6-luna");
+  assert.equal(noSearchCatalog.models[0].supports_search_tool, false);
+  assert.equal(noSearchCatalog.models[0].web_search_tool_type, "text");
+  assert.equal(noSearchCatalog.models[0].supports_search_tool, false);
+
+  const appServerArgsWithCatalog = buildCodexAppServerArgs(configured, environment, undefined, "C:\\Temp\\agenthub-codex-model.json");
+  assert.ok(appServerArgsWithCatalog.includes('model_catalog_json="C:\\\\Temp\\\\agenthub-codex-model.json"'));
+
+  const chatAppServerArgs = buildCodexAppServerArgs({
+    ...configured,
+    providerOptions: { ...configured.providerOptions, wireApi: "chat", webSearch: false }
+  }, environment);
+  assert.ok(chatAppServerArgs.includes('model_providers.agenthub_proxy.wire_api="responses"'));
+  assert.equal(chatAppServerArgs.includes('web_search="live"'), false);
+
+  const defaultEndpointArgs = buildCodexAppServerArgs({ ...configured, providerOptions: undefined }, environment);
+  assert.ok(defaultEndpointArgs.includes('web_search="live"'));
 
   const profiledAppServerArgs = buildCodexAppServerArgs({ ...configured, profile: "work" }, environment);
   assert.deepEqual(profiledAppServerArgs.slice(0, 4), ["--profile", "work", "app-server", "--stdio"]);
@@ -362,7 +412,7 @@ test("Codex app-server opts into native experimental provider capabilities", () 
   assert.equal(CODEX_APP_SERVER_INITIALIZE_PARAMS.capabilities.experimentalApi, true);
 });
 
-test("Codex app-server maps AgentHub runtime tools to dynamic function tools", () => {
+test("Codex app-server maps Nautilo runtime tools to dynamic function tools", () => {
   assert.deepEqual(buildCodexDynamicTools([{
     name: "agenthub_delegate",
     description: "Dispatch one child task",
@@ -378,6 +428,253 @@ test("Codex app-server maps AgentHub runtime tools to dynamic function tools", (
     description: "Invalid dotted name",
     inputSchema: { type: "object" }
   }]), /Invalid Codex dynamic tool name: agenthub\.delegate/);
+});
+
+test("Codex Chat Completions compatibility mode streams an assistant message", async (t) => {
+  let received;
+  const server = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      response.write(`data: ${JSON.stringify({ id: "chatcmpl-test", choices: [{ delta: { content: "Hi" } }] })}\n\n`);
+      response.write("data: [DONE]\n\n");
+      response.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  const configured = {
+    ...instance,
+    baseArgs: [],
+    models: [{ id: "deepseek-v4-flash-free", reasoningEfforts: [] }],
+    providerOptions: { wireApi: "chat", baseUrl: `http://127.0.0.1:${address.port}/v1` }
+  };
+  const run = startCodexChatCompletions({
+    instance: configured,
+    prompt: "hi",
+    cwd: process.cwd(),
+    model: "deepseek-v4-flash-free",
+    env: { OPENAI_API_KEY: "test-secret" }
+  });
+  const events = [];
+  for await (const event of run.events) events.push(event);
+  assert.equal(received.model, "deepseek-v4-flash-free");
+  assert.deepEqual(received.messages, [{ role: "user", content: "hi" }]);
+  assert.ok(events.some((event) => event.kind === "message" && event.phase === "delta" && event.text === "Hi"));
+  assert.ok(events.some((event) => event.kind === "message" && event.phase === "completed" && event.text === "Hi"));
+  assert.equal(events.at(-1)?.kind, "exit");
+});
+
+test("Codex Responses compatibility proxy translates input and streams Responses events", async (t) => {
+  let received;
+  const remote = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(`data: ${JSON.stringify({ id: "chatcmpl-proxy", choices: [{ delta: { reasoning_content: "think first " } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ id: "chatcmpl-proxy", choices: [{ delta: { reasoning_content: "then answer. ", content: "Hi" } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ id: "chatcmpl-proxy", choices: [], usage: { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12, completion_tokens_details: { reasoning_tokens: 3 } } })}\n\n`);
+      response.write("data: [DONE]\n\n");
+      response.end();
+    });
+  });
+  await new Promise((resolve) => remote.listen(0, "127.0.0.1", resolve));
+  t.after(() => remote.close());
+  const address = remote.address();
+  const proxy = await startChatCompatProxy({
+    remoteBaseUrl: `http://127.0.0.1:${address.port}/v1`,
+    environment: { OPENAI_API_KEY: "proxy-secret" }
+  });
+  t.after(() => proxy.close());
+
+  const response = await fetch(`${proxy.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash-free",
+      input: [{ type: "text", text: "hi" }],
+      tools: [{ type: "web_search_preview" }],
+      reasoning: { effort: "high" },
+      max_output_tokens: 128,
+      text: { format: { type: "json_object" } },
+      stream: true
+    })
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.deepEqual(received.messages, [{ role: "user", content: "hi" }]);
+  assert.equal(received.stream, true);
+  assert.equal(received.reasoning_effort, "high");
+  assert.equal(received.max_tokens, 128);
+  assert.deepEqual(received.response_format, { type: "json_object" });
+  assert.equal("web_search_options" in received, false);
+  assert.match(body, /response\.reasoning_summary_text\.delta/);
+  assert.match(body, /response\.output_text\.delta/);
+  assert.match(body, /"input_tokens":7/);
+  assert.match(body, /"reasoning_tokens":3/);
+  assert.match(body, /response\.completed/);
+});
+
+test("Codex Responses compatibility proxy translates Chat tool calls", async (t) => {
+  let received;
+  const remote = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-test", type: "function", function: { name: "lookup", arguments: "" } }] } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ q: "hi" }) } }] } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
+      response.write("data: [DONE]\n\n");
+      response.end();
+    });
+  });
+  await new Promise((resolve) => remote.listen(0, "127.0.0.1", resolve));
+  t.after(() => remote.close());
+  const address = remote.address();
+  const proxy = await startChatCompatProxy({ remoteBaseUrl: `http://127.0.0.1:${address.port}/v1` });
+  t.after(() => proxy.close());
+
+  const response = await fetch(`${proxy.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash-free",
+      input: [{ type: "text", text: "hi" }],
+      tools: [{ type: "function", name: "lookup", description: "Look up data", parameters: { type: "object" } }],
+      stream: true
+    })
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(received.tools[0].function.name, "lookup");
+  assert.match(body, /response\.output_item\.added/);
+  assert.match(body, /response\.function_call_arguments\.delta/);
+  assert.match(body, /response\.function_call_arguments\.done/);
+  assert.match(body, /"type":"function_call"/);
+  assert.match(body, /"arguments":"\{\\"q\\":\\"hi\\"\}"/);
+});
+
+test("Codex Responses compatibility proxy does not mark an empty upstream response completed", async (t) => {
+  const remote = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "only thinking" } }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise((resolve) => remote.listen(0, "127.0.0.1", resolve));
+  t.after(() => remote.close());
+  const address = remote.address();
+  const proxy = await startChatCompatProxy({ remoteBaseUrl: `http://127.0.0.1:${address.port}/v1` });
+  t.after(() => proxy.close());
+
+  const response = await fetch(`${proxy.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "deepseek-v4-flash-free", input: "hi", stream: true })
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(body, /response\.failed/);
+  assert.match(body, /empty_upstream_response/);
+  assert.doesNotMatch(body, /response\.completed/);
+});
+
+test("Codex Responses compatibility proxy preserves reasoning for tool results", async (t) => {
+  let received;
+  const remote = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: "DONE" } }] })}\n\ndata: [DONE]\n\n`);
+    });
+  });
+  await new Promise((resolve) => remote.listen(0, "127.0.0.1", resolve));
+  t.after(() => remote.close());
+  const address = remote.address();
+  const proxy = await startChatCompatProxy({ remoteBaseUrl: `http://127.0.0.1:${address.port}/v1` });
+  t.after(() => proxy.close());
+
+  const response = await fetch(`${proxy.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash-free",
+      input: [
+        { type: "reasoning", summary: [{ type: "summary_text", text: "think before using the tool" }] },
+        { type: "function_call", call_id: "call-roundtrip", name: "lookup", arguments: "{\"q\":\"hi\"}" },
+        { type: "function_call_output", call_id: "call-roundtrip", output: "tool result" }
+      ],
+      stream: true
+    })
+  });
+  assert.equal(response.status, 200);
+  await response.text();
+  const assistant = received.messages.find((message) => message.role === "assistant");
+  const tool = received.messages.find((message) => message.role === "tool");
+  assert.equal(assistant.reasoning_content, "think before using the tool");
+  assert.equal(assistant.tool_calls.length, 1);
+  assert.equal(assistant.tool_calls[0].function.name, "lookup");
+  assert.equal(tool.tool_call_id, "call-roundtrip");
+  assert.equal(tool.content, "tool result");
+});
+
+test("official web search runtime tool uses the selected official instance", async (t) => {
+  const database = new Database(":memory:");
+  const dataDir = mkdtempSync(join(tmpdir(), "agenthub-search-"));
+  const credentials = new CredentialService(database, dataDir, new AdapterRegistry());
+  const official = {
+    ...instance,
+    id: "official-search",
+    providerId: "codex",
+    providerOptions: { baseUrl: "https://api.openai.com/v1", wireApi: "responses" }
+  };
+  const current = {
+    ...instance,
+    providerOptions: {
+      wireApi: "chat",
+      webSearchMode: "official",
+      webSearchInstanceId: official.id,
+      webSearchModel: "gpt-5.6-luna",
+      webSearchReasoningEffort: "high"
+    }
+  };
+  database.agents.save(official, now);
+  credentials.set(official.id, { apiKey: "official-secret" });
+  const previousFetch = globalThis.fetch;
+  let captured;
+  globalThis.fetch = async (url, options) => {
+    captured = { url: String(url), options };
+    return new Response(JSON.stringify({
+      output: [{ type: "message", content: [{ type: "output_text", text: "Search result", annotations: [{ type: "url_citation", url: "https://example.com", title: "Example" }] }] }]
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+    database.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const result = await executeOfficialWebSearch({
+    providerId: "codex",
+    name: RUNTIME_TOOL_NAMES.officialWebSearch,
+    arguments: { query: "today's news", search_context_size: "low" }
+  }, current, database, credentials);
+  assert.equal(result.success, true);
+  assert.match(result.content, /Search result/);
+  assert.match(result.content, /\[Example\]\(https:\/\/example\.com\)/);
+  assert.equal(captured.url, "https://api.openai.com/v1/responses");
+  assert.equal(captured.options.headers.authorization, "Bearer official-secret");
+  const body = JSON.parse(captured.options.body);
+  assert.equal(body.model, "gpt-5.6-luna");
+  assert.deepEqual(body.reasoning, { effort: "high" });
+  assert.deepEqual(body.tools, [{ type: "web_search", search_context_size: "low" }]);
 });
 
 test("Codex app-server exposes an executable image bridge and persists its result", async () => {
@@ -504,6 +801,12 @@ test("Kimi ACP parser preserves streaming chunks and coalescible tool details", 
   assert.equal(commands.kind, "commands");
   assert.deepEqual(commands.commands[0], { name: "compact", description: "Compact context", inputHint: "instruction" });
   assert.deepEqual(parseKimiAcpUpdate({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "" } }, state), []);
+
+  const delayedAgent = parseKimiAcpUpdate({ sessionUpdate: "tool_call", toolCallId: "agent-1", title: "Agent", status: "in_progress" }, state);
+  const agentWithPrompt = parseKimiAcpUpdate({ sessionUpdate: "tool_call_update", toolCallId: "agent-1", status: "in_progress", rawInput: { prompt: "inspect child" } }, state);
+  assert.equal(delayedAgent.length, 1);
+  assert.equal(agentWithPrompt.length, 1);
+  assert.equal(agentWithPrompt[0].input.prompt, "inspect child");
 });
 
 test("Kimi ACP coalesces cumulative tool input and preserves a late file path on completion", () => {
@@ -587,6 +890,117 @@ test("Kimi ACP reasoning is split before tools and before the final answer", () 
   const secondBoundary = segments.flushBefore(answer);
   assert.equal(secondBoundary[0].messageId, "kimi-thinking-2");
   assert.equal(secondBoundary[0].text, "implement fix");
+});
+
+test("Kimi subagent wire parser exposes public progress and tools without private thoughts", () => {
+  const state = createKimiSubagentWireParseState("agent-0");
+  const thought = parseKimiSubagentWireLine(JSON.stringify({
+    type: "context.append_loop_event",
+    event: { type: "content.part", part: { type: "think", think: "private reasoning" } }
+  }), state, "dispatch-1");
+  assert.deepEqual(thought, []);
+
+  const message = parseKimiSubagentWireLine(JSON.stringify({
+    type: "context.append_loop_event",
+    event: { type: "content.part", part: { type: "text", text: "Inspecting the adapter." } }
+  }), state, "dispatch-1")[0];
+  assert.equal(message.kind, "message");
+  assert.equal(message.subagentDispatchId, "dispatch-1");
+
+  const started = parseKimiSubagentWireLine(JSON.stringify({
+    type: "context.append_loop_event",
+    event: { type: "tool.call", toolCallId: "read-1", name: "Read", args: { path: "src/a.ts" } }
+  }), state, "dispatch-1")[0];
+  const completed = parseKimiSubagentWireLine(JSON.stringify({
+    type: "context.append_loop_event",
+    event: { type: "tool.result", toolCallId: "read-1", result: { isError: false, output: "ok" } }
+  }), state, "dispatch-1")[0];
+  assert.deepEqual(
+    { name: started.name, phase: started.phase, input: started.input, dispatch: started.subagentDispatchId },
+    { name: "Read", phase: "started", input: { path: "src/a.ts" }, dispatch: "dispatch-1" }
+  );
+  assert.deepEqual(
+    { name: completed.name, phase: completed.phase, output: completed.output, success: completed.success },
+    { name: "Read", phase: "completed", output: "ok", success: true }
+  );
+});
+
+test("Kimi subagent wire watcher correlates parallel child agents by prompt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nautilo-kimi-wire-"));
+  const sessionId = "session-test";
+  const agentsDir = join(root, "sessions", "workspace", sessionId, "agents");
+  try {
+    mkdirSync(join(agentsDir, "main"), { recursive: true });
+    writeFileSync(join(agentsDir, "main", "wire.jsonl"), "");
+    const watcher = new KimiSubagentWireWatcher(sessionId, root);
+    await watcher.initialize();
+    watcher.track("dispatch-alpha", { prompt: "inspect alpha" });
+    watcher.track("dispatch-beta", { prompt: "inspect beta" });
+
+    const writeChild = (agentId, prompt, toolCallId) => {
+      const directory = join(agentsDir, agentId);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "wire.jsonl"), [
+        JSON.stringify({ type: "metadata", protocol_version: "1" }),
+        JSON.stringify({ type: "turn.prompt", input: [{ type: "text", text: `subagent wrapper\n${prompt}\ncontext` }] }),
+        JSON.stringify({ type: "context.append_loop_event", event: { type: "content.part", part: { type: "think", think: "hidden" } } }),
+        JSON.stringify({ type: "context.append_loop_event", event: { type: "content.part", part: { type: "text", text: `working on ${prompt}` } } }),
+        JSON.stringify({ type: "context.append_loop_event", event: { type: "tool.call", toolCallId, name: "Read", args: { path: `${agentId}.ts` } } })
+      ].join("\n") + "\n");
+    };
+    // Reverse the creation order: exact prompt matching must prevent cross-talk.
+    writeChild("agent-0", "inspect beta", "read-beta");
+    writeChild("agent-1", "inspect alpha", "read-alpha");
+
+    const first = await watcher.poll();
+    assert.equal(first.length, 4);
+    assert.deepEqual(new Set(first.map((event) => event.subagentDispatchId)), new Set(["dispatch-alpha", "dispatch-beta"]));
+    assert.equal(first.find((event) => event.kind === "tool" && event.callId === "read-alpha")?.subagentDispatchId, "dispatch-alpha");
+    assert.equal(first.find((event) => event.kind === "tool" && event.callId === "read-beta")?.subagentDispatchId, "dispatch-beta");
+    assert.equal(first.some((event) => event.kind === "message" && event.text.includes("hidden")), false);
+
+    appendFileSync(join(agentsDir, "agent-1", "wire.jsonl"), JSON.stringify({
+      type: "context.append_loop_event",
+      event: { type: "tool.result", toolCallId: "read-alpha", result: { isError: false, output: "alpha done" } }
+    }) + "\n");
+    const second = await watcher.poll();
+    assert.equal(second.length, 1);
+    assert.equal(second[0].subagentDispatchId, "dispatch-alpha");
+    assert.equal(second[0].kind, "tool");
+    assert.equal(second[0].phase, "completed");
+    assert.equal(second[0].output, "alpha done");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Kimi subagent wire watcher resumes an existing child without replaying history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nautilo-kimi-resume-wire-"));
+  const sessionId = "session-resume";
+  const childDir = join(root, "sessions", "workspace", sessionId, "agents", "agent-0");
+  const wire = join(childDir, "wire.jsonl");
+  try {
+    mkdirSync(childDir, { recursive: true });
+    writeFileSync(wire, JSON.stringify({
+      type: "context.append_loop_event",
+      event: { type: "content.part", part: { type: "text", text: "old history" } }
+    }) + "\n");
+    const watcher = new KimiSubagentWireWatcher(sessionId, root);
+    await watcher.initialize();
+    watcher.track("dispatch-resume", { resume: "agent-0", prompt: "continue" });
+    appendFileSync(wire, JSON.stringify({
+      type: "context.append_loop_event",
+      event: { type: "tool.call", toolCallId: "new-read", name: "Read", args: { path: "new.ts" } }
+    }) + "\n");
+
+    const events = await watcher.poll();
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "tool");
+    assert.equal(events[0].callId, "new-read");
+    assert.equal(events[0].subagentDispatchId, "dispatch-resume");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Kimi context usage falls back to the provider wire log when ACP omits usage_update", () => {

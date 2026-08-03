@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Eye, EyeOff, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { ENV_POLICIES, permissionModesFor, supportsConfigProfile, useProviderMetas } from "../../lib/provider-catalog";
-import type { AgentInstanceConfig } from "../../lib/types";
+import type { AgentInstanceConfig, CodexWireApi, WebSearchMode } from "../../lib/types";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { Field, Input } from "../../components/ui/Input";
@@ -14,7 +14,7 @@ import { useAgentsStore, type AgentInstanceDraft } from "../../stores/agents";
 import { toast } from "../../stores/toast";
 
 /**
- * Instance editor: how AgentHub connects to a CLI, plus an optional curated
+ * Instance editor: how Nautilo connects to a CLI, plus an optional curated
  * model catalog (ids, ordered efforts, context windows). Per-run execution
  * choices still belong to TeamMember or Session.
  */
@@ -32,6 +32,13 @@ function emptyModelRow(): ModelRow {
   return { key: newId("model"), id: "", displayName: "", contextWindow: "", efforts: "" };
 }
 
+function canProvideNativeWebSearch(candidate: AgentInstanceConfig): boolean {
+  // Codex is the adapter that can expose native web_search through either
+  // the official endpoint or a compatible third-party endpoint. Whether the
+  // upstream actually supports it is validated when the request runs.
+  return candidate.providerId === "codex";
+}
+
 interface FormState {
   displayName: string;
   providerId: string;
@@ -42,6 +49,11 @@ interface FormState {
   permissionMode: string;
   apiKey: string;
   baseUrl: string;
+  wireApi: CodexWireApi;
+  webSearchMode: WebSearchMode;
+  webSearchInstanceId: string;
+  webSearchModel: string;
+  webSearchReasoningEffort: string;
   models: ModelRow[];
   enabled: boolean;
 }
@@ -57,6 +69,11 @@ function emptyForm(): FormState {
     permissionMode: "",
     apiKey: "",
     baseUrl: "",
+    wireApi: "responses",
+    webSearchMode: "native",
+    webSearchInstanceId: "",
+    webSearchModel: "",
+    webSearchReasoningEffort: "",
     models: [],
     enabled: true
   };
@@ -73,6 +90,11 @@ function formFromInstance(instance: AgentInstanceConfig): FormState {
     permissionMode: instance.permissionMode ?? "",
     apiKey: instance.apiKey ?? "",
     baseUrl: instance.baseUrl ?? "",
+    wireApi: instance.wireApi ?? "responses",
+    webSearchMode: instance.webSearchMode ?? (instance.wireApi === "chat" ? "off" : "native"),
+    webSearchInstanceId: instance.webSearchInstanceId ?? "",
+    webSearchModel: instance.webSearchModel ?? "",
+    webSearchReasoningEffort: instance.webSearchReasoningEffort ?? "",
     models: (instance.models ?? []).map((model) => ({
       key: newId("model"),
       id: model.id,
@@ -98,6 +120,7 @@ export function AgentEditorDialog({
   const updateInstance = useAgentsStore((state) => state.updateInstance);
   const previewModels = useAgentsStore((state) => state.previewModels);
   const installations = useAgentsStore((state) => state.installations);
+  const instances = useAgentsStore((state) => state.instances);
 
   const [form, setForm] = useState<FormState>(emptyForm);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -198,6 +221,36 @@ export function AgentEditorDialog({
     [form.providerId, locale]
   );
 
+  const webSearchInstanceOptions = useMemo(
+    () => [
+      { value: "", label: t("agents.editor.basic.webSearchInstanceNone") },
+      ...instances
+        .filter((candidate) => candidate.id !== instance?.id && candidate.enabled && canProvideNativeWebSearch(candidate))
+        .map((candidate) => ({ value: candidate.id, label: candidate.displayName }))
+    ],
+    [instance?.id, instances, t]
+  );
+
+  const selectedWebSearchInstance = instances.find((candidate) => candidate.id === form.webSearchInstanceId);
+  const webSearchModelOptions = useMemo(
+    () => [
+      { value: "", label: t("agents.editor.basic.webSearchModelDefault") },
+      ...(selectedWebSearchInstance?.models ?? []).map((model) => ({
+        value: model.id,
+        label: model.displayName ? `${model.displayName} (${model.id})` : model.id
+      }))
+    ],
+    [selectedWebSearchInstance, t]
+  );
+  const selectedWebSearchModel = selectedWebSearchInstance?.models?.find((model) => model.id === form.webSearchModel);
+  const webSearchReasoningOptions = useMemo(
+    () => [
+      { value: "", label: t("agents.editor.basic.webSearchReasoningDefault") },
+      ...(selectedWebSearchModel?.reasoningEfforts ?? []).map((effort) => ({ value: effort, label: effort }))
+    ],
+    [selectedWebSearchModel, t]
+  );
+
   const save = async (): Promise<void> => {
     const nextErrors: typeof errors = {};
     if (!form.displayName.trim()) nextErrors.name = t("agents.editor.nameRequired");
@@ -228,6 +281,11 @@ export function AgentEditorDialog({
       permissionMode: form.permissionMode.trim() || undefined,
       apiKey: form.apiKey.trim() || undefined,
       baseUrl: form.baseUrl.trim() || undefined,
+      wireApi: form.providerId === "codex" ? form.wireApi : undefined,
+      webSearchMode: form.providerId === "codex" ? form.webSearchMode : undefined,
+      webSearchInstanceId: form.providerId === "codex" && form.webSearchMode === "official" ? form.webSearchInstanceId || undefined : undefined,
+      webSearchModel: form.providerId === "codex" && form.webSearchMode === "official" ? form.webSearchModel || undefined : undefined,
+      webSearchReasoningEffort: form.providerId === "codex" && form.webSearchMode === "official" ? form.webSearchReasoningEffort || undefined : undefined,
       models: models.length ? models : undefined,
       enabled: form.enabled
     };
@@ -277,7 +335,8 @@ export function AgentEditorDialog({
             onValueChange={(value) => patch({
               providerId: value,
               executable: installations.find((item) => item.providerId === value)?.executable ?? "",
-              permissionMode: ""
+              permissionMode: "",
+              wireApi: value === "codex" ? form.wireApi : "responses"
             })}
             options={providerOptions}
             placeholder={t("agents.editor.basic.providerPlaceholder")}
@@ -399,6 +458,86 @@ export function AgentEditorDialog({
                 className="font-mono text-[13px]"
               />
             </Field>
+            {form.providerId === "codex" && (
+              <Field
+                label={t("agents.editor.basic.wireApi")}
+                hint={t("agents.editor.basic.wireApiHint")}
+              >
+                <SelectField
+                  aria-label={t("agents.editor.basic.wireApi")}
+                  value={form.wireApi}
+                  onValueChange={(wireApi) => patch({ wireApi: wireApi as CodexWireApi })}
+                  options={[
+                    {
+                      value: "responses",
+                      label: t("agents.editor.basic.wireApiResponses"),
+                      hint: t("agents.editor.basic.wireApiResponsesHint")
+                    },
+                    {
+                      value: "chat",
+                      label: t("agents.editor.basic.wireApiChat"),
+                      hint: t("agents.editor.basic.wireApiChatHint")
+                    }
+                  ]}
+                />
+              </Field>
+            )}
+            {form.providerId === "codex" && (
+              <Field
+                label={t("agents.editor.basic.webSearchMode")}
+                hint={t("agents.editor.basic.webSearchModeHint")}
+              >
+                <SelectField
+                  aria-label={t("agents.editor.basic.webSearchMode")}
+                  value={form.webSearchMode}
+                  onValueChange={(value) => patch({ webSearchMode: value as WebSearchMode })}
+                  options={[
+                    { value: "native", label: t("agents.editor.basic.webSearchNative"), hint: t("agents.editor.basic.webSearchNativeHint") },
+                    { value: "official", label: t("agents.editor.basic.webSearchOfficial"), hint: t("agents.editor.basic.webSearchOfficialHint") },
+                    { value: "off", label: t("agents.editor.basic.webSearchOff"), hint: t("agents.editor.basic.webSearchOffHint") }
+                  ]}
+                />
+              </Field>
+            )}
+            {form.providerId === "codex" && form.webSearchMode === "official" && (
+              <Field
+                label={t("agents.editor.basic.webSearchInstance")}
+                hint={t("agents.editor.basic.webSearchInstanceHint")}
+              >
+                <SelectField
+                  aria-label={t("agents.editor.basic.webSearchInstance")}
+                  value={form.webSearchInstanceId}
+                  onValueChange={(value) => patch({ webSearchInstanceId: value, webSearchModel: "", webSearchReasoningEffort: "" })}
+                  options={webSearchInstanceOptions}
+                />
+              </Field>
+            )}
+            {form.providerId === "codex" && form.webSearchMode === "official" && form.webSearchInstanceId && (
+              <>
+                <Field
+                  label={t("agents.editor.basic.webSearchModel")}
+                  hint={t("agents.editor.basic.webSearchModelHint")}
+                >
+                  <SelectField
+                    aria-label={t("agents.editor.basic.webSearchModel")}
+                    value={form.webSearchModel}
+                    onValueChange={(value) => patch({ webSearchModel: value, webSearchReasoningEffort: "" })}
+                    options={webSearchModelOptions}
+                  />
+                </Field>
+                <Field
+                  label={t("agents.editor.basic.webSearchReasoning")}
+                  hint={t("agents.editor.basic.webSearchReasoningHint")}
+                >
+                  <SelectField
+                    aria-label={t("agents.editor.basic.webSearchReasoning")}
+                    value={form.webSearchReasoningEffort}
+                    onValueChange={(value) => patch({ webSearchReasoningEffort: value })}
+                    options={webSearchReasoningOptions}
+                  />
+                </Field>
+              </>
+            )}
           </div>
         </div>
         <div className="sm:col-span-2 rounded-xl border border-line bg-card-hover/50 p-3.5">

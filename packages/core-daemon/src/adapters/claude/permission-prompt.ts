@@ -9,7 +9,7 @@ const record = (value: unknown): RecordValue => typeof value === "object" && val
 type InteractionHandler = (input: AdapterInteractionInput) => Promise<InteractionResponse>;
 
 /**
- * Maps Claude Code's --permission-prompt-tool calls onto AgentHub interactions.
+ * Maps Claude Code's --permission-prompt-tool calls onto Nautilo interactions.
  * AskUserQuestion is answered with `updatedInput.answers` (keyed by question
  * text, values joined for multi-select); everything else is an allow/deny
  * approval. Cancelling denies, which lets the agent continue without the tool.
@@ -57,7 +57,7 @@ export function buildClaudePermissionPromptHandler(
       if (response.outcome === "selected" && response.optionId === "allow") {
         return { behavior: "allow", updatedInput: input };
       }
-      return { behavior: "deny", message: "User chose to continue refining the plan in AgentHub." };
+      return { behavior: "deny", message: "User chose to continue refining the plan in Nautilo." };
     }
     const response = await requestInteraction({
       kind: "approval",
@@ -69,6 +69,6 @@ export function buildClaudePermissionPromptHandler(
       ]
     });
     if (response.outcome === "selected" && response.optionId === "allow") return { behavior: "allow", updatedInput: input };
-    return { behavior: "deny", message: "User denied this action in AgentHub." };
+    return { behavior: "deny", message: "User denied this action in Nautilo." };
   };
 }

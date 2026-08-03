@@ -1,5 +1,5 @@
 /**
- * AgentHub provider plugin — minimal working template.
+ * Nautilo provider plugin — minimal working template.
  *
  * Wraps any agent CLI that accepts a prompt as a CLI argument and streams its
  * answer to stdout. Copy this package, rename the plugin id in

@@ -688,7 +688,7 @@ export class OrchestrationService {
     this.events.appendForSession(mainSession, { projectRunId }, "approval.requested", {
       approvalId,
       category: "merge",
-      summary: `Merge ${mergeReady.branchName} into ${mergeReady.baseBranch}. AgentHub will not push.`
+      summary: `Merge ${mergeReady.branchName} into ${mergeReady.baseBranch}. Nautilo will not push.`
     });
     this.events.appendForSession(mainSession, { projectRunId }, "run.waiting", { reason: "approval" });
   }

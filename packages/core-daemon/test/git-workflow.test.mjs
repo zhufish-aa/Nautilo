@@ -27,7 +27,7 @@ function createFixture(t, verificationTemplates = [], workspaceMode = "git_isola
   git(root, "init", "-b", "main", repositoryPath);
   writeFileSync(join(repositoryPath, "src", "shared.txt"), "base\n", "utf8");
   git(repositoryPath, "add", ".");
-  git(repositoryPath, "-c", "user.name=AgentHub Test", "-c", "user.email=test@agenthub.local", "commit", "-m", "initial");
+  git(repositoryPath, "-c", "user.name=Nautilo Test", "-c", "user.email=test@agenthub.local", "commit", "-m", "initial");
 
   const database = new Database(":memory:");
   const now = new Date().toISOString();
@@ -265,7 +265,7 @@ test("B-038 aborts conflicts and preserves the target worktree content", async (
 
   writeFileSync(join(run.workspacePath, "src", "shared.txt"), "main run\n", "utf8");
   git(run.workspacePath, "add", ".");
-  git(run.workspacePath, "-c", "user.name=AgentHub Test", "-c", "user.email=test@agenthub.local", "commit", "-m", "main change");
+  git(run.workspacePath, "-c", "user.name=Nautilo Test", "-c", "user.email=test@agenthub.local", "commit", "-m", "main change");
   writeFileSync(join(task.workspacePath, "src", "shared.txt"), "task run\n", "utf8");
 
   const finalized = await fixture.workflow.finalizeTask(run, task, fixture.taskSession, fixture.mainSession);

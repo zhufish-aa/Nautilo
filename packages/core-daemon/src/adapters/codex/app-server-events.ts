@@ -45,7 +45,7 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
   const id = text(item.id);
   if (item.type === "collabAgentToolCall") {
     // Codex multi-agent collab call (spawnAgent / sendInput / wait / …). The
-    // spawnAgent variant is AgentHub's sub-agent dispatch; its receiver thread
+    // spawnAgent variant is Nautilo's sub-agent dispatch; its receiver thread
     // ids are correlated back to this item's id by the run loop.
     const states = record(item.agentsStates);
     const stateSummary = Object.entries(states)

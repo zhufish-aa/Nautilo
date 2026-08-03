@@ -374,9 +374,9 @@ export interface Session {
   title: string;
   status: SessionStatus;
   providerSessionId?: string;
-  /** Set after persisted AgentHub history is synchronized into the provider thread. */
+  /** Set after persisted Nautilo history is synchronized into the provider thread. */
   providerContextSyncedAt?: string;
-  /** AgentHub runtime-tool contract installed into the native provider thread. */
+  /** Nautilo runtime-tool contract installed into the native provider thread. */
   runtimeToolVersion?: number;
   unreadCount: number;
   lastMessageAt?: string;

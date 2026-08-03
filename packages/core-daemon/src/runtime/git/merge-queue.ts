@@ -26,7 +26,7 @@ export class MergeQueue {
 
   private async merge(targetPath: string, sourceBranch: string, targetBranch: string, operation: GitConflict["operation"]): Promise<MergeResult> {
     const previousCommit = (await this.git.run(targetPath, ["rev-parse", "HEAD"])).stdout.trim();
-    const result = await this.git.run(targetPath, ["-c", "user.name=AgentHub", "-c", "user.email=agenthub@local", "merge", "--no-ff", "--no-edit", sourceBranch], { allowFailure: true });
+    const result = await this.git.run(targetPath, ["-c", "user.name=Nautilo", "-c", "user.email=agenthub@local", "merge", "--no-ff", "--no-edit", sourceBranch], { allowFailure: true });
     if (result.exitCode === 0) {
       return { merged: true, commit: (await this.git.run(targetPath, ["rev-parse", "HEAD"])).stdout.trim(), previousCommit };
     }

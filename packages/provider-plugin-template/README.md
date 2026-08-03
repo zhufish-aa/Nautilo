@@ -1,6 +1,6 @@
-# AgentHub Provider 插件模板
+# Nautilo Provider 插件模板
 
-把任意 agent CLI 包装成 AgentHub Provider 的最小可用示例。
+把任意 agent CLI 包装成 Nautilo Provider 的最小可用示例。
 
 ## 结构
 
@@ -21,7 +21,7 @@ pnpm --filter @agenthub/provider-plugin-template build
 
 1. 复制本目录，修改 `agenthub-plugin.json`：
    - `id`：全局唯一的小写短横线 id，同时是 providerId；
-   - `descriptor`：名称、厂商、能力标签、默认可执行文件名、凭证环境变量、权限模式等（渲染端完全靠它展示，无需改 AgentHub 代码）。
+   - `descriptor`：名称、厂商、能力标签、默认可执行文件名、凭证环境变量、权限模式等（渲染端完全靠它展示，无需改 Nautilo 代码）。
 2. 改 `src/index.ts`：
    - `providerId` 改为同样的 id；
    - `detect()`：探测 CLI 是否安装/兼容；
@@ -29,7 +29,7 @@ pnpm --filter @agenthub/provider-plugin-template build
    - 需要续聊就实现 `resume()` 并把 `supportsResume` / `capabilities.nativeResume` 置真。
 3. `pnpm --filter <你的包> build`。
 
-## 安装到 AgentHub
+## 安装到 Nautilo
 
 - 应用内：插件市场页 → 从本地目录安装，选择本目录；
 - 或手动：把整个目录复制到 `~/.agenthub/plugins/<id>/`，重启应用。

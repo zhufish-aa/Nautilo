@@ -129,7 +129,7 @@ test("session-selected main Agent can call delegation as a runtime tool without 
         assert.match(request.prompt, /Never ask one child Agent to obtain status, context, or output from another child Agent/);
         assert.match(request.prompt, /Delegation tools do not forward chat-only attachments or inline images/);
         assert.match(request.runtimeTools[0].description, /cannot read the parent or sibling Agent sessions/);
-        assert.match(request.runtimeTools[1].description, /use dependsOn so AgentHub can supply completed dependency outcomes/);
+        assert.match(request.runtimeTools[1].description, /use dependsOn so Nautilo can supply completed dependency outcomes/);
         receipts.push(await request.executeRuntimeTool({
           providerId: "modern-fake",
           callId: "call-1",
@@ -192,7 +192,7 @@ test("session-selected main Agent can call delegation as a runtime tool without 
   assert.equal(prompts.some((entry) => entry.prompt.includes("[AGENTHUB_PLANNER_DECISION]")), false);
   assert.equal(receipts[0]?.success, true);
   assert.equal(JSON.parse(receipts[0].content).accepted, true);
-  assert.equal(daemon.database.sessions.get(started.mainSession.id)?.runtimeToolVersion, 2);
+  assert.equal(daemon.database.sessions.get(started.mainSession.id)?.runtimeToolVersion, 3);
   assert.ok(prompts.find((entry) => entry.agentId === "modern-main" && entry.prompt.includes("[AGENTHUB_FINAL_SYNTHESIS]")));
   await daemon.stop();
 });
@@ -463,7 +463,7 @@ test("plan validates and executes an acyclic dependency graph in order", async (
   const delegatedPrompts = fixture.prompts.filter((entry) => entry.prompt.includes("[AGENTHUB_DELEGATED_TASK]"));
   assert.ok(delegatedPrompts[0].prompt.includes('"id": "first"'));
   assert.ok(delegatedPrompts[1].prompt.includes('"id": "second"'));
-  assert.match(delegatedPrompts[1].prompt, /Completed dependency outcomes supplied by AgentHub/);
+  assert.match(delegatedPrompts[1].prompt, /Completed dependency outcomes supplied by Nautilo/);
   assert.match(delegatedPrompts[1].prompt, /first done/);
   fixture.database.close();
 });

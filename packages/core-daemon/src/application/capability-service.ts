@@ -129,7 +129,7 @@ function skillTargets(): SkillTarget[] {
   ];
 }
 
-/** Writes/removes provider-native skill files for AgentHub-managed skills. */
+/** Writes/removes provider-native skill files for Nautilo-managed skills. */
 export class SkillFileSync {
   /** Reconciles the on-disk state of one capability across all known providers. */
   sync(capability: ProviderCapability): void {
@@ -193,7 +193,7 @@ export class SkillFileSync {
       const filePath = target.filePath(slug);
       if (!existsSync(filePath)) return;
       const existing = readFileSync(filePath, "utf8");
-      // Only remove files AgentHub wrote for this exact capability.
+      // Only remove files Nautilo wrote for this exact capability.
       if (!existing.includes(`${SKILL_FILE_MARKER}${capability.id}`)) return;
       rmSync(filePath, { force: true });
     } catch (error) {

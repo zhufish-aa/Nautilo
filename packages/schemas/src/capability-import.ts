@@ -32,7 +32,7 @@ export interface SkillCandidate {
   providerIds: string[];
   warnings: string[];
   origin?: string;
-  /** Set when the Markdown carries an AgentHub marker, i.e. we wrote this file. */
+  /** Set when the Markdown carries an Nautilo marker, i.e. we wrote this file. */
   existingId?: string;
   /**
    * Directory holding the scanned `SKILL.md`; its other files are the skill's

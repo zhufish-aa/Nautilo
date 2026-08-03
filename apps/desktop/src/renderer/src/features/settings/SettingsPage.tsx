@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Languages, Bell, Lock, Monitor, Moon, Palette, Plus, Rows3, Sparkles, Sun, TextQuote, Trash2 } from "lucide-react";
+import { Languages, Bell, Lock, Monitor, Moon, Palette, Plus, RotateCcw, Rows3, Sparkles, Sun, TextQuote, Trash2 } from "lucide-react";
 import { getBridge, isElectron } from "../../lib/bridge";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import type { AppInfo } from "../../types/bridge";
 import { PageHeader } from "../../components/layout/AppShell";
 import { MotionCard, StaggerGroup } from "../../components/ui/Card";
+import { Button } from "../../components/ui/Button";
 import { RadioCardGroup } from "../../components/ui/RadioGroup";
 import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
@@ -108,6 +110,7 @@ function ThemePreview({ themeId }: { themeId: string }): JSX.Element {
 
 export function SettingsPage(): JSX.Element {
   const { t } = useI18n();
+  const navigate = useNavigate();
   const theme = useSettingsStore((state) => state.theme);
   const customThemes = useSettingsStore((state) => state.customThemes);
   const locale = useSettingsStore((state) => state.locale);
@@ -124,6 +127,7 @@ export function SettingsPage(): JSX.Element {
   const promptSnippets = useSettingsStore((state) => state.promptSnippets);
   const upsertSnippet = useSettingsStore((state) => state.upsertSnippet);
   const removeSnippet = useSettingsStore((state) => state.removeSnippet);
+  const setOnboardingCompleted = useSettingsStore((state) => state.setOnboardingCompleted);
 
   const [appInfo, setAppInfo] = useState<AppInfo | undefined>();
   useEffect(() => {
@@ -338,6 +342,19 @@ export function SettingsPage(): JSX.Element {
             <Moon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
             {t("settings.about.dataNote")}
           </p>
+          <div className="mt-4">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setOnboardingCompleted(false);
+                navigate("/projects");
+              }}
+            >
+              <RotateCcw className="h-4 w-4" aria-hidden />
+              {t("onboarding.replay")}
+            </Button>
+          </div>
         </Section>
       </StaggerGroup>
     </>

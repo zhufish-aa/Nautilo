@@ -4,7 +4,7 @@ import type { LocaleCode } from "./utils";
 
 const zh = {
   app: {
-    name: "AgentHub",
+    name: "Nautilo",
     tagline: "本地多 Agent 编程工作台",
     skipToContent: "跳到主内容",
     browserBadge: "浏览器预览",
@@ -134,7 +134,7 @@ const zh = {
     count: "{count} 个项目",
     add: "添加项目",
     addTitle: "添加本地项目",
-    addDesc: "选择一个本地目录，AgentHub 会扫描它的 Git、技术栈与目录结构。",
+    addDesc: "选择一个本地目录，Nautilo 会扫描它的 Git、技术栈与目录结构。",
     pathLabel: "项目目录",
     pathPlaceholder: "例如 C:\\work\\my-project",
     nameLabel: "显示名称",
@@ -144,7 +144,7 @@ const zh = {
     scanHint: "扫描为只读操作，不会修改目录内容",
     remove: "移除项目",
     removeTitle: "移除项目",
-    removeDesc: "仅从 AgentHub 移除「{name}」的配置，不会删除磁盘上的任何文件。",
+    removeDesc: "仅从 Nautilo 移除「{name}」的配置，不会删除磁盘上的任何文件。",
     addedToast: "项目「{name}」已添加",
     removedToast: "项目「{name}」已移除",
     duplicateToast: "该目录已在项目列表中",
@@ -286,6 +286,29 @@ const zh = {
         baseUrl: "API 请求地址",
         baseUrlPlaceholder: "https://api.example.com/v1",
         baseUrlHint: "第三方中转/代理服务时填写，留空走默认端点",
+        wireApi: "API 协议",
+        wireApiHint: "Responses 用于 Codex 原生传输；只支持 chat/completions 的中转服务请选择后者",
+        wireApiResponses: "Responses API",
+        wireApiResponsesHint: "Codex 原生模式，支持工具、MCP 和网络搜索",
+        wireApiChat: "Chat Completions API",
+        wireApiChatHint: "兼容模式：直接请求 /chat/completions，适合只提供 Chat API 的第三方服务",
+        webSearchMode: "网络搜索方式",
+        webSearchModeHint: "原生支持时走当前接口；不支持时可切换到指定搜索实例",
+        webSearchNative: "当前接口原生搜索",
+        webSearchNativeHint: "不注入兼容搜索工具，由当前接口自己处理",
+        webSearchOfficial: "指定实例搜索",
+        webSearchOfficialHint: "当前模型调用工具，由选定的官方或第三方实例执行原生搜索",
+        webSearchOff: "关闭搜索",
+        webSearchOffHint: "不提供任何网络搜索工具",
+        webSearchInstance: "搜索实例",
+        webSearchInstanceHint: "选择支持原生 web_search 的 Codex 实例，官方和第三方端点都可以",
+        webSearchInstanceNone: "请选择实例",
+        webSearchModel: "搜索模型",
+        webSearchModelHint: "选择执行搜索的模型，留空使用该实例的默认模型",
+        webSearchModelDefault: "默认模型",
+        webSearchReasoning: "搜索推理强度",
+        webSearchReasoningHint: "选择搜索模型的推理强度，留空使用默认值",
+        webSearchReasoningDefault: "默认强度",
         showKey: "显示 API Key",
         hideKey: "隐藏 API Key"
       },
@@ -311,7 +334,7 @@ const zh = {
     },
     providers: {
       desc: "本机 CLI 的安装与可用性检测结果。",
-      notice: "仅展示本机 CLI 的检测结果；登录与授权由各 CLI 自行管理，AgentHub 不接管第三方账号流程。",
+      notice: "仅展示本机 CLI 的检测结果；登录与授权由各 CLI 自行管理，Nautilo 不接管第三方账号流程。",
       executable: "可执行路径",
       version: "版本",
       minVersion: "需要 ≥ {version}",
@@ -1016,6 +1039,38 @@ const zh = {
         "engine-load": "预览引擎加载失败，请重试"
       }
     }
+  },
+  onboarding: {
+    step: "第 {current} / {total} 步",
+    skip: "跳过",
+    prev: "上一步",
+    next: "下一步",
+    finish: "完成",
+    replay: "重新观看新手引导",
+    welcome: {
+      title: "欢迎来到 Nautilo",
+      desc: "花 30 秒了解核心用法：检测 Agent、组建团队、接入项目，然后开始对话。"
+    },
+    agents: {
+      title: "Agent 与实例",
+      desc: "这里自动检测本机已安装的 CLI（Codex、Claude Code、Kimi Code 等），并创建 Agent 实例。"
+    },
+    teams: {
+      title: "团队",
+      desc: "把多个 Agent 组建成团队，分配角色，让它们协同完成更大的任务。"
+    },
+    projects: {
+      title: "项目",
+      desc: "点击「新建项目」接入本地文件夹，Agent 才能在你的代码上工作。"
+    },
+    sessions: {
+      title: "会话",
+      desc: "点击「新建会话」，选择 Agent 或团队开始对话；左侧列表管理历史会话。"
+    },
+    done: {
+      title: "教程完成",
+      desc: "开始你的第一个任务吧。随时可以在「设置」里重新观看本教程。"
+    }
   }
 };
 
@@ -1023,7 +1078,7 @@ export type Messages = typeof zh;
 
 const en: Messages = {
   app: {
-    name: "AgentHub",
+    name: "Nautilo",
     tagline: "Local multi-agent coding workbench",
     skipToContent: "Skip to main content",
     browserBadge: "Browser preview",
@@ -1153,7 +1208,7 @@ const en: Messages = {
     count: "{count} projects",
     add: "Add project",
     addTitle: "Add a local project",
-    addDesc: "Pick a local directory and AgentHub scans its Git state, tech stack and layout.",
+    addDesc: "Pick a local directory and Nautilo scans its Git state, tech stack and layout.",
     pathLabel: "Project directory",
     pathPlaceholder: "e.g. C:\\work\\my-project",
     nameLabel: "Display name",
@@ -1163,7 +1218,7 @@ const en: Messages = {
     scanHint: "Scanning is read-only and never modifies the directory",
     remove: "Remove project",
     removeTitle: "Remove project",
-    removeDesc: "Only removes the configuration of “{name}” from AgentHub. Nothing on disk is deleted.",
+    removeDesc: "Only removes the configuration of “{name}” from Nautilo. Nothing on disk is deleted.",
     addedToast: "Project “{name}” added",
     removedToast: "Project “{name}” removed",
     duplicateToast: "This directory is already in the project list",
@@ -1305,6 +1360,29 @@ const en: Messages = {
         baseUrl: "API base URL",
         baseUrlPlaceholder: "https://api.example.com/v1",
         baseUrlHint: "For third-party relay/proxy services; empty uses the default endpoint",
+        wireApi: "API protocol",
+        wireApiHint: "Use Responses for native Codex transport; choose Chat Completions for relays that only expose /chat/completions.",
+        wireApiResponses: "Responses API",
+        wireApiResponsesHint: "Native Codex transport with tools, MCP, and web search support",
+        wireApiChat: "Chat Completions API",
+        wireApiChatHint: "Compatibility mode for providers exposing only /chat/completions",
+        webSearchMode: "Web search mode",
+        webSearchModeHint: "Use the current provider when it supports native search; otherwise use the selected search instance",
+        webSearchNative: "Current provider native search",
+        webSearchNativeHint: "Do not inject a compatibility search tool",
+        webSearchOfficial: "Selected instance search",
+        webSearchOfficialHint: "The current model calls a tool executed by the selected official or third-party instance",
+        webSearchOff: "Disable search",
+        webSearchOffHint: "Do not expose any web search tool",
+        webSearchInstance: "Search instance",
+        webSearchInstanceHint: "Select a Codex instance with native web_search support; official and third-party endpoints are allowed",
+        webSearchInstanceNone: "Select an instance",
+        webSearchModel: "Search model",
+        webSearchModelHint: "Choose the model that performs the search; empty uses the instance default",
+        webSearchModelDefault: "Default model",
+        webSearchReasoning: "Search reasoning effort",
+        webSearchReasoningHint: "Choose the search model's reasoning effort; empty uses the default",
+        webSearchReasoningDefault: "Default effort",
         showKey: "Show API key",
         hideKey: "Hide API key"
       },
@@ -1330,7 +1408,7 @@ const en: Messages = {
     },
     providers: {
       desc: "Installation and availability of local CLIs.",
-      notice: "Only local CLI detection is shown. Sign-in and authorization stay with each CLI — AgentHub never brokers third-party accounts.",
+      notice: "Only local CLI detection is shown. Sign-in and authorization stay with each CLI — Nautilo never brokers third-party accounts.",
       executable: "Executable",
       version: "Version",
       minVersion: "Requires ≥ {version}",
@@ -2034,6 +2112,38 @@ const en: Messages = {
         corrupted: "The file is corrupted or its format is unsupported",
         "engine-load": "The preview engine failed to load — try again"
       }
+    }
+  },
+  onboarding: {
+    step: "Step {current} of {total}",
+    skip: "Skip",
+    prev: "Back",
+    next: "Next",
+    finish: "Finish",
+    replay: "Replay the onboarding tour",
+    welcome: {
+      title: "Welcome to Nautilo",
+      desc: "Take 30 seconds to learn the basics: detect agents, build a team, attach a project, then start chatting."
+    },
+    agents: {
+      title: "Agents & instances",
+      desc: "Nautilo detects the CLIs installed on this machine (Codex, Claude Code, Kimi Code, etc.) and creates agent instances here."
+    },
+    teams: {
+      title: "Teams",
+      desc: "Group multiple agents into a team, assign roles, and let them collaborate on bigger tasks."
+    },
+    projects: {
+      title: "Projects",
+      desc: "Click \"New project\" to attach a local folder so agents can work on your code."
+    },
+    sessions: {
+      title: "Sessions",
+      desc: "Click \"New session\" to start a conversation with an agent or a team; the left panel keeps your history."
+    },
+    done: {
+      title: "All set",
+      desc: "Start your first task now. You can replay this tour anytime from Settings."
     }
   }
 };

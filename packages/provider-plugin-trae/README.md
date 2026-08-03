@@ -1,10 +1,10 @@
 # @agenthub/provider-plugin-trae
 
-Trae 的 AgentHub Provider 插件。**Trae 不内置在 AgentHub 中，本插件是它的唯一接入方式**——安装后 Provider 列表出现 Trae，卸载后即移除。
+Trae 的 Nautilo Provider 插件。**Trae 不内置在 Nautilo 中，本插件是它的唯一接入方式**——安装后 Provider 列表出现 Trae，卸载后即移除。
 
 一个插件同时支持两个 Trae CLI，按二进制探测结果自动选择传输：
 
-- **官方 TRAE CLI（`traecli`，仅企业版）**：ACP 协议接入（`traecli acp serve`，ndjson JSON-RPC）。支持流式消息/思考、工具调用卡片、`usage_update` 上下文用量、`available_commands_update` 原生指令、权限请求桥接到 AgentHub 审批、`session/load` 会话恢复、经 `configOptions` 的模型/推理档位透传。
+- **官方 TRAE CLI（`traecli`，仅企业版）**：ACP 协议接入（`traecli acp serve`，ndjson JSON-RPC）。支持流式消息/思考、工具调用卡片、`usage_update` 上下文用量、`available_commands_update` 原生指令、权限请求桥接到 Nautilo 审批、`session/load` 会话恢复、经 `configOptions` 的模型/推理档位透传。
 - **开源 trae-agent（`trae-cli`）**：无头 `trae-cli run` 纯文本模式。仅单轮任务：无会话恢复、无用量上报，完整输出作为最终消息返回。
 
 其他行为：
@@ -24,4 +24,4 @@ pnpm --filter @agenthub/provider-plugin-trae build
 
 ## 安装
 
-在 AgentHub「Agents → 插件市场」页选择"本地安装"，选中本目录（需先构建出 `dist/`）；或将本目录打包为 `.tgz` 上架到插件市场 registry。实例的可执行文件默认为 `traecli`，未安装官方 CLI 时改为 `trae-cli`。
+在 Nautilo「Agents → 插件市场」页选择"本地安装"，选中本目录（需先构建出 `dist/`）；或将本目录打包为 `.tgz` 上架到插件市场 registry。实例的可执行文件默认为 `traecli`，未安装官方 CLI 时改为 `trae-cli`。

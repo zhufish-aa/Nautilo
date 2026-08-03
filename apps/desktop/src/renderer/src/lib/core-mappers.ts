@@ -24,7 +24,12 @@ export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
     providerOptions: {
       envPolicyId: instance.envPolicyId,
       ...(instance.permissionMode ? { permissionMode: instance.permissionMode } : {}),
-      ...(instance.baseUrl ? { baseUrl: instance.baseUrl } : {})
+      ...(instance.baseUrl ? { baseUrl: instance.baseUrl } : {}),
+      ...(instance.wireApi ? { wireApi: instance.wireApi } : {}),
+      ...(instance.webSearchMode ? { webSearchMode: instance.webSearchMode } : {}),
+      ...(instance.webSearchInstanceId ? { webSearchInstanceId: instance.webSearchInstanceId } : {}),
+      ...(instance.webSearchModel ? { webSearchModel: instance.webSearchModel } : {}),
+      ...(instance.webSearchReasoningEffort ? { webSearchReasoningEffort: instance.webSearchReasoningEffort } : {})
     },
     capabilities: providerMeta(instance.providerId).capabilities,
     enabled: instance.enabled,
@@ -45,6 +50,13 @@ export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
     envPolicyId: typeof instance.providerOptions?.envPolicyId === "string" ? instance.providerOptions.envPolicyId : "env-standard",
     permissionMode: typeof instance.providerOptions?.permissionMode === "string" ? instance.providerOptions.permissionMode : undefined,
     baseUrl: typeof instance.providerOptions?.baseUrl === "string" ? instance.providerOptions.baseUrl : undefined,
+    wireApi: instance.providerOptions?.wireApi === "chat" ? "chat" : "responses",
+    webSearchMode: instance.providerOptions?.webSearchMode === "official" || instance.providerOptions?.webSearchMode === "off"
+      ? instance.providerOptions.webSearchMode
+      : instance.providerOptions?.wireApi === "chat" ? "off" : "native",
+    webSearchInstanceId: typeof instance.providerOptions?.webSearchInstanceId === "string" ? instance.providerOptions.webSearchInstanceId : undefined,
+    webSearchModel: typeof instance.providerOptions?.webSearchModel === "string" ? instance.providerOptions.webSearchModel : undefined,
+    webSearchReasoningEffort: typeof instance.providerOptions?.webSearchReasoningEffort === "string" ? instance.providerOptions.webSearchReasoningEffort : undefined,
     models: instance.models,
     enabled: instance.enabled,
     status: instance.status,

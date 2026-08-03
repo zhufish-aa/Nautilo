@@ -8,9 +8,12 @@ import { registerInteractionHandlers } from "./desktop-interactions";
 import { registerProviderUpdateHandlers } from "./provider-updates";
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
+const legacyUserDataPath = app.getPath("userData");
+app.setName("Nautilo");
+app.setPath("userData", legacyUserDataPath);
 const appIcon = isDev
-  ? join(__dirname, "../../resources/agenthub-icon-512.png")
-  : join(process.resourcesPath, "app", "resources", "agenthub-icon.png");
+  ? join(__dirname, "../../resources/nautilo-icon-512.png")
+  : join(process.resourcesPath, "app", "resources", "nautilo-icon.png");
 const coreDaemon = new CoreDaemonClient();
 registerArtifactScheme();
 
@@ -33,7 +36,7 @@ function registerIpcHandlers(): void {
   // Whitelisted shell-level IPC only. Business APIs are served by the Core
   // Daemon gateway (backend scope) and are intentionally not bridged here.
   ipcMain.handle("app:get-info", () => ({
-    name: "AgentHub",
+    name: "Nautilo",
     version: app.getVersion(),
     platform: process.platform,
     arch: process.arch,
@@ -121,7 +124,7 @@ function createMainWindow(): BrowserWindow {
     autoHideMenuBar: true,
     backgroundColor: "#090b10",
     icon: appIcon,
-    title: "AgentHub",
+    title: "Nautilo",
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,

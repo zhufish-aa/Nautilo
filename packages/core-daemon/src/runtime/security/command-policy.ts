@@ -40,7 +40,7 @@ export class CommandPolicyService {
         { id: "block-force-push", action: "blocked", executable: "git", argsPrefix: ["push", "--force"], description: "Force push is blocked" },
         { id: "safe-agent-launch", action: "safe", executable: "*", sources: ["agent"], description: "Configured Agent CLI launch" },
         { id: "safe-registered-verification", action: "safe", executable: "*", sources: ["verification"], description: "Project-registered verification command" },
-        { id: "safe-system", action: "safe", executable: "*", sources: ["system"], description: "AgentHub internal command" }
+        { id: "safe-system", action: "safe", executable: "*", sources: ["system"], description: "Nautilo internal command" }
       ],
       updatedAt: new Date().toISOString()
     };

@@ -118,7 +118,7 @@ function discoveryWarning(reason: string, env: Record<string, string | undefined
 
 /**
  * Live model discovery through the Anthropic models API, so newly released
- * models show up without an AgentHub update. Falls back to the CLI alias
+ * models show up without an Nautilo update. Falls back to the CLI alias
  * catalog when the instance has no API credential or the endpoint is down.
  */
 export async function discoverClaudeModels(env?: Record<string, string | undefined>): Promise<ProviderModelCatalog> {

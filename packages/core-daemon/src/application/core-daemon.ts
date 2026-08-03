@@ -100,7 +100,7 @@ export class CoreDaemon {
       ? undefined
       : new GitWorkflowService(this.database, this.events, options.worktreeRoot ?? join(dataDir, "worktrees"), this.redaction);
     this.orchestration = new OrchestrationService(this.database, this.runs, this.events, this.gitWorkflows, this.approvals);
-    this.runs.setRuntimeToolProvider(new MainAgentRuntimeToolProvider(this.database, this.orchestration));
+    this.runs.setRuntimeToolProvider(new MainAgentRuntimeToolProvider(this.database, this.orchestration, this.credentials));
     this.metrics = new MetricsService(this.database);
     this.diagnostics = new DiagnosticsService(this.database, this.audit, this.metrics, this.redaction, dataDir);
     this.recovery = new RecoveryService(this.database, this.audit, this.events);

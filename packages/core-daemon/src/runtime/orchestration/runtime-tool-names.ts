@@ -1,6 +1,7 @@
 export const RUNTIME_TOOL_NAMES = {
   delegate: "agenthub_delegate",
-  plan: "agenthub_plan"
+  plan: "agenthub_plan",
+  officialWebSearch: "agenthub_web_search"
 } as const;
 
 /** Accepts legacy dotted names while all newly registered tools use provider-safe names. */

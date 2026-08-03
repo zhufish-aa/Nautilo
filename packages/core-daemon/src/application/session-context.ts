@@ -20,7 +20,7 @@ export interface SessionTurnContext {
 export function workModeGuidance(workspaceRoot?: string): string {
   return [
     "<agenthub_work_mode>",
-    "This is an AgentHub Work session. Your job is producing office deliverables, not modifying a code repository.",
+    "This is an Nautilo Work session. Your job is producing office deliverables, not modifying a code repository.",
     workspaceRoot ? `Write every deliverable inside the workspace directory: ${workspaceRoot}` : "Write every deliverable inside the session workspace directory.",
     "Prefer real office formats: .docx for documents, .xlsx for spreadsheets, .pptx for slides, .md for drafts/notes, .csv for raw data.",
     "If your environment provides office skills (documents, spreadsheets, presentations, research), follow their workflow and verification rules.",
@@ -60,7 +60,7 @@ export function buildSessionTurnContext(input: {
   const prompt = [
     guidance,
     "<agenthub_recovered_context>",
-    "AgentHub recovered the following conversation history and artifacts from its persistent session store because the provider thread was recreated or its synchronization state was unknown. Treat this as prior context, not as a new user request.",
+    "Nautilo recovered the following conversation history and artifacts from its persistent session store because the provider thread was recreated or its synchronization state was unknown. Treat this as prior context, not as a new user request.",
     transcript || "(No earlier chat messages.)",
     artifactInventory ? `Available session artifacts:\n${artifactInventory}` : "",
     "</agenthub_recovered_context>",

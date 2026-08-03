@@ -1,6 +1,6 @@
 import type { ProcessEvent } from "../../process-runtime.js";
 import { ProcessRuntime } from "../../process-runtime.js";
-import { JsonRpcProcessClient } from "../json-rpc-process.js";
+import { JsonRpcProcessClient, type JsonRpcProcessEvent } from "../json-rpc-process.js";
 import type { AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest } from "../types.js";
 import { resolvePermissionMode } from "../permission-mode.js";
 import { parseKimiAcpUpdate, type KimiAcpParseState } from "./acp-events.js";
@@ -8,9 +8,31 @@ import { KimiAcpTurnSegments } from "./acp-segments.js";
 import { readKimiSessionUsage } from "./session-usage.js";
 import { startKimiRuntimeMcpBridge, type KimiRuntimeMcpBridge } from "./runtime-mcp-server.js";
 import { normalizeKimiPermissionInteraction } from "./interaction.js";
+import { KimiSubagentWireWatcher } from "./subagent-wire.js";
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue => typeof value === "object" && value !== null ? value as RecordValue : {};
+const KIMI_SUBAGENT_POLL_MS = 300;
+
+function isKimiAgentTool(event: AdapterEvent): event is Extract<AdapterEvent, { kind: "tool" }> {
+  return event.kind === "tool" && event.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "") === "agent";
+}
+
+async function nextRpcOrPoll(
+  nextRpc: Promise<IteratorResult<JsonRpcProcessEvent>>,
+  poll: boolean
+): Promise<{ source: "rpc"; result: IteratorResult<JsonRpcProcessEvent> } | { source: "poll" }> {
+  if (!poll) return { source: "rpc", result: await nextRpc };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      nextRpc.then((result) => ({ source: "rpc" as const, result })),
+      new Promise<{ source: "poll" }>((resolve) => { timer = setTimeout(() => resolve({ source: "poll" }), KIMI_SUBAGENT_POLL_MS); })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function transportEvent(event: ProcessEvent): AdapterEvent | undefined {
   if (event.kind === "stdout") return { kind: "raw", stream: "stdout", text: event.text };
@@ -40,7 +62,7 @@ async function applyConfig(rpc: JsonRpcProcessClient, sessionId: string, respons
       const name = String(item.name ?? "").toLowerCase();
       return id === "mode" || name === "mode" || id === "permission" || name === "permission";
     });
-    // Older AgentHub builds saved "manual"; the CLI calls that mode "default".
+    // Older Nautilo builds saved "manual"; the CLI calls that mode "default".
     const value = mode === "manual" ? "default" : mode;
     if (option?.id) await rpc.request("session/set_config_option", { sessionId, configId: option.id, value }).catch(() => undefined);
   }
@@ -100,7 +122,7 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
       await rpc.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
-        clientInfo: { name: "AgentHub", version: "0.1.0" }
+        clientInfo: { name: "Nautilo", version: "0.1.0" }
       });
       const sessionResponse = record(await rpc.request(resume ? "session/resume" : "session/new", resume
         ? { sessionId: (request as AdapterResumeRequest).providerSessionId, cwd: request.cwd, mcpServers }
@@ -108,6 +130,11 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
       sessionId = String(sessionResponse.sessionId ?? (resume ? (request as AdapterResumeRequest).providerSessionId : ""));
       if (!sessionId) throw new Error("Kimi ACP did not return a session id");
       yield { kind: "session", providerSessionId: sessionId };
+      const subagentWires = new KimiSubagentWireWatcher(
+        sessionId,
+        request.env?.KIMI_CODE_HOME
+      );
+      await subagentWires.initialize();
       // Resume spawns a fresh CLI process whose mode/model reset to defaults
       // (the resume response carries configOptions too), so re-apply every time.
       await applyConfig(rpc, sessionId, sessionResponse, request);
@@ -115,15 +142,34 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
       const prompt = rpc.requestWithId("session/prompt", { sessionId, prompt: [{ type: "text", text: request.prompt }] });
       void prompt.promise.catch(() => undefined);
 
-      for await (const event of rpc) {
+      const rpcEvents = rpc[Symbol.asyncIterator]();
+      let nextRpc = rpcEvents.next();
+      while (true) {
+        const next = await nextRpcOrPoll(nextRpc, subagentWires.hasActive());
+        if (next.source === "poll") {
+          for (const item of await subagentWires.poll()) yield item;
+          continue;
+        }
+        if (next.result.done) break;
+        const event = next.result.value;
+        nextRpc = rpcEvents.next();
         if (event.kind === "notification" && event.method === "session/update") {
           const update = record(event.params).update;
           const parsed = parseKimiAcpUpdate(update, state);
           for (const boundary of segments.flushBefore(parsed)) yield boundary;
           for (const item of parsed) {
+            if (isKimiAgentTool(item) && item.callId && item.phase === "started") {
+              subagentWires.track(item.callId, item.input);
+            }
+            if (isKimiAgentTool(item) && item.callId && item.phase === "completed") {
+              for (const childItem of await subagentWires.poll()) yield childItem;
+            }
             segments.append(item);
             if (item.kind === "usage") usageReceived = true;
             yield item;
+            if (isKimiAgentTool(item) && item.callId && item.phase === "completed") {
+              subagentWires.release(item.callId);
+            }
           }
         } else if (event.kind === "request" && event.method === "session/request_permission") {
           const params = record(event.params);
@@ -144,8 +190,9 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
             else rpc.respond(event.id, { outcome: { outcome: "cancelled" } });
           }
         } else if (event.kind === "request") {
-          rpc.respondError(event.id, -32601, `AgentHub does not support ACP request ${event.method}`);
+          rpc.respondError(event.id, -32601, `Nautilo does not support ACP request ${event.method}`);
         } else if (event.kind === "response" && event.id === prompt.id) {
+          for (const childItem of await subagentWires.poll()) yield childItem;
           for (const completed of [...segments.flushMessage(), ...segments.flushThinking()]) yield completed;
           if (!usageReceived && sessionId) {
             const configOptions = Array.isArray(sessionResponse.configOptions) ? sessionResponse.configOptions.map(record) : [];

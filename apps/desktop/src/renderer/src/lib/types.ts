@@ -43,6 +43,8 @@ export interface EnvironmentPolicy {
 
 /** A CLI-native permission mode exposed for a provider (e.g. Codex approval modes). */
 export type PermissionModeOption = ProviderPermissionMode;
+export type CodexWireApi = "responses" | "chat";
+export type WebSearchMode = "native" | "official" | "off";
 
 export interface AgentInstanceConfig {
   id: string;
@@ -58,6 +60,13 @@ export interface AgentInstanceConfig {
   apiKey?: string;
   credentialStored?: boolean;
   baseUrl?: string;
+  wireApi?: CodexWireApi;
+  webSearchMode?: WebSearchMode;
+  webSearchInstanceId?: string;
+  /** Model used when this instance delegates search to another instance. */
+  webSearchModel?: string;
+  /** Reasoning effort used by the delegated search model. */
+  webSearchReasoningEffort?: string;
   /** User-curated model list; empty/undefined means live discovery is used as-is. */
   models?: InstanceModelConfig[];
   enabled: boolean;

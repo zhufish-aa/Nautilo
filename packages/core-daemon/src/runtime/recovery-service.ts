@@ -56,7 +56,7 @@ export class RecoveryService {
     if (!started || terminal) return;
     this.events.append(session, run, "run.failed", {
       code: "DAEMON_RESTARTED",
-      message: "AgentHub exited while this run was still in progress; the run was interrupted.",
+      message: "Nautilo exited while this run was still in progress; the run was interrupted.",
       retryable: true
     });
   }

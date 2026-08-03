@@ -9,7 +9,7 @@ export interface SlashCommandDefinition {
   description: string;
   icon: SlashCommandIcon;
   availability: SlashCommandAvailability;
-  /** AgentHub commands open structured local UI; provider commands are sent to the active CLI session. */
+  /** Nautilo commands open structured local UI; provider commands are sent to the active CLI session. */
   execution?: "agenthub" | "provider";
   /**
    * Provider-native control command this entry maps to. When set, the daemon

@@ -16,7 +16,7 @@ export function claudePermissionArgs(instance: AgentInstance, request?: AdapterS
 }
 
 function modelArgs(request?: AdapterStartRequest): string[] {
-  // "default" is an AgentHub catalog entry meaning "whatever the CLI is configured with".
+  // "default" is an Nautilo catalog entry meaning "whatever the CLI is configured with".
   return request?.model && request.model !== "default" ? ["--model", request.model] : [];
 }
 
@@ -44,7 +44,7 @@ export function claudeSettingsArgs(request?: AdapterStartRequest): string[] {
 
 /**
  * Headless MCP config: user-managed servers merged with the run-scoped
- * AgentHub tool bridge. User server tools are pre-allowed so headless runs do
+ * Nautilo tool bridge. User server tools are pre-allowed so headless runs do
  * not stall on a permission prompt.
  */
 export function claudeRuntimeMcpArgs(bridgeUrl: string | undefined, servers: AdapterMcpServer[] = []): string[] {
@@ -77,7 +77,7 @@ export function claudeRuntimeMcpArgs(bridgeUrl: string | undefined, servers: Ada
 
 /**
  * Routes Claude Code permission prompts (including AskUserQuestion) through
- * the AgentHub interaction bridge. The flag points at the bridge's
+ * the Nautilo interaction bridge. The flag points at the bridge's
  * permission_prompt tool, so it requires the bridge to be listening.
  */
 export function claudePermissionPromptToolArgs(request: AdapterStartRequest | AdapterResumeRequest, bridge: RuntimeMcpBridge | undefined): string[] {

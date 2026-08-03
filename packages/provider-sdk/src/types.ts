@@ -15,7 +15,7 @@ export type {
 } from "@agenthub/domain";
 
 /**
- * Public contract between AgentHub and a provider (agent CLI) adapter.
+ * Public contract between Nautilo and a provider (agent CLI) adapter.
  *
  * These types are the stable plugin API surface: built-in adapters in
  * core-daemon and third-party provider plugins implement the same
@@ -69,7 +69,7 @@ export interface AdapterStartRequest {
   maxOutputBytes?: number;
   outputSchemaPath?: string;
   localImagePaths?: string[];
-  /** Tools supplied by AgentHub for this provider session, such as delegation. */
+  /** Tools supplied by Nautilo for this provider session, such as delegation. */
   runtimeTools?: RuntimeToolSpec[];
   executeRuntimeTool?: RuntimeToolExecutor;
   /**

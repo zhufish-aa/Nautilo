@@ -11,7 +11,7 @@ export const CODEX_IMAGE_GENERATION_TOOL_NAME = "image_gen";
 
 export const CODEX_IMAGE_GENERATION_TOOL: RuntimeToolSpec = {
   name: CODEX_IMAGE_GENERATION_TOOL_NAME,
-  description: "Generate an image through the configured AgentHub image endpoint and save it in the current workspace. Use this for image generation requests.",
+  description: "Generate an image through the configured Nautilo image endpoint and save it in the current workspace. Use this for image generation requests.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -45,7 +45,7 @@ export function isCodexImageGenerationConfigured(request: CodexImageRequest): bo
   );
 }
 
-/** Executes the AgentHub bridge used when Codex's host-only native tool is unavailable. */
+/** Executes the Nautilo bridge used when Codex's host-only native tool is unavailable. */
 export async function executeCodexImageGeneration(
   request: CodexImageRequest,
   argumentsValue: unknown

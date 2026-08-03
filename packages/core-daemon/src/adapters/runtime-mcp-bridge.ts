@@ -31,9 +31,9 @@ export interface PermissionPromptResult {
 export const PERMISSION_PROMPT_TOOL_NAME = "permission_prompt";
 
 /**
- * Exposes run-scoped AgentHub tools to a provider CLI over loopback Streamable
+ * Exposes run-scoped Nautilo tools to a provider CLI over loopback Streamable
  * HTTP. The random path is a bearer capability and the server exists only for
- * one provider process, so tools never leak into another AgentHub session.
+ * one provider process, so tools never leak into another Nautilo session.
  */
 export async function startRuntimeMcpBridge(
   providerId: string,
@@ -52,7 +52,7 @@ export async function startRuntimeMcpBridge(
     { name: "agenthub-runtime", version: "0.1.0" },
     {
       capabilities: { tools: {} },
-      instructions: "AgentHub session-scoped orchestration tools. Call them only when delegation is useful."
+      instructions: "Nautilo session-scoped orchestration tools. Call them only when delegation is useful."
     }
   );
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -65,7 +65,7 @@ export async function startRuntimeMcpBridge(
       ...(onPermissionPrompt
         ? [{
             name: PERMISSION_PROMPT_TOOL_NAME,
-            description: "AgentHub permission prompt bridge used by --permission-prompt-tool; not for direct model use.",
+            description: "Nautilo permission prompt bridge used by --permission-prompt-tool; not for direct model use.",
             inputSchema: {
               type: "object",
               properties: {
@@ -92,7 +92,7 @@ export async function startRuntimeMcpBridge(
       }
     }
     const tool = byPublicName.get(request.params.name);
-    if (!tool || !execute) return { isError: true, content: [{ type: "text", text: `Unknown AgentHub tool: ${request.params.name}` }] };
+    if (!tool || !execute) return { isError: true, content: [{ type: "text", text: `Unknown Nautilo tool: ${request.params.name}` }] };
     try {
       const result = await execute({
         providerId,
@@ -136,7 +136,7 @@ export async function startRuntimeMcpBridge(
   if (!address || typeof address === "string") {
     await transport.close();
     await new Promise<void>((resolve) => http.close(() => resolve()));
-    throw new Error("AgentHub could not allocate a runtime tool endpoint");
+    throw new Error("Nautilo could not allocate a runtime tool endpoint");
   }
 
   let closed = false;

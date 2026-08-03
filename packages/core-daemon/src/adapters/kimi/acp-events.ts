@@ -69,6 +69,11 @@ function firstString(input: RecordValue, keys: readonly string[]): string | unde
   return undefined;
 }
 
+function agentPrompt(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return firstString(value as RecordValue, ["prompt", "instruction", "instructions", "message", "goal"]);
+}
+
 function fileDiff(toolName: string, value: unknown): AdapterFileDiff | undefined {
   const normalized = toolName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
   const isEdit = normalized === "edit"
@@ -166,9 +171,11 @@ export function parseKimiAcpUpdate(value: unknown, state: KimiAcpParseState): Ad
       output: output ?? previous?.output
     };
     state.toolCalls.set(callId, next);
+    const gainedInput = previous?.input === undefined && next.input !== undefined;
+    const gainedAgentPrompt = agentPrompt(previous?.input) !== agentPrompt(next.input) && agentPrompt(next.input) !== undefined;
     if (
       previous?.phase === "completed"
-      || (!completed && previous?.phase === "started" && previous.inputIdentity === next.inputIdentity)
+      || (!completed && previous?.phase === "started" && previous.inputIdentity === next.inputIdentity && !gainedInput && !gainedAgentPrompt)
     ) return [];
     return [{
       kind: "tool",

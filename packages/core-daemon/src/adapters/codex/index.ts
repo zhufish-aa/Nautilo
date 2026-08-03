@@ -7,3 +7,5 @@ export * from "./app-server-events.js";
 export * from "./app-server-run.js";
 export * from "./provider-config.js";
 export * from "./image-generation.js";
+export * from "./chat-completions-run.js";
+export * from "./chat-compat-proxy.js";

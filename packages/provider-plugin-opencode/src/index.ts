@@ -1,5 +1,5 @@
 /**
- * AgentHub provider plugin for OpenCode.
+ * Nautilo provider plugin for OpenCode.
  *
  * Uses OpenCode's headless server API and reuses one server per configured
  * instance/workspace instead of paying a process cold start on every turn.
@@ -180,7 +180,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
   /**
    * OpenCode's `run --format json` command explicitly denies question and
    * plan_exit requests. Use its documented headless server API instead so the
-   * plugin can bridge question.asked to AgentHub and reply over HTTP.
+   * plugin can bridge question.asked to Nautilo and reply over HTTP.
    */
   private serverRun(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
     let server: ManagedServer | undefined;

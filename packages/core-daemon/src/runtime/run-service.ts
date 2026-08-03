@@ -234,7 +234,7 @@ export class RunService {
     };
     const runtimeToolBinding = context.presentation === "provider_command"
       ? undefined
-      : this.runtimeToolProvider?.forRun(session, context);
+      : this.runtimeToolProvider?.forRun(session, context, agent);
     const request = {
       instance: agent,
       prompt,

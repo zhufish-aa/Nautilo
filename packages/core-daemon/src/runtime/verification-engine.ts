@@ -47,8 +47,8 @@ export class VerificationEngine {
       for await (const event of handle.events) {
         if (event.kind === "stdout" || event.kind === "stderr") output += event.text;
         else if (event.kind === "exit") exitCode = event.exitCode ?? -1;
-        else if (event.kind === "timeout") output += `\n[AgentHub] ${event.reason}\n`;
-        else if (event.kind === "error") output += `\n[AgentHub] ${event.error.message}\n`;
+        else if (event.kind === "timeout") output += `\n[Nautilo] ${event.reason}\n`;
+        else if (event.kind === "error") output += `\n[Nautilo] ${event.error.message}\n`;
       }
       output = this.redaction.text(output);
       const artifact = this.artifacts.save({ kind: "test_report", name: `${template.name}.log`, content: output, projectRunId: context.projectRunId, taskId: context.taskId, sessionId: context.sessionId, metadata: { commandTemplateId: template.id, exitCode } });

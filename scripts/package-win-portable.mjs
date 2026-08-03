@@ -7,7 +7,7 @@ import { rcedit } from "rcedit";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const releaseRoot = join(repositoryRoot, "release");
-const releaseName = "AgentHub-win32-x64";
+const releaseName = "Nautilo-win32-x64";
 let applicationDirectory = join(releaseRoot, releaseName);
 let archivePath = join(releaseRoot, `${releaseName}.zip`);
 
@@ -51,7 +51,7 @@ function copyDirectory(source, target) {
 
 const nodeVersion = process.versions.node.split(".").map(Number);
 if (nodeVersion[0] < 22 || (nodeVersion[0] === 22 && nodeVersion[1] < 5)) {
-  throw new Error(`AgentHub packaging requires Node.js 22.5 or newer; found ${process.versions.node}`);
+  throw new Error(`Nautilo packaging requires Node.js 22.5 or newer; found ${process.versions.node}`);
 }
 
 mkdirSync(releaseRoot, { recursive: true });
@@ -63,12 +63,23 @@ const electronDistribution = dirname(electronExecutable);
 copyDirectory(electronDistribution, applicationDirectory);
 
 const originalExecutable = join(applicationDirectory, "electron.exe");
-const brandedExecutable = join(applicationDirectory, "AgentHub.exe");
+const brandedExecutable = join(applicationDirectory, "Nautilo.exe");
 if (!existsSync(originalExecutable)) throw new Error(`Electron executable was not found: ${originalExecutable}`);
 renameSync(originalExecutable, brandedExecutable);
-const iconSource = join(repositoryRoot, "apps", "desktop", "resources", "agenthub-icon.ico");
+const iconSource = join(repositoryRoot, "apps", "desktop", "resources", "nautilo-icon.ico");
 if (!existsSync(iconSource)) throw new Error(`Application icon was not found: ${iconSource}`);
-await rcedit(brandedExecutable, { icon: iconSource });
+await rcedit(brandedExecutable, {
+  icon: iconSource,
+  "version-string": {
+    CompanyName: "Nautilo",
+    FileDescription: "Nautilo",
+    InternalName: "Nautilo",
+    OriginalFilename: "Nautilo.exe",
+    ProductName: "Nautilo"
+  },
+  "file-version": "0.1.0",
+  "product-version": "0.1.0"
+});
 
 const resourcesDirectory = join(applicationDirectory, "resources");
 rmSync(join(resourcesDirectory, "default_app.asar"), { force: true });
@@ -82,11 +93,11 @@ writeFileSync(join(desktopAppDirectory, "package.json"), JSON.stringify({
   private: true,
   main: "out/main/index.js"
 }, null, 2));
-const windowIconSource = join(repositoryRoot, "apps", "desktop", "resources", "agenthub-icon-512.png");
+const windowIconSource = join(repositoryRoot, "apps", "desktop", "resources", "nautilo-icon-512.png");
 if (!existsSync(windowIconSource)) throw new Error(`Window icon was not found: ${windowIconSource}`);
 const windowIconDirectory = join(desktopAppDirectory, "resources");
 mkdirSync(windowIconDirectory, { recursive: true });
-copyFileSync(windowIconSource, join(windowIconDirectory, "agenthub-icon.png"));
+copyFileSync(windowIconSource, join(windowIconDirectory, "nautilo-icon.png"));
 
 const coreDaemonDirectory = join(resourcesDirectory, "core-daemon");
 mkdirSync(coreDaemonDirectory, { recursive: true });
@@ -115,17 +126,17 @@ mkdirSync(nodeRuntimeDirectory, { recursive: true });
 cpSync(process.execPath, join(nodeRuntimeDirectory, "node.exe"));
 writeFileSync(join(nodeRuntimeDirectory, "README.txt"), [
   `Bundled Node.js runtime: ${process.version}`,
-  "This runtime is used only by the local AgentHub Core Daemon.",
+  "This runtime is used only by the local Nautilo Core Daemon.",
   "Before redistributing this package, include the official Node.js license and third-party notices."
 ].join("\r\n"));
 
 const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
 writeFileSync(join(applicationDirectory, "PACKAGE-INFO.txt"), [
-  `${rootPackage.description ?? "AgentHub"}`,
+  `${rootPackage.description ?? "Nautilo"}`,
   `Version: ${rootPackage.version}`,
   `Electron: ${desktopRequire("electron/package.json").version}`,
   `Node runtime: ${process.version}`,
-  "Launch: AgentHub.exe"
+  "Launch: Nautilo.exe"
 ].join("\r\n"));
 
 const archive = spawnSync("tar.exe", ["-a", "-c", "-f", archivePath, "-C", releaseRoot, basename(applicationDirectory)], {

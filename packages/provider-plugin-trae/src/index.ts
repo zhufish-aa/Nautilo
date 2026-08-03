@@ -1,5 +1,5 @@
 /**
- * AgentHub provider plugin for Trae.
+ * Nautilo provider plugin for Trae.
  *
  * Two Trae CLIs exist and this adapter drives both:
  *
@@ -228,7 +228,7 @@ async function* acpRun(
     } else if (event.kind === "request" && event.method === "session/request_permission") {
       await answerAcpPermission(rpc, event.id, event.params, request);
     } else if (event.kind === "request") {
-      rpc.respondError(event.id, -32601, `AgentHub does not support ACP request ${event.method}`);
+      rpc.respondError(event.id, -32601, `Nautilo does not support ACP request ${event.method}`);
     } else if (event.kind === "response" && event.id === prompt.id) {
       // The daemon coalesces delta buffers when a completed event carries no text.
       if (messageStreamed) yield { kind: "message", phase: "completed", messageId: state.messageId, text: "" };
@@ -251,7 +251,7 @@ function acpInitializeParams(): RecordValue {
   return {
     protocolVersion: 1,
     clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
-    clientInfo: { name: "AgentHub", version: "0.1.0" }
+    clientInfo: { name: "Nautilo", version: "0.1.0" }
   };
 }
 

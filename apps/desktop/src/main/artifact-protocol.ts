@@ -13,7 +13,7 @@ export function registerArtifactScheme(): void {
   }]);
 }
 
-/** Streams only AgentHub-owned images; arbitrary file:// access stays blocked. */
+/** Streams only Nautilo-owned images; arbitrary file:// access stays blocked. */
 export function registerArtifactProtocol(getWorkspaceRoots?: () => Promise<string[]>): void {
   const fixedRoots = [
     resolve(homedir(), ".codex", "generated_images"),

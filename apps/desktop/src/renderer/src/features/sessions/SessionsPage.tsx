@@ -64,7 +64,7 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
           title={t("sessions.empty.title")}
           description={t("sessions.empty.desc")}
           action={
-            <Button variant="primary" onClick={() => setNewOpen(true)}>
+            <Button variant="primary" data-tour="sessions-new" onClick={() => setNewOpen(true)}>
               {t("sessions.empty.action")}
             </Button>
           }

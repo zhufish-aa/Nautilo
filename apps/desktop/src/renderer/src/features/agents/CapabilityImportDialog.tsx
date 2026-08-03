@@ -106,7 +106,7 @@ function skillRow(candidate: SkillCandidate, key: string, exists: boolean): Prev
     detail: candidate.description,
     warnings: candidate.warnings,
     origin: candidate.origin,
-    // An AgentHub marker means we wrote this file, so it is an update either way.
+    // An Nautilo marker means we wrote this file, so it is an update either way.
     exists: exists || !!candidate.existingId,
     carriesProviders: candidate.providerIds.length > 0,
     build: (providerIds, now) => ({

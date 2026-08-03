@@ -106,7 +106,7 @@ export function ProjectsPage(): JSX.Element {
         actions={
           <>
             <StatusChip tone="muted" label={t("projects.count", { count: projects.length })} />
-            <Button variant="primary" onClick={() => setAddOpen(true)}>
+            <Button variant="primary" data-tour="projects-new" onClick={() => setAddOpen(true)}>
               <FolderPlus className="h-4 w-4" aria-hidden />
               {t("projects.add")}
             </Button>

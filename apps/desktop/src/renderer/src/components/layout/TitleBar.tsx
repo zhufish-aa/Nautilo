@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Copy, Minus, Square, X, Zap } from "lucide-react";
+import { Copy, Minus, Square, X } from "lucide-react";
+import nautiloIcon from "../../assets/nautilo-icon.png";
 import { getBridge, isElectron } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
@@ -51,14 +52,13 @@ export function TitleBar(): JSX.Element {
       <div className="titlebar-brand flex items-center gap-2.5 pl-4">
         <span
           aria-hidden
-          className="titlebar-logo flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-2 shadow-[0_0_16px_-2px_var(--accent)]"
+          className="titlebar-logo flex h-7 w-7 items-center justify-center overflow-hidden rounded-lg"
         >
-          <Zap className="h-3.5 w-3.5 text-white" strokeWidth={2.5} />
+          <img src={nautiloIcon} alt="" className="h-full w-full object-contain" />
         </span>
         <span className="titlebar-name text-[13px] font-semibold tracking-tight text-ink">
           {t("app.name")}
         </span>
-        <span className="titlebar-tagline hidden text-xs text-ink-3 sm:inline">{t("app.tagline")}</span>
         {!isElectron && (
           <span className="ml-2 rounded-md border border-warn/30 bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn">
             {t("app.browserBadge")}

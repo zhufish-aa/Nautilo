@@ -23,6 +23,8 @@ interface SettingsState {
   collapsedProjects: string[];
   /** Installed theme packs (theme market / user-made), overlaid on builtins. */
   customThemes: ThemeDefinition[];
+  /** First-run onboarding tour finished or skipped. */
+  onboardingCompleted: boolean;
   setTheme: (theme: ThemePreference) => void;
   setLocale: (locale: LocaleCode) => void;
   setReduceMotion: (reduce: boolean) => void;
@@ -35,6 +37,7 @@ interface SettingsState {
   /** Install (or replace) a theme pack; rejects malformed definitions. */
   installTheme: (theme: ThemeDefinition) => boolean;
   uninstallTheme: (id: string) => void;
+  setOnboardingCompleted: (completed: boolean) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -48,6 +51,7 @@ export const useSettingsStore = create<SettingsState>()(
       notificationSound: true,
       collapsedProjects: [],
       customThemes: [],
+      onboardingCompleted: false,
       promptSnippets: [
         { id: "seed-test-fix", title: "跑测试并修红", text: "运行本项目的测试，定位失败的用例并修复，直到全部通过。" },
         { id: "seed-review", title: "审查本次改动", text: "审查当前工作区的改动，指出潜在 bug、回归风险和可简化之处，按严重程度排序。" },
@@ -87,6 +91,7 @@ export const useSettingsStore = create<SettingsState>()(
           // Fall back to system if the active theme got removed.
           theme: state.theme === id ? "system" : state.theme
         })),
+      setOnboardingCompleted: (onboardingCompleted) => set({ onboardingCompleted }),
       setNavVisible: (key, visible) =>
         set((state) => ({
           hiddenNav: visible

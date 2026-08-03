@@ -3,6 +3,8 @@ dist/
 coverage/
 .turbo/
 .env
+.idea
+.daemon-diagnosis-data
 .env.*
 !.env.example
 *.log

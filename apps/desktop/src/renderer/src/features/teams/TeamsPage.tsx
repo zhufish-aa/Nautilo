@@ -85,7 +85,7 @@ export function TeamsPage(): JSX.Element {
   };
 
   return (
-    <>
+    <div data-tour="teams-page">
       <PageHeader
         title={t("teams.title")}
         subtitle={t("teams.subtitle")}
@@ -119,6 +119,6 @@ export function TeamsPage(): JSX.Element {
           ))}
         </StaggerGroup>
       )}
-    </>
+    </div>
   );
 }

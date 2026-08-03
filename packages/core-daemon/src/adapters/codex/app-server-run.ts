@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentInstance } from "@agenthub/domain";
 import { ProcessRuntime, type ProcessEvent } from "../../process-runtime.js";
 import { JsonRpcProcessClient } from "../json-rpc-process.js";
@@ -26,9 +29,19 @@ type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue => typeof value === "object" && value !== null ? value as RecordValue : {};
 const text = (value: unknown): string | undefined => typeof value === "string" && value ? value : undefined;
 const CODEX_DYNAMIC_TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
+const CODEX_WEB_SEARCH_MODE = "live";
+const CODEX_MODEL_CATALOG_PREFIX = "agenthub-codex-model-";
+const CODEX_MODEL_CATALOG_CONTEXT_WINDOW = 272_000;
+const CODEX_MODEL_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+
+function codexWebSearchEnabled(instance: AgentInstance): boolean {
+  const mode = instance.providerOptions?.webSearchMode;
+  if (mode === "off" || mode === "official") return false;
+  return instance.providerOptions?.webSearch !== false;
+}
 
 export const CODEX_APP_SERVER_INITIALIZE_PARAMS = {
-  clientInfo: { name: "AgentHub", version: "0.1.0" },
+  clientInfo: { name: "Nautilo", version: "0.1.0" },
   capabilities: { experimentalApi: true }
 } as const;
 
@@ -133,7 +146,7 @@ async function handleDynamicToolCall(
   if (!tool || !request.executeRuntimeTool) {
     rpc.respond(event.id, {
       success: false,
-      contentItems: [{ type: "inputText", text: `AgentHub runtime tool is unavailable: ${tool || "unknown"}` }]
+      contentItems: [{ type: "inputText", text: `Nautilo runtime tool is unavailable: ${tool || "unknown"}` }]
     });
     return [];
   }
@@ -167,7 +180,7 @@ async function handleRequestUserInput(
   event: { id: string | number; params?: unknown }
 ): Promise<void> {
   if (!request.requestInteraction) {
-    rpc.respondError(event.id, -32601, "AgentHub does not support app-server request item/tool/requestUserInput");
+    rpc.respondError(event.id, -32601, "Nautilo does not support app-server request item/tool/requestUserInput");
     return;
   }
   const params = record(event.params);
@@ -260,10 +273,129 @@ export function buildCodexTurnInput(prompt: string, localImagePaths: string[] = 
   ];
 }
 
+/**
+ * Codex's native web-search switch is provider-wide, but it still consults
+ * the model catalog before serializing the Responses request. Models that are
+ * only discovered from a third-party `/models` endpoint consequently fall
+ * back to `supports_search_tool = false` and never receive a `web_search`
+ * tool, even when the upstream endpoint supports it.
+ *
+ * Supply a short-lived catalog for custom endpoints so the selected model is
+ * described as search-capable. This keeps the actual model id in the outgoing
+ * request; it does not alias or replace the user's model.
+ */
+export function buildCodexCustomModelCatalog(instance: AgentInstance, requestedModel?: string): RecordValue | undefined {
+  const baseUrl = instance.providerOptions?.baseUrl;
+  if (typeof baseUrl !== "string" || !baseUrl.trim()) return undefined;
+
+  const configured = new Map<string, { displayName?: string; reasoningEfforts?: string[]; contextWindow?: number }>();
+  for (const model of instance.models ?? []) {
+    const id = typeof model.id === "string" ? model.id.trim() : "";
+    if (!id) continue;
+    configured.set(id, {
+      displayName: model.displayName,
+      reasoningEfforts: model.reasoningEfforts,
+      contextWindow: model.contextWindow
+    });
+  }
+  const selected = typeof requestedModel === "string" ? requestedModel.trim() : "";
+  if (selected && !configured.has(selected)) configured.set(selected, {});
+  if (!configured.size) return undefined;
+
+  return {
+    models: [...configured.entries()].map(([id, model]) => {
+      const efforts = normalizeReasoningEfforts(model.reasoningEfforts);
+      const contextWindow = Number.isFinite(model.contextWindow) && (model.contextWindow ?? 0) > 0
+        ? Math.floor(model.contextWindow!)
+        : CODEX_MODEL_CATALOG_CONTEXT_WINDOW;
+      return {
+        prefer_websockets: false,
+        support_verbosity: false,
+        // Codex 0.146 deserializes these catalog fields as enums rather than
+        // nullable values. A null here makes app-server exit before initialize.
+        default_verbosity: "low",
+        apply_patch_tool_type: "freeform",
+        // Keep a valid catalog enum even when search is disabled. The
+        // supports_search_tool flag below remains the authoritative switch.
+        web_search_tool_type: "text",
+        input_modalities: ["text", "image"],
+        supports_image_detail_original: false,
+        truncation_policy: { mode: "tokens", limit: 10_000 },
+        supports_parallel_tool_calls: true,
+        context_window: contextWindow,
+        max_context_window: contextWindow,
+        auto_compact_token_limit: null,
+        reasoning_summary_format: "experimental",
+        default_reasoning_summary: "auto",
+        slug: id,
+        display_name: model.displayName?.trim() || id,
+        description: "Nautilo custom endpoint model.",
+        default_reasoning_level: efforts[0],
+        supported_reasoning_levels: efforts.map((effort) => ({
+          effort,
+          description: `Reasoning effort: ${effort}`
+        })),
+        shell_type: "shell_command",
+        visibility: "list",
+        minimal_client_version: "0.0.1",
+        supported_in_api: true,
+        availability_nux: null,
+        upgrade: null,
+        priority: 1,
+        base_instructions: "",
+        model_messages: null,
+        include_skills_usage_instructions: false,
+        supports_reasoning_summary_parameter: true,
+        supports_search_tool: codexWebSearchEnabled(instance),
+        service_tiers: [],
+        additional_speed_tiers: [],
+        supports_reasoning_summaries: true,
+        effective_context_window_percent: 95,
+        experimental_supported_tools: [],
+        use_responses_lite: false,
+        auto_review_model_override: null,
+        tool_mode: null,
+        multi_agent_version: null
+      };
+    })
+  };
+}
+
+function normalizeReasoningEfforts(values: string[] | undefined): string[] {
+  const configured = (values ?? []).filter((value): value is string => typeof value === "string" && !!value.trim()).map((value) => value.trim());
+  const unique = [...new Set(configured)];
+  return unique.length ? unique : [...CODEX_MODEL_REASONING_EFFORTS];
+}
+
+interface CodexModelCatalogFile {
+  path: string;
+  cleanup: () => void;
+}
+
+function createCodexCustomModelCatalogFile(instance: AgentInstance, requestedModel?: string): CodexModelCatalogFile | undefined {
+  const catalog = buildCodexCustomModelCatalog(instance, requestedModel);
+  if (!catalog) return undefined;
+  const directory = mkdtempSync(join(tmpdir(), CODEX_MODEL_CATALOG_PREFIX));
+  const path = join(directory, "models.json");
+  try {
+    writeFileSync(path, JSON.stringify(catalog), "utf8");
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw new Error(`Failed to prepare Codex custom model catalog: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return {
+    path,
+    cleanup: () => {
+      try { rmSync(directory, { recursive: true, force: true }); } catch { /* best effort after Codex exits */ }
+    }
+  };
+}
+
 export function buildCodexAppServerArgs(
   instance: AgentInstance,
   environment: Record<string, string | undefined> | undefined,
-  mcpServers?: AdapterMcpServer[]
+  mcpServers?: AdapterMcpServer[],
+  modelCatalogPath?: string
 ): string[] {
   const profileArgs = instance.profile ? ["--profile", instance.profile] : [];
   // Codex ships image generation as a feature-gated native extension.  The
@@ -276,26 +408,41 @@ export function buildCodexAppServerArgs(
     "--stdio",
     "--enable",
     "image_generation",
-    ...buildCodexProviderConfigArgs(instance, environment),
+    ...(codexWebSearchEnabled(instance)
+      ? ["--config", `web_search=${JSON.stringify(CODEX_WEB_SEARCH_MODE)}`]
+      : []),
+    ...(modelCatalogPath ? ["--config", `model_catalog_json=${JSON.stringify(modelCatalogPath)}`] : []),
+    // Codex 0.146 only accepts Responses in app-server. Chat mode is handled
+    // by chat-completions-run.ts before this path is reached; keep discovery
+    // and any defensive app-server calls on the supported wire format.
+    ...buildCodexProviderConfigArgs(instance, environment, "responses"),
     ...buildCodexMcpConfigArgs(mcpServers)
   ];
 }
 
 export function startCodexAppServer(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
   const runtime = new ProcessRuntime();
-  const invocation = resolveCodexInvocation(
-    request.instance.executable,
-    buildCodexAppServerArgs(request.instance, request.env, request.mcpServers)
-  );
-  const process = runtime.start({
-    command: invocation.command,
-    args: invocation.args,
-    cwd: request.cwd,
-    env: request.env,
-    timeoutMs: request.timeoutMs,
-    idleTimeoutMs: request.idleTimeoutMs,
-    maxOutputBytes: request.maxOutputBytes ?? 20 * 1024 * 1024
-  });
+  const modelCatalog = createCodexCustomModelCatalogFile(request.instance, request.model);
+  let process: ReturnType<ProcessRuntime["start"]>;
+  try {
+    const invocation = resolveCodexInvocation(
+      request.instance.executable,
+      buildCodexAppServerArgs(request.instance, request.env, request.mcpServers, modelCatalog?.path)
+    );
+    process = runtime.start({
+      command: invocation.command,
+      args: invocation.args,
+      cwd: request.cwd,
+      env: request.env,
+      timeoutMs: request.timeoutMs,
+      idleTimeoutMs: request.idleTimeoutMs,
+      maxOutputBytes: request.maxOutputBytes ?? 20 * 1024 * 1024
+    });
+    if (modelCatalog) process.child.once("close", modelCatalog.cleanup);
+  } catch (error) {
+    modelCatalog?.cleanup();
+    throw error;
+  }
   const rpc = new JsonRpcProcessClient(process);
   let threadId: string | undefined;
   let turnId: string | undefined;
@@ -372,7 +519,7 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
         } else if (event.kind === "request" && (event.method === "item/commandExecution/requestApproval" || event.method === "item/fileChange/requestApproval")) {
           await handleCodexApproval(rpc, request, event);
         } else if (event.kind === "request") {
-          rpc.respondError(event.id, -32601, `AgentHub does not support app-server request ${event.method}`);
+          rpc.respondError(event.id, -32601, `Nautilo does not support app-server request ${event.method}`);
         } else if (event.kind === "transport") {
           const mapped = transportEvent(event.event);
           if (mapped && !(finished && mapped.kind === "exit")) yield mapped;

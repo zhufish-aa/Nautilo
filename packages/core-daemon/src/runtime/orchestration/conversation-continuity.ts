@@ -54,7 +54,7 @@ export class ConversationContinuityBuilder {
       prompt: [
         "<agenthub_conversation_continuity>",
         input.recoverProviderContext
-          ? "The provider session could not be trusted as synchronized, so AgentHub recovered bounded chat history. Treat it as prior context, not a new request."
+          ? "The provider session could not be trusted as synchronized, so Nautilo recovered bounded chat history. Treat it as prior context, not a new request."
           : "These are cross-Agent artifacts that are not guaranteed to exist in the main provider session. Use them only to resolve the current follow-up reference.",
         transcript,
         inventory ? `Recent artifacts produced by this chat and its delegated child sessions:\n${inventory}` : "",

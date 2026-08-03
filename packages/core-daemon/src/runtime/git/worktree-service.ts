@@ -43,7 +43,7 @@ export class WorktreeService {
     await this.git.run(worktreePath, ["add", "-A"]);
     const status = await this.git.run(worktreePath, ["status", "--porcelain=v1"]);
     if (!status.stdout.trim()) return undefined;
-    await this.git.run(worktreePath, ["-c", "user.name=AgentHub", "-c", "user.email=agenthub@local", "commit", "-m", message]);
+    await this.git.run(worktreePath, ["-c", "user.name=Nautilo", "-c", "user.email=agenthub@local", "commit", "-m", message]);
     return (await this.git.run(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
   }
 
