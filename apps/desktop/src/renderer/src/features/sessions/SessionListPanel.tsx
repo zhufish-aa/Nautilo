@@ -89,7 +89,11 @@ function SessionItem({
   const visualDepth = Math.min(depth, 4);
 
   return (
-    <li
+    <motion.li
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, height: 0, marginTop: 0, overflow: "hidden" }}
+      transition={{ duration: 0.16, ease: "easeOut" }}
       className="group relative min-w-0"
       role="treeitem"
       aria-level={depth + 1}
@@ -166,7 +170,7 @@ function SessionItem({
       >
         <Trash2 className="h-3.5 w-3.5" aria-hidden />
       </button>
-    </li>
+    </motion.li>
   );
 }
 
@@ -264,15 +268,17 @@ export function SessionListPanel({
                     className="min-w-0 space-y-0.5 overflow-hidden"
                     role="tree"
                   >
-                    {projectEntries.map((entry) => (
-                      <SessionItem
-                        key={entry.session.id}
-                        entry={entry}
-                        active={entry.session.id === activeSessionId}
-                        onSelect={() => onSelect(entry.session.id)}
-                        onDelete={() => onDelete(entry.session)}
-                      />
-                    ))}
+                    <AnimatePresence initial={false}>
+                      {projectEntries.map((entry) => (
+                        <SessionItem
+                          key={entry.session.id}
+                          entry={entry}
+                          active={entry.session.id === activeSessionId}
+                          onSelect={() => onSelect(entry.session.id)}
+                          onDelete={() => onDelete(entry.session)}
+                        />
+                      ))}
+                    </AnimatePresence>
                   </motion.ul>
                 )}
               </AnimatePresence>

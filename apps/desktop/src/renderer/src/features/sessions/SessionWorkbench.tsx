@@ -365,7 +365,7 @@ export function SessionWorkbench({
               ? waitingForApproval ? "waiting" : workbenchRunning ? "running" : undefined
               : undefined;
             return (
-              <section key={turn.key} className="turn-block pl-6" data-live={live}>
+              <section key={turn.key} className="turn-block pl-6 motion-safe:animate-[rise-in_0.28s_ease-out_both]" data-live={live}>
                 {turn.header && (
                   <TimelineEventView
                     event={turn.header}

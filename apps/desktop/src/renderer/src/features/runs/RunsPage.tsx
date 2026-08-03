@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import { motion } from "framer-motion";
 import { BellRing, Inbox, Loader2, MailWarning } from "lucide-react";
 import { PageHeader } from "../../components/layout/AppShell";
 import { EmptyState } from "../../components/ui/EmptyState";
@@ -116,11 +117,17 @@ export function RunsPage(): JSX.Element {
         />
       </div>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        {sections.map((section) => {
+        {sections.map((section, sectionIndex) => {
           const Icon = section.icon;
           const list = groups[section.key];
           return (
-            <section key={section.key} className="flex flex-col gap-2.5">
+            <motion.section
+              key={section.key}
+              initial={{ opacity: 0, y: 14 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ type: "spring", stiffness: 240, damping: 26, delay: sectionIndex * 0.08 }}
+              className="flex flex-col gap-2.5"
+            >
               <h2 className="flex items-center gap-2 px-1 text-xs font-semibold tracking-[0.16em] text-ink-3">
                 <Icon className={`h-3.5 w-3.5 ${section.key === "running" && list.length > 0 ? "animate-spin" : ""}`} aria-hidden />
                 {t(`runsPage.${section.key}` as MessageKey)}
@@ -130,20 +137,26 @@ export function RunsPage(): JSX.Element {
                 <EmptyState icon={Icon} title={t(`runsPage.empty${section.key[0].toUpperCase()}${section.key.slice(1)}` as MessageKey)} description="" />
               ) : (
                 <div className="flex flex-col gap-2.5">
-                  {list.map((session) => (
-                    <SessionCard
+                  {list.map((session, cardIndex) => (
+                    <motion.div
                       key={session.id}
-                      session={session}
-                      meta={meta(session)}
-                      snippet={lastSnippet(events[session.id])}
-                      badge={section.badge(session)}
-                      tone={section.tone}
-                      onOpen={() => open(session.id)}
-                    />
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ type: "spring", stiffness: 260, damping: 26, delay: 0.12 + sectionIndex * 0.08 + cardIndex * 0.045 }}
+                    >
+                      <SessionCard
+                        session={session}
+                        meta={meta(session)}
+                        snippet={lastSnippet(events[session.id])}
+                        badge={section.badge(session)}
+                        tone={section.tone}
+                        onOpen={() => open(session.id)}
+                      />
+                    </motion.div>
                   ))}
                 </div>
               )}
-            </section>
+            </motion.section>
           );
         })}
       </div>
