@@ -24,8 +24,8 @@ apps/desktop/out/
 .runtime-validation-data/
 .claude/worktrees/
 .ppt_build/
-work/
-test-results/
+/work/
+/test-results/
 
 # Local virtual environments and IDE metadata
 .venv/
