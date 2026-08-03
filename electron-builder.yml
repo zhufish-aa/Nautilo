@@ -26,11 +26,14 @@ files:
   - "!node_modules/**"
 
 # Prepared by scripts/prepare-packaged-resources.mjs on the target platform.
+# core-daemon is copied by scripts/electron-builder-after-pack.cjs instead:
+# electron-builder silently drops any directory named node_modules from
+# extraResources, and the daemon cannot start without its dependencies.
 extraResources:
-  - from: build/packaged/core-daemon
-    to: core-daemon
   - from: build/packaged/node
     to: node
+
+afterPack: scripts/electron-builder-after-pack.cjs
 
 asar: true
 

@@ -32,15 +32,17 @@ mkdirSync(stagingDirectory, { recursive: true });
 
 // The daemon runs under the bundled Node runtime, so it needs an isolated
 // runtime dependency tree. `pnpm deploy --legacy` materializes workspace
-// packages as well as transitive third-party dependencies.
+// packages as well as transitive third-party dependencies. The hoisted
+// node-linker produces a flat, symlink-free node_modules — required because
+// the packaged app cannot ship pnpm's symlinked virtual store.
 const coreDaemonDirectory = join(stagingDirectory, "core-daemon");
 const deployedDaemon = process.platform === "win32"
-  ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", `pnpm.cmd --filter @agenthub/core-daemon --prod deploy --legacy ${relative(repositoryRoot, coreDaemonDirectory)}`], {
+  ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", `pnpm.cmd --filter @agenthub/core-daemon --prod deploy --legacy --node-linker=hoisted ${relative(repositoryRoot, coreDaemonDirectory)}`], {
     cwd: repositoryRoot,
     stdio: "inherit",
     windowsHide: true
   })
-  : spawnSync("pnpm", ["--filter", "@agenthub/core-daemon", "--prod", "deploy", "--legacy", coreDaemonDirectory], {
+  : spawnSync("pnpm", ["--filter", "@agenthub/core-daemon", "--prod", "deploy", "--legacy", "--node-linker=hoisted", coreDaemonDirectory], {
     cwd: repositoryRoot,
     stdio: "inherit",
     windowsHide: true
