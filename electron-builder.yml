@@ -37,6 +37,12 @@ afterPack: scripts/electron-builder-after-pack.cjs
 
 asar: true
 
+# electron-builder drafts releases by default; publish them directly.
+publish:
+  provider: github
+  draft: false
+  prerelease: false
+
 win:
   icon: nautilo-icon.ico
   target:
