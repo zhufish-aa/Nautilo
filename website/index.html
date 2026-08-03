@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nautilo — 本地多 Agent 编程工作台</title>
+<meta name="description" content="Nautilo 是一个本地、可自由配置的多 Agent 编程工作台：统一管理 Codex、Claude Code、Kimi Code 等 Coding Agent CLI，组建团队，编排协作。">
+<link rel="icon" href="icon.png" type="image/png">
+<style>
+  :root {
+    --bg: #0b1017;
+    --bg-soft: #101825;
+    --bg-card: #131c2b;
+    --border: #223046;
+    --text: #e6edf5;
+    --text-dim: #8ea1b8;
+    --accent: #2dd4bf;
+    --accent-dim: #14b8a622;
+    --accent-2: #38bdf8;
+    --radius: 14px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.65;
+    overflow-x: hidden;
+  }
+  a { color: inherit; text-decoration: none; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- nav ---------- */
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: #0b1017cc; backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .wrap { display: flex; align-items: center; gap: 28px; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; }
+  .brand img { width: 28px; height: 28px; border-radius: 7px; }
+  .nav-links { display: flex; gap: 22px; margin-left: auto; align-items: center; font-size: 14px; color: var(--text-dim); }
+  .nav-links a:hover { color: var(--accent); }
+  .lang-toggle {
+    border: 1px solid var(--border); background: none; color: var(--text-dim);
+    padding: 4px 12px; border-radius: 999px; cursor: pointer; font-size: 13px;
+  }
+  .lang-toggle:hover { color: var(--accent); border-color: var(--accent); }
+  .gh-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 14px;
+    font-size: 14px; color: var(--text);
+  }
+  .gh-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 96px 0 72px; text-align: center; position: relative; }
+  .hero::before {
+    content: ""; position: absolute; inset: -20% -10% auto; height: 560px;
+    background: radial-gradient(ellipse 60% 50% at 50% 0%, var(--accent-dim), transparent 70%);
+    pointer-events: none;
+  }
+  .hero h1 { font-size: clamp(34px, 5.4vw, 56px); line-height: 1.2; letter-spacing: 0.5px; position: relative; }
+  .hero h1 .grad {
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p.sub { margin: 20px auto 0; max-width: 640px; color: var(--text-dim); font-size: 17px; position: relative; }
+  .hero-actions { margin-top: 36px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; position: relative; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 26px; border-radius: 10px; font-size: 15px; font-weight: 600;
+    border: 1px solid transparent; transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .btn:hover { transform: translateY(-2px); }
+  .btn-primary { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #06231f; box-shadow: 0 6px 24px #14b8a640; }
+  .btn-ghost { border-color: var(--border); color: var(--text); background: var(--bg-card); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---------- mock window ---------- */
+  .mock {
+    margin: 64px auto 0; max-width: 880px; position: relative;
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 30px 80px #000a; overflow: hidden; text-align: left;
+  }
+  .mock-bar { display: flex; gap: 7px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .mock-bar i { width: 11px; height: 11px; border-radius: 50%; background: #33455e; }
+  .mock-bar i:nth-child(1) { background: #ff5f57; } .mock-bar i:nth-child(2) { background: #febc2e; } .mock-bar i:nth-child(3) { background: #28c840; }
+  .mock-body { display: flex; min-height: 300px; }
+  .mock-side { width: 200px; border-right: 1px solid var(--border); padding: 16px 12px; font-size: 12.5px; color: var(--text-dim); }
+  .mock-side .item { padding: 7px 10px; border-radius: 7px; margin-bottom: 4px; white-space: nowrap; }
+  .mock-side .item.on { background: var(--accent-dim); color: var(--accent); }
+  .mock-main { flex: 1; padding: 18px 20px; font-size: 13px; }
+  .mock-msg { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  .mock-msg .who { color: var(--accent); font-weight: 600; font-size: 12px; margin-bottom: 5px; }
+  .mock-msg .who.b { color: var(--accent-2); }
+  .mock-line { color: var(--text-dim); }
+  .mock-line b { color: var(--text); font-weight: 600; }
+  .mock-caret { display: inline-block; width: 8px; height: 15px; background: var(--accent); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (max-width: 720px) { .mock-side { display: none; } }
+
+  /* ---------- sections ---------- */
+  section { padding: 88px 0; }
+  .sec-title { text-align: center; font-size: 30px; margin-bottom: 12px; }
+  .sec-sub { text-align: center; color: var(--text-dim); max-width: 620px; margin: 0 auto 48px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px; transition: border-color .15s ease, transform .15s ease;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-3px); }
+  .card .ico {
+    width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
+    background: var(--accent-dim); color: var(--accent); font-size: 19px; margin-bottom: 14px;
+  }
+  .card h3 { font-size: 16.5px; margin-bottom: 8px; }
+  .card p { font-size: 14px; color: var(--text-dim); }
+
+  /* ---------- download ---------- */
+  .dl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
+  .dl-card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 28px 24px; text-align: center; transition: border-color .15s ease;
+  }
+  .dl-card:hover { border-color: var(--accent); }
+  .dl-card .os { font-size: 34px; margin-bottom: 10px; }
+  .dl-card h3 { font-size: 17px; margin-bottom: 6px; }
+  .dl-card p { font-size: 13px; color: var(--text-dim); margin-bottom: 16px; min-height: 40px; }
+  .dl-card .btn { padding: 9px 20px; font-size: 14px; }
+  .dl-note { text-align: center; color: var(--text-dim); font-size: 13px; margin-top: 26px; }
+  .dl-note code { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; font-size: 12.5px; }
+
+  /* ---------- plugins ---------- */
+  .split { display: grid; grid-template-columns: 1.05fr 1fr; gap: 44px; align-items: center; }
+  @media (max-width: 860px) { .split { grid-template-columns: 1fr; } }
+  .split h2 { font-size: 26px; margin-bottom: 16px; }
+  .split p { color: var(--text-dim); font-size: 15px; margin-bottom: 14px; }
+  .split ul { color: var(--text-dim); font-size: 14.5px; padding-left: 20px; }
+  .split li { margin-bottom: 8px; }
+  .split li b { color: var(--text); }
+  pre.code {
+    background: #0a0f16; border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 20px 22px; font-size: 13px; overflow-x: auto; line-height: 1.7;
+    font-family: "Cascadia Code", Consolas, monospace; color: #b8c7d9;
+  }
+  pre.code .c { color: #5b7089; } pre.code .k { color: var(--accent); } pre.code .s { color: #f0b86e; }
+
+  /* ---------- steps ---------- */
+  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 18px; counter-reset: step; }
+  .step { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; position: relative; }
+  .step::before {
+    counter-increment: step; content: counter(step);
+    display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
+    background: var(--accent-dim); color: var(--accent); font-weight: 700; margin-bottom: 12px;
+  }
+  .step h3 { font-size: 15.5px; margin-bottom: 6px; }
+  .step p { font-size: 13.5px; color: var(--text-dim); }
+
+  footer { border-top: 1px solid var(--border); padding: 34px 0 44px; color: var(--text-dim); font-size: 13.5px; }
+  footer .wrap { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
+  footer a:hover { color: var(--accent); }
+  footer .right { margin-left: auto; }
+
+  [data-en] { display: none; }
+  html[lang="en"] [data-en] { display: revert; }
+  html[lang="en"] [data-zh] { display: none; }
+  html[lang="en"] h1 [data-en], html[lang="en"] span[data-en] { display: inline; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="icon.png" alt="Nautilo">Nautilo</a>
+    <div class="nav-links">
+      <a href="#features" data-zh>特性</a><a href="#features" data-en>Features</a>
+      <a href="#download" data-zh>下载</a><a href="#download" data-en>Download</a>
+      <a href="#plugins" data-zh>插件</a><a href="#plugins" data-en>Plugins</a>
+      <a href="https://github.com/zhufish-aa/Nautilo/blob/master/docs/provider-plugins.md" data-zh>文档</a><a href="https://github.com/zhufish-aa/Nautilo/blob/master/docs/provider-plugins.md" data-en>Docs</a>
+      <button class="lang-toggle" id="langToggle">EN</button>
+      <a class="gh-btn" href="https://github.com/zhufish-aa/Nautilo">★ GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <h1>
+      <span data-zh>把 Coding Agent CLI<br>编成一支<span class="grad">你的团队</span></span>
+      <span data-en>Orchestrate your coding<br>agent CLIs as <span class="grad">one team</span></span>
+    </h1>
+    <p class="sub">
+      <span data-zh>Nautilo 是一个本地、可自由配置的多 Agent 编程工作台。统一管理 Codex、Claude Code、Kimi Code 等 CLI，定义成员与角色，让主 Agent 决策、委派、验证并协同完成任务。</span>
+      <span data-en>Nautilo is a local, fully configurable multi-agent coding workbench. Manage Codex, Claude Code, Kimi Code and more — define members and roles, and let the main agent decide, delegate, verify and deliver.</span>
+    </p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="https://github.com/zhufish-aa/Nautilo/releases/latest" data-zh>⬇ 下载最新版</a>
+      <a class="btn btn-primary" href="https://github.com/zhufish-aa/Nautilo/releases/latest" data-en>⬇ Download latest</a>
+      <a class="btn btn-ghost" href="https://github.com/zhufish-aa/Nautilo" data-zh>查看源码</a>
+      <a class="btn btn-ghost" href="https://github.com/zhufish-aa/Nautilo" data-en>View source</a>
+    </div>
+
+    <div class="mock">
+      <div class="mock-bar"><i></i><i></i><i></i></div>
+      <div class="mock-body">
+        <div class="mock-side">
+          <div class="item on">◈ <span data-zh>主会话</span><span data-en>Main session</span></div>
+          <div class="item">◇ Codex · GPT</div>
+          <div class="item">◇ Kimi Code</div>
+          <div class="item">◇ Claude Code</div>
+          <div class="item">◇ OpenCode <span data-zh>(插件)</span><span data-en>(plugin)</span></div>
+        </div>
+        <div class="mock-main">
+          <div class="mock-msg">
+            <div class="who" data-zh>主 Agent · 任务决策</div>
+            <div class="who b" data-en>Main agent · planning</div>
+            <div class="mock-line" data-zh>目标：为插件市场接入 GitHub 托管的 registry。计划：拆分为 <b>3 个任务</b>，委派给 2 名成员并行执行。</div>
+            <div class="mock-line" data-en>Goal: move the marketplace to a GitHub-hosted registry. Plan: split into <b>3 tasks</b>, delegate to 2 members in parallel.</div>
+          </div>
+          <div class="mock-msg">
+            <div class="who b" data-zh>成员 · Kimi Code</div>
+            <div class="who b" data-en>Member · Kimi Code</div>
+            <div class="mock-line" data-zh>✓ 修改 registry.json 与校验逻辑 &nbsp;✓ 验证通过 &nbsp;✓ 已回传结果<span class="mock-caret"></span></div>
+            <div class="mock-line" data-en>✓ registry.json + checksum logic &nbsp;✓ verified &nbsp;✓ result handed off<span class="mock-caret"></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <h2 class="sec-title" data-zh>一个工作台，管好所有 Agent</h2>
+    <h2 class="sec-title" data-en>One workbench for every agent</h2>
+    <p class="sec-sub">
+      <span data-zh>不训练模型、不替代任何 CLI——Nautilo 是这些工具之上的编排层。</span>
+      <span data-en>No model training, no CLI replacement — Nautilo is the orchestration layer on top of the tools you already use.</span>
+    </p>
+    <div class="grid">
+      <div class="card"><div class="ico">⛯</div>
+        <h3 data-zh>多 Provider 管理</h3><h3 data-en>Multi-provider management</h3>
+        <p data-zh>内置 Codex、Claude Code、Kimi Code、Custom CLI 适配器；OpenCode、Trae 走插件。自动检测本机 CLI 与版本。</p>
+        <p data-en>Built-in adapters for Codex, Claude Code, Kimi Code and custom CLIs; OpenCode and Trae via plugins. Auto-detects local CLIs and versions.</p>
+      </div>
+      <div class="card"><div class="ico">⚑</div>
+        <h3 data-zh>主 Agent 任务决策</h3><h3 data-en>Main-agent decisions</h3>
+        <p data-zh>直接完成、委派局部任务，或生成带依赖关系的任务 DAG；结果回传、失败重试、接管与继续。</p>
+        <p data-en>Complete directly, delegate subtasks, or emit a dependency-aware task DAG — with handoff, retry, take-over and resume.</p>
+      </div>
+      <div class="card"><div class="ico">☷</div>
+        <h3 data-zh>团队编排</h3><h3 data-en>Team orchestration</h3>
+        <p data-zh>自定义成员名称、角色、能力、限制、任务类型与并发上限，绑定 Agent 实例与委派策略。</p>
+        <p data-en>Define member names, roles, capabilities, limits, task types and concurrency — bound to agent instances and delegation policies.</p>
+      </div>
+      <div class="card"><div class="ico">⌗</div>
+        <h3 data-zh>Git 隔离与验证</h3><h3 data-en>Git isolation & verification</h3>
+        <p data-zh>worktree 隔离、allowedPaths、文件/提交级 Diff、验证命令、合并队列与人工批准合并。</p>
+        <p data-en>Worktree isolation, allowedPaths, file/commit diffs, verification commands, a merge queue and human-approved merges.</p>
+      </div>
+      <div class="card"><div class="ico">⛨</div>
+        <h3 data-zh>权限与安全</h3><h3 data-en>Permissions & security</h3>
+        <p data-zh>命令策略、环境变量白名单、路径策略、凭证加密、审批流、日志脱敏与审计。</p>
+        <p data-en>Command policies, env allowlists, path policies, encrypted credentials, approvals, log redaction and auditing.</p>
+      </div>
+      <div class="card"><div class="ico">✦</div>
+        <h3 data-zh>新手引导</h3><h3 data-en>Onboarding tour</h3>
+        <p data-zh>游戏式分步引导：检测 CLI → 创建实例 → 组建团队 → 新建项目 → 开始会话。中英双语界面。</p>
+        <p data-en>A game-style step-by-step tour: detect CLIs → create an instance → build a team → add a project → start. Bilingual UI.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="download" style="background: var(--bg-soft); border-block: 1px solid var(--border);">
+  <div class="wrap">
+    <h2 class="sec-title" data-zh>下载</h2>
+    <h2 class="sec-title" data-en>Download</h2>
+    <p class="sec-sub">
+      <span data-zh>Windows / macOS / Linux 预编译包，随每个版本自动构建发布。</span>
+      <span data-en>Prebuilt packages for Windows, macOS and Linux, built and published with every release.</span>
+    </p>
+    <div class="dl-grid">
+      <div class="dl-card">
+        <div class="os">🪟</div>
+        <h3>Windows</h3>
+        <p data-zh>NSIS 安装程序（x64）<br>或免安装 ZIP</p>
+        <p data-en>NSIS installer (x64)<br>or portable ZIP</p>
+        <a class="btn btn-primary" href="https://github.com/zhufish-aa/Nautilo/releases/latest" data-zh>下载</a>
+        <a class="btn btn-primary" href="https://github.com/zhufish-aa/Nautilo/releases/latest" data-en>Download</a>
+      </div>
+      <div class="dl-card">
+        <div class="os">🍎</div>
+        <h3>macOS</h3>
+        <p data-zh>DMG（Apple Silicon / Intel）<br>未签名：需在隐私与安全性中允许</p>
+        <p data-en>DMG (Apple Silicon / Intel)<br>Unsigned: allow in Privacy & Security</p>
+        <a class="btn btn-primary" href="https://github.com/zhufish-aa/Nautilo/releases/latest" data-zh>下载</a>
+        <a class="btn btn-primary" href="https://github.com/zhufish-aa/Nautilo/releases/latest" data-en>Download</a>
+      </div>
+      <div class="dl-card">
+        <div class="os">🐧</div>
+        <h3>Linux</h3>
+        <p data-zh>AppImage / .deb / .rpm（x64）</p>
+        <p data-en>AppImage / .deb / .rpm (x64)</p>
+        <a class="btn btn-primary" href="https://github.com/zhufish-aa/Nautilo/releases/latest" data-zh>下载</a>
+        <a class="btn btn-primary" href="https://github.com/zhufish-aa/Nautilo/releases/latest" data-en>Download</a>
+      </div>
+    </div>
+    <p class="dl-note">
+      <span data-zh>从源码构建：</span><span data-en>Build from source:</span>
+      <code>git clone https://github.com/zhufish-aa/Nautilo.git && pnpm install && pnpm dev:desktop</code>
+    </p>
+  </div>
+</section>
+
+<section id="plugins">
+  <div class="wrap">
+    <div class="split">
+      <div>
+        <h2 data-zh>插件机制：把任意 CLI 变成 Provider</h2>
+        <h2 data-en>Plugins: turn any CLI into a provider</h2>
+        <p data-zh>实现一个 Adapter 接口、写一份 manifest，就能把任何 Agent CLI 接入 Nautilo 的统一会话界面——无需改动任何前端代码。</p>
+        <p data-en>Implement one adapter interface and one manifest to plug any agent CLI into Nautilo's unified session UI — no frontend changes needed.</p>
+        <ul>
+          <li data-zh><b>插件市场</b>：registry 托管在 GitHub，应用内一键安装，SHA-256 校验</li>
+          <li data-en><b>Marketplace</b>: registry hosted on GitHub, one-click install with SHA-256 verification</li>
+          <li data-zh><b>发布 = 提 PR</b>：向 registry 仓库提交 Pull Request 即可上架</li>
+          <li data-en><b>Publishing = a PR</b>: open a pull request to the registry repo to get listed</li>
+          <li data-zh><b>完整 SDK 与模板</b>：OpenCode / Trae 两个真实参考实现</li>
+          <li data-en><b>Full SDK & template</b>: OpenCode and Trae as real reference implementations</li>
+        </ul>
+      </div>
+      <pre class="code"><span class="c"># 1. 复制模板 / copy the template</span>
+<span class="k">cp</span> -r packages/provider-plugin-template \
+      packages/provider-plugin-my-cli
+
+<span class="c"># 2. 改 manifest 和适配器 / edit manifest + adapter</span>
+<span class="c"># 3. 构建 / build</span>
+<span class="k">pnpm</span> --filter <span class="s">&lt;your-package&gt;</span> build
+
+<span class="c"># 4. 上架 = 向 registry 提 PR / publish via PR</span>
+<span class="c"># github.com/zhufish-aa/nautilo-provider-registry</span></pre>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top: 0;">
+  <div class="wrap">
+    <h2 class="sec-title" data-zh>四步上手</h2>
+    <h2 class="sec-title" data-en>Up and running in four steps</h2>
+    <p class="sec-sub"> </p>
+    <div class="steps">
+      <div class="step">
+        <h3 data-zh>安装并启动</h3><h3 data-en>Install & launch</h3>
+        <p data-zh>下载对应平台安装包，首次启动进入新手引导。</p>
+        <p data-en>Grab the package for your platform; the onboarding tour starts on first launch.</p>
+      </div>
+      <div class="step">
+        <h3 data-zh>检测 CLI</h3><h3 data-en>Detect CLIs</h3>
+        <p data-zh>自动扫描本机已安装的 Agent CLI 及版本。</p>
+        <p data-en>Automatically scans installed agent CLIs and versions.</p>
+      </div>
+      <div class="step">
+        <h3 data-zh>创建实例与团队</h3><h3 data-en>Instances & team</h3>
+        <p data-zh>配置凭证、模型与权限模式，按需组建团队。</p>
+        <p data-en>Configure credentials, models and permission modes; build a team if needed.</p>
+      </div>
+      <div class="step">
+        <h3 data-zh>接入项目开工</h3><h3 data-en>Attach a project</h3>
+        <p data-zh>添加本地项目，开始会话，剩下的交给 Agent。</p>
+        <p data-en>Add a local project, start a session, and let the agents work.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Nautilo</span>
+    <a href="https://github.com/zhufish-aa/Nautilo">GitHub</a>
+    <a href="https://github.com/zhufish-aa/Nautilo/releases">Releases</a>
+    <a href="https://github.com/zhufish-aa/nautilo-provider-registry" data-zh>插件 Registry</a>
+    <a href="https://github.com/zhufish-aa/nautilo-provider-registry" data-en>Plugin registry</a>
+    <span class="right" data-zh>本地优先 · 数据不出本机</span>
+    <span class="right" data-en>Local-first · your data never leaves your machine</span>
+  </div>
+</footer>
+
+<script>
+  const toggle = document.getElementById("langToggle");
+  const root = document.documentElement;
+  const saved = localStorage.getItem("nautilo-lang");
+  if (saved) root.lang = saved;
+  else if ((navigator.language || "").startsWith("en")) root.lang = "en";
+  const sync = () => { toggle.textContent = root.lang === "en" ? "中文" : "EN"; };
+  toggle.addEventListener("click", () => {
+    root.lang = root.lang === "en" ? "zh-CN" : "en";
+    localStorage.setItem("nautilo-lang", root.lang);
+    sync();
+  });
+  sync();
+</script>
+</body>
+</html>
