@@ -357,7 +357,7 @@ CLI 支持在一轮运行中追加输入时，实现 `AdapterRun.steer(input)`�
 
 ## 插件市场（registry）
 
-市场数据来自一个 GitHub 仓库里的 `registry.json`（默认 `https://raw.githubusercontent.com/agenthub/provider-registry/main/registry.json`，可用环境变量 `AGENTHUB_PLUGIN_REGISTRY` 覆盖）：
+市场数据来自官方 registry 仓库 [zhufish-aa/nautilo-provider-registry](https://github.com/zhufish-aa/nautilo-provider-registry) 里的 `registry.json`（raw 地址 `https://raw.githubusercontent.com/zhufish-aa/nautilo-provider-registry/main/registry.json`，可用环境变量 `AGENTHUB_PLUGIN_REGISTRY` 覆盖）：
 
 ```json
 {
@@ -374,7 +374,7 @@ CLI 支持在一轮运行中追加输入时，实现 `AdapterRun.steer(input)`�
 }
 ```
 
-上架 = 向 registry 仓库提 PR，包含清单审核、tarball 下载地址与 sha256。没有 `sha256` 的条目会跳过校验，不建议。
+上架 = 向 [registry 仓库](https://github.com/zhufish-aa/nautilo-provider-registry)提 PR：官方插件把 `.tgz` 放进 PR 的 `packages/` 目录（raw URL 直接可下载），第三方插件把 tar 球托管在自己仓库的 Release 里；条目需带 `sha256`（缺失会跳过校验，不建议）。详细流程和自检清单见 registry 仓库的 README 与 PR 模板。
 
 ## 调试与常见问题
 
