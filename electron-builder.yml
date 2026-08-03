@@ -3,6 +3,9 @@ productName: Nautilo
 # Explicit: the app package name is the scoped "@agenthub/desktop", which
 # sanitizes to an invalid executable name on Linux.
 executableName: Nautilo
+# Default Linux artifact names embed the scoped package name and produce
+# invalid nested paths (release/@agenthub/desktop_*.deb).
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 copyright: Copyright © 2026 Nautilo
 # pnpm keeps electron in the virtual store, so electron-builder cannot detect
 # the version from node_modules — pin it explicitly (keep in sync with
