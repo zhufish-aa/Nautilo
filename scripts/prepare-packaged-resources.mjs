@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,6 +50,14 @@ const deployedDaemon = process.platform === "win32"
 if (deployedDaemon.error) throw deployedDaemon.error;
 if (deployedDaemon.status !== 0) {
   throw new Error(`Deploying the Core Daemon runtime failed with exit code ${deployedDaemon.status}`);
+}
+
+// node-pty ships prebuilds for every supported OS/arch (~60 MB); only the
+// one matching this packaging target can ever load.
+const prebuildsDirectory = join(coreDaemonDirectory, "node_modules", "node-pty", "prebuilds");
+const wantedPrebuild = `${process.platform}-${process.arch}`;
+for (const entry of readdirSync(prebuildsDirectory)) {
+  if (entry !== wantedPrebuild) rmSync(join(prebuildsDirectory, entry), { recursive: true, force: true });
 }
 
 const nodeRuntimeDirectory = join(stagingDirectory, "node");

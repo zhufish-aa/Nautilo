@@ -19,7 +19,10 @@ module.exports = async function afterPack(context) {
     ? join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
     : join(context.appOutDir, "resources");
   const target = join(resourcesDirectory, "core-daemon");
-  // dereference: pnpm deploy links packages into the .pnpm virtual store.
-  cpSync(source, target, { recursive: true, dereference: true });
+  // Only runtime files: src/, test/, tsconfig and tsbuildinfo are build inputs.
+  for (const entry of ["dist", "node_modules", "package.json"]) {
+    // dereference: pnpm deploy may link packages into a virtual store.
+    cpSync(join(source, entry), join(target, entry), { recursive: true, dereference: true });
+  }
   console.log(`afterPack: copied Core Daemon runtime to ${target}`);
 };

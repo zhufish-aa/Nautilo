@@ -24,6 +24,8 @@ files:
   - package.json
   - resources/nautilo-icon-512.png
   - "!node_modules/**"
+  # 58 MB of renderer source maps — dev artifacts, not needed at runtime.
+  - "!**/*.map"
 
 # Prepared by scripts/prepare-packaged-resources.mjs on the target platform.
 # core-daemon is copied by scripts/electron-builder-after-pack.cjs instead:
@@ -39,9 +41,8 @@ asar: true
 
 # electron-builder drafts releases by default; publish them directly.
 publish:
-  provider: github
-  draft: false
-  prerelease: false
+  - provider: github
+    releaseType: release
 
 win:
   icon: nautilo-icon.ico
