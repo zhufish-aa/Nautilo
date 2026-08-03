@@ -35,6 +35,10 @@ jobs:
         run: pnpm install
 
       - name: Build desktop app and daemon
+        # The renderer bundle (monaco, diff editor, xlsx, pdfjs) exceeds the
+        # default 2 GB V8 heap on CI runners.
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: pnpm build:desktop
 
       - name: Prepare packaged resources (daemon deps + Node runtime)
