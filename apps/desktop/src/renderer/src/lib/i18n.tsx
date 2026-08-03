@@ -979,6 +979,19 @@ const zh = {
       desc: "Project Run 与 AgentRun 的时间线、验收与恢复将在 M3 里程碑开放。"
     }
   },
+  tasksPage: {
+    title: "任务编排",
+    subtitle: "主 Agent 拆解的任务图：依赖、分配与实时进度一览",
+    empty: "还没有任务计划",
+    emptyHint: "在工作台发起一个复杂任务，主 Agent 规划拆解后，任务图会实时出现在这里",
+    untitled: "未命名编排",
+    clickHint: "点击节点可打开对应的子会话",
+    statsTotal: "任务 {count}",
+    statsActive: "进行中 {count}",
+    statsDone: "已完成 {count}",
+    statsFailed: "失败 {count}",
+    progress: "{done}/{total}"
+  },
   runsPage: {
     title: "运行驾驶舱",
     subtitle: "所有会话的运行状态一览：哪些在跑、哪些等你处理、哪些已完成未读",
@@ -2052,6 +2065,19 @@ const en: Messages = {
       title: "Run history",
       desc: "Project run and agent run timelines, verification and recovery arrive in M3."
     }
+  },
+  tasksPage: {
+    title: "Task orchestration",
+    subtitle: "The task graph your main agent planned: dependencies, assignments and live progress",
+    empty: "No task plan yet",
+    emptyHint: "Start a complex task in the workbench — once the main agent plans it, the graph appears here in real time",
+    untitled: "Untitled run",
+    clickHint: "Click a node to open its sub-session",
+    statsTotal: "Tasks {count}",
+    statsActive: "Active {count}",
+    statsDone: "Done {count}",
+    statsFailed: "Failed {count}",
+    progress: "{done}/{total}"
   },
   runsPage: {
     title: "Runs cockpit",

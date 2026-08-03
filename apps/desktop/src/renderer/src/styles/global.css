@@ -329,6 +329,31 @@
   }
 }
 
+/* Task board DAG: dashes flowing along edges that feed an active task. */
+@keyframes dash-flow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+.dag-edge-flow {
+  stroke-dasharray: 7 7;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dag-edge-flow {
+    animation: dash-flow 0.9s linear infinite;
+  }
+}
+
+.dag-node {
+  transition: filter 0.18s ease;
+}
+
+.dag-node:hover {
+  filter: brightness(1.07);
+}
+
 @keyframes session-speed-flow {
   from {
     background-position: 100% 0;
