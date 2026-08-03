@@ -57,6 +57,8 @@ linux:
   icon: icon.png
   category: Development
   syncDesktopName: true
+  # Required by fpm-based targets (deb/rpm); package.json has no author email.
+  maintainer: Nautilo <zhufish-aa@users.noreply.github.com>
   target:
     - AppImage
     - deb
