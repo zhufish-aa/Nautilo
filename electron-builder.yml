@@ -1,0 +1,61 @@
+appId: com.nautilo.desktop
+productName: Nautilo
+copyright: Copyright © 2026 Nautilo
+# pnpm keeps electron in the virtual store, so electron-builder cannot detect
+# the version from node_modules — pin it explicitly (keep in sync with
+# apps/desktop/package.json).
+electronVersion: "33.4.11"
+
+directories:
+  app: apps/desktop
+  buildResources: apps/desktop/resources
+  output: release
+
+# The renderer bundles every npm dependency into out/ via electron-vite, and
+# main/preload only use electron + node builtins — node_modules stays out.
+files:
+  - out/**
+  - package.json
+  - resources/nautilo-icon-512.png
+  - "!node_modules/**"
+
+# Prepared by scripts/prepare-packaged-resources.mjs on the target platform.
+extraResources:
+  - from: build/packaged/core-daemon
+    to: core-daemon
+  - from: build/packaged/node
+    to: node
+
+asar: true
+
+win:
+  icon: nautilo-icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  shortcutName: Nautilo
+
+mac:
+  icon: icon.png
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  identity: null
+
+linux:
+  icon: icon.png
+  category: Development
+  target:
+    - AppImage
+    - deb
+    - rpm
+
+npmRebuild: false

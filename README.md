@@ -6,6 +6,18 @@ Nautilo 是一个**本地、可自由配置的多 Agent 编程工作台**。它�
 
 Nautilo 不训练模型、不替代任何 Provider CLI——它是这些 CLI 之上的**编排层与管理工作台**。
 
+## 下载安装
+
+预编译安装包发布在 [GitHub Releases](https://github.com/zhufish-aa/Nautilo/releases)：
+
+| 平台 | 资产 |
+|---|---|
+| Windows x64 | `Nautilo-Setup-*.exe`（NSIS 安装程序）/ `Nautilo-*-win.zip`（免安装） |
+| macOS | `Nautilo-*-arm64.dmg`（Apple Silicon）/ `Nautilo-*-x64.dmg`（Intel） |
+| Linux x64 | `.AppImage` / `.deb` / `.rpm` |
+
+安装包目前**未做代码签名**：Windows 首次运行会出现 SmartScreen 提示（选「仍要运行」），macOS 需在「系统设置 → 隐私与安全性」中允许打开。
+
 ## 功能特性
 
 - **多 Provider / CLI 管理**：内置 Codex、Claude Code、Kimi Code 和 Custom CLI 适配器；OpenCode、Trae 通过可选插件接入。自动检测本机已安装的 CLI 及版本。
@@ -80,15 +92,30 @@ pnpm dev:desktop   # 构建 Core Daemon 并启动 Electron 开发模式
 | `pnpm typecheck` | 根项目与桌面端类型检查 |
 | `pnpm test` | workspace 全部测试 + 契约测试 |
 | `pnpm check` | typecheck + test |
-| `pnpm package:win` | 构建并产出 Windows portable 包 |
+| `pnpm package:win` | 构建并产出 Windows portable 包（旧脚本） |
+| `pnpm package` | 构建并用 electron-builder 产出当前平台安装包 |
 
-### 打包（Windows）
+### 打包
 
 ```bash
-pnpm package:win
+pnpm package          # 当前平台安装包（Windows: NSIS + zip）
+pnpm package:win      # 旧版 Windows portable ZIP 脚本（保留）
 ```
 
-产出 `release/Nautilo-win32-x64/` 与 `release/Nautilo-win32-x64.zip`：便携式 ZIP（非安装程序），内含改名后的 `Nautilo.exe`、图标与版本信息、daemon 运行依赖及 Node runtime。
+electron-builder 产出在 `release/`：`Nautilo-Setup-*.exe`（NSIS 安装程序）与 zip 免安装包；macOS 为 dmg/zip，Linux 为 AppImage/deb/rpm。打包前会自动执行 `scripts/prepare-packaged-resources.mjs`，把 daemon 运行依赖（`pnpm deploy --prod`）和当前平台的 Node runtime 放入 `build/packaged/`，作为 `extraResources` 打进安装包。
+
+### 发布流程（GitHub Release）
+
+打 tag 即触发 `.github/workflows/release.yml`，在 Windows / macOS(arm64+x64) / Linux 四个 runner 上并行构建并自动把产物挂到对应 Release：
+
+```bash
+# 1. bump apps/desktop/package.json 的 version 并提交
+# 2. 打 tag 推送
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+注意：`electron-builder.yml` 里的 `electronVersion` 需与 `apps/desktop/package.json` 的 electron 版本保持同步（pnpm 虚拟 store 无法自动探测）。
 
 ## 插件开发
 

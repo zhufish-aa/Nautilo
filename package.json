@@ -11,6 +11,7 @@
     "build": "tsc -b tsconfig.json --pretty false",
     "build:desktop": "pnpm --filter @agenthub/core-daemon build && pnpm --filter @agenthub/desktop build",
     "package:win": "pnpm build:desktop && node scripts/package-win-portable.mjs",
+    "package": "pnpm build:desktop && node scripts/prepare-packaged-resources.mjs build/packaged && electron-builder",
     "typecheck": "tsc -b tsconfig.json --pretty false && pnpm --filter @agenthub/desktop typecheck",
     "test": "pnpm -r --if-present test && node tests/contract/contracts.test.mjs",
     "check": "pnpm typecheck && pnpm test",
@@ -20,6 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "electron-builder": "^26.0.12",
     "rcedit": "^5.0.2",
     "typescript": "^5.8.3"
   },

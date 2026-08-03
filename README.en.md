@@ -6,6 +6,18 @@ Nautilo is a **local, user-configurable multi-agent coding workspace**. It runs 
 
 Nautilo does not train models and does not replace any provider CLI — it is the **orchestration layer and management workbench** on top of those CLIs.
 
+## Download
+
+Prebuilt installers are published on [GitHub Releases](https://github.com/zhufish-aa/Nautilo/releases):
+
+| Platform | Assets |
+|---|---|
+| Windows x64 | `Nautilo-Setup-*.exe` (NSIS installer) / `Nautilo-*-win.zip` (portable) |
+| macOS | `Nautilo-*-arm64.dmg` (Apple Silicon) / `Nautilo-*-x64.dmg` (Intel) |
+| Linux x64 | `.AppImage` / `.deb` / `.rpm` |
+
+Packages are currently **not code-signed**: Windows shows a SmartScreen prompt on first run (choose "Run anyway"), and macOS requires allowing the app under "System Settings → Privacy & Security".
+
 ## Features
 
 - **Multi-provider / CLI management**: built-in adapters for Codex, Claude Code, Kimi Code, and Custom CLI; OpenCode and Trae are available as optional plugins. Automatically detects installed CLIs and their versions.
@@ -86,15 +98,30 @@ On first launch, an onboarding tour walks you through: detect CLIs → create an
 | `pnpm typecheck` | Type-check root project and desktop app |
 | `pnpm test` | All workspace tests + contract tests |
 | `pnpm check` | typecheck + test |
-| `pnpm package:win` | Build and produce the Windows portable package |
+| `pnpm package:win` | Build and produce the Windows portable package (legacy script) |
+| `pnpm package` | Build and produce installers for the current platform via electron-builder |
 
-### Packaging (Windows)
+### Packaging
 
 ```bash
-pnpm package:win
+pnpm package          # installers for the current platform (Windows: NSIS + zip)
+pnpm package:win      # legacy Windows portable ZIP script (kept)
 ```
 
-Produces `release/Nautilo-win32-x64/` and `release/Nautilo-win32-x64.zip`: a portable ZIP (not an installer) containing the renamed `Nautilo.exe` with icon and version metadata, daemon runtime dependencies, and a bundled Node runtime.
+electron-builder writes to `release/`: `Nautilo-Setup-*.exe` (NSIS installer) and a portable zip on Windows; dmg/zip on macOS; AppImage/deb/rpm on Linux. Packaging first runs `scripts/prepare-packaged-resources.mjs`, which stages the daemon runtime dependencies (`pnpm deploy --prod`) and the current platform's Node runtime into `build/packaged/` to be bundled as `extraResources`.
+
+### Releasing (GitHub Release)
+
+Pushing a tag triggers `.github/workflows/release.yml`, which builds in parallel on four runners (Windows / macOS arm64 / macOS x64 / Linux) and attaches the artifacts to the matching Release:
+
+```bash
+# 1. Bump the version in apps/desktop/package.json and commit
+# 2. Tag and push
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Note: `electronVersion` in `electron-builder.yml` must stay in sync with the electron version in `apps/desktop/package.json` (the pnpm virtual store cannot be auto-detected).
 
 ## Plugin Development
 
