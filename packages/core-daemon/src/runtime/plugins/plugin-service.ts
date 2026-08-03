@@ -123,10 +123,11 @@ export class PluginService {
       const extractDir = join(scratch, "extract");
       await mkdir(extractDir, { recursive: true });
       // bsdtar ships with Windows 10+ and every supported unix — no npm tar
-      // dep. --force-local keeps GNU tar from treating "C:\..." as a remote
-      // host:path spec, and forward slashes keep MSYS GNU tar happy when Git
-      // Bash's tar shadows the system bsdtar.
-      await execFileAsync("tar", ["--force-local", "-xzf", tarPath(archive), "-C", tarPath(extractDir)]);
+      // dep. Run inside the scratch dir with relative paths: GNU tar treats a
+      // "C:"-prefixed archive as a remote host:path spec (and bsdtar rejects
+      // GNU's --force-local), so absolute Windows paths fail on one flavor or
+      // the other. Relative paths work on both.
+      await execFileAsync("tar", ["-xzf", "plugin.tgz", "-C", "extract"], { cwd: scratch });
       return await this.installLocal(await this.findPluginRoot(extractDir));
     } finally {
       await rm(scratch, { recursive: true, force: true });
@@ -284,9 +285,4 @@ async function exists(path: string): Promise<boolean> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/** Node accepts forward slashes on Windows; MSYS GNU tar requires them. */
-function tarPath(path: string): string {
-  return path.replaceAll("\\", "/");
 }
