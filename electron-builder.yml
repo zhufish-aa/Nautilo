@@ -1,5 +1,8 @@
 appId: com.nautilo.desktop
 productName: Nautilo
+# Explicit: the app package name is the scoped "@agenthub/desktop", which
+# sanitizes to an invalid executable name on Linux.
+executableName: Nautilo
 copyright: Copyright © 2026 Nautilo
 # pnpm keeps electron in the virtual store, so electron-builder cannot detect
 # the version from node_modules — pin it explicitly (keep in sync with
@@ -53,6 +56,7 @@ mac:
 linux:
   icon: icon.png
   category: Development
+  syncDesktopName: true
   target:
     - AppImage
     - deb
