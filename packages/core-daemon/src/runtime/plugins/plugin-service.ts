@@ -14,7 +14,7 @@ import type { AdapterRegistry } from "../../adapters/index.js";
 const execFileAsync = promisify(execFile);
 
 /** Default marketplace registry; overridable per-call or via env. */
-const DEFAULT_REGISTRY_URL = "https://raw.githubusercontent.com/zhufish-aa/nautilo-provider-registry/main/registry.json";
+const DEFAULT_REGISTRY_URL = "https://cdn.jsdelivr.net/gh/zhufish-aa/nautilo-provider-registry@main/registry.json";
 
 export interface ProviderPluginRecord {
   id: string;

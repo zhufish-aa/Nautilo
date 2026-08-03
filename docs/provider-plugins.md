@@ -357,7 +357,7 @@ CLI 支持在一轮运行中追加输入时，实现 `AdapterRun.steer(input)`�
 
 ## 插件市场（registry）
 
-市场数据来自官方 registry 仓库 [zhufish-aa/nautilo-provider-registry](https://github.com/zhufish-aa/nautilo-provider-registry) 里的 `registry.json`（raw 地址 `https://raw.githubusercontent.com/zhufish-aa/nautilo-provider-registry/main/registry.json`，可用环境变量 `AGENTHUB_PLUGIN_REGISTRY` 覆盖）：
+市场数据来自官方 registry 仓库 [zhufish-aa/nautilo-provider-registry](https://github.com/zhufish-aa/nautilo-provider-registry) 里的 `registry.json`。应用默认通过 jsDelivr CDN 拉取（`https://cdn.jsdelivr.net/gh/zhufish-aa/nautilo-provider-registry@main/registry.json`，避免 `raw.githubusercontent.com` 在部分网络下 TLS 不稳定导致下载失败），可用环境变量 `AGENTHUB_PLUGIN_REGISTRY` 覆盖：
 
 ```json
 {
