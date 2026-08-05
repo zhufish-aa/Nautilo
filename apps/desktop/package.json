@@ -1,6 +1,6 @@
 {
   "name": "@agenthub/desktop",
-  "version": "0.2.2",
+  "version": "0.2.5",
   "private": true,
   "description": "A local, user-configurable multi-agent coding workspace.",
   "author": "Nautilo",
