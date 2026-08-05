@@ -157,6 +157,12 @@ importers:
         specifier: workspace:*
         version: link:../provider-sdk
 
+  packages/provider-plugin-pi:
+    dependencies:
+      '@agenthub/provider-sdk':
+        specifier: workspace:*
+        version: link:../provider-sdk
+
   packages/provider-plugin-template:
     dependencies:
       '@agenthub/provider-sdk':
@@ -186,6 +192,8 @@ importers:
       '@agenthub/provider-sdk':
         specifier: workspace:*
         version: link:../provider-sdk
+
+  packages/trae-agent-mcp-bridge: {}
 
 packages:
 
