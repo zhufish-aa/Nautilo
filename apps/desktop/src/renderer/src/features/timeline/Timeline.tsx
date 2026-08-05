@@ -408,7 +408,40 @@ function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind
 
 function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kind: "reasoning" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
   const [open, setOpen] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const reasoningScrollRef = useRef<HTMLDivElement>(null);
+  const followReasoningRef = useRef(true);
   const zh = locale === "zh-CN";
+  const scrollToLatest = useCallback(() => {
+    const element = reasoningScrollRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+    followReasoningRef.current = true;
+    setShowJumpToLatest(false);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    followReasoningRef.current = true;
+    setShowJumpToLatest(false);
+    scrollToLatest();
+  }, [open, scrollToLatest]);
+
+  // Streaming text replaces the reasoning event on every delta. Keep the
+  // viewport pinned only while the user is already at the tail; a manual
+  // upward scroll opts out until they return to the bottom.
+  useLayoutEffect(() => {
+    if (open && event.data.streaming && followReasoningRef.current) scrollToLatest();
+  }, [event.data.streaming, event.data.text, open, scrollToLatest]);
+
+  const handleReasoningScroll = (): void => {
+    const element = reasoningScrollRef.current;
+    if (!element) return;
+    const atLatest = element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_TAIL_THRESHOLD;
+    followReasoningRef.current = atLatest;
+    setShowJumpToLatest(!atLatest);
+  };
+
   return (
     <motion.article initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="reasoning-card rounded-xl border border-line bg-card/70">
       <button
@@ -425,10 +458,32 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
         <ChevronDown className={cn("ml-auto h-3.5 w-3.5 text-ink-3 transition-transform duration-200", open && "rotate-180")} aria-hidden />
       </button>
       {open && (
-        <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} className="overflow-hidden">
-          <div className="border-t border-line px-3.5 py-3 text-[13px] leading-relaxed text-ink-2">
-            <MarkdownContent source={event.data.text} />
-            {event.data.streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-hidden />}
+        <motion.div
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: "auto", opacity: 1 }}
+          onAnimationComplete={scrollToLatest}
+          className="overflow-hidden"
+        >
+          <div className="relative">
+            <div
+              ref={reasoningScrollRef}
+              onScroll={handleReasoningScroll}
+              className="max-h-96 overscroll-contain overflow-y-auto border-t border-line px-3.5 py-3 pr-2 text-[13px] leading-relaxed text-ink-2"
+            >
+              <MarkdownContent source={event.data.text} />
+              {event.data.streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-hidden />}
+            </div>
+            {showJumpToLatest && (
+              <button
+                type="button"
+                onClick={scrollToLatest}
+                className="absolute bottom-2 right-3 inline-flex items-center gap-1 rounded-full border border-line bg-card px-2 py-1 text-[11px] text-ink-2 shadow-pop transition-colors hover:bg-card-hover"
+                aria-label={zh ? "滚动到最新推理" : "Scroll to latest reasoning"}
+              >
+                <ChevronDown className="h-3 w-3" aria-hidden />
+                {zh ? "回到底部" : "Latest"}
+              </button>
+            )}
           </div>
         </motion.div>
       )}
