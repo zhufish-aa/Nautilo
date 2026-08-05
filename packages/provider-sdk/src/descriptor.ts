@@ -19,6 +19,14 @@ export interface ProviderPermissionMode {
   description: LocalizedText;
 }
 
+/** One provider-native upstream protocol selectable in the instance editor. */
+export interface ProviderApiType {
+  /** Value persisted in AgentInstance.providerOptions.apiType. */
+  value: string;
+  name: LocalizedText;
+  description: LocalizedText;
+}
+
 export interface ProviderDescriptor {
   providerId: string;
   name: string;
@@ -38,6 +46,8 @@ export interface ProviderDescriptor {
   baseUrlEnv?: string;
   /** CLI-native permission modes; omit when the CLI has no selectable modes. */
   permissionModes?: ProviderPermissionMode[];
+  /** Provider-native upstream API protocols; omit when the provider has no choice. */
+  apiTypes?: ProviderApiType[];
   /**
    * Whether instances support a named config profile passed to the CLI
    * (codex --profile). The instance editor hides the profile field otherwise.

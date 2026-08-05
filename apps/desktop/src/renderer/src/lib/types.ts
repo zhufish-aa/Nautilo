@@ -60,6 +60,8 @@ export interface AgentInstanceConfig {
   apiKey?: string;
   credentialStored?: boolean;
   baseUrl?: string;
+  /** Provider-native upstream protocol (for example Pi's openai-completions). */
+  apiType?: string;
   wireApi?: CodexWireApi;
   webSearchMode?: WebSearchMode;
   webSearchInstanceId?: string;

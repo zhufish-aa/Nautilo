@@ -49,6 +49,11 @@ export function permissionModesFor(providerId: string): PermissionModeOption[] {
   return findDescriptor(providerId)?.permissionModes ?? [];
 }
 
+/** Upstream wire/API protocols declared by a provider plugin. */
+export function apiTypesFor(providerId: string): NonNullable<ProviderDescriptor["apiTypes"]> {
+  return findDescriptor(providerId)?.apiTypes ?? [];
+}
+
 /** Whether the provider passes instance.profile to its CLI (codex --profile). */
 export function supportsConfigProfile(providerId: string): boolean {
   return findDescriptor(providerId)?.configProfile === true;

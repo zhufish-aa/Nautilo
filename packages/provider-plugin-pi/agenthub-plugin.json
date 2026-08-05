@@ -1,0 +1,74 @@
+{
+  "id": "pi",
+  "apiVersion": 1,
+  "main": "dist/index.js",
+  "version": "0.2.2",
+  "descriptor": {
+    "providerId": "pi",
+    "name": "Pi",
+    "vendor": "Pi",
+    "capabilities": ["headless_structured", "native_resume", "tool_streaming"],
+    "defaultExecutable": "pi",
+    "credentialEnv": ["AGENTHUB_PI_API_KEY"],
+    "baseUrlEnv": "AGENTHUB_PI_BASE_URL",
+    "envPassthrough": [
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "AZURE_OPENAI_API_KEY",
+      "DEEPSEEK_API_KEY",
+      "GEMINI_API_KEY",
+      "OPENROUTER_API_KEY",
+      "KIMI_API_KEY",
+      "MOONSHOT_API_KEY",
+      "OPENCODE_API_KEY",
+      "ZAI_API_KEY",
+      "ZAI_CODING_CN_API_KEY",
+      "AWS_PROFILE",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_REGION",
+      "PI_CODING_AGENT_DIR",
+      "PI_CODING_AGENT_SESSION_DIR"
+    ],
+    "permissionModes": [
+      {
+        "value": "standard",
+        "name": { "zh-CN": "标准", "en-US": "Standard" },
+        "description": { "zh-CN": "加载项目级 Pi 资源并沿用 Pi 的工具配置", "en-US": "Load project-local Pi resources and keep Pi's configured tools" }
+      },
+      {
+        "value": "read-only",
+        "name": { "zh-CN": "只读", "en-US": "Read only" },
+        "description": { "zh-CN": "仅启用 read、grep、find 和 ls", "en-US": "Only enable read, grep, find, and ls" }
+      },
+      {
+        "value": "isolated",
+        "name": { "zh-CN": "忽略项目扩展", "en-US": "Ignore project extensions" },
+        "description": { "zh-CN": "沿用 Pi 的工具配置，但不加载项目级 Pi 资源", "en-US": "Keep Pi's configured tools but ignore project-local Pi resources" }
+      }
+    ],
+    "apiTypes": [
+      {
+        "value": "openai-completions",
+        "name": { "zh-CN": "OpenAI Chat Completions", "en-US": "OpenAI Chat Completions" },
+        "description": { "zh-CN": "适用于 /chat/completions 兼容接口", "en-US": "For /chat/completions-compatible endpoints" }
+      },
+      {
+        "value": "openai-responses",
+        "name": { "zh-CN": "OpenAI Responses", "en-US": "OpenAI Responses" },
+        "description": { "zh-CN": "适用于 OpenAI Responses 兼容接口", "en-US": "For OpenAI Responses-compatible endpoints" }
+      },
+      {
+        "value": "anthropic-messages",
+        "name": { "zh-CN": "Anthropic Messages", "en-US": "Anthropic Messages" },
+        "description": { "zh-CN": "适用于 Anthropic Messages 兼容接口", "en-US": "For Anthropic Messages-compatible endpoints" }
+      },
+      {
+        "value": "google-generative-ai",
+        "name": { "zh-CN": "Google Generative AI", "en-US": "Google Generative AI" },
+        "description": { "zh-CN": "适用于 Gemini/Google Generative AI 接口", "en-US": "For Gemini/Google Generative AI endpoints" }
+      }
+    ],
+    "contextWindowDiscovery": true
+  }
+}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Eye, EyeOff, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
-import { ENV_POLICIES, permissionModesFor, supportsConfigProfile, useProviderMetas } from "../../lib/provider-catalog";
+import { apiTypesFor, ENV_POLICIES, permissionModesFor, supportsConfigProfile, useProviderMetas } from "../../lib/provider-catalog";
 import type { AgentInstanceConfig, CodexWireApi, WebSearchMode } from "../../lib/types";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -49,6 +49,7 @@ interface FormState {
   permissionMode: string;
   apiKey: string;
   baseUrl: string;
+  apiType: string;
   wireApi: CodexWireApi;
   webSearchMode: WebSearchMode;
   webSearchInstanceId: string;
@@ -69,6 +70,7 @@ function emptyForm(): FormState {
     permissionMode: "",
     apiKey: "",
     baseUrl: "",
+    apiType: "",
     wireApi: "responses",
     webSearchMode: "native",
     webSearchInstanceId: "",
@@ -90,6 +92,7 @@ function formFromInstance(instance: AgentInstanceConfig): FormState {
     permissionMode: instance.permissionMode ?? "",
     apiKey: instance.apiKey ?? "",
     baseUrl: instance.baseUrl ?? "",
+    apiType: instance.apiType ?? apiTypesFor(instance.providerId)[0]?.value ?? "",
     wireApi: instance.wireApi ?? "responses",
     webSearchMode: instance.webSearchMode ?? (instance.wireApi === "chat" ? "off" : "native"),
     webSearchInstanceId: instance.webSearchInstanceId ?? "",
@@ -221,6 +224,15 @@ export function AgentEditorDialog({
     [form.providerId, locale]
   );
 
+  const apiTypeOptions = useMemo(
+    () => apiTypesFor(form.providerId).map((apiType) => ({
+      value: apiType.value,
+      label: apiType.name[locale],
+      hint: apiType.description[locale]
+    })),
+    [form.providerId, locale]
+  );
+
   const webSearchInstanceOptions = useMemo(
     () => [
       { value: "", label: t("agents.editor.basic.webSearchInstanceNone") },
@@ -281,6 +293,7 @@ export function AgentEditorDialog({
       permissionMode: form.permissionMode.trim() || undefined,
       apiKey: form.apiKey.trim() || undefined,
       baseUrl: form.baseUrl.trim() || undefined,
+      apiType: apiTypeOptions.length ? form.apiType.trim() || apiTypeOptions[0]?.value : undefined,
       wireApi: form.providerId === "codex" ? form.wireApi : undefined,
       webSearchMode: form.providerId === "codex" ? form.webSearchMode : undefined,
       webSearchInstanceId: form.providerId === "codex" && form.webSearchMode === "official" ? form.webSearchInstanceId || undefined : undefined,
@@ -336,6 +349,7 @@ export function AgentEditorDialog({
               providerId: value,
               executable: installations.find((item) => item.providerId === value)?.executable ?? "",
               permissionMode: "",
+              apiType: apiTypesFor(value)[0]?.value ?? "",
               wireApi: value === "codex" ? form.wireApi : "responses"
             })}
             options={providerOptions}
@@ -458,6 +472,19 @@ export function AgentEditorDialog({
                 className="font-mono text-[13px]"
               />
             </Field>
+            {apiTypeOptions.length > 0 && (
+              <Field
+                label={t("agents.editor.basic.apiType")}
+                hint={t("agents.editor.basic.apiTypeHint")}
+              >
+                <SelectField
+                  aria-label={t("agents.editor.basic.apiType")}
+                  value={form.apiType || apiTypeOptions[0]?.value}
+                  onValueChange={(apiType) => patch({ apiType })}
+                  options={apiTypeOptions}
+                />
+              </Field>
+            )}
             {form.providerId === "codex" && (
               <Field
                 label={t("agents.editor.basic.wireApi")}

@@ -25,6 +25,7 @@ export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
       envPolicyId: instance.envPolicyId,
       ...(instance.permissionMode ? { permissionMode: instance.permissionMode } : {}),
       ...(instance.baseUrl ? { baseUrl: instance.baseUrl } : {}),
+      ...(instance.apiType ? { apiType: instance.apiType } : {}),
       ...(instance.wireApi ? { wireApi: instance.wireApi } : {}),
       ...(instance.webSearchMode ? { webSearchMode: instance.webSearchMode } : {}),
       ...(instance.webSearchInstanceId ? { webSearchInstanceId: instance.webSearchInstanceId } : {}),
@@ -50,6 +51,7 @@ export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
     envPolicyId: typeof instance.providerOptions?.envPolicyId === "string" ? instance.providerOptions.envPolicyId : "env-standard",
     permissionMode: typeof instance.providerOptions?.permissionMode === "string" ? instance.providerOptions.permissionMode : undefined,
     baseUrl: typeof instance.providerOptions?.baseUrl === "string" ? instance.providerOptions.baseUrl : undefined,
+    apiType: typeof instance.providerOptions?.apiType === "string" ? instance.providerOptions.apiType : undefined,
     wireApi: instance.providerOptions?.wireApi === "chat" ? "chat" : "responses",
     webSearchMode: instance.providerOptions?.webSearchMode === "official" || instance.providerOptions?.webSearchMode === "off"
       ? instance.providerOptions.webSearchMode

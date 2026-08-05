@@ -1,0 +1,15 @@
+{
+  "name": "@agenthub/provider-plugin-pi",
+  "version": "0.2.2",
+  "private": true,
+  "type": "module",
+  "description": "AgentHub provider plugin for Pi over its native JSONL RPC protocol.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@agenthub/provider-sdk": "workspace:*"
+  }
+}

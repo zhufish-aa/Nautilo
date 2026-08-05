@@ -521,7 +521,10 @@ export class RunService {
     }
     else if (event.kind === "exit") {
       const current = this.database.runs.get(run.id) ?? run;
-      if (!["cancelled", "cancelling"].includes(current.status)) {
+      // A provider process can exit cleanly after reporting a model/transport
+      // failure (Pi RPC is one example). Do not let exit code 0 erase the
+      // earlier failed/timed-out state and leave a misleading completed run.
+      if (!["failed", "timed_out", "cancelled", "cancelling", "crashed"].includes(current.status)) {
         this.database.runs.save({ ...current, status: event.exitCode === 0 ? "completed" : "failed", endedAt: new Date().toISOString(), exitCode: event.exitCode ?? undefined });
       }
     } else if (event.kind === "timeout") this.database.runs.save({ ...(this.database.runs.get(run.id) ?? run), status: "timed_out", endedAt: new Date().toISOString(), failureCode: `RUN_${event.reason.toUpperCase()}` });
