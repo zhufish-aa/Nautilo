@@ -61,7 +61,7 @@ export class AgentService {
     return { providerId, ...(await this.adapters.detect({ ...probe, executable: command })) };
   }
 
-  async listModels(providerId: string, executable?: string, agentInstanceId?: string, options: { baseUrl?: string; apiKey?: string } = {}): Promise<ProviderModelCatalog> {
+  async listModels(providerId: string, executable?: string, agentInstanceId?: string, options: { baseUrl?: string; apiKey?: string; apiType?: string } = {}): Promise<ProviderModelCatalog> {
     const configured = agentInstanceId
       ? this.list().find((instance) => instance.id === agentInstanceId && instance.providerId === providerId)
       : this.list().find((instance) => instance.providerId === providerId && instance.executable.trim());
@@ -91,27 +91,39 @@ export class AgentService {
     try {
       const baseUrl = options.baseUrl?.trim();
       const apiKey = options.apiKey?.trim();
+      const apiType = options.apiType?.trim();
       const descriptor = this.adapters.find(providerId)?.descriptor;
       const instance = {
         ...probe,
         executable: command,
-        providerOptions: { ...probe.providerOptions, ...(baseUrl ? { baseUrl } : {}) }
+        providerOptions: {
+          ...probe.providerOptions,
+          ...(baseUrl ? { baseUrl } : {}),
+          ...(apiType ? { apiType } : {})
+        }
       };
       const credentialEnvironment = { ...(this.credentials?.environment(instance.id, instance.providerId) ?? {}) };
       if (apiKey) for (const key of descriptor?.credentialEnv ?? []) credentialEnvironment[key] = apiKey;
       const context = {
         env: this.environment.build(undefined, { ...providerEnvironmentPassthrough(instance, process.env, descriptor), ...credentialEnvironment })
       };
-      // Instance-editor quick fetch: with a base URL every provider goes through
-      // the generic OpenAI-compatible endpoint first; adapter discovery (which
-      // falls back to the local CLI) remains the default and the fallback.
+      // Instance-editor quick fetch must honor the unsaved endpoint currently
+      // visible in the form. Once the user supplies a base URL, never silently
+      // replace an API failure with the local CLI catalog: that makes a broken
+      // endpoint look successful and overwrites the form with unrelated models.
       if (baseUrl) {
         const effectiveApiKey = apiKey || descriptor?.credentialEnv?.map((key) => credentialEnvironment[key]).find((value) => value?.trim());
         try {
-          const generic = await discoverOpenAiCompatibleModels(baseUrl, effectiveApiKey);
+          const generic = await discoverOpenAiCompatibleModels(baseUrl, effectiveApiKey, undefined, apiType);
           return mergeInstanceModelConfig({ ...generic, providerId }, instance.models);
-        } catch {
-          // Fall through to adapter/CLI discovery below.
+        } catch (error) {
+          return {
+            providerId,
+            models: [],
+            source: "unavailable",
+            fetchedAt: new Date().toISOString(),
+            warning: error instanceof Error ? error.message : String(error)
+          };
         }
       }
       return await this.adapters.listModels(instance, context);

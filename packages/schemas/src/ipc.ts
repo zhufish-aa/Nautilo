@@ -75,7 +75,7 @@ export interface IpcRequestMap {
   "capability.discoverMcp": { input: { projectRoot?: string }; output: { sources: DiscoveredMcpSource[] } };
   "capability.scanSkills": { input: { dir: string }; output: CapabilityScanResult };
   "capability.importMany": { input: { items: ProviderCapability[]; onConflict?: CapabilityImportConflictPolicy }; output: { results: CapabilityImportOutcome[] } };
-  "provider.models": { input: { providerId: string; agentInstanceId?: string; executable?: string; baseUrl?: string; apiKey?: string }; output: ProviderModelCatalog };
+  "provider.models": { input: { providerId: string; agentInstanceId?: string; executable?: string; baseUrl?: string; apiKey?: string; apiType?: string }; output: ProviderModelCatalog };
   "team.list": { input: undefined; output: TeamDefinition[] };
   "team.get": { input: { teamId: string }; output: TeamDefinition };
   "team.upsert": { input: TeamDefinition; output: TeamDefinition };

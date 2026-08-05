@@ -166,7 +166,8 @@ export function AgentEditorDialog({
         agentInstanceId: instance?.id,
         executable: form.executable,
         baseUrl: form.baseUrl,
-        apiKey: form.apiKey
+        apiKey: form.apiKey,
+        apiType: form.apiType
       });
       if (!catalog.models.length) {
         toast.error(catalog.warning ?? t("agents.editor.models.fetchEmpty"));

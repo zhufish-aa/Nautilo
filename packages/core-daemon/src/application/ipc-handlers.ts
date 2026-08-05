@@ -84,7 +84,11 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("capability.discoverMcp", async (input) => services.capabilityImports.discoverMcp(input));
   gateway.register("capability.scanSkills", async ({ dir }) => services.capabilityImports.scanSkills({ dir }));
   gateway.register("capability.importMany", async (input) => services.capabilityImports.importMany(input));
-  gateway.register("provider.models", async (input) => services.agents.listModels(input.providerId, input.executable, input.agentInstanceId, { baseUrl: input.baseUrl, apiKey: input.apiKey }));
+  gateway.register("provider.models", async (input) => services.agents.listModels(input.providerId, input.executable, input.agentInstanceId, {
+    baseUrl: input.baseUrl,
+    apiKey: input.apiKey,
+    apiType: input.apiType
+  }));
   gateway.register("team.list", async () => services.teams.list());
   gateway.register("team.get", async ({ teamId }) => services.teams.get(teamId));
   gateway.register("team.upsert", async (input) => services.teams.upsert(input));

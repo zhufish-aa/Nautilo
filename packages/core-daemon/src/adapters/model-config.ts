@@ -53,36 +53,62 @@ export function mergeInstanceModelConfig(
 }
 
 /**
- * Generic OpenAI-compatible model discovery against `GET {baseUrl}/models`.
+ * Provider API model discovery against `GET {baseUrl}/models`.
  * Used by the instance editor's quick-fetch button when a base URL is
  * configured; requests without a credential are sent unauthenticated so
  * local endpoints (Ollama, vLLM, LM Studio, ...) work out of the box.
  *
- * Anthropic-protocol shims (e.g. DeepSeek's `/anthropic` base URL) rarely
- * expose a models route, so a `/anthropic` suffix is retried stripped.
+ * Authentication follows the selected upstream protocol. Both the exact
+ * base URL and its conventional versioned models route are tried; Anthropic
+ * shims ending in `/anthropic` also retry against the parent endpoint.
  */
 export async function discoverOpenAiCompatibleModels(
   baseUrl: string,
   apiKey?: string,
-  timeoutMs = 10_000
+  timeoutMs = 10_000,
+  apiType?: string
 ): Promise<ProviderModelCatalog> {
   const normalized = baseUrl.replace(/\/+$/, "");
-  try {
-    return await fetchModels(normalized, apiKey, timeoutMs);
-  } catch (error) {
-    const stripped = normalized.replace(/\/anthropic$/i, "");
-    if (stripped === normalized) throw error;
-    return fetchModels(stripped, apiKey, timeoutMs);
+  const endpoints = modelListEndpoints(normalized, apiType);
+  let lastError: unknown;
+  for (const endpoint of endpoints) {
+    try {
+      return await fetchModels(endpoint, apiKey, timeoutMs, apiType);
+    } catch (error) {
+      lastError = error;
+    }
   }
+  throw lastError instanceof Error ? lastError : new Error(`Unable to fetch models from ${normalized}`);
 }
 
-async function fetchModels(baseUrl: string, apiKey: string | undefined, timeoutMs: number): Promise<ProviderModelCatalog> {
-  const endpoint = `${baseUrl}/models`;
+function modelListEndpoints(baseUrl: string, apiType?: string): string[] {
+  const roots = [baseUrl];
+  const strippedAnthropic = baseUrl.replace(/\/anthropic$/i, "");
+  if (strippedAnthropic !== baseUrl) roots.push(strippedAnthropic);
+  const suffix = apiType === "google-generative-ai" ? "v1beta" : "v1";
+  return [...new Set(roots.flatMap((root) => [
+    `${root}/models`,
+    ...(/\/(?:v1|v1beta)$/i.test(root) ? [] : [`${root}/${suffix}/models`])
+  ]))];
+}
+
+function modelListHeaders(apiKey: string | undefined, apiType?: string): Record<string, string> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (!apiKey) return headers;
+  if (apiType === "anthropic-messages") {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else if (apiType === "google-generative-ai") {
+    headers["x-goog-api-key"] = apiKey;
+  } else {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
+  return headers;
+}
+
+async function fetchModels(endpoint: string, apiKey: string | undefined, timeoutMs: number, apiType?: string): Promise<ProviderModelCatalog> {
   const response = await fetch(endpoint, {
-    headers: {
-      accept: "application/json",
-      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {})
-    },
+    headers: modelListHeaders(apiKey, apiType),
     signal: AbortSignal.timeout(timeoutMs)
   });
   if (!response.ok) throw new Error(`GET ${endpoint} failed (${response.status})`);
