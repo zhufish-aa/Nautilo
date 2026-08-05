@@ -476,6 +476,7 @@ function mergeStandaloneEvents(sessionId: string, events: RuntimeEvent[]): void 
   standaloneEventCache.set(sessionId, [...current, ...fresh]);
   ingestInteractionEvents(fresh);
   ingestFollowUpEvents(sessionId, fresh);
+  ingestProviderCommandEvents(sessionId, fresh);
   // Keep the event -> render edge synchronous for streaming text. The
   // workbench follows the rendered timeline height; queueing deltas here can
   // leave the UI with a stale event array for a frame and, more importantly,
@@ -755,10 +756,17 @@ async function projectSessionEvents(sessionId: string): Promise<{ events: Runtim
   if (fresh.length) {
     ingestInteractionEvents(fresh);
     ingestFollowUpEvents(sessionId, fresh);
+    ingestProviderCommandEvents(sessionId, fresh);
   }
   const events = fresh.length ? [...cached, ...fresh] : cached;
   projectSessionEventCache.set(sessionId, events);
   return { events, hasNew: fresh.length > 0 };
+}
+
+function ingestProviderCommandEvents(sessionId: string, events: RuntimeEvent[]): void {
+  if (events.some((event) => event.type === "provider.commands_updated")) {
+    useSessionsStore.getState()._bumpProviderCommands(sessionId);
+  }
 }
 
 const POLL_FIRST_TICK_MS = 250;

@@ -327,3 +327,55 @@ test("RunService forwards providerOptions.baseUrl as ANTHROPIC_BASE_URL to claud
   assert.equal(captured.env.ANTHROPIC_BASE_URL, "https://relay.example.com");
   database.close();
 });
+
+test("RunService passes only enabled provider-bound skills through the adapter SDK", async () => {
+  let captured;
+  const adapter = {
+    providerId: "pi",
+    supportsStructuredOutput: true,
+    supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    detect: async () => ({ installed: true, executable: "pi" }),
+    start: (request) => {
+      captured = request;
+      async function* events() {
+        yield { kind: "message", text: "ok" };
+        yield { kind: "exit", exitCode: 0 };
+      }
+      return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+    }
+  };
+  const database = new Database(":memory:");
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  const project = { id: "p-skills", name: "Skills", rootPath: process.cwd(), repositoryType: "none", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const session = { id: "s-skills", projectId: project.id, memberId: "a-skills", title: "Skills", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+  const agent = { id: "a-skills", providerId: "pi", displayName: "Pi", executable: "pi", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now };
+  database.projects.save(project, now);
+  database.sessions.save(session);
+  const capability = (id, enabled, providerIds) => ({
+    id,
+    kind: "skill",
+    name: id,
+    description: `${id} description`,
+    tags: [],
+    enabled,
+    providerIds,
+    skill: { instructions: `${id} instructions`, resourceDir: `C:/skills/${id}` },
+    createdAt: now,
+    updatedAt: now
+  });
+  database.capabilities.save(capability("selected", true, ["pi"]), now);
+  database.capabilities.save(capability("disabled", false, ["pi"]), now);
+  database.capabilities.save(capability("other-provider", true, ["codex"]), now);
+
+  const runId = await service.start(session, agent, "use a skill");
+  await waitForRun(database, runId);
+  assert.deepEqual(captured.skills, [{
+    id: "selected",
+    name: "selected",
+    description: "selected description",
+    instructions: "selected instructions",
+    resourceDir: "C:/skills/selected"
+  }]);
+  database.close();
+});

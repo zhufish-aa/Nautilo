@@ -37,7 +37,16 @@ export class SlashCommandService {
 
   list(sessionId: string): SlashCommandDefinition[] {
     const { agent } = this.resolveBase(sessionId);
-    return slashCommandCatalog(agent.providerId, this.latestProviderCommands(sessionId, agent.providerId));
+    // Runtime reports override descriptor defaults with the same name. The
+    // descriptor makes stable commands available before a session's first run;
+    // reports still support commands discovered dynamically by a provider.
+    const runtime = this.latestProviderCommands(sessionId, agent.providerId);
+    const defaults = this.agents.nativeCommands(agent.providerId);
+    const runtimeNames = new Set(runtime.map((command) => command.name.replace(/^\//, "")));
+    return slashCommandCatalog(agent.providerId, [
+      ...runtime,
+      ...defaults.filter((command) => !runtimeNames.has(command.name.replace(/^\//, "")))
+    ]);
   }
 
   async execute(sessionId: string, commandId: string, argument?: string): Promise<SlashCommandResult> {

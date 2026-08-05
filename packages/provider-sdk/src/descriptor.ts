@@ -27,6 +27,15 @@ export interface ProviderApiType {
   description: LocalizedText;
 }
 
+/** One provider-native command that the adapter can execute headlessly. */
+export interface ProviderNativeCommand {
+  name: string;
+  description: string;
+  inputHint?: string;
+  /** Dedicated provider transport used instead of sending command text as chat. */
+  providerCommand?: "compact";
+}
+
 export interface ProviderDescriptor {
   providerId: string;
   name: string;
@@ -48,6 +57,8 @@ export interface ProviderDescriptor {
   permissionModes?: ProviderPermissionMode[];
   /** Provider-native upstream API protocols; omit when the provider has no choice. */
   apiTypes?: ProviderApiType[];
+  /** Commands available immediately after the provider/plugin is loaded. */
+  nativeCommands?: ProviderNativeCommand[];
   /**
    * Whether instances support a named config profile passed to the CLI
    * (codex --profile). The instance editor hides the profile field otherwise.

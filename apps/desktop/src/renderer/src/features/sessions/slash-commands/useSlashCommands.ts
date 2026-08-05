@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { SlashCommandDefinition, SlashCommandResult } from "@agenthub/domain";
 import { requestCore } from "../../../lib/bridge";
+import { useProvidersStore } from "../../../stores/providers";
 import { useSessionsStore } from "../../../stores/sessions";
 
 export function useSlashCommands(sessionId?: string): {
@@ -16,6 +17,10 @@ export function useSlashCommands(sessionId?: string): {
   const [result, setResult] = useState<SlashCommandResult>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const providerCatalog = useProvidersStore((state) => state.catalog);
+  const providerCommandRevision = useSessionsStore((state) =>
+    sessionId ? state.providerCommandRevisions[sessionId] ?? 0 : 0
+  );
 
   useEffect(() => {
     let active = true;
@@ -27,7 +32,7 @@ export function useSlashCommands(sessionId?: string): {
       .then((items) => { if (active) setCommands(items); })
       .catch((cause) => { if (active) setError(message(cause)); });
     return () => { active = false; };
-  }, [sessionId]);
+  }, [sessionId, providerCatalog, providerCommandRevision]);
 
   const applyPatch = useCallback((next: SlashCommandResult): void => {
     if (!sessionId || !next.sessionPatch) return;

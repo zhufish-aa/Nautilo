@@ -8,7 +8,7 @@ import type {
   Session,
   TaskId
 } from "@agenthub/domain";
-import { AdapterRegistry, type AdapterEvent, type AdapterFileDiff, type AdapterInteractionInput, type AdapterMcpServer } from "../adapters/index.js";
+import { AdapterRegistry, type AdapterEvent, type AdapterFileDiff, type AdapterInteractionInput, type AdapterMcpServer, type AdapterSkill } from "../adapters/index.js";
 import { Database } from "../database/index.js";
 import { EventService } from "./event-service.js";
 import { ApprovalService, CommandPolicyService, CredentialService, EnvironmentPolicyService, RedactionService, providerEnvironmentPassthrough } from "./security/index.js";
@@ -249,6 +249,7 @@ export class RunService {
       idleTimeoutMs: 30 * 60_000,
       localImagePaths: context.localImagePaths,
       providerCommand: context.providerCommand,
+      skills: this.resolveSkills(agent),
       mcpServers: this.resolveMcpServers(agent),
       ...(runtimeToolBinding ? { runtimeTools: runtimeToolBinding.tools, executeRuntimeTool: runtimeToolBinding.execute } : {}),
       ...(this.interactions && context.presentation !== "provider_command"
@@ -297,6 +298,22 @@ export class RunService {
       .filter((server): server is AdapterMcpServer => server !== undefined);
   }
 
+  /** Provider-neutral skill bundles; each adapter decides how its CLI loads them. */
+  private resolveSkills(agent: AgentInstance): AdapterSkill[] {
+    return this.database.capabilities.list()
+      .filter((capability) => capability.kind === "skill"
+        && capability.enabled
+        && capability.providerIds.includes(agent.providerId)
+        && Boolean(capability.skill?.instructions.trim()))
+      .map((capability) => ({
+        id: capability.id,
+        name: capability.name,
+        description: capability.description,
+        instructions: capability.skill!.instructions,
+        resourceDir: capability.skill!.resourceDir
+      }));
+  }
+
   private async consume(
     run: AgentRun,
     session: Session,
@@ -316,7 +333,7 @@ export class RunService {
         const cancelled = latest.status === "cancelled" || latest.status === "cancelling";
         const detail = cancelled
           ? "CLI process cancelled"
-          : this.outputTails.get(run.id)?.trim() || (latest.status === "timed_out" ? "CLI process timed out" : "CLI process failed");
+          : this.outputTails.get(run.id)?.trim() || runFailureDetail(latest);
         if (context.presentation !== "provider_command") {
           this.events.append(session, latest, "run.failed", {
             code: latest.failureCode ?? "RUN_START_FAILED",
@@ -527,7 +544,12 @@ export class RunService {
       if (!["failed", "timed_out", "cancelled", "cancelling", "crashed"].includes(current.status)) {
         this.database.runs.save({ ...current, status: event.exitCode === 0 ? "completed" : "failed", endedAt: new Date().toISOString(), exitCode: event.exitCode ?? undefined });
       }
-    } else if (event.kind === "timeout") this.database.runs.save({ ...(this.database.runs.get(run.id) ?? run), status: "timed_out", endedAt: new Date().toISOString(), failureCode: `RUN_${event.reason.toUpperCase()}` });
+    } else if (event.kind === "timeout") this.database.runs.save({
+      ...(this.database.runs.get(run.id) ?? run),
+      status: event.reason === "max_output" ? "failed" : "timed_out",
+      endedAt: new Date().toISOString(),
+      failureCode: `RUN_${event.reason.toUpperCase()}`
+    });
     else if (event.kind === "error") {
       this.rememberOutput(run.id, event.error.message);
       this.database.runs.save({ ...(this.database.runs.get(run.id) ?? run), status: "failed", endedAt: new Date().toISOString(), failureCode: "PROVIDER_ERROR" });
@@ -618,4 +640,11 @@ function normalizeChangeType(value?: string): GitChangedFile["changeType"] {
   if (value === "delete" || value === "remove") return "deleted";
   if (value === "rename") return "renamed";
   return "modified";
+}
+
+function runFailureDetail(run: AgentRun): string {
+  if (run.failureCode === "RUN_MAX_OUTPUT") return "CLI output exceeded the configured safety limit";
+  if (run.failureCode === "RUN_IDLE") return "CLI process was idle for too long";
+  if (run.failureCode === "RUN_TIMEOUT") return "CLI process exceeded the configured time limit";
+  return run.status === "timed_out" ? "CLI process timed out" : "CLI process failed";
 }

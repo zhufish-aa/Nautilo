@@ -27,6 +27,8 @@ interface SessionsState {
   artifacts: Record<string, SessionArtifact[]>;
   rawLog: Record<string, string[]>;
   contextUsage: Record<string, ContextUsage | undefined>;
+  /** Incremented when a provider reports a new native command catalog. */
+  providerCommandRevisions: Record<string, number>;
   /** The provider turn currently occupying this exact session. */
   foreground: Record<string, RunLifecycle | undefined>;
   running: Record<string, RunLifecycle | undefined>;
@@ -74,6 +76,7 @@ interface SessionsState {
   _replaceArtifacts: (sessionId: string, artifacts: SessionArtifact[]) => void;
   _replaceRawLog: (sessionId: string, lines: string[]) => void;
   _replaceContextUsage: (sessionId: string, usage: ContextUsage | undefined) => void;
+  _bumpProviderCommands: (sessionId: string) => void;
   _replaceSessions: (sessions: UiSession[]) => void;
   _replaceQueuedFollowUps: (sessionId: string, items: QueuedFollowUp[]) => void;
   _addQueuedFollowUp: (sessionId: string, item: QueuedFollowUp) => void;
@@ -84,7 +87,7 @@ interface SessionsState {
 
 function buildInitial(): Pick<
   SessionsState,
-  "sessions" | "events" | "tasks" | "artifacts" | "rawLog" | "contextUsage"
+  "sessions" | "events" | "tasks" | "artifacts" | "rawLog" | "contextUsage" | "providerCommandRevisions"
 > {
   return {
     sessions: [],
@@ -92,7 +95,8 @@ function buildInitial(): Pick<
     tasks: {},
     artifacts: {},
     rawLog: {},
-    contextUsage: {}
+    contextUsage: {},
+    providerCommandRevisions: {}
   };
 }
 
@@ -132,6 +136,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             artifacts: keep(state.artifacts),
             rawLog: keep(state.rawLog),
             contextUsage: keep(state.contextUsage),
+            providerCommandRevisions: keep(state.providerCommandRevisions),
             foreground: keep(state.foreground),
             running: keep(state.running),
             activeAgentRunIds: keep(state.activeAgentRunIds),
@@ -165,7 +170,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           events: { ...state.events, [session.id]: [] },
           tasks: { ...state.tasks, [session.id]: [] },
           artifacts: { ...state.artifacts, [session.id]: [] },
-          rawLog: { ...state.rawLog, [session.id]: [] }
+          rawLog: { ...state.rawLog, [session.id]: [] },
+          providerCommandRevisions: { ...state.providerCommandRevisions, [session.id]: 0 }
         }));
         if (getBridge()) {
           const memberId = target.type === "member" ? target.memberId : target.type === "agent" ? target.instanceId : "";
@@ -332,7 +338,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             events: state.events[session.id] ? state.events : { ...state.events, [session.id]: [] },
             tasks: state.tasks[session.id] ? state.tasks : { ...state.tasks, [session.id]: [] },
             artifacts: state.artifacts[session.id] ? state.artifacts : { ...state.artifacts, [session.id]: [] },
-            rawLog: state.rawLog[session.id] ? state.rawLog : { ...state.rawLog, [session.id]: [] }
+            rawLog: state.rawLog[session.id] ? state.rawLog : { ...state.rawLog, [session.id]: [] },
+            providerCommandRevisions: Object.hasOwn(state.providerCommandRevisions, session.id)
+              ? state.providerCommandRevisions
+              : { ...state.providerCommandRevisions, [session.id]: 0 }
           };
         }),
 
@@ -351,6 +360,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       _replaceContextUsage: (sessionId, usage) =>
         set((state) => ({ contextUsage: { ...state.contextUsage, [sessionId]: usage } })),
 
+      _bumpProviderCommands: (sessionId) =>
+        set((state) => ({
+          providerCommandRevisions: {
+            ...state.providerCommandRevisions,
+            [sessionId]: (state.providerCommandRevisions[sessionId] ?? 0) + 1
+          }
+        })),
+
       _replaceSessions: (sessions) => set((state) => {
         const ids = new Set(sessions.map((session) => session.id));
         return {
@@ -361,6 +378,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           artifacts: Object.fromEntries(sessions.map((session) => [session.id, state.artifacts[session.id] ?? []])),
           rawLog: Object.fromEntries(sessions.map((session) => [session.id, state.rawLog[session.id] ?? []])),
           contextUsage: Object.fromEntries(sessions.map((session) => [session.id, state.contextUsage[session.id]])),
+          providerCommandRevisions: Object.fromEntries(sessions.map((session) => [session.id, state.providerCommandRevisions[session.id] ?? 0])),
           foreground: Object.fromEntries(sessions.map((session) => [session.id, state.foreground[session.id]])),
           queuedFollowUps: Object.fromEntries(sessions.map((session) => [session.id, state.queuedFollowUps[session.id] ?? []]))
         };

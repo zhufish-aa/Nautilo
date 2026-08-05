@@ -6,7 +6,7 @@
  * automatically retry or compact after the earlier `agent_end` event.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { delimiter, extname, join } from "node:path";
 import type {
@@ -16,6 +16,7 @@ import type {
   AdapterFileDiff,
   AdapterResumeRequest,
   AdapterRun,
+  AdapterSkill,
   AdapterStartRequest,
   AgentCliAdapter,
   AgentInstance,
@@ -26,6 +27,16 @@ import type {
   ProviderModelCatalog,
   ProviderPluginFactory
 } from "@agenthub/provider-sdk";
+
+/** Native Pi commands that AgentHub can expose before the first run. */
+const NATIVE_COMMANDS = [
+  {
+    name: "compact",
+    description: "压缩当前 Pi 会话上下文，可附加保留内容说明",
+    inputHint: "可选的压缩说明",
+    providerCommand: "compact" as const
+  }
+];
 
 const descriptor: ProviderDescriptor = {
   providerId: "pi",
@@ -81,6 +92,7 @@ const descriptor: ProviderDescriptor = {
       description: { "zh-CN": "适用于 Gemini/Google Generative AI 接口", "en-US": "For Gemini/Google Generative AI endpoints" }
     }
   ],
+  nativeCommands: NATIVE_COMMANDS,
   contextWindowDiscovery: true
 };
 
@@ -169,25 +181,34 @@ class PiPluginAdapter implements AgentCliAdapter {
     const executable = request.instance.executable || descriptor.defaultExecutable || "pi";
     const env = { ...process.env, ...(request.env ?? {}), PI_OFFLINE: "1" } as Record<string, string>;
     configurePiProviderEnvironment(request.instance, env);
+    configurePiMcpEnvironment(request, env);
     if (platform() === "win32" && request.permissionMode !== "read-only") {
       env.AGENTHUB_PI_ENABLE_POWERSHELL = "1";
     }
-    const args = piRunArgs(request, resume);
+    const skills = materializePiSkills(request.skills);
+    const args = piRunArgs(request, resume, skills.paths);
     const resolved = resolveSpawnCommand(executable, args, env);
-    const child = spawn(resolved.command, resolved.args, {
-      cwd: request.cwd,
-      env,
-      windowsHide: true,
-      windowsVerbatimArguments: resolved.verbatim ?? false
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(resolved.command, resolved.args, {
+        cwd: request.cwd,
+        env,
+        windowsHide: true,
+        windowsVerbatimArguments: resolved.verbatim ?? false
+      });
+    } catch (error) {
+      skills.cleanup();
+      throw error;
+    }
     const processHandle = new PluginProcessHandle(child, {
       timeoutMs: request.timeoutMs,
       idleTimeoutMs: request.idleTimeoutMs,
-      // Pi's message_update frames contain a growing assistant-message snapshot.
-      // Long reasoning/tool turns can therefore exceed 32 MiB even though the
-      // actual model output is much smaller. Keep a safety cap, but leave enough
-      // room for Pi's own retry/compaction machinery to finish.
-      maxOutputBytes: request.maxOutputBytes ?? 256 * 1024 * 1024
+      // Pi's message_update frames contain the complete growing assistant
+      // snapshot in addition to the delta. A cumulative byte cap therefore
+      // counts the same reasoning text thousands of times and kills healthy
+      // long turns. Only enforce a cap when the caller explicitly supplies one;
+      // jsonLines() still bounds each individual RPC frame below.
+      maxOutputBytes: request.maxOutputBytes
     });
     const state: PiParseState = {
       messageSequence: 0,
@@ -200,13 +221,19 @@ class PiPluginAdapter implements AgentCliAdapter {
     let terminalStatus = false;
     let stateReceived = false;
     let promptSent = false;
+    const selectedModel = effectivePiModel(request.instance, request.model);
 
     const send = (value: RecordValue): void => processHandle.write(`${JSON.stringify(value)}\n`);
     const sendPrompt = (): void => {
       if (promptSent) return;
       promptSent = true;
       if (request.providerCommand === "compact") {
-        send({ id: "agenthub-prompt", type: "compact" });
+        const customInstructions = request.prompt.replace(/^\s*\/?compact\b/i, "").trim();
+        send({
+          id: "agenthub-prompt",
+          type: "compact",
+          ...(customInstructions ? { customInstructions } : {})
+        });
       } else {
         send({
           id: "agenthub-prompt",
@@ -216,17 +243,21 @@ class PiPluginAdapter implements AgentCliAdapter {
         });
       }
     };
-    const sendThinkingOrPrompt = (): void => {
-      if (request.reasoningEffort) send({ id: "agenthub-set-thinking", type: "set_thinking_level", level: request.reasoningEffort });
+    const sendVerificationOrPrompt = (): void => {
+      if (selectedModel || request.reasoningEffort) send({ id: "agenthub-verify-state", type: "get_state" });
       else sendPrompt();
+    };
+    const sendThinkingOrVerify = (): void => {
+      if (request.reasoningEffort) send({ id: "agenthub-set-thinking", type: "set_thinking_level", level: request.reasoningEffort });
+      else sendVerificationOrPrompt();
     };
     send({ id: "agenthub-state", type: "get_state" });
 
     const events = async function* (): AsyncGenerator<AdapterEvent> {
+      // Report this before the first turn event so Core can expose /compact
+      // in the composer and the context-usage card for the active session.
+      yield { kind: "commands", commands: NATIVE_COMMANDS };
       yield { kind: "status", phase: "turn_started" };
-      if (request.mcpServers?.length) {
-        yield { kind: "raw", stream: "stderr", text: "Pi RPC does not natively accept AgentHub MCP server injection; configure the integration as a Pi extension.\n" };
-      }
       if (request.runtimeTools?.length) {
         yield { kind: "raw", stream: "stderr", text: "Pi RPC does not natively accept AgentHub runtime tools; provider-native Pi tools remain available.\n" };
       }
@@ -258,6 +289,33 @@ class PiPluginAdapter implements AgentCliAdapter {
 
           const value = item.value;
           if (value.type === "response") {
+            if (request.providerCommand === "compact" && value.id === "agenthub-prompt") {
+              const error = stringValue(value.error);
+              const nothingToCompact = value.success === false
+                && /^(?:Nothing to compact(?: \(session too small\))?|Already compacted)$/i.test(error ?? "");
+              if (value.success === false && !nothingToCompact) {
+                throw new Error(error ?? `Pi RPC command ${String(value.command)} failed`);
+              }
+              yield {
+                kind: "message",
+                phase: "completed",
+                messageId: "pi-compact",
+                text: nothingToCompact
+                  ? "当前 Pi 会话没有可压缩的旧内容，无需压缩。"
+                  : "Pi 会话压缩完成。",
+                raw: value
+              };
+              settled = true;
+              if (!terminalStatus) {
+                yield { kind: "status", phase: "turn_completed", raw: value };
+                terminalStatus = true;
+              }
+              // Compact is an RPC command, not an agent turn, so Pi responds
+              // directly and does not emit agent_settled. Close stdin after
+              // the response or a successful compaction would wait forever.
+              if (child.stdin.writable) child.stdin.end();
+              continue;
+            }
             if (value.success === false) throw new Error(stringValue(value.error) ?? `Pi RPC command ${String(value.command)} failed`);
             if (value.id === "agenthub-state") {
               stateReceived = true;
@@ -265,14 +323,16 @@ class PiPluginAdapter implements AgentCliAdapter {
               const sessionId = stringValue(data.sessionId);
               if (!sessionId) throw new Error("Pi get_state response did not include sessionId");
               yield { kind: "session", providerSessionId: sessionId, raw: value };
-              const selected = effectivePiModel(request.instance, request.model);
-              const slash = selected?.indexOf("/") ?? -1;
-              if (selected && slash > 0) {
-                send({ id: "agenthub-set-model", type: "set_model", provider: selected.slice(0, slash), modelId: selected.slice(slash + 1) });
-              } else sendThinkingOrPrompt();
+              const slash = selectedModel?.indexOf("/") ?? -1;
+              if (selectedModel && slash > 0) {
+                send({ id: "agenthub-set-model", type: "set_model", provider: selectedModel.slice(0, slash), modelId: selectedModel.slice(slash + 1) });
+              } else sendThinkingOrVerify();
             } else if (value.id === "agenthub-set-model") {
-              sendThinkingOrPrompt();
+              sendThinkingOrVerify();
             } else if (value.id === "agenthub-set-thinking") {
+              sendVerificationOrPrompt();
+            } else if (value.id === "agenthub-verify-state") {
+              assertPiSelection(value, selectedModel, request.reasoningEffort);
               sendPrompt();
             }
             continue;
@@ -307,6 +367,8 @@ class PiPluginAdapter implements AgentCliAdapter {
         }
         yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
         await processHandle.cancel().catch(() => undefined);
+      } finally {
+        skills.cleanup();
       }
     };
 
@@ -316,6 +378,7 @@ class PiPluginAdapter implements AgentCliAdapter {
       cancel: async () => {
         if (child.stdin.writable) send({ id: "agenthub-abort", type: "abort" });
         await processHandle.cancel();
+        skills.cleanup();
       },
       steer: async (input) => {
         if (!child.stdin.writable) throw new Error("Pi RPC process is no longer running");
@@ -326,7 +389,11 @@ class PiPluginAdapter implements AgentCliAdapter {
   }
 }
 
-export function piRunArgs(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): string[] {
+export function piRunArgs(
+  request: AdapterStartRequest | AdapterResumeRequest,
+  resume: boolean,
+  skillPaths: string[] = []
+): string[] {
   const args = [...request.instance.baseArgs, "--mode", "rpc", "--offline"];
   const mode = request.permissionMode ?? "standard";
   if (mode === "isolated") args.push("--no-approve");
@@ -335,6 +402,7 @@ export function piRunArgs(request: AdapterStartRequest | AdapterResumeRequest, r
   // The extension also supplies Windows-native PowerShell compatibility and
   // normalizes malformed empty provider errors, so load it for every Pi run.
   args.push("--extension", agentHubPiExtensionPath());
+  for (const path of skillPaths) args.push("--skill", path);
   if (resume) args.push("--session", (request as AdapterResumeRequest).providerSessionId);
   const selectedModel = effectivePiModel(request.instance, request.model);
   if (selectedModel) args.push("--model", selectedModel);
@@ -346,9 +414,13 @@ export function parsePiModels(modelResponse: RecordValue, stateResponse?: Record
   const data = asRecord(modelResponse.data);
   const rawModels = (Array.isArray(data.models) ? data.models : [])
     .filter((item) => !providerFilter || asRecord(item).provider === providerFilter);
-  const active = asRecord(asRecord(stateResponse?.data).model);
-  let defaultModel = stringValue(active.provider) && stringValue(active.id)
-    ? `${String(active.provider)}/${String(active.id)}`
+  const stateData = asRecord(stateResponse?.data);
+  const active = asRecord(stateData.model);
+  const activeProvider = stringValue(active.provider);
+  const activeId = stringValue(active.id);
+  const activeThinkingLevel = stringValue(stateData.thinkingLevel);
+  let defaultModel = activeProvider && activeId
+    ? providerFilter === activeProvider ? activeId : `${activeProvider}/${activeId}`
     : undefined;
   const models: ProviderModel[] = rawModels.map((item) => {
     const model = asRecord(item);
@@ -372,7 +444,9 @@ export function parsePiModels(modelResponse: RecordValue, stateResponse?: Record
       contextWindow: numberValue(model.contextWindow),
       capabilities: ["tool_use", ...(reasoning ? ["reasoning"] : []), ...(input.includes("image") ? ["vision"] : [])],
       reasoningEfforts,
-      defaultReasoningEffort: reasoningEfforts.includes("medium") ? "medium" : reasoningEfforts[0],
+      defaultReasoningEffort: id === defaultModel && activeThinkingLevel && reasoningEfforts.includes(activeThinkingLevel)
+        ? activeThinkingLevel
+        : reasoningEfforts.includes("medium") ? "medium" : reasoningEfforts[0],
       serviceTiers: []
     };
   });
@@ -389,10 +463,343 @@ export function parsePiModels(modelResponse: RecordValue, stateResponse?: Record
   };
 }
 
+/** Fails closed when Pi accepted a switch command but did not apply it. */
+export function assertPiSelection(
+  stateResponse: RecordValue,
+  expectedModel?: string,
+  expectedThinkingLevel?: string
+): void {
+  const data = asRecord(stateResponse.data);
+  const model = asRecord(data.model);
+  const provider = stringValue(model.provider);
+  const modelId = stringValue(model.id);
+  if (expectedModel) {
+    const slash = expectedModel.indexOf("/");
+    const matches = slash > 0
+      ? provider === expectedModel.slice(0, slash) && modelId === expectedModel.slice(slash + 1)
+      : modelId === expectedModel;
+    if (!matches) {
+      const actual = provider && modelId ? `${provider}/${modelId}` : "none";
+      throw new Error(`Pi model switch did not apply: expected ${expectedModel}, got ${actual}`);
+    }
+  }
+  if (expectedThinkingLevel) {
+    const actual = stringValue(data.thinkingLevel);
+    if (actual !== expectedThinkingLevel) {
+      throw new Error(`Pi thinking level did not apply: expected ${expectedThinkingLevel}, got ${actual ?? "none"}`);
+    }
+  }
+}
+
+const PI_SKILL_FILE_NAMES = new Set(["skill.md", "skills.md", "skill.markdown", "skills.markdown"]);
+
+function piSkillSlug(value: string): string {
+  const slug = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "skill";
+}
+
+function renderPiSkill(skill: AdapterSkill, slug: string): string {
+  const description = skill.description.replace(/\s+/g, " ").trim() || slug;
+  return [
+    "---",
+    `name: ${slug}`,
+    `description: ${JSON.stringify(description)}`,
+    "---",
+    "",
+    skill.instructions.trim(),
+    "",
+    `<!-- agenthub:runtime-skill:${skill.id} -->`,
+    ""
+  ].join("\n");
+}
+
+/** Materializes run-scoped Pi skills so the provider plugin owns Pi's native format. */
+export function materializePiSkills(skills: AdapterSkill[] | undefined): { paths: string[]; cleanup: () => void } {
+  if (!skills?.length) return { paths: [], cleanup: () => undefined };
+  const root = mkdtempSync(join(tmpdir(), "agenthub-pi-skills-"));
+  const paths: string[] = [];
+  const used = new Set<string>();
+  let cleaned = false;
+  try {
+    for (const skill of skills) {
+      const base = piSkillSlug(skill.name);
+      let slug = base;
+      let suffix = 2;
+      while (used.has(slug)) slug = `${base}-${suffix++}`;
+      used.add(slug);
+      const directory = join(root, slug);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "SKILL.md"), renderPiSkill(skill, slug), "utf8");
+      const source = skill.resourceDir?.trim();
+      if (source) {
+        try {
+          if (statSync(source).isDirectory()) {
+            for (const entry of readdirSync(source, { withFileTypes: true })) {
+              if (entry.isFile() && PI_SKILL_FILE_NAMES.has(entry.name.toLowerCase())) continue;
+              cpSync(join(source, entry.name), join(directory, entry.name), { recursive: true });
+            }
+          }
+        } catch { /* missing optional resources do not prevent the skill from loading */ }
+      }
+      paths.push(directory);
+    }
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    paths,
+    cleanup: () => {
+      if (cleaned) return;
+      cleaned = true;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+}
+
 const PI_API_TYPES = new Set(["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"]);
 const AGENTHUB_PI_EXTENSION = `import { spawn } from "node:child_process";
 
-export default function (pi) {
+const MCP_PROTOCOL_VERSION = "2024-11-05";
+const MCP_TIMEOUT_MS = 30000;
+
+function mcpError(value) {
+  if (!value) return "Unknown MCP error";
+  if (typeof value === "string") return value;
+  if (value.message) return String(value.message);
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+function mcpToolName(serverName, toolName, used) {
+  const clean = (value) => String(value || "tool").replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "tool";
+  const base = ("mcp_" + clean(serverName) + "_" + clean(toolName)).slice(0, 120);
+  let name = base;
+  let suffix = 2;
+  while (used.has(name)) name = base.slice(0, 116) + "_" + suffix++;
+  used.add(name);
+  return name;
+}
+
+function toolParameters(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return { type: "object", properties: {}, additionalProperties: true };
+  }
+  return { type: "object", properties: {}, ...schema };
+}
+
+function toolResult(result, serverName, toolName) {
+  const rawContent = Array.isArray(result?.content) ? result.content : [];
+  const content = rawContent.map((part) => {
+    if (part?.type === "text") return { type: "text", text: String(part.text || "") };
+    if (part?.type === "image" && part.data && part.mimeType) {
+      return { type: "image", data: String(part.data), mimeType: String(part.mimeType) };
+    }
+    return { type: "text", text: JSON.stringify(part ?? null) };
+  });
+  if (!content.length && result?.structuredContent !== undefined) {
+    content.push({ type: "text", text: JSON.stringify(result.structuredContent, null, 2) });
+  }
+  if (!content.length) content.push({ type: "text", text: "MCP tool completed with no content" });
+  return {
+    content,
+    details: { server: serverName, tool: toolName, structuredContent: result?.structuredContent },
+    isError: result?.isError === true
+  };
+}
+
+class StdioMcpClient {
+  constructor(config) {
+    this.config = config;
+    this.nextId = 0;
+    this.pending = new Map();
+    this.buffer = "";
+  }
+
+  async start() {
+    if (!this.config.command) throw new Error("STDIO MCP server is missing command");
+    const useShell = process.platform === "win32" && /\\.(cmd|bat)$/i.test(this.config.command);
+    this.child = spawn(this.config.command, this.config.args || [], {
+      cwd: this.config.cwd || undefined,
+      env: { ...process.env, ...(this.config.env || {}) },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      shell: useShell
+    });
+    this.child.stdout.on("data", (chunk) => this.onData(chunk));
+    this.child.stderr.on("data", (chunk) => {
+      const text = String(chunk).trim();
+      if (text) process.stderr.write("[AgentHub MCP " + this.config.name + "] " + text + "\\n");
+    });
+    this.child.on("close", (code) => {
+      const error = new Error("MCP server " + this.config.name + " exited with code " + String(code));
+      for (const entry of this.pending.values()) entry.reject(error);
+      this.pending.clear();
+    });
+    await new Promise((resolve, reject) => {
+      this.child.once("spawn", resolve);
+      this.child.once("error", reject);
+    });
+    await this.request("initialize", {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "agenthub-pi", version: "0.2.5" }
+    });
+    this.notify("notifications/initialized", {});
+  }
+
+  onData(chunk) {
+    this.buffer += String(chunk);
+    const lines = this.buffer.split(/\\r?\\n/);
+    this.buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let message;
+      try { message = JSON.parse(line); } catch { continue; }
+      const entry = this.pending.get(message.id);
+      if (!entry) continue;
+      this.pending.delete(message.id);
+      entry.cleanup();
+      if (message.error) entry.reject(new Error(mcpError(message.error)));
+      else entry.resolve(message.result);
+    }
+  }
+
+  write(message) {
+    if (!this.child?.stdin?.writable) throw new Error("MCP server " + this.config.name + " is not connected");
+    this.child.stdin.write(JSON.stringify(message) + "\\n");
+  }
+
+  request(method, params, signal) {
+    const id = ++this.nextId;
+    return new Promise((resolve, reject) => {
+      let abortHandler;
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (abortHandler) signal?.removeEventListener("abort", abortHandler);
+      };
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error("MCP request timed out: " + method));
+      }, MCP_TIMEOUT_MS);
+      timer.unref?.();
+      if (signal) {
+        abortHandler = () => {
+          this.pending.delete(id);
+          cleanup();
+          this.notify("notifications/cancelled", { requestId: id, reason: "AgentHub tool call aborted" });
+          reject(new Error("MCP request aborted: " + method));
+        };
+        if (signal.aborted) return abortHandler();
+        signal.addEventListener("abort", abortHandler, { once: true });
+      }
+      this.pending.set(id, { resolve, reject, cleanup });
+      try { this.write({ jsonrpc: "2.0", id, method, params }); }
+      catch (error) {
+        this.pending.delete(id);
+        cleanup();
+        reject(error);
+      }
+    });
+  }
+
+  notify(method, params) {
+    try { this.write({ jsonrpc: "2.0", method, params }); } catch { /* process is closing */ }
+  }
+
+  async close() {
+    try { this.child?.stdin?.end(); } catch { /* already closed */ }
+    if (this.child?.exitCode === null) this.child.kill();
+  }
+}
+
+class HttpMcpClient {
+  constructor(config) {
+    this.config = config;
+    this.nextId = 0;
+    this.sessionId = undefined;
+  }
+
+  async start() {
+    await this.request("initialize", {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "agenthub-pi", version: "0.2.5" }
+    });
+    await this.notify("notifications/initialized", {});
+  }
+
+  async post(message, signal) {
+    if (!this.config.url) throw new Error("HTTP MCP server is missing URL");
+    const timeout = AbortSignal.timeout(MCP_TIMEOUT_MS);
+    const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const response = await fetch(this.config.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "accept": "application/json, text/event-stream",
+        ...(this.config.headers || {}),
+        ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {})
+      },
+      body: JSON.stringify(message),
+      signal: requestSignal
+    });
+    const sessionId = response.headers.get("mcp-session-id");
+    if (sessionId) this.sessionId = sessionId;
+    if (!response.ok) throw new Error("MCP HTTP " + response.status + ": " + (await response.text()).slice(0, 2000));
+    if (response.status === 202 || response.status === 204) return undefined;
+    const text = await response.text();
+    if (!text.trim()) return undefined;
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/event-stream")) {
+      const messages = [];
+      for (const block of text.split(/\\r?\\n\\r?\\n/)) {
+        const data = block.split(/\\r?\\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\\n");
+        if (!data || data === "[DONE]") continue;
+        try { messages.push(JSON.parse(data)); } catch { /* ignore non-JSON SSE data */ }
+      }
+      return messages.find((item) => item.id === message.id) || messages.at(-1);
+    }
+    return JSON.parse(text);
+  }
+
+  async request(method, params, signal) {
+    const id = ++this.nextId;
+    const response = await this.post({ jsonrpc: "2.0", id, method, params }, signal);
+    if (response?.error) throw new Error(mcpError(response.error));
+    return response?.result;
+  }
+
+  async notify(method, params) {
+    await this.post({ jsonrpc: "2.0", method, params });
+  }
+
+  async close() {
+    if (!this.sessionId || !this.config.url) return;
+    try {
+      await fetch(this.config.url, {
+        method: "DELETE",
+        headers: { ...(this.config.headers || {}), "mcp-session-id": this.sessionId },
+        signal: AbortSignal.timeout(2000)
+      });
+    } catch { /* best-effort session cleanup */ }
+  }
+}
+
+async function listMcpTools(client) {
+  const tools = [];
+  let cursor;
+  do {
+    const result = await client.request("tools/list", cursor ? { cursor } : {});
+    if (Array.isArray(result?.tools)) tools.push(...result.tools);
+    cursor = result?.nextCursor;
+  } while (cursor);
+  return tools;
+}
+
+export default async function (pi) {
   const raw = process.env.AGENTHUB_PI_PROVIDER_CONFIG;
   if (raw) {
     const config = JSON.parse(raw);
@@ -400,6 +807,48 @@ export default function (pi) {
       ...config,
       apiKey: process.env.AGENTHUB_PI_API_KEY || "agenthub"
     });
+  }
+
+  const mcpClients = [];
+  const mcpToolNames = [];
+  const mcpErrors = [];
+  const usedToolNames = new Set();
+  const rawMcp = process.env.AGENTHUB_PI_MCP_SERVERS;
+  const mcpConfigs = rawMcp ? JSON.parse(rawMcp) : [];
+  for (const config of mcpConfigs) {
+    let client;
+    try {
+      client = config.transport === "http" ? new HttpMcpClient(config) : new StdioMcpClient(config);
+      await client.start();
+      mcpClients.push(client);
+      const tools = await listMcpTools(client);
+      for (const tool of tools) {
+        const registeredName = mcpToolName(config.name, tool.name, usedToolNames);
+        mcpToolNames.push(registeredName);
+        pi.registerTool({
+          name: registeredName,
+          label: config.name + ": " + (tool.title || tool.name),
+          description: (tool.description || "MCP tool " + tool.name) + " (server: " + config.name + ")",
+          promptSnippet: "Use " + registeredName + " to call " + config.name + "/" + tool.name + ".",
+          parameters: toolParameters(tool.inputSchema),
+          async execute(_toolCallId, params, signal) {
+            try {
+              const result = await client.request("tools/call", { name: tool.name, arguments: params || {} }, signal);
+              return toolResult(result, config.name, tool.name);
+            } catch (error) {
+              return {
+                content: [{ type: "text", text: mcpError(error) }],
+                details: { server: config.name, tool: tool.name },
+                isError: true
+              };
+            }
+          }
+        });
+      }
+    } catch (error) {
+      mcpErrors.push(config.name + ": " + mcpError(error));
+      await client?.close().catch(() => undefined);
+    }
   }
 
   // Some OpenAI-compatible gateways terminate a stream without an error body.
@@ -417,9 +866,8 @@ export default function (pi) {
     };
   });
 
-  if (process.env.AGENTHUB_PI_ENABLE_POWERSHELL !== "1" || process.platform !== "win32") return;
-
-  pi.registerTool({
+  const powershellEnabled = process.env.AGENTHUB_PI_ENABLE_POWERSHELL === "1" && process.platform === "win32";
+  if (powershellEnabled) pi.registerTool({
     name: "powershell",
     label: "PowerShell",
     description: "Run a command with native Windows PowerShell. Use this instead of bash on Windows.",
@@ -481,13 +929,20 @@ export default function (pi) {
     }
   });
 
-  const enableNativeShell = () => {
+  const enableAgentHubTools = () => {
     const active = pi.getActiveTools();
-    pi.setActiveTools([...new Set([...active.filter((name) => name !== "bash"), "powershell"])]);
+    const native = powershellEnabled ? [...active.filter((name) => name !== "bash"), "powershell"] : active;
+    pi.setActiveTools([...new Set([...native, ...mcpToolNames])]);
   };
   // Pi action methods are unavailable while the extension factory is loading.
   // session_start runs after the extension runtime has been initialized.
-  pi.on("session_start", enableNativeShell);
+  pi.on("session_start", (_event, ctx) => {
+    enableAgentHubTools();
+    for (const error of mcpErrors) ctx?.ui?.notify?.("MCP unavailable: " + error, "error");
+  });
+  pi.on("session_shutdown", async () => {
+    await Promise.allSettled(mcpClients.map((client) => client.close()));
+  });
 }
 `;
 
@@ -529,6 +984,17 @@ function configurePiProviderEnvironment(instance: AgentInstance, env: Record<str
     api,
     models
   });
+}
+
+function configurePiMcpEnvironment(
+  request: AdapterStartRequest | AdapterResumeRequest,
+  env: Record<string, string>
+): void {
+  if (!request.mcpServers?.length) {
+    delete env.AGENTHUB_PI_MCP_SERVERS;
+    return;
+  }
+  env.AGENTHUB_PI_MCP_SERVERS = JSON.stringify(request.mcpServers);
 }
 
 function agentHubPiExtensionPath(): string {
@@ -729,6 +1195,8 @@ function mimeType(path: string): string {
 
 type JsonLineItem = { kind: "json"; value: RecordValue } | { kind: "process"; event: Exclude<ProcessEvent, { kind: "stdout" }> };
 
+const PI_MAX_RPC_FRAME_BYTES = 64 * 1024 * 1024;
+
 async function* jsonLines(handle: PluginProcessHandle): AsyncGenerator<JsonLineItem> {
   let buffer = "";
   for await (const event of handle.events) {
@@ -739,8 +1207,14 @@ async function* jsonLines(handle: PluginProcessHandle): AsyncGenerator<JsonLineI
     buffer += event.text;
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() ?? "";
+    if (Buffer.byteLength(buffer) > PI_MAX_RPC_FRAME_BYTES) {
+      throw new Error(`Pi RPC frame exceeded ${PI_MAX_RPC_FRAME_BYTES} bytes`);
+    }
     for (const line of lines) {
       if (!line.trim()) continue;
+      if (Buffer.byteLength(line) > PI_MAX_RPC_FRAME_BYTES) {
+        throw new Error(`Pi RPC frame exceeded ${PI_MAX_RPC_FRAME_BYTES} bytes`);
+      }
       try { yield { kind: "json", value: asRecord(JSON.parse(line)) }; }
       catch { yield { kind: "process", event: { kind: "stderr", text: `Invalid Pi RPC output: ${line}\n` } }; }
     }
@@ -751,7 +1225,7 @@ async function* jsonLines(handle: PluginProcessHandle): AsyncGenerator<JsonLineI
   }
 }
 
-interface HandleLimits { timeoutMs?: number; idleTimeoutMs?: number; maxOutputBytes: number }
+interface HandleLimits { timeoutMs?: number; idleTimeoutMs?: number; maxOutputBytes?: number }
 
 class PluginProcessHandle implements ProcessHandle {
   readonly events: AsyncIterable<ProcessEvent>;
@@ -768,7 +1242,7 @@ class PluginProcessHandle implements ProcessHandle {
     const onOutput = (kind: "stdout" | "stderr", chunk: unknown): void => {
       const text = String(chunk);
       this.outputBytes += Buffer.byteLength(text);
-      if (this.outputBytes > limits.maxOutputBytes) { this.timeout("max_output"); return; }
+      if (limits.maxOutputBytes && this.outputBytes > limits.maxOutputBytes) { this.timeout("max_output"); return; }
       this.push({ kind, text });
       this.resetIdleTimer(limits.idleTimeoutMs);
     };

@@ -78,6 +78,8 @@ export interface AdapterStartRequest {
    * when absent, adapters fall back to their previous auto-answer behavior.
    */
   requestInteraction?: (input: AdapterInteractionInput) => Promise<InteractionResponse>;
+  /** Enabled AgentHub skills for this provider; the provider owns native loading/materialization. */
+  skills?: AdapterSkill[];
   /** User-managed MCP servers enabled for this provider; injected at session start. */
   mcpServers?: AdapterMcpServer[];
   /**
@@ -90,6 +92,16 @@ export interface AdapterStartRequest {
 
 export interface AdapterResumeRequest extends AdapterStartRequest {
   providerSessionId: string;
+}
+
+/** Provider-neutral skill bundle resolved for one provider session. */
+export interface AdapterSkill {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  /** Optional directory containing scripts, references, assets, and other skill resources. */
+  resourceDir?: string;
 }
 
 /** User-managed MCP server resolved for one provider session. */

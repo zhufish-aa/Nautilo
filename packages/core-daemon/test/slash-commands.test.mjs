@@ -141,6 +141,45 @@ test("plugin providers get a generic catalog from their reported native commands
   assert.equal(compact.providerCommand, "compact");
 });
 
+test("plugin descriptor commands are available before the provider reports a runtime catalog", () => {
+  const directory = mkdtempSync(join(tmpdir(), "agenthub-slash-plugin-descriptor-"));
+  const database = new Database(join(directory, "test.sqlite"));
+  try {
+    const adapter = {
+      providerId: "pi",
+      descriptor: {
+        providerId: "pi",
+        name: "Pi",
+        vendor: "Pi",
+        capabilities: [],
+        nativeCommands: [{
+          name: "compact",
+          description: "Compact the current Pi session",
+          providerCommand: "compact"
+        }]
+      },
+      supportsStructuredOutput: false,
+      supportsResume: true,
+      capabilities: { structuredOutput: false, textOutput: true, interactiveStdin: true, nativeResume: true, pty: false },
+      detect: async () => ({ installed: true, executable: "pi" }),
+      start: () => { throw new Error("not used"); }
+    };
+    const registry = new AdapterRegistry([adapter]);
+    const agent = { id: "pi-agent", providerId: "pi", displayName: "Pi", executable: "pi", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now };
+    const session = { id: "pi-session", projectId: "project-1", memberId: agent.id, agentInstanceId: agent.id, title: "Pi chat", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+    database.agents.save(agent, now);
+    database.sessions.save(session);
+    const service = new SlashCommandService(database, new AgentService(database, registry), new AuditService(database, new RedactionService(() => [])));
+
+    const compact = service.list(session.id).find((command) => command.name === "/compact");
+    assert.equal(compact?.id, "pi.native.compact");
+    assert.equal(compact?.providerCommand, "compact");
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("plugin-reported compact requires a provider session and uses the compact transport", async () => {
   const directory = mkdtempSync(join(tmpdir(), "agenthub-opencode-command-"));
   const database = new Database(join(directory, "test.sqlite"));

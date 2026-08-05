@@ -1,5 +1,5 @@
 import type { AgentInstance, ProviderModelCatalog } from "@agenthub/domain";
-import type { AdapterDetectionResult } from "../adapters/index.js";
+import type { AdapterDetectionResult, ProviderNativeCommand } from "../adapters/index.js";
 import { AdapterRegistry, discoverOpenAiCompatibleModels, mergeInstanceModelConfig } from "../adapters/index.js";
 import { Database } from "../database/index.js";
 import { CoreError } from "../errors.js";
@@ -19,6 +19,10 @@ export class AgentService {
 
   list(): AgentInstance[] {
     return this.database.agents.list();
+  }
+
+  nativeCommands(providerId: string): ProviderNativeCommand[] {
+    return this.adapters.find(providerId)?.descriptor?.nativeCommands ?? [];
   }
 
   upsert(instance: AgentInstance): AgentInstance {

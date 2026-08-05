@@ -2,7 +2,7 @@
   "id": "pi",
   "apiVersion": 1,
   "main": "dist/index.js",
-  "version": "0.2.2",
+  "version": "0.2.5",
   "descriptor": {
     "providerId": "pi",
     "name": "Pi",
@@ -67,6 +67,14 @@
         "value": "google-generative-ai",
         "name": { "zh-CN": "Google Generative AI", "en-US": "Google Generative AI" },
         "description": { "zh-CN": "适用于 Gemini/Google Generative AI 接口", "en-US": "For Gemini/Google Generative AI endpoints" }
+      }
+    ],
+    "nativeCommands": [
+      {
+        "name": "compact",
+        "description": "压缩当前 Pi 会话上下文，可附加保留内容说明",
+        "inputHint": "可选的压缩说明",
+        "providerCommand": "compact"
       }
     ],
     "contextWindowDiscovery": true

@@ -1,6 +1,6 @@
 {
   "name": "@agenthub/provider-plugin-pi",
-  "version": "0.2.2",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "AgentHub provider plugin for Pi over its native JSONL RPC protocol.",
