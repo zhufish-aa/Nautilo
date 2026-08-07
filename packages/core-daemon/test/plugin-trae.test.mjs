@@ -31,7 +31,14 @@ const notify = (method, params) => send({ jsonrpc: "2.0", method, params });
 function handle(msg) {
   if (msg.method === "initialize") return send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
   if (msg.method === "session/new") return send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "trae-session-1", configOptions: [{ id: "model", name: "Model", options: [{ value: "trae-model-a" }] }] } });
-  if (msg.method === "session/load") return send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: msg.params.sessionId, configOptions: [{ id: "model", name: "Model", options: [{ value: "trae-model-a" }] }] } });
+  if (msg.method === "session/load") {
+    const sessionId = msg.params.sessionId;
+    // ACP replays the loaded conversation before acknowledging session/load.
+    // These historical updates must never be surfaced as the next turn.
+    notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Previous answer" } } });
+    notify("session/update", { sessionId, update: { sessionUpdate: "tool_call", toolCallId: "history-call", title: "read_file", status: "completed", rawInput: { path: "old.ts" }, rawOutput: "old result" } });
+    return send({ jsonrpc: "2.0", id: msg.id, result: { sessionId, configOptions: [{ id: "model", name: "Model", options: [{ value: "trae-model-a" }] }] } });
+  }
   if (msg.method === "session/set_config_option") return send({ jsonrpc: "2.0", id: msg.id, result: {} });
   if (msg.method === "session/prompt") {
     const sessionId = msg.params.sessionId;
@@ -136,6 +143,16 @@ test("the trae plugin drives traecli over ACP with streaming, tools, usage and r
   const resumed = [];
   for await (const event of adapter.resume({ instance, prompt: "again", providerSessionId: "trae-session-1", cwd: bin, env: {}, model: "trae-model-a" }).events) resumed.push(event);
   assert.equal(resumed.find((event) => event.kind === "session")?.providerSessionId, "trae-session-1");
+  assert.deepEqual(
+    resumed.filter((event) => event.kind === "message" && event.phase === "delta").map((event) => event.text),
+    ["Hello ", "world"],
+    "session/load history replay must not be concatenated into the resumed turn"
+  );
+  assert.deepEqual(
+    resumed.filter((event) => event.kind === "tool").map((event) => event.name),
+    ["edit_file"],
+    "session/load history tools must not be emitted as current-turn activity"
+  );
   assert.ok(resumed.some((event) => event.kind === "status" && event.phase === "turn_completed"));
   assert.equal(resumed.at(-1).kind, "exit");
   assert.equal(resumed.at(-1).exitCode, 0);

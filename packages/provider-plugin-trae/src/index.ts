@@ -203,9 +203,22 @@ async function* acpRun(
   let messageStreamed = false;
   let thinkingStreamed = false;
 
-  const sessionResponse = asRecord(await rpc.request(resume ? "session/load" : "session/new", resume
+  const sessionRequest = rpc.requestWithId(resume ? "session/load" : "session/new", resume
     ? { sessionId: (request as AdapterResumeRequest).providerSessionId, cwd: request.cwd, mcpServers }
-    : { cwd: request.cwd, mcpServers }));
+    : { cwd: request.cwd, mcpServers });
+  // ACP session/load reconstructs the loaded conversation by replaying its
+  // historical session/update notifications before the load response. A new
+  // CLI process is created for every resumed turn, so those notifications are
+  // queued on this fresh RPC client. If they reach the prompt loop below, the
+  // host concatenates every old assistant chunk into the new answer. Consume
+  // the replay through the exact load-response boundary before prompting.
+  const sessionResponseValue = resume
+    ? (await Promise.all([
+        sessionRequest.promise,
+        drainAcpSessionLoadReplay(rpc, sessionRequest.id, request)
+      ]))[0]
+    : await sessionRequest.promise;
+  const sessionResponse = asRecord(sessionResponseValue);
   const sessionId = String(sessionResponse.sessionId ?? (resume ? (request as AdapterResumeRequest).providerSessionId : ""));
   if (!sessionId) throw new Error("TRAE CLI ACP did not return a session id");
   hooks.setSessionId(sessionId);
@@ -245,6 +258,28 @@ async function* acpRun(
       if (mapped) yield mapped;
     }
   }
+}
+
+/**
+ * Consumes ACP's session/load reconstruction stream through its response.
+ * Requests still need answers so a server that asks the client for permission
+ * while loading cannot deadlock. Notifications are deliberately discarded:
+ * they describe already-persisted history, not activity from the next turn.
+ */
+async function drainAcpSessionLoadReplay(
+  rpc: PluginJsonRpcClient,
+  responseId: string | number,
+  request: AdapterStartRequest | AdapterResumeRequest
+): Promise<void> {
+  for await (const event of rpc) {
+    if (event.kind === "response" && event.id === responseId) return;
+    if (event.kind === "request" && event.method === "session/request_permission") {
+      await answerAcpPermission(rpc, event.id, event.params, request);
+    } else if (event.kind === "request") {
+      rpc.respondError(event.id, -32601, `Nautilo does not support ACP request ${event.method}`);
+    }
+  }
+  throw new Error("TRAE CLI ACP closed before session/load completed");
 }
 
 function acpInitializeParams(): RecordValue {

@@ -561,6 +561,93 @@ test("Codex Responses compatibility proxy translates Chat tool calls", async (t)
   assert.match(body, /"arguments":"\{\\"q\\":\\"hi\\"\}"/);
 });
 
+test("Codex Responses compatibility proxy round-trips custom apply_patch calls", async (t) => {
+  let received;
+  const patch = "*** Begin Patch\n*** Add File: fixed.txt\n+fixed\n*** End Patch\n";
+  const remote = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-patch", type: "function", function: { name: "apply_patch", arguments: "" } }] } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ input: patch }) } }] } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
+      response.write("data: [DONE]\n\n");
+      response.end();
+    });
+  });
+  await new Promise((resolve) => remote.listen(0, "127.0.0.1", resolve));
+  t.after(() => remote.close());
+  const address = remote.address();
+  const proxy = await startChatCompatProxy({ remoteBaseUrl: `http://127.0.0.1:${address.port}/v1` });
+  t.after(() => proxy.close());
+
+  const response = await fetch(`${proxy.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash-free",
+      input: [{ type: "text", text: "create fixed.txt" }],
+      tools: [{
+        type: "custom",
+        name: "apply_patch",
+        description: "Apply a patch",
+        format: { type: "grammar", syntax: "lark", definition: "start: /.+/" }
+      }],
+      stream: true
+    })
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(received.tools[0].function.name, "apply_patch");
+  assert.deepEqual(received.tools[0].function.parameters.required, ["input"]);
+  assert.match(received.tools[0].function.parameters.properties.input.description, /start: \/\.\+\//);
+  assert.match(body, /response\.custom_tool_call_input\.delta/);
+  assert.match(body, /response\.custom_tool_call_input\.done/);
+  assert.match(body, /"type":"custom_tool_call"/);
+  assert.match(body, /\*\*\* Begin Patch/);
+  assert.doesNotMatch(body, /"type":"function_call","status":"completed","call_id":"call-patch"/);
+});
+
+test("Codex Responses compatibility proxy sends custom tool results back through Chat messages", async (t) => {
+  let received;
+  const patch = "*** Begin Patch\n*** Add File: fixed.txt\n+fixed\n*** End Patch\n";
+  const remote = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: "done" } }] })}\n\ndata: [DONE]\n\n`);
+    });
+  });
+  await new Promise((resolve) => remote.listen(0, "127.0.0.1", resolve));
+  t.after(() => remote.close());
+  const address = remote.address();
+  const proxy = await startChatCompatProxy({ remoteBaseUrl: `http://127.0.0.1:${address.port}/v1` });
+  t.after(() => proxy.close());
+
+  const response = await fetch(`${proxy.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash-free",
+      input: [
+        { type: "custom_tool_call", call_id: "call-patch", name: "apply_patch", input: patch },
+        { type: "custom_tool_call_output", call_id: "call-patch", output: "Done!" }
+      ],
+      stream: true
+    })
+  });
+  assert.equal(response.status, 200);
+  await response.text();
+  assert.equal(received.messages[0].role, "assistant");
+  assert.equal(received.messages[0].tool_calls[0].function.name, "apply_patch");
+  assert.equal(JSON.parse(received.messages[0].tool_calls[0].function.arguments).input, patch);
+  assert.deepEqual(received.messages[1], { role: "tool", tool_call_id: "call-patch", content: "Done!" });
+});
+
 test("Codex Responses compatibility proxy does not mark an empty upstream response completed", async (t) => {
   const remote = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "text/event-stream" });

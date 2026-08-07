@@ -1,0 +1,11 @@
+{
+  "name": "@agenthub/trae-agent-mcp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Stateful MCP bridge that asks TRAE Agent to read and edit files inside one ACP turn.",
+  "main": "server.mjs",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

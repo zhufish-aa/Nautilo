@@ -45,6 +45,7 @@ interface FunctionCallContext {
   arguments: string;
   outputIndex: number;
   started: boolean;
+  toolType: "function" | "custom";
 }
 
 /**
@@ -212,7 +213,7 @@ function responsesToChatRequest(input: RecordValue, allowNativeWebSearch = false
   const tools = chatTools(input.tools);
   if (tools.length) request.tools = tools;
   if (allowNativeWebSearch && hasWebSearchTool(input.tools)) request.web_search_options = { search_context_size: "high" };
-  if (input.tool_choice !== undefined) request.tool_choice = input.tool_choice;
+  if (input.tool_choice !== undefined) request.tool_choice = chatToolChoice(input.tool_choice);
   return request;
 }
 
@@ -267,12 +268,34 @@ function appendInputMessages(messages: RecordValue[], items: unknown[]): void {
       });
       continue;
     }
+    if (type === "custom_tool_call_output") {
+      flushText();
+      flushAssistant();
+      messages.push({
+        role: "tool",
+        tool_call_id: stringValue(item.call_id) ?? stringValue(item.id) ?? randomUUID(),
+        content: stringValue(item.output) ?? JSON.stringify(item.output ?? "")
+      });
+      continue;
+    }
     if (type === "function_call") {
       flushText();
       pendingToolCalls.push({
         id: stringValue(item.call_id) ?? stringValue(item.id) ?? randomUUID(),
         type: "function",
         function: { name: stringValue(item.name) ?? "function", arguments: stringValue(item.arguments) ?? "{}" }
+      });
+      continue;
+    }
+    if (type === "custom_tool_call") {
+      flushText();
+      pendingToolCalls.push({
+        id: stringValue(item.call_id) ?? stringValue(item.id) ?? randomUUID(),
+        type: "function",
+        function: {
+          name: stringValue(item.name) ?? "function",
+          arguments: JSON.stringify({ input: stringValue(item.input) ?? "" })
+        }
       });
       continue;
     }
@@ -352,9 +375,52 @@ function chatTools(value: unknown): RecordValue[] {
         }
       }];
     }
+    if (tool.type === "custom" && typeof tool.name === "string") {
+      const format = asRecord(tool.format);
+      const grammar = stringValue(format?.definition);
+      return [{
+        type: "function",
+        function: {
+          name: tool.name,
+          description: stringValue(tool.description),
+          parameters: {
+            type: "object",
+            properties: {
+              input: {
+                type: "string",
+                description: grammar
+                  ? `Freeform tool input. It must follow this grammar:\n${grammar}`
+                  : "Freeform tool input."
+              }
+            },
+            required: ["input"],
+            additionalProperties: false
+          }
+        }
+      }];
+    }
     if (tool.type === "web_search_preview" || tool.type === "web_search") return [];
     return [];
   });
+}
+
+function chatToolChoice(value: unknown): unknown {
+  const choice = asRecord(value);
+  if (!choice || (choice.type !== "function" && choice.type !== "custom")) return value;
+  const name = stringValue(choice.name) ?? stringValue(asRecord(choice.function)?.name);
+  return name ? { type: "function", function: { name } } : value;
+}
+
+function responseToolTypes(value: unknown): Map<string, "function" | "custom"> {
+  const result = new Map<string, "function" | "custom">();
+  if (!Array.isArray(value)) return result;
+  for (const raw of value) {
+    const tool = asRecord(raw);
+    const name = stringValue(tool?.name);
+    if (!name || (tool?.type !== "function" && tool?.type !== "custom")) continue;
+    result.set(name, tool.type);
+  }
+  return result;
 }
 
 function hasWebSearchTool(value: unknown): boolean {
@@ -384,6 +450,7 @@ async function writeResponsesStream(
     toolCalls: new Map(),
     output: []
   };
+  const toolTypes = responseToolTypes(request.tools);
   writeEvent(response, "response.created", { type: "response.created", response: responseObject(context, "in_progress") });
 
   for await (const chunk of readChatStream(remoteResponse)) {
@@ -405,7 +472,7 @@ async function writeResponsesStream(
     }
     const toolCallValue = delta?.tool_calls ?? completedMessage?.tool_calls;
     if (Array.isArray(toolCallValue)) {
-      for (const toolCall of toolCallValue) appendFunctionCallDelta(response, context, toolCall);
+      for (const toolCall of toolCallValue) appendFunctionCallDelta(response, context, toolCall, toolTypes);
     }
     const text = stringValue(delta?.content);
     const annotationValue = delta?.annotations ?? completedMessage?.annotations;
@@ -451,16 +518,39 @@ async function writeResponsesStream(
   }
   const toolCalls = [...context.toolCalls.values()].sort((left, right) => left.index - right.index);
   for (const call of toolCalls) {
-    writeEvent(response, "response.function_call_arguments.done", {
-      type: "response.function_call_arguments.done",
-      item_id: call.itemId,
-      output_index: call.outputIndex,
-      arguments: call.arguments
-    });
+    const customInput = call.toolType === "custom" ? customToolInput(call.arguments) : undefined;
+    if (call.toolType === "custom") {
+      writeEvent(response, "response.custom_tool_call_input.delta", {
+        type: "response.custom_tool_call_input.delta",
+        item_id: call.itemId,
+        output_index: call.outputIndex,
+        delta: customInput
+      });
+      writeEvent(response, "response.custom_tool_call_input.done", {
+        type: "response.custom_tool_call_input.done",
+        item_id: call.itemId,
+        output_index: call.outputIndex,
+        input: customInput
+      });
+    } else {
+      writeEvent(response, "response.function_call_arguments.done", {
+        type: "response.function_call_arguments.done",
+        item_id: call.itemId,
+        output_index: call.outputIndex,
+        arguments: call.arguments
+      });
+    }
     writeEvent(response, "response.output_item.done", {
       type: "response.output_item.done",
       output_index: call.outputIndex,
-      item: {
+      item: call.toolType === "custom" ? {
+        id: call.itemId,
+        type: "custom_tool_call",
+        status: "completed",
+        call_id: call.callId,
+        name: call.name,
+        input: customInput
+      } : {
         id: call.itemId,
         type: "function_call",
         status: "completed",
@@ -522,11 +612,11 @@ async function writeResponsesStream(
     ...(context.reasoningStarted ? [{ id: context.reasoningId, type: "reasoning", status: "completed", summary: [{ type: "summary_text", text: context.reasoning }] }] : []),
     ...toolCalls.map((call) => ({
       id: call.itemId,
-      type: "function_call",
+      type: call.toolType === "custom" ? "custom_tool_call" : "function_call",
       status: "completed",
       call_id: call.callId,
       name: call.name,
-      arguments: call.arguments
+      ...(call.toolType === "custom" ? { input: customToolInput(call.arguments) } : { arguments: call.arguments })
     })),
     ...(message ? [message] : [])
   ];
@@ -537,26 +627,37 @@ async function writeResponsesStream(
   response.end();
 }
 
-function appendFunctionCallDelta(response: ServerResponse, context: ResponseContext, value: unknown): void {
+function appendFunctionCallDelta(
+  response: ServerResponse,
+  context: ResponseContext,
+  value: unknown,
+  toolTypes: Map<string, "function" | "custom">
+): void {
   const raw = asRecord(value);
   if (!raw) return;
   const functionValue = asRecord(raw.function);
   const index = numberValue(raw.index) ?? context.toolCalls.size;
+  const incomingName = stringValue(functionValue?.name);
   let call = context.toolCalls.get(index);
   if (!call) {
+    const name = incomingName ?? "function";
     call = {
       index,
       itemId: `fc-${randomUUID()}`,
       callId: stringValue(raw.id) ?? `call-${randomUUID()}`,
-      name: stringValue(functionValue?.name) ?? "function",
+      name,
       arguments: "",
       outputIndex: (context.reasoningStarted ? 1 : 0) + context.toolCalls.size,
-      started: false
+      started: false,
+      toolType: toolTypes.get(name) ?? "function"
     };
     context.toolCalls.set(index, call);
   }
   if (stringValue(raw.id)) call.callId = stringValue(raw.id)!;
-  if (stringValue(functionValue?.name)) call.name = stringValue(functionValue?.name)!;
+  if (incomingName) {
+    call.name = incomingName;
+    call.toolType = toolTypes.get(incomingName) ?? call.toolType;
+  }
   if (!call.started) {
     call.started = true;
     writeEvent(response, "response.output_item.added", {
@@ -564,23 +665,35 @@ function appendFunctionCallDelta(response: ServerResponse, context: ResponseCont
       output_index: call.outputIndex,
       item: {
         id: call.itemId,
-        type: "function_call",
+        type: call.toolType === "custom" ? "custom_tool_call" : "function_call",
         status: "in_progress",
         call_id: call.callId,
         name: call.name,
-        arguments: ""
+        ...(call.toolType === "custom" ? { input: "" } : { arguments: "" })
       }
     });
   }
   const argumentDelta = stringValue(functionValue?.arguments);
   if (!argumentDelta) return;
   call.arguments += argumentDelta;
+  if (call.toolType === "custom") return;
   writeEvent(response, "response.function_call_arguments.delta", {
     type: "response.function_call_arguments.delta",
     item_id: call.itemId,
     output_index: call.outputIndex,
     delta: argumentDelta
   });
+}
+
+function customToolInput(argumentsValue: string): string {
+  try {
+    const parsed = JSON.parse(argumentsValue) as unknown;
+    if (typeof parsed === "string") return parsed;
+    const record = asRecord(parsed);
+    return stringValue(record?.input) ?? stringValue(record?.command) ?? argumentsValue;
+  } catch {
+    return argumentsValue;
+  }
 }
 
 function ensureReasoningStarted(response: ServerResponse, context: ResponseContext): void {

@@ -543,3 +543,88 @@ test("the generated Pi extension injects AgentHub Streamable HTTP MCP tools", as
     else process.env.AGENTHUB_PI_MCP_SERVERS = previousMcp;
   }
 });
+
+test("the Pi plugin serves AgentHub runtime tools to the Pi extension over MCP", async (t) => {
+  if (!existsSync(pluginDist)) { t.skip("provider-plugin-pi is not built"); return; }
+  const module = await import(pathToFileURL(pluginDist).href);
+  await module.piRuntimeToolServer.ready;
+
+  // A fake Pi that records the MCP server config it was spawned with.
+  const adapter = module.default({ sdkVersion: "1" });
+  const bin = tempDir(t, "agenthub-fake-pi-runtime-tools-");
+  const dumpPath = join(bin, "mcp-env.json");
+  const fakePi = join(bin, "fake-pi.mjs");
+  writeFileSync(fakePi, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(dumpPath)}, process.env.AGENTHUB_PI_MCP_SERVERS ?? "", "utf8");\n${FAKE_PI}`, "utf8");
+  const instance = { providerId: "pi", executable: process.execPath, baseArgs: [fakePi], providerOptions: {} };
+  const calls = [];
+  const events = [];
+  for await (const event of adapter.start({
+    instance,
+    prompt: "delegate",
+    cwd: bin,
+    env: {},
+    runtimeTools: [{
+      name: "agenthub_delegate",
+      description: "Dispatch a task to a child Agent.",
+      inputSchema: {
+        type: "object",
+        properties: { memberId: { type: "string" }, task: { type: "string" } },
+        required: ["memberId", "task"]
+      }
+    }],
+    executeRuntimeTool: async (call) => {
+      calls.push(call);
+      return { success: true, content: `dispatched:${call.name}` };
+    }
+  }).events) events.push(event);
+
+  assert.ok(!events.some((event) => event.kind === "raw" && String(event.text).includes("runtime tool endpoint is not ready")));
+  const servers = JSON.parse(readFileSync(dumpPath, "utf8"));
+  const bridge = servers.find((server) => server.name === "agenthub");
+  assert.ok(bridge, "run should expose the AgentHub runtime tool server to Pi");
+  assert.match(bridge.url, /^http:\/\/127\.0\.0\.1:\d+\/mcp\/[0-9a-f]{32}$/);
+
+  // The registered endpoint speaks MCP and routes calls back to the executor.
+  // (Registrations live only for the duration of a run, so this exercises the
+  // server with its own registration while the dump above proves run wiring.)
+  const liveUrl = module.piRuntimeToolServer.register({
+    tools: [{
+      name: "agenthub_delegate",
+      description: "Dispatch a task to a child Agent.",
+      inputSchema: {
+        type: "object",
+        properties: { memberId: { type: "string" }, task: { type: "string" } },
+        required: ["memberId", "task"]
+      }
+    }],
+    execute: async (call) => {
+      calls.push(call);
+      return { success: true, content: `dispatched:${call.name}` };
+    }
+  });
+  assert.ok(liveUrl);
+  const post = async (message) => {
+    const response = await fetch(liveUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify(message)
+    });
+    return { status: response.status, body: await response.text() };
+  };
+  const init = JSON.parse((await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })).body);
+  assert.equal(init.result.serverInfo.name, "agenthub-runtime");
+  const listed = JSON.parse((await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })).body);
+  assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["delegate"]);
+  const called = JSON.parse((await post({
+    jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: { name: "delegate", arguments: { memberId: "member_1", task: "explore" } }
+  })).body);
+  assert.equal(called.result.isError, false);
+  assert.equal(called.result.content[0].text, "dispatched:agenthub_delegate");
+  assert.deepEqual(calls, [{ providerId: "pi", name: "agenthub_delegate", arguments: { memberId: "member_1", task: "explore" } }]);
+
+  // Unregistering withdraws the capability.
+  module.piRuntimeToolServer.unregister(liveUrl);
+  const gone = await post({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} });
+  assert.equal(gone.status, 404);
+});

@@ -6,7 +6,9 @@
  * automatically retry or compact after the earlier `agent_end` event.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer, type Server as HttpServer } from "node:http";
 import { platform, tmpdir } from "node:os";
 import { delimiter, extname, join } from "node:path";
 import type {
@@ -25,7 +27,9 @@ import type {
   ProviderDescriptor,
   ProviderModel,
   ProviderModelCatalog,
-  ProviderPluginFactory
+  ProviderPluginFactory,
+  RuntimeToolExecutor,
+  RuntimeToolSpec
 } from "@agenthub/provider-sdk";
 
 /** Native Pi commands that AgentHub can expose before the first run. */
@@ -115,6 +119,177 @@ interface PiParseState {
   toolArgs: Map<string, { name: string; args: RecordValue }>;
 }
 
+/* ------------------------------------------------------------------ */
+/* Runtime tools (agenthub_delegate / agenthub_plan) over loopback MCP. */
+/* ------------------------------------------------------------------ */
+
+interface PiRuntimeToolRegistration {
+  tools: RuntimeToolSpec[];
+  execute: RuntimeToolExecutor;
+}
+
+/** Mirrors the core runtime bridge: the model sees prefix-free tool names. */
+function publicRuntimeToolName(name: string): string {
+  if (name.startsWith("agenthub.")) return name.slice("agenthub.".length);
+  if (name.startsWith("agenthub_")) return name.slice("agenthub_".length);
+  return name;
+}
+
+/**
+ * Serves run-scoped Nautilo tools to the Pi extension over loopback HTTP.
+ * Pi spawns synchronously inside `run()`, before any await could allocate an
+ * ephemeral port, so one long-lived server is shared by all runs; each run
+ * registers its tools under a random URL token that acts as the capability.
+ */
+class PiRuntimeToolServer {
+  private http?: HttpServer;
+  private port?: number;
+  private readonly registrations = new Map<string, PiRuntimeToolRegistration>();
+  ready: Promise<void>;
+
+  constructor() {
+    this.ready = this.start();
+  }
+
+  private async start(): Promise<void> {
+    const http = createServer((request, response) => {
+      void this.handle(request, response).catch((error) => {
+        if (!response.headersSent) response.writeHead(500, { "content-type": "application/json" });
+        if (!response.writableEnded) response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      });
+    });
+    // The shared server must never keep a host process (or test runner) alive.
+    http.unref();
+    this.http = http;
+    await new Promise<void>((resolve, reject) => {
+      http.once("error", reject);
+      http.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = http.address();
+    if (!address || typeof address === "string") throw new Error("Pi runtime tool endpoint did not allocate a port");
+    this.port = address.port;
+  }
+
+  /**
+   * Returns the run-scoped MCP URL, or undefined while the server is not
+   * listening yet. A disposed (plugin-reloaded) server restarts in the
+   * background so the next run can register again.
+   */
+  register(registration: PiRuntimeToolRegistration): string | undefined {
+    if (this.port === undefined || !this.http) {
+      if (!this.http) this.ready = this.start().catch(() => undefined);
+      return undefined;
+    }
+    const token = randomUUID().replaceAll("-", "");
+    this.registrations.set(token, registration);
+    return `http://127.0.0.1:${this.port}/mcp/${token}`;
+  }
+
+  unregister(url: string | undefined): void {
+    if (!url) return;
+    const token = url.slice(url.lastIndexOf("/") + 1);
+    this.registrations.delete(token);
+  }
+
+  async close(): Promise<void> {
+    this.registrations.clear();
+    const http = this.http;
+    this.http = undefined;
+    this.port = undefined;
+    if (http) await new Promise<void>((resolve) => http.close(() => resolve()));
+  }
+
+  private async handle(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse): Promise<void> {
+    const remote = request.socket.remoteAddress;
+    const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    const token = pathname.startsWith("/mcp/") ? pathname.slice("/mcp/".length) : "";
+    const registration = this.registrations.get(token);
+    if (!local || !registration) {
+      response.writeHead(404).end();
+      return;
+    }
+    if (request.method === "DELETE") {
+      response.writeHead(202).end();
+      return;
+    }
+    if (request.method !== "POST") {
+      response.writeHead(405).end();
+      return;
+    }
+    const body = await readRequestBody(request);
+    const message = JSON.parse(body) as RecordValue;
+    // Notifications carry no id and expect no response body.
+    if (message.id === undefined || message.id === null) {
+      response.writeHead(202).end();
+      return;
+    }
+    const reply = (result: unknown): void => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+    };
+    const fail = (code: number, text: string): void => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code, message: text } }));
+    };
+    const method = stringValue(message.method);
+    if (method === "initialize") {
+      reply({
+        protocolVersion: "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: "agenthub-runtime", version: "0.1.0" }
+      });
+      return;
+    }
+    if (method === "tools/list") {
+      reply({
+        tools: registration.tools.map((tool) => ({
+          name: publicRuntimeToolName(tool.name),
+          description: tool.description,
+          inputSchema: tool.inputSchema
+        }))
+      });
+      return;
+    }
+    if (method === "tools/call") {
+      const params = asRecord(message.params);
+      const requested = stringValue(params.name) ?? "";
+      const tool = registration.tools.find((entry) => publicRuntimeToolName(entry.name) === requested);
+      if (!tool) {
+        reply({ isError: true, content: [{ type: "text", text: `Unknown Nautilo tool: ${requested}` }] });
+        return;
+      }
+      try {
+        const result = await registration.execute({
+          providerId: "pi",
+          name: tool.name,
+          arguments: params.arguments ?? {}
+        });
+        reply({ isError: !result.success, content: [{ type: "text", text: result.content }] });
+      } catch (error) {
+        reply({ isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] });
+      }
+      return;
+    }
+    fail(-32601, `Method not found: ${method ?? "unknown"}`);
+  }
+}
+
+/** Exported for tests; the adapter shares one server across all Pi runs. */
+export const piRuntimeToolServer = new PiRuntimeToolServer();
+
+async function readRequestBody(request: import("node:http").IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.byteLength;
+    if (size > 20 * 1024 * 1024) throw new Error("Pi runtime tool request is too large");
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 class PiPluginAdapter implements AgentCliAdapter {
   readonly providerId = "pi";
   readonly descriptor = descriptor;
@@ -177,11 +352,18 @@ class PiPluginAdapter implements AgentCliAdapter {
     return this.run(request, true);
   }
 
+  async dispose(): Promise<void> {
+    await piRuntimeToolServer.close();
+  }
+
   private run(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
     const executable = request.instance.executable || descriptor.defaultExecutable || "pi";
     const env = { ...process.env, ...(request.env ?? {}), PI_OFFLINE: "1" } as Record<string, string>;
     configurePiProviderEnvironment(request.instance, env);
-    configurePiMcpEnvironment(request, env);
+    const runtimeToolUrl = request.runtimeTools?.length && request.executeRuntimeTool
+      ? piRuntimeToolServer.register({ tools: request.runtimeTools, execute: request.executeRuntimeTool })
+      : undefined;
+    configurePiMcpEnvironment(request, env, runtimeToolUrl ? [{ transport: "http", name: "agenthub", url: runtimeToolUrl }] : []);
     if (platform() === "win32" && request.permissionMode !== "read-only") {
       env.AGENTHUB_PI_ENABLE_POWERSHELL = "1";
     }
@@ -197,6 +379,7 @@ class PiPluginAdapter implements AgentCliAdapter {
         windowsVerbatimArguments: resolved.verbatim ?? false
       });
     } catch (error) {
+      piRuntimeToolServer.unregister(runtimeToolUrl);
       skills.cleanup();
       throw error;
     }
@@ -258,8 +441,8 @@ class PiPluginAdapter implements AgentCliAdapter {
       // in the composer and the context-usage card for the active session.
       yield { kind: "commands", commands: NATIVE_COMMANDS };
       yield { kind: "status", phase: "turn_started" };
-      if (request.runtimeTools?.length) {
-        yield { kind: "raw", stream: "stderr", text: "Pi RPC does not natively accept AgentHub runtime tools; provider-native Pi tools remain available.\n" };
+      if (request.runtimeTools?.length && !runtimeToolUrl) {
+        yield { kind: "raw", stream: "stderr", text: "AgentHub runtime tools were supplied but the Pi runtime tool endpoint is not ready yet; provider-native Pi tools remain available.\n" };
       }
       try {
         for await (const item of jsonLines(processHandle)) {
@@ -368,6 +551,7 @@ class PiPluginAdapter implements AgentCliAdapter {
         yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
         await processHandle.cancel().catch(() => undefined);
       } finally {
+        piRuntimeToolServer.unregister(runtimeToolUrl);
         skills.cleanup();
       }
     };
@@ -376,6 +560,7 @@ class PiPluginAdapter implements AgentCliAdapter {
       process: processHandle,
       events: { [Symbol.asyncIterator]: events },
       cancel: async () => {
+        piRuntimeToolServer.unregister(runtimeToolUrl);
         if (child.stdin.writable) send({ id: "agenthub-abort", type: "abort" });
         await processHandle.cancel();
         skills.cleanup();
@@ -988,13 +1173,15 @@ function configurePiProviderEnvironment(instance: AgentInstance, env: Record<str
 
 function configurePiMcpEnvironment(
   request: AdapterStartRequest | AdapterResumeRequest,
-  env: Record<string, string>
+  env: Record<string, string>,
+  extraServers: Array<Record<string, unknown>> = []
 ): void {
-  if (!request.mcpServers?.length) {
+  const servers = [...(request.mcpServers ?? []), ...extraServers];
+  if (!servers.length) {
     delete env.AGENTHUB_PI_MCP_SERVERS;
     return;
   }
-  env.AGENTHUB_PI_MCP_SERVERS = JSON.stringify(request.mcpServers);
+  env.AGENTHUB_PI_MCP_SERVERS = JSON.stringify(servers);
 }
 
 function agentHubPiExtensionPath(): string {
