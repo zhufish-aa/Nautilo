@@ -99,6 +99,66 @@ pub fn start_codex_chat_compat_app_server(request: AdapterStartRequest, resume_s
     Ok(run)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_tools() -> Value {
+        json!([
+            {
+                "type": "function",
+                "name": "agenthub_delegate",
+                "description": "Dispatch a task.",
+                "parameters": { "type": "object", "properties": { "memberId": { "type": "string" } } }
+            },
+            {
+                "type": "namespace",
+                "name": "multi_agent_v1",
+                "description": "Multi-agent",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "description": "Spawn a sub-agent.",
+                        "parameters": { "type": "object", "properties": { "task": { "type": "string" } } }
+                    }
+                ]
+            }
+        ])
+    }
+
+    /// Namespace tool groups (codex multi_agent_v1 / MCP servers) must be
+    /// flattened into plain chat functions, otherwise the chat-wire model never
+    /// sees sub-agent dispatch tools like `spawn_agent`.
+    #[test]
+    fn chat_tools_flattens_namespace_sub_tools() {
+        let chat = chat_tools(Some(&sample_tools()));
+        let names: Vec<String> = chat
+            .iter()
+            .filter_map(|t| t.get("function").and_then(|f| f.get("name")).and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(names.contains(&"agenthub_delegate".to_string()), "regular function must survive");
+        assert!(names.contains(&"multi_agent_v1-spawn_agent".to_string()), "namespace sub-tool must be flattened into a chat function");
+    }
+
+    /// The response direction must re-map the hyphenated chat name back to the
+    /// codex dotted name so the CLI recognizes the namespaced tool call.
+    #[test]
+    fn response_tool_types_maps_namespace_back_to_dotted_name() {
+        let types = response_tool_types(Some(&sample_tools()));
+        assert_eq!(
+            types.get("agenthub_delegate"),
+            Some(&("agenthub_delegate".to_string(), "function".to_string())),
+            "regular function keeps its identity"
+        );
+        assert_eq!(
+            types.get("multi_agent_v1-spawn_agent"),
+            Some(&("multi_agent_v1.spawn_agent".to_string(), "custom".to_string())),
+            "namespace sub-tool maps to the dotted codex name as a custom call"
+        );
+    }
+}
+
 // ---------------------------------------------------------------- proxy server
 
 pub struct ChatCompatProxy {
@@ -578,6 +638,59 @@ fn chat_tools(value: Option<&Value>) -> Vec<Value> {
                     }
                 }));
             }
+            "namespace" if tool.get("name").and_then(Value::as_str).is_some() => {
+                // Namespaced tool groups (codex built-ins like multi_agent_v1
+                // and MCP servers) must be flattened into plain chat functions;
+                // chat tool names reject dots, so use a hyphen join and keep
+                // the mapping for the response direction in response_tool_types.
+                let namespace = tool.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                let namespace_description = tool.get("description").and_then(Value::as_str).map(str::to_string);
+                for sub in tool.get("tools").and_then(Value::as_array).cloned().unwrap_or_default() {
+                    let sub_type = sub.get("type").and_then(Value::as_str).unwrap_or("");
+                    let Some(sub_name) = sub.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let chat_name = format!("{namespace}-{sub_name}");
+                    let description = match (&namespace_description, sub.get("description").and_then(Value::as_str)) {
+                        (Some(ns), Some(sub_desc)) => format!("[{namespace}] {sub_desc}"),
+                        (Some(ns), None) => format!("[{namespace}]"),
+                        (None, Some(sub_desc)) => sub_desc.to_string(),
+                        (None, None) => String::new(),
+                    };
+                    if sub_type == "function" {
+                        result.push(json!({
+                            "type": "function",
+                            "function": {
+                                "name": chat_name,
+                                "description": description,
+                                "parameters": sub.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+                            }
+                        }));
+                    } else if sub_type == "custom" {
+                        let grammar = sub.get("format").and_then(|f| f.get("definition")).and_then(Value::as_str);
+                        result.push(json!({
+                            "type": "function",
+                            "function": {
+                                "name": chat_name,
+                                "description": description,
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "input": {
+                                            "type": "string",
+                                            "description": grammar
+                                                .map(|g| format!("Freeform tool input. It must follow this grammar:\n{g}"))
+                                                .unwrap_or_else(|| "Freeform tool input.".to_string())
+                                        }
+                                    },
+                                    "required": ["input"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        }));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -599,7 +712,12 @@ fn chat_tool_choice(value: &Value) -> Value {
     }
 }
 
-fn response_tool_types(value: Option<&Value>) -> HashMap<String, String> {
+/// Registry of chat-side tool names -> (codex-side tool name, wire type).
+///
+/// Namespaced tools (multi_agent_v1.*, mcp__*) are exposed to the chat model
+/// as `{namespace}-{sub}` functions and come back to codex as `{namespace}.{sub}`
+/// custom tool calls, so the call-back must be re-mapped to the dotted name.
+fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String)> {
     let mut result = HashMap::new();
     let Some(tools) = value.and_then(Value::as_array) else {
         return result;
@@ -607,8 +725,27 @@ fn response_tool_types(value: Option<&Value>) -> HashMap<String, String> {
     for tool in tools {
         let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
         let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("");
-        if !name.is_empty() && (tool_type == "function" || tool_type == "custom") {
-            result.insert(name.to_string(), tool_type.to_string());
+        match tool_type {
+            "function" | "custom" if !name.is_empty() => {
+                result.insert(name.to_string(), (name.to_string(), tool_type.to_string()));
+            }
+            "namespace" if !name.is_empty() => {
+                let namespace = name;
+                if let Some(subs) = tool.get("tools").and_then(Value::as_array) {
+                    for sub in subs {
+                        let sub_type = sub.get("type").and_then(Value::as_str).unwrap_or("");
+                        let Some(sub_name) = sub.get("name").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        if sub_type == "function" || sub_type == "custom" {
+                            let codex_name = format!("{namespace}.{sub_name}");
+                            let chat_name = format!("{namespace}-{sub_name}");
+                            result.insert(chat_name, (codex_name, "custom".to_string()));
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
     result
@@ -745,7 +882,7 @@ async fn process_chat_chunk(
     chunk: &Value,
     context: &mut ResponseContext,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
-    tool_types: &HashMap<String, String>,
+    tool_types: &HashMap<String, (String, String)>,
 ) -> anyhow::Result<()> {
     let choice = chunk.get("choices").and_then(Value::as_array).and_then(|c| c.first()).cloned().unwrap_or(Value::Null);
     let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
@@ -852,13 +989,17 @@ async fn append_function_call_delta(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     context: &mut ResponseContext,
     value: &Value,
-    tool_types: &HashMap<String, String>,
+    tool_types: &HashMap<String, (String, String)>,
 ) -> anyhow::Result<()> {
     let function = value.get("function").cloned().unwrap_or(Value::Null);
     let index = value.get("index").and_then(as_number).unwrap_or(context.tool_calls.len() as i64);
     let incoming_name = function.get("name").and_then(Value::as_str).map(str::to_string);
     if !context.tool_calls.contains_key(&index) {
         let name = incoming_name.clone().unwrap_or_else(|| "function".to_string());
+        // Chat-side name -> (codex dotted name, wire type). Namespaced tools are
+        // re-mapped so the codex CLI receives e.g. `multi_agent_v1.spawn_agent`
+        // rather than the hyphenated chat name.
+        let (codex_name, tool_type) = tool_types.get(&name).cloned().unwrap_or_else(|| (name.clone(), "function".to_string()));
         let call_id = value
             .get("id")
             .and_then(Value::as_str)
@@ -871,11 +1012,11 @@ async fn append_function_call_delta(
                 index,
                 item_id: format!("fc-{}", Uuid::new_v4()),
                 call_id,
-                name: name.clone(),
+                name: codex_name,
                 arguments: String::new(),
                 output_index,
                 started: false,
-                tool_type: tool_types.get(&name).cloned().unwrap_or_else(|| "function".to_string()),
+                tool_type,
             },
         );
     }
@@ -885,8 +1026,8 @@ async fn append_function_call_delta(
             call.call_id = id.to_string();
         }
         if let Some(name) = &incoming_name {
-            call.name = name.clone();
-            if let Some(mapped) = tool_types.get(name) {
+            if let Some((codex_name, mapped)) = tool_types.get(name) {
+                call.name = codex_name.clone();
                 call.tool_type = mapped.clone();
             }
         }

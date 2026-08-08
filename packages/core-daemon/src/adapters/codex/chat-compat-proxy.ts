@@ -399,6 +399,59 @@ function chatTools(value: unknown): RecordValue[] {
         }
       }];
     }
+    if (tool.type === "namespace" && typeof tool.name === "string") {
+      // Namespaced tool groups (codex built-ins like multi_agent_v1 and MCP
+      // servers) must be flattened into plain chat functions; chat tool names
+      // reject dots, so use a hyphen join and keep the mapping for the response
+      // direction in responseToolTypes.
+      const namespace = tool.name;
+      const namespaceDescription = stringValue(tool.description);
+      const flattened: RecordValue[] = [];
+      const subs = Array.isArray(tool.tools) ? tool.tools : [];
+      for (const sub of subs) {
+        const subRecord = asRecord(sub);
+        if (!subRecord) continue;
+        const subType = subRecord.type;
+        const subName = stringValue(subRecord.name);
+        if (!subName || (subType !== "function" && subType !== "custom")) continue;
+        const chatName = `${namespace}-${subName}`;
+        const description = [namespaceDescription ? `[${namespace}]` : null, stringValue(subRecord.description)].filter(Boolean).join(" ");
+        if (subType === "function") {
+          flattened.push({
+            type: "function",
+            function: {
+              name: chatName,
+              description,
+              parameters: subRecord.parameters ?? { type: "object", properties: {} }
+            }
+          });
+        } else if (subType === "custom") {
+          const format = asRecord(subRecord.format);
+          const grammar = stringValue(format?.definition);
+          flattened.push({
+            type: "function",
+            function: {
+              name: chatName,
+              description,
+              parameters: {
+                type: "object",
+                properties: {
+                  input: {
+                    type: "string",
+                    description: grammar
+                      ? `Freeform tool input. It must follow this grammar:\n${grammar}`
+                      : "Freeform tool input."
+                  }
+                },
+                required: ["input"],
+                additionalProperties: false
+              }
+            }
+          });
+        }
+      }
+      return flattened;
+    }
     if (tool.type === "web_search_preview" || tool.type === "web_search") return [];
     return [];
   });
@@ -411,14 +464,32 @@ function chatToolChoice(value: unknown): unknown {
   return name ? { type: "function", function: { name } } : value;
 }
 
-function responseToolTypes(value: unknown): Map<string, "function" | "custom"> {
-  const result = new Map<string, "function" | "custom">();
+/**
+ * Registry of chat-side tool names -> { codexName, type }.
+ *
+ * Namespaced tools (multi_agent_v1.*, mcp__*) are exposed to the chat model
+ * as `{namespace}-{sub}` functions and come back to codex as `{namespace}.{sub}`
+ * custom tool calls, so the call-back must be re-mapped to the dotted name.
+ */
+function responseToolTypes(value: unknown): Map<string, { codexName: string; type: "function" | "custom" }> {
+  const result = new Map<string, { codexName: string; type: "function" | "custom" }>();
   if (!Array.isArray(value)) return result;
   for (const raw of value) {
     const tool = asRecord(raw);
     const name = stringValue(tool?.name);
-    if (!name || (tool?.type !== "function" && tool?.type !== "custom")) continue;
-    result.set(name, tool.type);
+    if (!name) continue;
+    if (tool?.type === "function" || tool?.type === "custom") {
+      result.set(name, { codexName: name, type: tool.type });
+    } else if (tool?.type === "namespace") {
+      const subs = Array.isArray(tool.tools) ? tool.tools : [];
+      for (const sub of subs) {
+        const subRecord = asRecord(sub);
+        const subType = subRecord?.type;
+        const subName = stringValue(subRecord?.name);
+        if (!subName || (subType !== "function" && subType !== "custom")) continue;
+        result.set(`${name}-${subName}`, { codexName: `${name}.${subName}`, type: "custom" });
+      }
+    }
   }
   return result;
 }
@@ -631,7 +702,7 @@ function appendFunctionCallDelta(
   response: ServerResponse,
   context: ResponseContext,
   value: unknown,
-  toolTypes: Map<string, "function" | "custom">
+  toolTypes: Map<string, { codexName: string; type: "function" | "custom" }>
 ): void {
   const raw = asRecord(value);
   if (!raw) return;
@@ -641,22 +712,29 @@ function appendFunctionCallDelta(
   let call = context.toolCalls.get(index);
   if (!call) {
     const name = incomingName ?? "function";
+    // Chat-side name -> { codex dotted name, wire type }. Namespaced tools are
+    // re-mapped so the codex CLI receives e.g. `multi_agent_v1.spawn_agent`
+    // rather than the hyphenated chat name.
+    const mapped = toolTypes.get(name) ?? { codexName: name, type: "function" as const };
     call = {
       index,
       itemId: `fc-${randomUUID()}`,
       callId: stringValue(raw.id) ?? `call-${randomUUID()}`,
-      name,
+      name: mapped.codexName,
       arguments: "",
       outputIndex: (context.reasoningStarted ? 1 : 0) + context.toolCalls.size,
       started: false,
-      toolType: toolTypes.get(name) ?? "function"
+      toolType: mapped.type
     };
     context.toolCalls.set(index, call);
   }
   if (stringValue(raw.id)) call.callId = stringValue(raw.id)!;
   if (incomingName) {
-    call.name = incomingName;
-    call.toolType = toolTypes.get(incomingName) ?? call.toolType;
+    const mapped = toolTypes.get(incomingName);
+    if (mapped) {
+      call.name = mapped.codexName;
+      call.toolType = mapped.type;
+    }
   }
   if (!call.started) {
     call.started = true;
