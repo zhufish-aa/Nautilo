@@ -21,7 +21,12 @@ interface InteractionsState {
 
 function upsert(list: InteractionRequest[] | undefined, interaction: InteractionRequest): InteractionRequest[] {
   const current = list ?? [];
-  const next = current.some((item) => item.id === interaction.id)
+  const existing = current.find((item) => item.id === interaction.id);
+  // A replayed interaction.requested must never resurrect a card that was
+  // already resolved/cancelled — journal order guarantees the resolved event
+  // comes later, but live events and replays interleave.
+  if (existing && existing.status !== "pending" && interaction.status === "pending") return current;
+  const next = existing
     ? current.map((item) => (item.id === interaction.id ? interaction : item))
     : [...current, interaction];
   return next.sort((left, right) => left.createdAt.localeCompare(right.createdAt));

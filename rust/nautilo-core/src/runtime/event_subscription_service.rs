@@ -104,6 +104,12 @@ impl EventSubscriptionService {
         Ok(events)
     }
 
+    /// Session scope of a subscription without extending its TTL — callers
+    /// (replay/wait) touch the entry themselves right after.
+    pub fn session_scope(&self, subscription_id: &str) -> Option<String> {
+        self.subscriptions.lock().unwrap().get(subscription_id).and_then(|entry| entry.session_id.clone())
+    }
+
     fn touch(&self, subscription_id: &str) -> CoreResult<SubscriptionEntrySnapshot> {
         let mut subscriptions = self.subscriptions.lock().unwrap();
         let entry = subscriptions.get_mut(subscription_id).ok_or_else(|| {

@@ -513,33 +513,65 @@ impl<'a> EventRepository<'a> {
     /// renderer's `sequence > afterSequence` polling would silently drop).
     /// Fills the allocated sequence into the event and returns it.
     ///
-    /// Streaming deltas are coalesced inside the same transaction: only the
-    /// newest delta per (session, type, messageId) survives, and a terminal
-    /// run event purges the session's remaining delta rows. Journaling every
-    /// delta verbatim grew the event table to millions of rows (97% deltas).
+    /// Streaming deltas are coalesced inside the same transaction: delta text
+    /// is INCREMENTAL (the renderer concatenates chunk texts on replay), so the
+    /// surviving row per (session, run, type, messageId) accumulates every
+    /// chunk — never just the newest. A terminal run event purges only
+    /// agent.message_delta rows, whose content also lives in the final
+    /// agent.message event; thinking deltas have no such final event and must
+    /// stay. Journaling every delta verbatim grew the event table to millions
+    /// of rows (97% deltas).
     pub fn append_allocating_sequence(&self, event: &mut Value, session_id: Option<&str>, run_id: Option<&str>) -> CoreResult<i64> {
         self.db.execute_batch("BEGIN IMMEDIATE").map_err(db_fail)?;
         let result = (|| {
-            let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+            let event_type = event.get("type").and_then(Value::as_str).unwrap_or("").to_string();
             // Allocate BEFORE the coalescing delete: the superseded delta row
             // usually holds the current MAX(sequence), so deleting first would
             // reissue an already-consumed sequence and break the renderer's
             // `sequence > afterSequence` polling.
             let sequence = self.next_sequence(session_id, run_id)?;
             if event_type.ends_with("_delta") {
-                let message_id = event.pointer("/payload/messageId").and_then(Value::as_str).unwrap_or("");
+                let message_id = event.pointer("/payload/messageId").and_then(Value::as_str).unwrap_or("").to_string();
+                // The merge key takes the run from the EVENT (the run_id
+                // argument is only the sequence scope and is often unset);
+                // the renderer keys streaming rows by runId too, so merging
+                // across runs would put one run's text under another run.
+                let event_run_id = event.get("runId").and_then(Value::as_str).map(str::to_string);
+                let prior_text: Option<String> = self
+                    .db
+                    .prepare(
+                        "SELECT json_extract(data, '$.payload.text') FROM runtime_events \
+                         WHERE session_id = ?1 AND COALESCE(run_id, '') = COALESCE(?2, '') \
+                         AND json_extract(data, '$.type') = ?3 \
+                         AND json_extract(data, '$.payload.messageId') = ?4 \
+                         ORDER BY sequence DESC, rowid DESC LIMIT 1",
+                    )
+                    .map_err(db_fail)?
+                    .query_row(
+                        params![session_id.unwrap_or(""), event_run_id, event_type, message_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .ok()
+                    .flatten();
+                if let Some(prior_text) = prior_text.filter(|text| !text.is_empty()) {
+                    if let Some(payload) = event.get_mut("payload").and_then(Value::as_object_mut) {
+                        let chunk = payload.get("text").and_then(Value::as_str).unwrap_or("");
+                        payload.insert("text".to_string(), json!(format!("{prior_text}{chunk}")));
+                    }
+                }
                 self.db
                     .prepare(
                         "DELETE FROM runtime_events WHERE session_id = ?1 \
-                         AND json_extract(data, '$.type') = ?2 \
-                         AND json_extract(data, '$.payload.messageId') = ?3",
+                         AND COALESCE(run_id, '') = COALESCE(?2, '') \
+                         AND json_extract(data, '$.type') = ?3 \
+                         AND json_extract(data, '$.payload.messageId') = ?4",
                     )
                     .map_err(db_fail)?
-                    .execute(params![session_id.unwrap_or(""), event_type, message_id])
+                    .execute(params![session_id.unwrap_or(""), event_run_id, event_type, message_id])
                     .map_err(db_fail)?;
-            } else if matches!(event_type, "run.completed" | "run.failed") {
+            } else if matches!(event_type.as_str(), "run.completed" | "run.failed") {
                 self.db
-                    .prepare("DELETE FROM runtime_events WHERE session_id = ?1 AND json_extract(data, '$.type') LIKE '%\\_delta' ESCAPE '\\'")
+                    .prepare("DELETE FROM runtime_events WHERE session_id = ?1 AND json_extract(data, '$.type') = 'agent.message_delta'")
                     .map_err(db_fail)?
                     .execute(params![session_id.unwrap_or("")])
                     .map_err(db_fail)?;
@@ -955,30 +987,54 @@ mod tests {
             .unwrap()
     }
 
+    fn typed_delta_event(session: &str, run: &str, event_type: &str, message_id: &str, text: &str) -> Value {
+        json!({
+            "eventId": uuid::Uuid::new_v4().to_string(),
+            "sessionId": session,
+            "runId": run,
+            "type": event_type,
+            "timestamp": "2026-08-08T00:00:00.000Z",
+            "payload": { "messageId": message_id, "text": text }
+        })
+    }
+
     #[test]
-    fn delta_events_coalesce_per_message_and_purge_on_run_end() {
+    fn delta_events_coalesce_by_concatenation_and_keep_thinking_on_run_end() {
         let db = open_test_db();
         let events = Repositories::new(&db.raw).events();
 
+        // Delta text is incremental — the renderer concatenates chunk texts on
+        // replay — so coalescing must ACCUMULATE chunks, not keep the newest.
         let mut first = delta_event("s1", "m1", "he");
-        let mut second = delta_event("s1", "m1", "hel");
-        let mut third = delta_event("s1", "m1", "hello");
+        let mut second = delta_event("s1", "m1", "ll");
+        let mut third = delta_event("s1", "m1", "o");
         let mut other_message = delta_event("s1", "m2", "world");
         let mut other_session = delta_event("s2", "m1", "untouched");
+        // Thinking deltas of the same run merge; another run never does.
+        let mut thought_a = typed_delta_event("s1", "r1", "agent.thinking_delta", "t1", "think-");
+        let mut thought_b = typed_delta_event("s1", "r1", "agent.thinking_delta", "t1", "ing");
+        let mut other_run = typed_delta_event("s1", "r2", "agent.message_delta", "m1", "other-run");
         for (event, scope) in [
             (&mut first, "s1"),
             (&mut second, "s1"),
             (&mut third, "s1"),
             (&mut other_message, "s1"),
             (&mut other_session, "s2"),
+            (&mut thought_a, "s1"),
+            (&mut thought_b, "s1"),
+            (&mut other_run, "s1"),
         ] {
             events.append_allocating_sequence(event, Some(scope), None).unwrap();
         }
 
-        // Coalesced: one row per (session, type, messageId), keeping the newest text.
         assert_eq!(
             delta_rows(&db.raw, "s1"),
-            vec![("m1".to_string(), "hello".to_string()), ("m2".to_string(), "world".to_string())]
+            vec![
+                ("m1".to_string(), "hello".to_string()),
+                ("m2".to_string(), "world".to_string()),
+                ("t1".to_string(), "think-ing".to_string()),
+                ("m1".to_string(), "other-run".to_string())
+            ]
         );
         assert_eq!(delta_rows(&db.raw, "s2").len(), 1);
 
@@ -988,7 +1044,9 @@ mod tests {
         let s3 = third.get("sequence").and_then(Value::as_i64).unwrap();
         assert!(s1 < s2 && s2 < s3, "sequences must increase: {s1} {s2} {s3}");
 
-        // A terminal run event purges the session's remaining delta rows only.
+        // A terminal run event purges message deltas (their text also lives in
+        // the final agent.message event) but never thinking deltas — those are
+        // the only record of the run's reasoning.
         let mut done = json!({
             "eventId": uuid::Uuid::new_v4().to_string(),
             "sessionId": "s1",
@@ -997,7 +1055,7 @@ mod tests {
             "payload": {}
         });
         events.append_allocating_sequence(&mut done, Some("s1"), None).unwrap();
-        assert!(delta_rows(&db.raw, "s1").is_empty());
+        assert_eq!(delta_rows(&db.raw, "s1"), vec![("t1".to_string(), "think-ing".to_string())]);
         assert_eq!(delta_rows(&db.raw, "s2").len(), 1);
     }
 }

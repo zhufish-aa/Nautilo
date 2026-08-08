@@ -430,12 +430,19 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         router.register("event.replay", move |input| {
             let daemon = daemon.clone();
             async move {
+                let subscription_id = input.get("subscriptionId").and_then(Value::as_str).unwrap_or("");
+                let after_sequence = input.get("afterSequence").and_then(Value::as_i64).unwrap_or(0);
+                // A full replay re-reads the journal; cancel orphaned
+                // interaction requests first so stale pending cards don't
+                // resurrect in the renderer.
+                if after_sequence == 0 {
+                    if let Some(session_id) = daemon.subscriptions.session_scope(subscription_id) {
+                        daemon.interactions.heal_orphaned(&session_id);
+                    }
+                }
                 daemon
                     .subscriptions
-                    .replay(
-                        input.get("subscriptionId").and_then(Value::as_str).unwrap_or(""),
-                        input.get("afterSequence").and_then(Value::as_i64).unwrap_or(0),
-                    )
+                    .replay(subscription_id, after_sequence)
                     .map_err(anyhow::Error::new)
             }
         });
@@ -445,11 +452,18 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         router.register("event.wait", move |input| {
             let daemon = daemon.clone();
             async move {
+                let subscription_id = input.get("subscriptionId").and_then(Value::as_str).unwrap_or("");
+                let after_sequence = input.get("afterSequence").and_then(Value::as_i64).unwrap_or(0);
+                if after_sequence == 0 {
+                    if let Some(session_id) = daemon.subscriptions.session_scope(subscription_id) {
+                        daemon.interactions.heal_orphaned(&session_id);
+                    }
+                }
                 daemon
                     .subscriptions
                     .wait(
-                        input.get("subscriptionId").and_then(Value::as_str).unwrap_or(""),
-                        input.get("afterSequence").and_then(Value::as_i64).unwrap_or(0),
+                        subscription_id,
+                        after_sequence,
                         input.get("timeoutMs").and_then(Value::as_u64),
                     )
                     .await

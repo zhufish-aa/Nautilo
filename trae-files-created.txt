@@ -1,0 +1,2 @@
+此文件由 trae-files 创建。
+已读取当前目录中的 hello.txt 和 package.json。

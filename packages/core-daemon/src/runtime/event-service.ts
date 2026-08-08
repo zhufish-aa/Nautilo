@@ -24,19 +24,34 @@ export class EventService {
     let event: RuntimeEvent;
     try {
       event = { schemaVersion: 1 as const, eventId: randomUUID(), sequence: this.database.events.nextSequence(session.id), projectId: session.projectId, runId: context.runId, projectRunId: context.projectRunId, taskId: context.taskId, sessionId: session.id, type, timestamp: new Date().toISOString(), payload: this.redaction.value(payload) } as RuntimeEvent;
-      // Streaming deltas are coalesced: only the newest delta per message
-      // survives, and a terminal run event purges the session's remaining
-      // delta rows. Journaling every delta verbatim grew the event table to
-      // millions of rows (97% deltas).
+      // Streaming deltas are coalesced: delta text is INCREMENTAL (the
+      // renderer concatenates chunk texts on replay), so the surviving row per
+      // (session, run, type, messageId) accumulates every chunk — never just
+      // the newest. A terminal run event purges only agent.message_delta rows,
+      // whose content also lives in the final agent.message event; thinking
+      // deltas have no such final event and must stay. Journaling every delta
+      // verbatim grew the event table to millions of rows (97% deltas).
       const typeName = event.type as string;
       if (typeName.endsWith("_delta")) {
         const messageId = (event.payload as { messageId?: string } | undefined)?.messageId ?? "";
+        const prior = this.database.connection.raw
+          .prepare(
+            "SELECT json_extract(data, '$.payload.text') AS text FROM runtime_events \
+             WHERE session_id = ? AND COALESCE(run_id, '') = COALESCE(?, '') \
+             AND json_extract(data, '$.type') = ? AND json_extract(data, '$.payload.messageId') = ? \
+             ORDER BY sequence DESC, rowid DESC LIMIT 1"
+          )
+          .get(session.id, event.runId ?? null, typeName, messageId) as { text?: string } | undefined;
+        if (prior?.text) {
+          const chunk = (event.payload as { text?: string }).text ?? "";
+          (event.payload as { text: string }).text = prior.text + chunk;
+        }
         this.database.connection.raw
-          .prepare("DELETE FROM runtime_events WHERE session_id = ? AND json_extract(data, '$.type') = ? AND json_extract(data, '$.payload.messageId') = ?")
-          .run(session.id, typeName, messageId);
+          .prepare("DELETE FROM runtime_events WHERE session_id = ? AND COALESCE(run_id, '') = COALESCE(?, '') AND json_extract(data, '$.type') = ? AND json_extract(data, '$.payload.messageId') = ?")
+          .run(session.id, event.runId ?? null, typeName, messageId);
       } else if (typeName === "run.completed" || typeName === "run.failed") {
         this.database.connection.raw
-          .prepare("DELETE FROM runtime_events WHERE session_id = ? AND json_extract(data, '$.type') LIKE '%_delta' ESCAPE '\\'")
+          .prepare("DELETE FROM runtime_events WHERE session_id = ? AND json_extract(data, '$.type') = 'agent.message_delta'")
           .run(session.id);
       }
       this.database.events.append(event);

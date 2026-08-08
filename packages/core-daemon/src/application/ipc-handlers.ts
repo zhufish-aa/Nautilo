@@ -140,7 +140,20 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("metrics.get", async ({ projectId }) => services.metrics.snapshot(projectId));
   gateway.register("diagnostics.export", async (input) => services.diagnostics.export(input));
   gateway.register("event.subscribe", async ({ projectRunId, sessionId }) => services.subscriptions.subscribe({ projectRunId, sessionId }));
-  gateway.register("event.replay", async ({ subscriptionId, afterSequence }) => services.subscriptions.replay(subscriptionId, afterSequence));
-  gateway.register("event.wait", async ({ subscriptionId, afterSequence, timeoutMs }) => services.subscriptions.wait(subscriptionId, afterSequence, timeoutMs));
+  // A full replay re-reads the journal; cancel orphaned interaction requests
+  // first so stale pending cards don't resurrect in the renderer.
+  const healBeforeFullReplay = (subscriptionId: string, afterSequence: number): void => {
+    if (afterSequence !== 0) return;
+    const sessionId = services.subscriptions.sessionScope(subscriptionId);
+    if (sessionId) services.interactions.healOrphaned(sessionId);
+  };
+  gateway.register("event.replay", async ({ subscriptionId, afterSequence }) => {
+    healBeforeFullReplay(subscriptionId, afterSequence);
+    return services.subscriptions.replay(subscriptionId, afterSequence);
+  });
+  gateway.register("event.wait", async ({ subscriptionId, afterSequence, timeoutMs }) => {
+    healBeforeFullReplay(subscriptionId, afterSequence);
+    return services.subscriptions.wait(subscriptionId, afterSequence, timeoutMs);
+  });
 }
 function notFound(resource: string, id: string): never { throw new CoreError("IPC_NOT_FOUND", { resource, id }); }

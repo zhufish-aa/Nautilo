@@ -3,7 +3,7 @@
 //! Records are in-memory: a pending interaction cannot outlive its provider
 //! process, and a daemon restart kills the process anyway.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -26,11 +26,20 @@ pub struct InteractionService {
     events: Arc<EventService>,
     pending: Mutex<HashMap<String, PendingInteraction>>,
     resolved_history: Mutex<Vec<Value>>,
+    /// Sessions whose journal was already scanned for orphaned requests in
+    /// this process — the scan is idempotent, so run it once per session.
+    healed_sessions: Mutex<HashSet<String>>,
 }
 
 impl InteractionService {
     pub fn new(db: Arc<Mutex<Database>>, events: Arc<EventService>) -> Self {
-        Self { db, events, pending: Mutex::new(HashMap::new()), resolved_history: Mutex::new(vec![]) }
+        Self {
+            db,
+            events,
+            pending: Mutex::new(HashMap::new()),
+            resolved_history: Mutex::new(vec![]),
+            healed_sessions: Mutex::new(HashSet::new()),
+        }
     }
 
     /// Called by RunService when an adapter asks for user input; blocks until
@@ -105,6 +114,71 @@ impl InteractionService {
             a.get("createdAt").and_then(Value::as_str).unwrap_or("").cmp(b.get("createdAt").and_then(Value::as_str).unwrap_or(""))
         });
         all
+    }
+
+    /// Journals a cancellation for every interaction.requested in this
+    /// session's journal that has no matching interaction.resolved. Pending
+    /// records are in-memory by design, so a daemon restart orphans them and
+    /// every full event replay would resurrect the card as pending forever.
+    /// Runs once per session per process; best-effort.
+    pub fn heal_orphaned(&self, session_id: &str) {
+        if session_id.is_empty() || !self.healed_sessions.lock().unwrap().insert(session_id.to_string()) {
+            return;
+        }
+        let journal: Vec<Value> = {
+            let db = self.db.lock().unwrap();
+            let mut statement = match db.raw.prepare(
+                "SELECT data FROM runtime_events WHERE session_id = ?1 \
+                 AND json_extract(data, '$.type') IN ('interaction.requested', 'interaction.resolved') \
+                 ORDER BY sequence, rowid",
+            ) {
+                Ok(statement) => statement,
+                Err(_) => return,
+            };
+            let rows = match statement.query_map([session_id], |row| row.get::<_, String>(0)) {
+                Ok(rows) => rows.filter_map(|row| row.ok()).filter_map(|data| serde_json::from_str(&data).ok()).collect(),
+                Err(_) => return,
+            };
+            rows
+        };
+        // Fold in journal order: a resolved id cancels its request; a repeated
+        // request id (cannot happen with UUIDs, but stay safe) re-opens it.
+        let mut open: Vec<(String, Value)> = Vec::new();
+        for event in &journal {
+            let interaction = event.get("payload").and_then(|payload| payload.get("interaction")).cloned().unwrap_or(Value::Null);
+            let id = interaction.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+            open.retain(|(open_id, _)| open_id != &id);
+            if event.get("type").and_then(Value::as_str) == Some("interaction.requested") {
+                open.push((id, interaction));
+            }
+        }
+        if open.is_empty() {
+            return;
+        }
+        let session = {
+            let db = self.db.lock().unwrap();
+            Repositories::new(&db.raw).sessions().get(session_id).ok().flatten()
+        };
+        let Some(session) = session else { return };
+        for (_, interaction) in open {
+            let mut record = interaction.as_object().cloned().unwrap_or_default();
+            record.insert("status".to_string(), json!("cancelled"));
+            record.insert("response".to_string(), json!({ "outcome": "cancelled" }));
+            record.insert("resolvedAt".to_string(), json!(now_iso()));
+            let record = Value::Object(record);
+            let appended = self.events.append_for_session(
+                &session,
+                &json!({ "runId": record.get("runId").cloned().unwrap_or(Value::Null) }),
+                "interaction.resolved",
+                json!({ "interaction": record.clone() }),
+            );
+            if appended.is_ok() {
+                self.remember(record);
+            }
+        }
     }
 
     /// Auto-cancels everything a finished/cancelled run was still waiting on.

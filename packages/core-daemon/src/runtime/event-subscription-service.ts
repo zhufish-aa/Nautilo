@@ -54,6 +54,11 @@ export class EventSubscriptionService {
       timer = setTimeout(() => finish({ events: [], lastSequence: afterSequence }), Math.min(Math.max(timeoutMs, 250), 25_000));
     });
   }
+  /** Session scope of a subscription without extending its TTL — replay/wait
+   * touch the entry themselves right after. */
+  sessionScope(subscriptionId: string): string | undefined {
+    return this.subscriptions.get(subscriptionId)?.scope.sessionId;
+  }
   private touch(subscriptionId: string): SubscriptionEntry {
     const entry = this.subscriptions.get(subscriptionId);
     if (!entry) throw new CoreError("IPC_NOT_FOUND", { resource: "eventSubscription", id: subscriptionId });

@@ -231,6 +231,12 @@ impl RunService {
         let prompt = prompt.to_string();
         let queue_key = context.queue_key.clone();
         let session_id = session.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        // Heal orphaned interaction requests before the run's events make the
+        // renderer re-read the journal — a replayed request would otherwise
+        // resurrect a card whose pending entry died with an older daemon.
+        if let Some(interactions) = self.interactions.read().unwrap().clone() {
+            interactions.heal_orphaned(&session_id);
+        }
         let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
         self.session_queue
             .enqueue_launch(&session_id, queue_key.as_deref(), move || async move {

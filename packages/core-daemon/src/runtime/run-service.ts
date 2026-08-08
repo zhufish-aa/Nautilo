@@ -152,6 +152,10 @@ export class RunService {
     prompt: string,
     context: RunContext = {}
   ): Promise<RunHandle> {
+    // Heal orphaned interaction requests before the run's events make the
+    // renderer re-read the journal — a replayed request would otherwise
+    // resurrect a card whose pending entry died with an older daemon.
+    this.interactions?.healOrphaned(session.id);
     return this.sessionQueue.enqueue(session.id, () => this.launchNow(session, agent, prompt, context), context.queueKey);
   }
 

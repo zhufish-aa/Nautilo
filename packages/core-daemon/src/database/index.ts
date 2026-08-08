@@ -37,12 +37,13 @@ export class Database {
   constructor(filePath: string) {
     this.connection = new DatabaseConnection(filePath);
     migrateDatabase(this.connection.raw);
-    // One-time compaction: drop verbatim streaming deltas journaled by older
-    // builds (writes are coalesced now), and reclaim the file when the backlog
-    // was large. Best-effort: VACUUM just fails while another daemon holds
-    // the database open.
+    // One-time compaction: drop verbatim message deltas journaled by older
+    // builds (writes are coalesced now, and message text also lives in the
+    // final agent.message event). Thinking deltas are NOT purged here — they
+    // are the only record of past reasoning. Best-effort: VACUUM just fails
+    // while another daemon holds the database open.
     const purged = this.connection.raw
-      .prepare("DELETE FROM runtime_events WHERE json_extract(data, '$.type') LIKE '%_delta' ESCAPE '\\'")
+      .prepare("DELETE FROM runtime_events WHERE json_extract(data, '$.type') = 'agent.message_delta'")
       .run().changes;
     if (purged > 50_000) {
       try { this.connection.raw.exec("VACUUM"); } catch { /* another daemon holds the lock */ }
