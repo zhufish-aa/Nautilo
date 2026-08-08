@@ -34,7 +34,7 @@ import { latestReasoningSummary } from "../../lib/tool-group-preview";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolFileDiffView } from "./ToolFileDiffView";
 import { TimelineImage } from "./TimelineImage";
-import { openFileWithToast, popupFileMenu, popupTextMenu } from "./media-actions";
+import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupTextMenu } from "./media-actions";
 import { openFilePreview } from "../../stores/file-preview";
 import { resolveFileOpenTarget } from "../../lib/file-references";
 import { fileChangeCounts } from "../../lib/changed-files";
@@ -315,7 +315,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
               {attachments.map((attachment) => attachment.kind === "image" && attachment.path ? (
                 <figure key={attachment.id ?? attachment.path} className="overflow-hidden rounded-xl border border-line bg-card-hover">
                   <TimelineImage
-                    src={`agenthub-artifact://local/?path=${encodeURIComponent(attachment.path)}`}
+                    src={artifactUrlForPath(attachment.path)}
                     alt={attachment.name}
                     name={attachment.name}
                     path={attachment.path}
@@ -608,7 +608,7 @@ function ArtifactCard({ event, locale, onOpenLocalFile }: {
       : content
         ? `data:${mimeType ?? "image/png"};base64,${content}`
         : path
-          ? `agenthub-artifact://local/?path=${encodeURIComponent(path)}`
+          ? artifactUrlForPath(path)
           : undefined
     : undefined;
   return (

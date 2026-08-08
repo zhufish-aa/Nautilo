@@ -6,6 +6,7 @@ import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { sendWorkbenchFollowUp, sendWorkbenchMessage, stopWorkbenchRun } from "../../lib/orchestration-runtime";
 import { getBridge } from "../../lib/bridge";
+import { artifactUrlForPath } from "../timeline/media-actions";
 import type { DesktopAttachment } from "../../types/bridge";
 import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
@@ -322,7 +323,7 @@ export function Composer({
             {attachments.map((attachment) => (
               <div key={attachment.path} className="group relative flex h-16 min-w-[154px] max-w-[220px] items-center gap-2.5 rounded-xl border border-line bg-card-hover px-2.5">
                 {attachment.kind === "image" ? (
-                  <img src={`agenthub-artifact://local/?path=${encodeURIComponent(attachment.path)}`} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
+                  <img src={artifactUrlForPath(attachment.path)} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
                 ) : (
                   <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-info/10 text-info"><FileText className="h-5 w-5" aria-hidden /></span>
                 )}
