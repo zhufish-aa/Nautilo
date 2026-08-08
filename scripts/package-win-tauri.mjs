@@ -120,7 +120,7 @@ writeFileSync(join(applicationDirectory, "PACKAGE-INFO.txt"), [
   "Launch: Nautilo.exe"
 ].join("\r\n"));
 
-const archive = spawnSync("tar.exe", ["-a", "-c", "-f", archivePath, "-C", releaseRoot, basename(applicationDirectory)], {
+const archive = spawnSync("tar.exe", ["-a", "-c", "--force-local", "-f", archivePath, "-C", releaseRoot, basename(applicationDirectory)], {
   cwd: repositoryRoot,
   stdio: "inherit",
   windowsHide: true
