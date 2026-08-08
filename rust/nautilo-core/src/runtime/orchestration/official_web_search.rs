@@ -243,6 +243,21 @@ fn extract_responses_message_text(value: Option<&Value>) -> String {
         .to_string()
 }
 
+/// Builds the child environment for a native Codex web-search subprocess.
+///
+/// The process runtime clears the child environment by design (exact env, never
+/// inherited), so the spawned Codex CLI must receive the daemon's own process
+/// environment merged with the search instance's credentials on top. This mirrors
+/// the TS daemon's `{ ...process.env, ...environment }` so that official-login
+/// instances (no API key in the credential store) still start and can locate
+/// `~/.codex/auth.json` via USERPROFILE/HOME instead of dying on an empty
+/// environment (node aborts before it can even respond to `initialize`).
+fn build_native_search_environment(environment: HashMap<String, String>) -> HashMap<String, String> {
+    let mut merged: HashMap<String, String> = std::env::vars().collect();
+    merged.extend(environment);
+    merged
+}
+
 /// Launches a real Codex turn whose model owns a native web search tool.
 async fn execute_native_official_web_search(
     target: &Value,
@@ -274,7 +289,7 @@ async fn execute_native_official_web_search(
         cwd: std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
         model: Some(model.to_string()),
         reasoning_effort: reasoning_effort.map(str::to_string),
-        env: Some(environment),
+        env: Some(build_native_search_environment(environment)),
         timeout_ms: Some(120_000),
         idle_timeout_ms: Some(60_000),
         max_output_bytes: Some(8 * 1024 * 1024),
@@ -317,4 +332,28 @@ async fn execute_native_official_web_search(
         return tool_result(true, text);
     }
     tool_result(false, format!("Official Codex native web search failed: {}", failure.unwrap_or_else(|| "no search result returned".to_string())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The child env must carry the daemon's own platform basics (home dir)
+    /// plus the instance credentials. Before the fix the helper passed the raw
+    /// (possibly empty) credential map straight through, which left the spawned
+    /// Codex CLI with no environment at all and aborted on startup.
+    #[test]
+    fn native_search_environment_preserves_process_env_and_layers_credentials() {
+        let credential_env: HashMap<String, String> =
+            [("OPENAI_API_KEY".to_string(), "sk-test".to_string())].into_iter().collect();
+        let merged = build_native_search_environment(credential_env);
+
+        // Credentials are layered on top and win over anything inherited.
+        assert_eq!(merged.get("OPENAI_API_KEY").map(String::as_str), Some("sk-test"));
+
+        // The daemon's home-directory variable must survive the merge so the
+        // official-login Codex CLI can locate ~/.codex/auth.json.
+        let has_home = merged.get("HOME").is_some() || merged.get("USERPROFILE").is_some() || merged.get("HOMEDRIVE").is_some();
+        assert!(has_home, "expected a home-directory variable in the merged child environment");
+    }
 }
