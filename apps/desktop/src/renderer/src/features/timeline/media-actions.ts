@@ -11,12 +11,17 @@ type Translate = (key: MessageKey, values?: Record<string, string | number>) => 
 
 /** Builds the renderer-safe URL used to stream a permitted local artifact. */
 export function artifactUrlForPath(path: string): string {
-  return `agenthub-artifact://local/?path=${encodeURIComponent(path)}`;
+  // Tauri on Windows serves custom schemes at http://<scheme>.localhost/.
+  const base =
+    typeof window !== "undefined" && (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+      ? "http://agenthub-artifact.localhost/"
+      : "agenthub-artifact://local/";
+  return `${base}?path=${encodeURIComponent(path)}`;
 }
 
-/** Extracts the local file path from an agenthub-artifact://…?path= URL. */
+/** Extracts the local file path from an agenthub-artifact…?path= URL. */
 export function artifactPathFromSrc(src: string): string | undefined {
-  if (!src.startsWith("agenthub-artifact:")) return undefined;
+  if (!src.startsWith("agenthub-artifact:") && !src.startsWith("http://agenthub-artifact.localhost/")) return undefined;
   try {
     return new URL(src).searchParams.get("path") ?? undefined;
   } catch {

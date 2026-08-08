@@ -1,0 +1,32 @@
+[package]
+name = "nautilo"
+version = "0.2.6"
+description = "Nautilo desktop shell (Tauri)"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "time", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+arboard = "3"
+rfd = "0.15"
+opener = { version = "0.8", features = ["reveal"] }
+trash = "5"
+encoding_rs = "0.8"
+dirs = "6"
+url = "2"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"
+strip = true

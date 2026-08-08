@@ -1,0 +1,25 @@
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import { defineConfig } from "vite";
+import { resolve } from "node:path";
+
+/**
+ * Standalone renderer build for the Tauri shell. Mirrors the `renderer`
+ * section of electron.vite.config.ts, emitting into src-tauri/dist which
+ * tauri.conf.json references as frontendDist.
+ */
+export default defineConfig({
+  root: resolve(__dirname, "src/renderer"),
+  base: "./",
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@": resolve(__dirname, "src/renderer/src")
+    }
+  },
+  build: {
+    outDir: resolve(__dirname, "src-tauri/dist"),
+    emptyOutDir: true,
+    sourcemap: true
+  }
+});

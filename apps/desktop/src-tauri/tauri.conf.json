@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nautilo",
+  "version": "0.2.6",
+  "identifier": "com.nautilo.app",
+  "build": {
+    "frontendDist": "./dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nautilo",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 1024,
+        "minHeight": 660,
+        "decorations": false,
+        "resizable": true,
+        "visible": false,
+        "backgroundColor": "#090b10"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://agenthub-artifact.localhost; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' blob: ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.png", "icons/icon.ico"]
+  }
+}
