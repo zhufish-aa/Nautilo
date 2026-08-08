@@ -77,7 +77,9 @@ const zh = {
     headless_text: "文本输出",
     long_running_stdin: "长驻会话",
     pty_interactive: "交互终端",
-    provider_server: "本地服务"
+    provider_server: "本地服务",
+    native_resume: "原生续聊",
+    tool_streaming: "工具流式"
   },
   taskTypes: {
     code: "编码",
@@ -1167,7 +1169,9 @@ const en: Messages = {
     headless_text: "Text output",
     long_running_stdin: "Long-running stdin",
     pty_interactive: "Interactive PTY",
-    provider_server: "Local server"
+    provider_server: "Local server",
+    native_resume: "Native resume",
+    tool_streaming: "Tool streaming"
   },
   taskTypes: {
     code: "Coding",
