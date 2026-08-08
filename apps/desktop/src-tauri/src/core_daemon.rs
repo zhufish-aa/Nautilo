@@ -68,7 +68,10 @@ impl CoreDaemonClient {
 
         let stdout = child.stdout.take().ok_or("Core Daemon stdout unavailable")?;
         let stderr = child.stderr.take();
+        // Keep the last few stderr lines so a readiness failure can say WHY.
+        let stderr_tail = std::sync::Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
         if let Some(stderr) = stderr {
+            let tail = std::sync::Arc::clone(&stderr_tail);
             std::thread::spawn(move || {
                 use std::io::Read;
                 let mut reader = std::io::BufReader::new(stderr);
@@ -81,14 +84,21 @@ impl CoreDaemonClient {
                             buffer.extend_from_slice(&chunk[..n]);
                             while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
                                 let line: Vec<u8> = buffer.drain(..=pos).collect();
-                                eprintln!("[core-daemon] {}", String::from_utf8_lossy(&line).trim_end());
+                                let text = String::from_utf8_lossy(&line).trim_end().to_string();
+                                eprintln!("[core-daemon] {text}");
+                                if let Ok(mut tail) = tail.lock() {
+                                    if tail.len() >= 50 {
+                                        tail.pop_front();
+                                    }
+                                    tail.push_back(text);
+                                }
                             }
                         }
                     }
                 }
             });
         }
-        let ready = wait_for_ready(stdout, &mut child)?;
+        let ready = wait_for_ready(stdout, &mut child, &stderr_tail)?;
         state.socket_path = Some(ready.socket_path.unwrap_or(socket_path));
         state.token_path = Some(token_path);
         state.process = Some(child);
@@ -224,7 +234,11 @@ fn resolve_daemon_exe() -> Result<PathBuf, String> {
     ))
 }
 
-fn wait_for_ready(stdout: impl std::io::Read + Send + 'static, child: &mut Child) -> Result<ReadyMessage, String> {
+fn wait_for_ready(
+    stdout: impl std::io::Read + Send + 'static,
+    child: &mut Child,
+    stderr_tail: &std::sync::Arc<Mutex<std::collections::VecDeque<String>>>,
+) -> Result<ReadyMessage, String> {
     use std::io::Read;
     let (tx, rx) = std::sync::mpsc::channel::<ReadyMessage>();
     std::thread::spawn(move || {
@@ -255,22 +269,31 @@ fn wait_for_ready(stdout: impl std::io::Read + Send + 'static, child: &mut Child
             }
         }
     });
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(message) => return Ok(message),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if let Ok(Some(status)) = child.try_wait() {
-                    return Err(format!("Core Daemon exited with {status}"));
+                    return Err(format!("Core Daemon exited with {status}{}", stderr_context(stderr_tail)));
                 }
                 if std::time::Instant::now() > deadline {
-                    return Err("Core Daemon did not become ready".to_string());
+                    return Err(format!("Core Daemon did not become ready{}", stderr_context(stderr_tail)));
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("Core Daemon did not become ready".to_string());
+                return Err(format!("Core Daemon did not become ready{}", stderr_context(stderr_tail)));
             }
         }
+    }
+}
+
+fn stderr_context(tail: &std::sync::Arc<Mutex<std::collections::VecDeque<String>>>) -> String {
+    let lines: Vec<String> = tail.lock().map(|t| t.iter().cloned().collect()).unwrap_or_default();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("; daemon stderr: {}", lines.join(" | "))
     }
 }
 
