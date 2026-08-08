@@ -65,8 +65,6 @@ export function TimelineViewport({
   const contentRef = useRef<HTMLDivElement>(null);
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
-  const scrollbarDragRef = useRef(false);
-  const scrollbarDragStartTopRef = useRef(0);
   const previousForceFollowKeyRef = useRef(forceFollowKey);
 
   const scrollToTail = useCallback(() => {
@@ -118,34 +116,21 @@ export function TimelineViewport({
       onScroll={(event) => {
         const element = event.currentTarget;
         const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
-        if (gap < FOLLOW_TAIL_THRESHOLD) {
-          // Reaching the tail by any means re-engages follow mode.
-          followTailRef.current = true;
-        } else if (scrollbarDragRef.current && element.scrollTop < lastScrollTopRef.current - 1) {
-          // A scrollbar thumb dragged upward is explicit user intent.
+        if (element.scrollTop < lastScrollTopRef.current - 1) {
+          // Any upward scroll (wheel, thumb drag, keys) is explicit user
+          // intent — even inside the re-engage threshold. Previously a small
+          // wheel-up within FOLLOW_TAIL_THRESHOLD re-engaged follow on the
+          // same event and the next stream tick yanked the view back down.
           followTailRef.current = false;
+        } else if (gap < FOLLOW_TAIL_THRESHOLD && element.scrollTop > lastScrollTopRef.current) {
+          // Only scrolling DOWN into the tail re-engages follow mode.
+          followTailRef.current = true;
         }
         lastScrollTopRef.current = element.scrollTop;
       }}
       onWheel={(event) => {
         // Wheel input is the other explicit way to pause follow mode.
         if (event.deltaY < 0) followTailRef.current = false;
-      }}
-      onPointerDownCapture={(event) => {
-        const element = event.currentTarget;
-        scrollbarDragRef.current =
-          element.scrollHeight > element.clientHeight &&
-          event.clientX >= element.getBoundingClientRect().right - 14;
-        scrollbarDragStartTopRef.current = element.scrollTop;
-      }}
-      onPointerUpCapture={() => {
-        const element = scrollRef.current;
-        if (element && scrollbarDragRef.current) {
-          const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
-          if (gap < FOLLOW_TAIL_THRESHOLD) followTailRef.current = true;
-          else if (element.scrollTop < scrollbarDragStartTopRef.current - 1) followTailRef.current = false;
-        }
-        scrollbarDragRef.current = false;
       }}
       style={{ overflowAnchor: "none" }}
       className={cn("relative h-full overflow-y-auto", className)}
