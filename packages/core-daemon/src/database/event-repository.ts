@@ -15,9 +15,9 @@ export class EventRepository {
   replay(input: { sessionId?: string; projectRunId?: string; runId?: string; afterSequence?: number }): RuntimeEvent[] {
     const after = input.afterSequence ?? 0;
     let rows: Row[];
-    if (input.sessionId) rows = this.db.prepare("SELECT data FROM runtime_events WHERE session_id = ? AND sequence > ? ORDER BY sequence").all(input.sessionId, after) as Row[];
-    else if (input.projectRunId) rows = this.db.prepare("SELECT data FROM runtime_events WHERE project_run_id = ? AND sequence > ? ORDER BY sequence").all(input.projectRunId, after) as Row[];
-    else if (input.runId) rows = this.db.prepare("SELECT data FROM runtime_events WHERE run_id = ? AND sequence > ? ORDER BY sequence").all(input.runId, after) as Row[];
+    if (input.sessionId) rows = this.db.prepare("SELECT data FROM runtime_events WHERE session_id = ? AND sequence > ? ORDER BY sequence, rowid").all(input.sessionId, after) as Row[];
+    else if (input.projectRunId) rows = this.db.prepare("SELECT data FROM runtime_events WHERE project_run_id = ? AND sequence > ? ORDER BY sequence, rowid").all(input.projectRunId, after) as Row[];
+    else if (input.runId) rows = this.db.prepare("SELECT data FROM runtime_events WHERE run_id = ? AND sequence > ? ORDER BY sequence, rowid").all(input.runId, after) as Row[];
     else rows = this.db.prepare("SELECT data FROM runtime_events WHERE sequence > ? ORDER BY timestamp, sequence").all(after) as Row[];
     return rows.map((row) => JSON.parse(String(row.data)) as RuntimeEvent);
   }

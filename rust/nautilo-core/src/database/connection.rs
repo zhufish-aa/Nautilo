@@ -18,7 +18,10 @@ impl Database {
             fs::create_dir_all(parent).map_err(io_fail)?;
         }
         let raw = Connection::open(file_path).map_err(db_fail)?;
-        raw.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+        // busy_timeout: two daemon processes can share one data dir during the
+        // Electron→Tauri migration; writers must wait for each other instead
+        // of failing (or racing) on the write lock.
+        raw.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
             .map_err(db_fail)?;
         crate::database::migrations::migrate(&raw)?;
         Ok(Self { raw, path: file_path.to_path_buf() })

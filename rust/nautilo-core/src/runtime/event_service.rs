@@ -37,14 +37,9 @@ impl EventService {
         payload: Value,
     ) -> CoreResult<Value> {
         let session_id = session.get("id").and_then(Value::as_str).unwrap_or("");
-        let sequence = {
-            let db = self.db.lock().unwrap();
-            Repositories::new(&db.raw).events().next_sequence(Some(session_id), None)?
-        };
         let mut event = Map::new();
         event.insert("schemaVersion".to_string(), json!(1));
         event.insert("eventId".to_string(), json!(Uuid::new_v4().to_string()));
-        event.insert("sequence".to_string(), json!(sequence));
         if let Some(project_id) = session.get("projectId").cloned() {
             event.insert("projectId".to_string(), project_id);
         }
@@ -57,10 +52,12 @@ impl EventService {
         event.insert("type".to_string(), json!(event_type));
         event.insert("timestamp".to_string(), json!(now_iso()));
         event.insert("payload".to_string(), self.redaction.value(&payload));
-        let event = Value::Object(event);
+        let mut event = Value::Object(event);
         {
             let db = self.db.lock().unwrap();
-            Repositories::new(&db.raw).events().append(&event)?;
+            // Allocates + inserts under one IMMEDIATE transaction and fills in
+            // event.sequence; two daemons sharing a data dir cannot collide.
+            Repositories::new(&db.raw).events().append_allocating_sequence(&mut event, Some(session_id), None)?;
         }
         // Receivers lagging behind simply miss events; replay() is the
         // recovery path, so a send error here is not fatal.

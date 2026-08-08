@@ -4,7 +4,7 @@
 //! so the Rust port does not need full domain structs to persist them.
 
 use rusqlite::{params, Connection};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::database::connection::db_fail;
 use crate::errors::{CoreError, CoreResult, ErrorCode};
@@ -507,6 +507,33 @@ impl<'a> EventRepository<'a> {
         Ok(())
     }
 
+    /// Allocates the sequence and inserts atomically: BEGIN IMMEDIATE takes
+    /// the write lock BEFORE MAX(sequence) is read, so a second daemon process
+    /// sharing the data dir cannot allocate the same sequence (which the
+    /// renderer's `sequence > afterSequence` polling would silently drop).
+    /// Fills the allocated sequence into the event and returns it.
+    pub fn append_allocating_sequence(&self, event: &mut Value, session_id: Option<&str>, run_id: Option<&str>) -> CoreResult<i64> {
+        self.db.execute_batch("BEGIN IMMEDIATE").map_err(db_fail)?;
+        let result = (|| {
+            let sequence = self.next_sequence(session_id, run_id)?;
+            if let Some(map) = event.as_object_mut() {
+                map.insert("sequence".to_string(), json!(sequence));
+            }
+            self.append(event)?;
+            Ok(sequence)
+        })();
+        match result {
+            Ok(sequence) => {
+                self.db.execute_batch("COMMIT").map_err(db_fail)?;
+                Ok(sequence)
+            }
+            Err(error) => {
+                let _ = self.db.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn delete_before(&self, timestamp: &str) -> CoreResult<usize> {
         let changes = self
             .db
@@ -527,7 +554,7 @@ impl<'a> EventRepository<'a> {
         let after = after_sequence.unwrap_or(0);
         let rows: Vec<String> = if let Some(session) = session_id {
             self.db
-                .prepare("SELECT data FROM runtime_events WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence")
+                .prepare("SELECT data FROM runtime_events WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence, rowid")
                 .map_err(db_fail)?
                 .query_map(params![session, after], |row| row.get(0))
                 .map_err(db_fail)?
@@ -535,7 +562,7 @@ impl<'a> EventRepository<'a> {
                 .map_err(db_fail)?
         } else if let Some(project_run) = project_run_id {
             self.db
-                .prepare("SELECT data FROM runtime_events WHERE project_run_id = ?1 AND sequence > ?2 ORDER BY sequence")
+                .prepare("SELECT data FROM runtime_events WHERE project_run_id = ?1 AND sequence > ?2 ORDER BY sequence, rowid")
                 .map_err(db_fail)?
                 .query_map(params![project_run, after], |row| row.get(0))
                 .map_err(db_fail)?
@@ -543,7 +570,7 @@ impl<'a> EventRepository<'a> {
                 .map_err(db_fail)?
         } else if let Some(run) = run_id {
             self.db
-                .prepare("SELECT data FROM runtime_events WHERE run_id = ?1 AND sequence > ?2 ORDER BY sequence")
+                .prepare("SELECT data FROM runtime_events WHERE run_id = ?1 AND sequence > ?2 ORDER BY sequence, rowid")
                 .map_err(db_fail)?
                 .query_map(params![run, after], |row| row.get(0))
                 .map_err(db_fail)?

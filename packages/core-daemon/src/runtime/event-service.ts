@@ -16,8 +16,20 @@ export class EventService {
     type: TType,
     payload: RuntimeEventPayloadMap[TType]
   ): RuntimeEvent {
-    const event = { schemaVersion: 1 as const, eventId: randomUUID(), sequence: this.database.events.nextSequence(session.id), projectId: session.projectId, runId: context.runId, projectRunId: context.projectRunId, taskId: context.taskId, sessionId: session.id, type, timestamp: new Date().toISOString(), payload: this.redaction.value(payload) } as RuntimeEvent;
-    this.database.events.append(event);
+    // Allocate the sequence and insert under one IMMEDIATE transaction: the
+    // write lock is held before MAX(sequence) is read, so a second daemon
+    // process sharing the data dir cannot allocate the same sequence (which
+    // the renderer's `sequence > afterSequence` polling would silently drop).
+    this.database.connection.raw.exec("BEGIN IMMEDIATE");
+    let event: RuntimeEvent;
+    try {
+      event = { schemaVersion: 1 as const, eventId: randomUUID(), sequence: this.database.events.nextSequence(session.id), projectId: session.projectId, runId: context.runId, projectRunId: context.projectRunId, taskId: context.taskId, sessionId: session.id, type, timestamp: new Date().toISOString(), payload: this.redaction.value(payload) } as RuntimeEvent;
+      this.database.events.append(event);
+      this.database.connection.raw.exec("COMMIT");
+    } catch (error) {
+      try { this.database.connection.raw.exec("ROLLBACK"); } catch { /* nothing to roll back */ }
+      throw error;
+    }
     for (const listener of this.listeners) listener(event);
     return event;
   }
