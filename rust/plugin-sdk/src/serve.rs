@@ -116,7 +116,10 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                     let frame = match method.as_str() {
                         "detect" => emit::response(id, plugin.detect(&input).await),
                         "listModels" => match plugin
-                            .list_models(&input, &Value::Null)
+                            // The host sends {instance, context} — unwrap them;
+                            // passing the whole frame as the instance hid every
+                            // instance option (endpoint, executable) from plugins.
+                            .list_models(input.get("instance").unwrap_or(&input), input.get("context").unwrap_or(&Value::Null))
                             .await
                         {
                             Ok(catalog) => emit::response(id, catalog),

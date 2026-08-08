@@ -181,7 +181,19 @@ impl CoreError {
 
 impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.0.code, self.0.message)
+        let reason = self
+            .0
+            .details
+            .as_ref()
+            .and_then(|details| details.get("reason"))
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty());
+        match reason {
+            // Diagnostics must surface the underlying cause — the canned
+            // message alone makes plugin/CLI failures undebuggable.
+            Some(reason) => write!(f, "{}: {}（{}）", self.0.code, self.0.message, reason),
+            None => write!(f, "{}: {}", self.0.code, self.0.message),
+        }
     }
 }
 

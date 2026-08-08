@@ -212,7 +212,10 @@ impl AgentService {
         }
         match self.adapters.list_models(&instance, Some(&context)).await {
             Ok(catalog) => Ok(catalog),
-            Err(error) => Ok(unavailable(error.to_string())),
+            // The TS registry merges the instance's manually configured models
+            // into every catalog, including discovery failures — otherwise
+            // providers without model discovery (trae) offer no choices at all.
+            Err(error) => Ok(merge_instance_model_config(&unavailable(error.to_string()), instance.get("models"))),
         }
     }
 

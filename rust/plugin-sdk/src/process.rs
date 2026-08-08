@@ -37,32 +37,26 @@ pub struct ProcessHandle {
     pub pid: Option<u32>,
     exit_watch: watch::Receiver<bool>,
     kill_switch: mpsc::Sender<()>,
-    stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
+    stdin: mpsc::UnboundedSender<StdinCommand>,
     exit_code: Arc<Mutex<Option<i32>>>,
+}
+
+/// Ordered stdin instructions for the single writer task. write() used to
+/// spawn one task per call; tasks raced the stdin lock, so a close could win
+/// over a pending write and silently drop it (Pi model discovery died this
+/// way), and two writes could arrive out of order.
+enum StdinCommand {
+    Write(Vec<u8>),
+    Close,
 }
 
 impl ProcessHandle {
     pub fn write(&self, input: &str) {
-        let stdin = self.stdin.clone();
-        let bytes = input.as_bytes().to_vec();
-        tokio::spawn(async move {
-            let mut guard = stdin.lock().await;
-            if let Some(stdin) = guard.as_mut() {
-                if stdin.write_all(&bytes).await.is_ok() {
-                    let _ = stdin.flush().await;
-                }
-            }
-        });
+        let _ = self.stdin.send(StdinCommand::Write(input.as_bytes().to_vec()));
     }
 
     pub fn end_stdin(&self) {
-        let stdin = self.stdin.clone();
-        tokio::spawn(async move {
-            let mut guard = stdin.lock().await;
-            if let Some(mut stdin) = guard.take() {
-                let _ = stdin.shutdown().await;
-            }
-        });
+        let _ = self.stdin.send(StdinCommand::Close);
     }
 
     pub async fn cancel(&self) {
@@ -217,6 +211,27 @@ pub fn start(request: &ProcessRequest) -> std::io::Result<StartedProcess> {
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
 
+    // One writer task owns stdin; callers enqueue ordered commands.
+    let (stdin_sender, mut stdin_receiver) = mpsc::unbounded_channel::<StdinCommand>();
+    tokio::spawn(async move {
+        let mut stdin = stdin;
+        while let Some(command) = stdin_receiver.recv().await {
+            let Some(stdin) = stdin.as_mut() else { break };
+            match command {
+                StdinCommand::Write(bytes) => {
+                    if stdin.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                    let _ = stdin.flush().await;
+                }
+                StdinCommand::Close => {
+                    let _ = stdin.shutdown().await;
+                    break;
+                }
+            }
+        }
+    });
+
     let (sender, receiver) = mpsc::unbounded_channel::<ProcessEvent>();
     let (exit_sender, exit_watch) = watch::channel(false);
     let exit_code = Arc::new(Mutex::new(None::<i32>));
@@ -360,7 +375,7 @@ pub fn start(request: &ProcessRequest) -> std::io::Result<StartedProcess> {
         pid,
         exit_watch,
         kill_switch,
-        stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
+        stdin: stdin_sender,
         exit_code,
     };
     Ok(StartedProcess { handle, events: receiver })
