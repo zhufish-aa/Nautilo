@@ -72,6 +72,9 @@ interface SessionsState {
   _addArtifact: (sessionId: string, artifact: SessionArtifact) => void;
   _upsertExternalSession: (session: UiSession) => void;
   _replaceEvents: (sessionId: string, events: TimelineEvent[]) => void;
+  /** Drops the materialized timeline/derived views of an evicted session;
+   * metadata and lifecycle state stay. Reopening re-hydrates the view. */
+  _evictSessionView: (sessionId: string) => void;
   _replaceTasks: (sessionId: string, tasks: SessionTask[]) => void;
   _replaceArtifacts: (sessionId: string, artifacts: SessionArtifact[]) => void;
   _replaceRawLog: (sessionId: string, lines: string[]) => void;
@@ -347,6 +350,27 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 
       _replaceEvents: (sessionId, events) =>
         set((state) => ({ events: { ...state.events, [sessionId]: events } })),
+
+      // Drops the materialized timeline/derived views of a session whose
+      // runtime caches were evicted (see evictStandaloneViewCaches). Session
+      // metadata and lifecycle state stay — the list and badges must not
+      // flicker; reopening re-hydrates the view.
+      _evictSessionView: (sessionId) =>
+        set((state) => {
+          const drop = <T,>(values: Record<string, T>): Record<string, T> => {
+            if (!(sessionId in values)) return values;
+            const next = { ...values };
+            delete next[sessionId];
+            return next;
+          };
+          return {
+            events: drop(state.events),
+            rawLog: drop(state.rawLog),
+            artifacts: drop(state.artifacts),
+            contextUsage: drop(state.contextUsage),
+            providerCommandRevisions: drop(state.providerCommandRevisions)
+          };
+        }),
 
       _replaceTasks: (sessionId, tasks) =>
         set((state) => ({ tasks: { ...state.tasks, [sessionId]: tasks } })),

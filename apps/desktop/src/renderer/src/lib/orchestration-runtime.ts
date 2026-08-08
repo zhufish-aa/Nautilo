@@ -38,6 +38,15 @@ const standaloneEventCache = new Map<string, RuntimeEvent[]>();
 const standaloneMessageCache = new Map<string, Message[]>();
 const standaloneArtifactCache = new Map<string, Artifact[]>();
 const standaloneRenderFrames = new Map<string, number>();
+// Sessions whose full runtime view (event replay + messages + timeline) is
+// materialized. Startup hydrates lazily: only sessions with a live run are
+// built up front, everything else on first open — replaying every session's
+// journal at launch pinned all of them in memory for the app's lifetime.
+const standaloneHydrated = new Set<string>();
+// Most-recently-opened standalone sessions (current first, max 2). The
+// previous session stays cached so switching back is instant; anything older
+// without a live poll is evicted.
+const standaloneRecent: string[] = [];
 // Sessions whose daemon queue has been fetched once; afterwards the
 // session.follow_up_queued/cancelled events keep the store list in sync.
 const followUpListSynced = new Set<string>();
@@ -113,8 +122,15 @@ export async function hydrateWorkbenchSessions(): Promise<void> {
   }
 
   useSessionsStore.getState()._replaceSessions(uiSessions);
+  // Lazy hydration: one run.list finds the sessions with a live run; only
+  // those get the full event replay at startup (polling needs it). Every
+  // other session hydrates on first open via ensureStandaloneSessionHydrated.
+  const allRuns = await requestCore<AgentRun[]>("run.list", {}).catch(() => [] as AgentRun[]);
+  const liveRunBySession = new Map(allRuns.filter(shouldPollAgentRun).map((run) => [run.sessionId, run]));
   for (const session of uiSessions.filter((item) => !item.projectRunId)) {
-    const run = await hydrateStandaloneSession(session);
+    const liveRun = liveRunBySession.get(session.id);
+    if (!liveRun) continue;
+    const run = await hydrateStandaloneSession(session, liveRun.id);
     if (run && shouldPollAgentRun(run)) scheduleStandalonePoll(session.id, run.id);
   }
   for (const projectRunId of runIds) await hydrateProjectRun(projectRunId);
@@ -377,6 +393,9 @@ function clearSessionRuntime(sessionId: string): void {
   standaloneEventCache.delete(sessionId);
   standaloneMessageCache.delete(sessionId);
   standaloneArtifactCache.delete(sessionId);
+  standaloneHydrated.delete(sessionId);
+  const recentIndex = standaloneRecent.indexOf(sessionId);
+  if (recentIndex !== -1) standaloneRecent.splice(recentIndex, 1);
   // Cancel a coalesced render still waiting for its animation frame; letting it
   // fire would rebuild a timeline for a session that no longer exists.
   const frame = standaloneRenderFrames.get(sessionId);
@@ -388,6 +407,53 @@ function clearSessionRuntime(sessionId: string): void {
   projectSessionBuilt.delete(sessionId);
   followUpListSynced.delete(sessionId);
   useInteractionsStore.getState()._removeSessions([sessionId]);
+}
+
+/**
+ * Materializes a standalone session's runtime view on first open and evicts
+ * older hydrated sessions (LRU: current + previous stay). Sessions with a
+ * live poll keep their caches regardless — a background run must keep
+ * streaming into its timeline.
+ */
+export async function ensureStandaloneSessionHydrated(sessionId: string): Promise<void> {
+  if (!getBridge()) return;
+  touchStandaloneRecent(sessionId);
+  if (!standaloneHydrated.has(sessionId)) {
+    const session = useSessionsStore.getState().sessions.find((item) => item.id === sessionId);
+    if (session && !session.projectRunId) {
+      standaloneHydrated.add(sessionId);
+      try {
+        const run = await hydrateStandaloneSession(session);
+        if (run && shouldPollAgentRun(run)) scheduleStandalonePoll(session.id, run.id);
+      } catch (error) {
+        standaloneHydrated.delete(sessionId);
+        console.error(`Failed to hydrate session ${sessionId}`, error);
+      }
+    }
+  }
+  evictStandaloneViewCaches();
+}
+
+function touchStandaloneRecent(sessionId: string): void {
+  const index = standaloneRecent.indexOf(sessionId);
+  if (index !== -1) standaloneRecent.splice(index, 1);
+  standaloneRecent.unshift(sessionId);
+  if (standaloneRecent.length > 2) standaloneRecent.pop();
+}
+
+function evictStandaloneViewCaches(): void {
+  const keep = new Set(standaloneRecent);
+  for (const sessionId of [...standaloneHydrated]) {
+    if (keep.has(sessionId)) continue;
+    if (standaloneStreams.has(sessionId)) continue;
+    standaloneHydrated.delete(sessionId);
+    standaloneEventCache.delete(sessionId);
+    standaloneMessageCache.delete(sessionId);
+    standaloneArtifactCache.delete(sessionId);
+    standaloneSubscriptions.delete(sessionId);
+    standaloneSequences.delete(sessionId);
+    useSessionsStore.getState()._evictSessionView(sessionId);
+  }
 }
 
 async function syncProjectAndAgents(session: UiSession): Promise<void> {
@@ -441,6 +507,7 @@ function toDomainSession(session: UiSession, _team?: UiTeam): DomainSession {
 }
 
 async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: string): Promise<AgentRun | undefined> {
+  standaloneHydrated.add(uiSession.id);
   const [detail, replay, runs, artifacts] = await Promise.all([
     requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: uiSession.id }),
     replayStandaloneEvents(uiSession.id),

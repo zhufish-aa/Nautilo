@@ -16,6 +16,7 @@ import { useProjectsStore } from "../../stores/projects";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
 import { hasRunningDelegatedTask, isActiveLifecycle, visibleSessionStatus } from "../../lib/session-lifecycle";
+import { ensureStandaloneSessionHydrated } from "../../lib/orchestration-runtime";
 import { cn } from "../../lib/utils";
 import { collectChangedFiles } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
@@ -224,6 +225,12 @@ export function SessionWorkbench({
     if (!active) return;
     setPreviewBasePaths(previewRootPath ? [previewRootPath] : []);
   }, [active, previewRootPath, setPreviewBasePaths]);
+
+  // Lazy hydration: standalone sessions load their event journal on first
+  // display instead of all at startup (memory); older views are evicted LRU.
+  useEffect(() => {
+    if (active) void ensureStandaloneSessionHydrated(sessionId);
+  }, [active, sessionId]);
 
   // File the artifacts drawer should focus when opened via a "view diff" entry.
   const [diffFocusPath, setDiffFocusPath] = useState<string | null>(null);
