@@ -74,6 +74,21 @@ async fn main() -> anyhow::Result<()> {
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
+    // The shell holds this daemon's stdout pipe open for its whole lifetime.
+    // If the shell is killed (crash/taskkill), the read end breaks and the
+    // next heartbeat write fails — self-exit instead of living on as an
+    // orphan that keeps the data directory locked (a killed shell used to
+    // leave one daemon behind per restart).
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let mut out = std::io::stdout();
+            if writeln!(out).is_err() {
+                std::process::exit(0);
+            }
+        }
+    });
+
     tokio::signal::ctrl_c().await?;
     let _ = daemon.audit.flush();
     gateway.cleanup();

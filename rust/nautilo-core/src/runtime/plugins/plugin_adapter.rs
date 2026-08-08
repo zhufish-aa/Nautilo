@@ -155,9 +155,17 @@ impl PluginClientInner {
             }
             Some("event") => {
                 let run_id = value.get("runId").and_then(Value::as_str).unwrap_or("");
+                let is_exit = value.get("event").and_then(|event| event.get("kind")).and_then(Value::as_str) == Some("exit");
                 let sender = self.runs.lock().unwrap().get(run_id).map(|run| run.events.clone());
                 if let Some(sender) = sender {
                     let _ = sender.send(value.get("event").cloned().unwrap_or(Value::Null));
+                }
+                if is_exit {
+                    // Remove the channel so the run stream actually ends: the
+                    // sender living in this map is the only thing keeping it
+                    // open, and an open stream means the turn never finalizes
+                    // (no run.failed/run.completed — the UI spins forever).
+                    self.runs.lock().unwrap().remove(run_id);
                 }
             }
             Some("interaction") => {

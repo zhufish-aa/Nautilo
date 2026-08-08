@@ -951,6 +951,9 @@ async fn server_run_loop(
                         .unwrap_or("OpenCode session failed");
                     let _ = sender.send(json!({ "kind": "status", "phase": "turn_failed", "raw": raw }));
                     let _ = sender.send(json!({ "kind": "error", "message": message }));
+                    // Every terminal path must end the stream — the daemon
+                    // finalizes the turn only when the exit frame arrives.
+                    let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
                     return Ok(());
                 }
                 _ => {}

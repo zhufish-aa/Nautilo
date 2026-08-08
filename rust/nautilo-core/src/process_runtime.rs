@@ -140,10 +140,15 @@ impl ProcessRuntime {
             command.current_dir(cwd);
         }
         // The TS runtime passes `env: request.env ?? {}` — never inherited.
+        // Callers that pass NO env (detection probes) get the default
+        // allowlist environment: a completely empty environment leaves
+        // cmd.exe unable to execute .cmd shims, so every npm-installed CLI
+        // would probe as "not installed".
         command.env_clear();
-        if let Some(env) = &request.env {
-            command.envs(env);
-        }
+        match &request.env {
+            Some(env) => command.envs(env),
+            None => command.envs(crate::runtime::security::environment_policy::build_environment(None, Default::default())),
+        };
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
