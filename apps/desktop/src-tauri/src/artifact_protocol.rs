@@ -77,6 +77,13 @@ pub fn handle(request: Request<Vec<u8>>, data_dir: &Path, workspace_roots: &Work
     let Some(requested) = requested else {
         return respond(StatusCode::BAD_REQUEST, "Missing artifact path");
     };
+    // Older artifact records may carry canonicalized `\\?\`-prefixed paths;
+    // normalize so containment checks compare like with like.
+    let requested = requested
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| requested.strip_prefix(r"\\?\").map(str::to_string))
+        .unwrap_or(requested);
     let candidate = PathBuf::from(&requested);
 
     let mut allowed_roots = Vec::new();

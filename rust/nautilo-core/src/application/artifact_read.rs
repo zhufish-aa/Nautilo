@@ -44,7 +44,7 @@ pub fn read_workspace_artifact(db: &Arc<Mutex<Database>>, input: &Value) -> Core
         .get(project_id)?
         .ok_or_else(|| not_found("project", project_id))?;
     let root_path = project.get("rootPath").and_then(Value::as_str).unwrap_or("");
-    let root = std::fs::canonicalize(root_path).unwrap_or_else(|_| Path::new(root_path).to_path_buf());
+    let root = crate::paths::canonicalize_plain(Path::new(root_path)).unwrap_or_else(|_| Path::new(root_path).to_path_buf());
     let raw = input.get("path").and_then(Value::as_str).unwrap_or("");
     let candidate = if Path::new(raw).is_absolute() { Path::new(raw).to_path_buf() } else { root.join(raw) };
     // Lexical containment check, matching Node's relative() semantics.

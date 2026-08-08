@@ -11,6 +11,7 @@ mod database;
 mod domain;
 mod errors;
 mod ipc_gateway;
+mod paths;
 mod process_runtime;
 mod runtime;
 mod win_command;

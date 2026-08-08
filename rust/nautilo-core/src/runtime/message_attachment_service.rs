@@ -41,7 +41,7 @@ impl MessageAttachmentService {
             if !Path::new(path_value).is_absolute() {
                 return Err(invalid("attachments.path", &[("path", json!(path_value))]));
             }
-            let Ok(path) = std::fs::canonicalize(path_value) else {
+            let Ok(path) = crate::paths::canonicalize_plain(Path::new(path_value)) else {
                 return Err(invalid("attachments.path", &[("path", json!(path_value))]));
             };
             let path = path.to_string_lossy().into_owned();
