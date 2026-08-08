@@ -415,7 +415,15 @@ function chatTools(value: unknown): RecordValue[] {
         const subName = stringValue(subRecord.name);
         if (!subName || (subType !== "function" && subType !== "custom")) continue;
         const chatName = `${namespace}-${subName}`;
-        const description = [namespaceDescription ? `[${namespace}]` : null, stringValue(subRecord.description)].filter(Boolean).join(" ");
+        const description = [
+          namespaceDescription ? `[${namespace}]` : null,
+          stringValue(subRecord.description),
+          // Chat relays reject dotted tool names, so the namespace was flattened
+          // to a hyphenated name. Tell the model the exact callable name
+          // explicitly; models otherwise default to the codex dotted convention
+          // (e.g. mcp__firecrawl.search) and fail the call.
+          `Call this tool with the exact name \`${chatName}\` (hyphen, not dot).`
+        ].filter(Boolean).join(" ");
         if (subType === "function") {
           flattened.push({
             type: "function",

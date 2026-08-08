@@ -657,6 +657,12 @@ fn chat_tools(value: Option<&Value>) -> Vec<Value> {
                         (None, Some(sub_desc)) => sub_desc.to_string(),
                         (None, None) => String::new(),
                     };
+                    // Chat relays reject dotted tool names, so the namespace was
+                    // flattened to a hyphenated name. Tell the model the exact
+                    // callable name explicitly; models otherwise default to the
+                    // codex dotted convention (e.g. mcp__firecrawl.search) and
+                    // fail the call.
+                    let description = format!("{description}\n\nCall this tool with the exact name `{chat_name}` (hyphen, not dot).");
                     if sub_type == "function" {
                         result.push(json!({
                             "type": "function",
