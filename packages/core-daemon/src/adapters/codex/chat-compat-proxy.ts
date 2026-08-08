@@ -504,6 +504,11 @@ function responseToolTypes(value: unknown): Map<string, { namespace: string; cod
         const value = { namespace: name, codexName: subName, type: "function" as const };
         result.set(`${name}-${subName}`, value);
         result.set(`${name}.${subName}`, value);
+        result.set(`${name}__${subName}`, value);
+        // Models frequently drop the namespace prefix and call the bare
+        // sub-tool name; register that alias too unless another tool already
+        // owns it (ambiguous otherwise).
+        if (!result.has(subName)) result.set(subName, value);
       }
     }
   }

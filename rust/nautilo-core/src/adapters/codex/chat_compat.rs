@@ -165,6 +165,16 @@ mod tests {
             Some(&expected),
             "dotted codex name also maps to namespace + name as a function call"
         );
+        assert_eq!(
+            types.get("multi_agent_v1__spawn_agent"),
+            Some(&expected),
+            "double-underscore form maps to namespace + name"
+        );
+        assert_eq!(
+            types.get("spawn_agent"),
+            Some(&expected),
+            "bare sub-tool name maps to namespace + name"
+        );
     }
 }
 
@@ -760,9 +770,17 @@ fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String
                         if sub_type == "function" || sub_type == "custom" {
                             let chat_name = format!("{namespace}-{sub_name}");
                             let codex_name = format!("{namespace}.{sub_name}");
+                            let double_underscore = format!("{namespace}__{sub_name}");
                             let value = (namespace.to_string(), sub_name.to_string(), "function".to_string());
                             result.insert(chat_name, value.clone());
-                            result.insert(codex_name, value);
+                            result.insert(codex_name, value.clone());
+                            result.insert(double_underscore, value.clone());
+                            // Models frequently drop the namespace prefix and call
+                            // the bare sub-tool name; register that alias too unless
+                            // another tool already owns it (ambiguous otherwise).
+                            if !result.contains_key(sub_name) {
+                                result.insert(sub_name.to_string(), value);
+                            }
                         }
                     }
                 }
