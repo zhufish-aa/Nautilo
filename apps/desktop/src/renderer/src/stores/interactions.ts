@@ -15,6 +15,7 @@ interface InteractionsState {
   loadPending: (sessionId: string) => Promise<void>;
   respond: (interactionId: string, response: InteractionResponse) => Promise<InteractionRequest>;
   _upsert: (interaction: InteractionRequest) => void;
+  _remove: (sessionId: string, interactionId: string) => void;
   _removeSessions: (sessionIds: string[]) => void;
 }
 
@@ -50,6 +51,16 @@ export const useInteractionsStore = create<InteractionsState>((set, get) => ({
       bySession: {
         ...state.bySession,
         [interaction.sessionId]: upsert(state.bySession[interaction.sessionId], interaction)
+      }
+    })),
+
+  // Drops a single card — used when the daemon reports it expired (a stale
+  // replayed card whose pending entry no longer exists anywhere).
+  _remove: (sessionId, interactionId) =>
+    set((state) => ({
+      bySession: {
+        ...state.bySession,
+        [sessionId]: (state.bySession[sessionId] ?? []).filter((item) => item.id !== interactionId)
       }
     })),
 

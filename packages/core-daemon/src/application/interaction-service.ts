@@ -83,6 +83,13 @@ export class InteractionService {
         response: { outcome: "cancelled" },
         resolvedAt: new Date().toISOString()
       };
+      // Journal the cancellation like respond() does — otherwise a replay
+      // resurrects the auto-cancelled card as pending forever.
+      try {
+        this.events.appendForSession(this.eventsSession(record.sessionId), { runId: record.runId }, "interaction.resolved", { interaction: record });
+      } catch {
+        // The session row may be gone; the in-memory resolution still stands.
+      }
       this.remember(record);
       pending.resolve({ outcome: "cancelled" });
     }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Check, ChevronDown, ChevronUp, ClipboardCheck, HelpCircle, RotateCcw, Send, ShieldAlert, X, type LucideIcon } from "lucide-react";
-import type { InteractionOption, InteractionQuestion, InteractionRequest } from "@agenthub/domain";
+import type { InteractionOption, InteractionQuestion, InteractionRequest, InteractionResponse } from "@agenthub/domain";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn, formatDateTime } from "../../lib/utils";
 import { useInteractionsStore } from "../../stores/interactions";
@@ -121,9 +121,28 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The daemon no longer holds this interaction (auto-cancelled or resolved elsewhere). */
+function isExpiredError(error: unknown): boolean {
+  return messageOf(error).includes("已过期");
+}
+
+/** Shared respond error handling: expired cards get dismissed, not just toasted. */
+function useInteractionRespond(): (interaction: InteractionRequest, response: InteractionResponse) => Promise<void> {
+  const respond = useInteractionsStore((state) => state.respond);
+  const remove = useInteractionsStore((state) => state._remove);
+  return async (interaction, response) => {
+    try {
+      await respond(interaction.id, response);
+    } catch (error) {
+      if (isExpiredError(error)) remove(interaction.sessionId, interaction.id);
+      else toast.error(messageOf(error));
+    }
+  };
+}
+
 function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX.Element {
   const { t } = useI18n();
-  const respond = useInteractionsStore((state) => state.respond);
+  const respondInteraction = useInteractionRespond();
   const shell = useInteractionShell(interaction);
   const questions = interaction.questions ?? [];
   const pending = interaction.status === "pending";
@@ -168,25 +187,15 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
       answers[question.id] = values;
     }
     setSubmitting(true);
-    try {
-      await respond(interaction.id, { outcome: "selected", answers });
-    } catch (error) {
-      toast.error(messageOf(error));
-    } finally {
-      setSubmitting(false);
-    }
+    await respondInteraction(interaction, { outcome: "selected", answers });
+    setSubmitting(false);
   };
 
   const cancel = async (): Promise<void> => {
     if (submitting) return;
     setSubmitting(true);
-    try {
-      await respond(interaction.id, { outcome: "cancelled" });
-    } catch (error) {
-      toast.error(messageOf(error));
-    } finally {
-      setSubmitting(false);
-    }
+    await respondInteraction(interaction, { outcome: "cancelled" });
+    setSubmitting(false);
   };
 
   return (
@@ -333,7 +342,7 @@ function QuestionHeading({ question }: { question: InteractionQuestion }): JSX.E
 
 function ApprovalCard({ interaction }: { interaction: InteractionRequest }): JSX.Element {
   const { t } = useI18n();
-  const respond = useInteractionsStore((state) => state.respond);
+  const respondInteraction = useInteractionRespond();
   const shell = useInteractionShell(interaction);
   const options = interaction.options ?? [];
   const pending = interaction.status === "pending";
@@ -346,13 +355,8 @@ function ApprovalCard({ interaction }: { interaction: InteractionRequest }): JSX
   const answer = async (outcome: "selected" | "cancelled", optionId?: string): Promise<void> => {
     if (submitting) return;
     setSubmitting(true);
-    try {
-      await respond(interaction.id, { outcome, optionId });
-    } catch (error) {
-      toast.error(messageOf(error));
-    } finally {
-      setSubmitting(false);
-    }
+    await respondInteraction(interaction, { outcome, optionId });
+    setSubmitting(false);
   };
 
   const labelOf = (option: InteractionOption): string => {

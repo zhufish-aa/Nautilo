@@ -123,7 +123,20 @@ impl InteractionService {
             record.insert("status".to_string(), json!("cancelled"));
             record.insert("response".to_string(), json!({ "outcome": "cancelled" }));
             record.insert("resolvedAt".to_string(), json!(now_iso()));
-            self.remember(Value::Object(record));
+            let record = Value::Object(record);
+            // Journal the cancellation like respond() does — otherwise a
+            // replay resurrects the auto-cancelled card as pending forever.
+            let session_id = record.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+            let session = Repositories::new(&self.db.lock().unwrap().raw).sessions().get(&session_id).ok().flatten();
+            if let Some(session) = session {
+                let _ = self.events.append_for_session(
+                    &session,
+                    &json!({ "runId": record.get("runId").cloned().unwrap_or(Value::Null) }),
+                    "interaction.resolved",
+                    json!({ "interaction": record }),
+                );
+            }
+            self.remember(record);
             let _ = entry.resolve.send(json!({ "outcome": "cancelled" }));
         }
     }
