@@ -477,11 +477,13 @@ function chatToolChoice(value: unknown): unknown {
  * Registry of chat-side tool names -> { namespace, codexName, type }.
  *
  * Namespaced tools (multi_agent_v1.*, mcp__*) are exposed to the chat model
- * as `{namespace}-{sub}` functions and come back to codex as `custom_tool_call`
- * items carrying the separate `namespace`/`name` fields (codex routes on the
- * ToolName split, so a single flattened name is never found). Both the
- * hyphenated chat name and the dotted codex name are registered so whichever
- * the model calls, the call-back routes correctly.
+ * as `{namespace}-{sub}` functions and come back to codex as `function_call`
+ * items carrying the separate `namespace`/`name` fields. Codex routes on the
+ * ToolName split (a single flattened name is never found) and its MCP /
+ * multi-agent handlers only accept function payloads, so the call-back must
+ * be a function_call (not custom_tool_call). Both the hyphenated chat name and
+ * the dotted codex name are registered so whichever the model calls, the
+ * call-back routes correctly.
  */
 function responseToolTypes(value: unknown): Map<string, { namespace: string; codexName: string; type: "function" | "custom" }> {
   const result = new Map<string, { namespace: string; codexName: string; type: "function" | "custom" }>();
@@ -499,7 +501,7 @@ function responseToolTypes(value: unknown): Map<string, { namespace: string; cod
         const subType = subRecord?.type;
         const subName = stringValue(subRecord?.name);
         if (!subName || (subType !== "function" && subType !== "custom")) continue;
-        const value = { namespace: name, codexName: subName, type: "custom" as const };
+        const value = { namespace: name, codexName: subName, type: "function" as const };
         result.set(`${name}-${subName}`, value);
         result.set(`${name}.${subName}`, value);
       }
@@ -640,7 +642,7 @@ async function writeResponsesStream(
         name: call.name,
         arguments: call.arguments
       };
-    if (call.toolType === "custom" && call.namespace) doneItem.namespace = call.namespace;
+    if (call.namespace) doneItem.namespace = call.namespace;
     writeEvent(response, "response.output_item.done", {
       type: "response.output_item.done",
       output_index: call.outputIndex,
@@ -706,7 +708,7 @@ async function writeResponsesStream(
         name: call.name,
         ...(call.toolType === "custom" ? { input: customToolInput(call.arguments) } : { arguments: call.arguments })
       };
-      if (call.toolType === "custom" && call.namespace) item.namespace = call.namespace;
+      if (call.namespace) item.namespace = call.namespace;
       return item;
     }),
     ...(message ? [message] : [])
@@ -768,7 +770,7 @@ function appendFunctionCallDelta(
       name: call.name,
       ...(call.toolType === "custom" ? { input: "" } : { arguments: "" })
     };
-    if (call.toolType === "custom" && call.namespace) item.namespace = call.namespace;
+    if (call.namespace) item.namespace = call.namespace;
     writeEvent(response, "response.output_item.added", {
       type: "response.output_item.added",
       output_index: call.outputIndex,

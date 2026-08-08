@@ -152,17 +152,18 @@ mod tests {
             "regular function keeps its identity"
         );
         // Both the hyphenated chat name and the dotted codex name route to the
-        // same (namespace, name, custom) triple.
-        let expected = ("multi_agent_v1".to_string(), "spawn_agent".to_string(), "custom".to_string());
+        // same (namespace, name, function) triple: codex's MCP / multi-agent
+        // handlers only accept function_call payloads.
+        let expected = ("multi_agent_v1".to_string(), "spawn_agent".to_string(), "function".to_string());
         assert_eq!(
             types.get("multi_agent_v1-spawn_agent"),
             Some(&expected),
-            "hyphenated chat name maps to namespace + name as a custom call"
+            "hyphenated chat name maps to namespace + name as a function call"
         );
         assert_eq!(
             types.get("multi_agent_v1.spawn_agent"),
             Some(&expected),
-            "dotted codex name also maps to namespace + name as a custom call"
+            "dotted codex name also maps to namespace + name as a function call"
         );
     }
 }
@@ -729,11 +730,13 @@ fn chat_tool_choice(value: &Value) -> Value {
 /// Registry of chat-side tool names -> (codex namespace, codex name, wire type).
 ///
 /// Namespaced tools (multi_agent_v1.*, mcp__*) are exposed to the chat model
-/// as `{namespace}-{sub}` functions and come back to codex as `custom_tool_call`
-/// items carrying the separate `namespace` and `name` fields (codex routes on
-/// the ToolName split, so a single flattened name is never found). Both the
-/// hyphenated chat name and the dotted codex name are registered so whichever
-/// the model calls, the call-back routes correctly.
+/// as `{namespace}-{sub}` functions and come back to codex as `function_call`
+/// items carrying the separate `namespace` and `name` fields. Codex routes on
+/// the ToolName split (a single flattened name is never found) and its MCP /
+/// multi-agent handlers only accept `ToolPayload::Function`, so the call-back
+/// must be a function_call (not custom_tool_call). Both the hyphenated chat
+/// name and the dotted codex name are registered so whichever the model calls,
+/// the call-back routes correctly.
 fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String, String)> {
     let mut result = HashMap::new();
     let Some(tools) = value.and_then(Value::as_array) else {
@@ -757,7 +760,7 @@ fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String
                         if sub_type == "function" || sub_type == "custom" {
                             let chat_name = format!("{namespace}-{sub_name}");
                             let codex_name = format!("{namespace}.{sub_name}");
-                            let value = (namespace.to_string(), sub_name.to_string(), "custom".to_string());
+                            let value = (namespace.to_string(), sub_name.to_string(), "function".to_string());
                             result.insert(chat_name, value.clone());
                             result.insert(codex_name, value);
                         }
@@ -1075,7 +1078,11 @@ async fn append_function_call_delta(
             }
             value
         } else {
-            json!({ "id": item_id, "type": "function_call", "status": "in_progress", "call_id": call_id, "name": name, "arguments": "" })
+            let mut value = json!({ "id": item_id, "type": "function_call", "status": "in_progress", "call_id": call_id, "name": name, "arguments": "" });
+            if !namespace.is_empty() {
+                value.as_object_mut().unwrap().insert("namespace".to_string(), json!(namespace));
+            }
+            value
         };
         write_sse(writer, "response.output_item.added", &json!({
             "type": "response.output_item.added",
@@ -1190,7 +1197,7 @@ async fn finalize_responses_stream(
         } else {
             json!({ "id": item_id, "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": arguments })
         };
-        if tool_type == "custom" && !namespace.is_empty() {
+        if !namespace.is_empty() {
             item.as_object_mut().unwrap().insert("namespace".to_string(), json!(namespace));
         }
         write_sse(writer, "response.output_item.done", &json!({
@@ -1266,7 +1273,7 @@ async fn finalize_responses_stream(
         } else {
             json!({ "id": item_id, "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": arguments })
         };
-        if tool_type == "custom" && !namespace.is_empty() {
+        if !namespace.is_empty() {
             item.as_object_mut().unwrap().insert("namespace".to_string(), json!(namespace));
         }
         output.push(item);
