@@ -14,6 +14,17 @@ import type {
   UiSession
 } from "../lib/types";
 
+// Shared empty snapshots. Store slices must always hold these STABLE
+// references for empty sessions: a selector like `state.events[id] ?? []`
+// would otherwise mint a fresh array per read, and React's
+// useSyncExternalStore spins into "Maximum update depth exceeded" (#185).
+const EMPTY_EVENTS: TimelineEvent[] = [];
+const EMPTY_LINES: string[] = [];
+const EMPTY_ARTIFACTS: SessionArtifact[] = [];
+/** Stable empty snapshots shared with components whose selectors need a
+ * fallback that never changes identity (React #185 guard). */
+export const SESSION_EMPTY = { events: EMPTY_EVENTS, lines: EMPTY_LINES, artifacts: EMPTY_ARTIFACTS } as const;
+
 /**
  * Sessions store: the append-only event log is the single source of truth.
  * Every event gets a monotonic per-session sequence; the runner keeps appending
@@ -351,24 +362,22 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       _replaceEvents: (sessionId, events) =>
         set((state) => ({ events: { ...state.events, [sessionId]: events } })),
 
-      // Drops the materialized timeline/derived views of a session whose
-      // runtime caches were evicted (see evictStandaloneViewCaches). Session
-      // metadata and lifecycle state stay — the list and badges must not
-      // flicker; reopening re-hydrates the view.
+      // Empties the materialized timeline/derived views of a session whose
+      // runtime caches were evicted (see evictStandaloneViewCaches). Entries
+      // are RESET to shared empty snapshots, never deleted: several selectors
+      // assume the keys exist, and a deleted key makes `state.events[id] ?? []`
+      // return a fresh array per read — React #185 (white screen). Session
+      // metadata and lifecycle state stay; reopening re-hydrates the view.
       _evictSessionView: (sessionId) =>
         set((state) => {
-          const drop = <T,>(values: Record<string, T>): Record<string, T> => {
-            if (!(sessionId in values)) return values;
-            const next = { ...values };
-            delete next[sessionId];
-            return next;
-          };
+          const reset = <T,>(values: Record<string, T>, empty: T): Record<string, T> =>
+            values[sessionId] === empty ? values : { ...values, [sessionId]: empty };
           return {
-            events: drop(state.events),
-            rawLog: drop(state.rawLog),
-            artifacts: drop(state.artifacts),
-            contextUsage: drop(state.contextUsage),
-            providerCommandRevisions: drop(state.providerCommandRevisions)
+            events: reset(state.events, EMPTY_EVENTS),
+            rawLog: reset(state.rawLog, EMPTY_LINES),
+            artifacts: reset(state.artifacts, EMPTY_ARTIFACTS),
+            contextUsage: reset(state.contextUsage, undefined),
+            providerCommandRevisions: reset(state.providerCommandRevisions, 0)
           };
         }),
 

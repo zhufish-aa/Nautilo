@@ -18,7 +18,7 @@ import { TimelineEventView } from "../timeline/Timeline";
 import { sessionTargetName } from "./SessionListPanel";
 import { useAgentsStore } from "../../stores/agents";
 import { useProjectsStore } from "../../stores/projects";
-import { useSessionsStore } from "../../stores/sessions";
+import { useSessionsStore, SESSION_EMPTY } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
 import { toast } from "../../stores/toast";
 
@@ -38,7 +38,7 @@ export function TerminalDrawer({
   sessionId?: string;
 }): JSX.Element {
   const { t } = useI18n();
-  const lines = useSessionsStore((state) => (sessionId ? (state.rawLog[sessionId] ?? []) : []));
+  const lines = useSessionsStore((state) => (sessionId ? (state.rawLog[sessionId] ?? SESSION_EMPTY.lines) : SESSION_EMPTY.lines));
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -126,8 +126,8 @@ export function ArtifactsDrawer({
   focusPath?: string | null;
 }): JSX.Element {
   const { t, locale } = useI18n();
-  const artifacts = useSessionsStore((state) => (sessionId ? (state.artifacts[sessionId] ?? []) : []));
-  const events = useSessionsStore((state) => (sessionId ? (state.events[sessionId] ?? []) : []));
+  const artifacts = useSessionsStore((state) => (sessionId ? (state.artifacts[sessionId] ?? SESSION_EMPTY.artifacts) : SESSION_EMPTY.artifacts));
+  const events = useSessionsStore((state) => (sessionId ? (state.events[sessionId] ?? SESSION_EMPTY.events) : SESSION_EMPTY.events));
   const sessions = useSessionsStore((state) => state.sessions);
   const allEvents = useSessionsStore((state) => state.events);
   const teams = useTeamsStore((state) => state.teams);
