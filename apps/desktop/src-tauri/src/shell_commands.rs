@@ -75,10 +75,10 @@ pub async fn dialog_pick_files(paths: State<'_, ShellPaths>) -> Result<Vec<Deskt
 }
 
 #[tauri::command]
-pub fn attachment_describe_paths(paths: State<'_, ShellPaths>, paths_arg: Vec<String>) -> Result<Vec<DesktopAttachment>, String> {
+pub fn attachment_describe_paths(shell: State<'_, ShellPaths>, paths: Vec<String>) -> Result<Vec<DesktopAttachment>, String> {
     // Mirrors Electron: attachment:describe-paths also runs prepare so
     // previewable images are copied into app-owned storage.
-    attachment_files::prepare_attachment_paths(&paths.data_dir, &paths_arg)
+    attachment_files::prepare_attachment_paths(&shell.data_dir, &paths)
 }
 
 #[tauri::command]
