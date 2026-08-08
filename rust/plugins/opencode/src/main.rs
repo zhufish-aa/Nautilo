@@ -55,6 +55,109 @@ fn env_of(request: &Value) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+/// Converts one Nautilo `AdapterMcpServer` spec into an opencode `mcp` config
+/// entry (`{ name: { type, command, environment, ... } }`).
+fn opencode_mcp_entry(server: &Value) -> Option<(String, Value)> {
+    let name = server.get("name").and_then(Value::as_str).unwrap_or("mcp").to_string();
+    let transport = server.get("transport").and_then(Value::as_str).unwrap_or("");
+    if transport == "http" {
+        let url = server.get("url").and_then(Value::as_str)?;
+        let mut entry = Map::new();
+        entry.insert("type".to_string(), json!("remote"));
+        entry.insert("url".to_string(), json!(url));
+        if let Some(headers) = server.get("headers").and_then(Value::as_object).filter(|h| !h.is_empty()) {
+            entry.insert("headers".to_string(), Value::Object(headers.clone()));
+        }
+        entry.insert("enabled".to_string(), json!(true));
+        Some((name, Value::Object(entry)))
+    } else {
+        let command = server.get("command").and_then(Value::as_str)?;
+        let mut cmd = vec![Value::String(command.to_string())];
+        if let Some(args) = server.get("args").and_then(Value::as_array) {
+            cmd.extend(args.iter().cloned());
+        }
+        let mut entry = Map::new();
+        entry.insert("type".to_string(), json!("local"));
+        entry.insert("command".to_string(), Value::Array(cmd));
+        if let Some(env) = server.get("env").and_then(Value::as_object).filter(|e| !e.is_empty()) {
+            entry.insert("environment".to_string(), Value::Object(env.clone()));
+        }
+        entry.insert("enabled".to_string(), json!(true));
+        Some((name, Value::Object(entry)))
+    }
+}
+
+/// Builds an opencode `mcp` config object from the request's `mcpServers`.
+fn build_opencode_mcp_config(servers: Option<&Value>) -> Option<Value> {
+    let servers = servers?.as_array()?;
+    let mut mcp = Map::new();
+    for server in servers {
+        if let Some((name, entry)) = opencode_mcp_entry(server) {
+            mcp.insert(name, entry);
+        }
+    }
+    if mcp.is_empty() {
+        return None;
+    }
+    Some(json!({ "mcp": Value::Object(mcp) }))
+}
+
+/// Injects Nautilo-managed MCP servers by writing `.opencode/opencode.json`
+/// in `cwd` (merged over any existing file; opencode loads and deep-merges
+/// this project-scoped config on top of the global one). Returns the previous
+/// state for restoration: `(cwd, previous_content_or_none, written_content)`.
+fn write_opencode_mcp_config(cwd: &str, servers: Option<&Value>) -> Option<(String, Option<String>, Option<String>)> {
+    let config = build_opencode_mcp_config(servers)?;
+    if cwd.is_empty() {
+        return None;
+    }
+    let dir = std::path::Path::new(cwd).join(".opencode");
+    let path = dir.join("opencode.json");
+    let previous = std::fs::read_to_string(&path).ok();
+    let mut merged: Value = previous
+        .as_deref()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(object) = merged.as_object_mut() {
+        if let Some(mcp) = config.get("mcp").cloned() {
+            object.insert("mcp".to_string(), mcp);
+        }
+    }
+    let written = serde_json::to_string_pretty(&merged).unwrap_or_default();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    if std::fs::write(&path, &written).is_err() {
+        return None;
+    }
+    Some((cwd.to_string(), previous, Some(written)))
+}
+
+/// Restores (or removes) the injected `.opencode/opencode.json`. Only touches
+/// the file if it still contains exactly what we wrote, so a concurrent write
+/// from another server is never clobbered.
+fn restore_opencode_mcp_config(cleanup: Option<&(String, Option<String>, Option<String>)>) {
+    let Some((cwd, previous, written)) = cleanup else { return };
+    let path = std::path::Path::new(cwd).join(".opencode").join("opencode.json");
+    let owns = written
+        .as_deref()
+        .map(|content| std::fs::read_to_string(&path).ok().as_deref() == Some(content))
+        .unwrap_or(false);
+    if !owns {
+        return;
+    }
+    match previous {
+        Some(content) => {
+            let _ = std::fs::write(&path, content);
+        }
+        None => {
+            let _ = std::fs::remove_file(&path);
+            // Best-effort: drop the now-empty .opencode dir.
+            let _ = std::fs::remove_dir(path.parent().unwrap_or(std::path::Path::new("")));
+        }
+    }
+}
+
 fn executable_of(instance: &Value) -> String {
     instance
         .get("executable")
@@ -97,6 +200,9 @@ struct ManagedServer {
     handle: agenthub_plugin_sdk::process::ProcessHandle,
     active_runs: usize,
     retire_when_idle: bool,
+    /// Injected `.opencode/opencode.json` state to restore when the server retires:
+    /// (cwd, previous content or None, written content).
+    config_cleanup: Option<(String, Option<String>, Option<String>)>,
 }
 
 #[derive(Default)]
@@ -145,6 +251,10 @@ impl OpenCodePlugin {
 
     async fn launch_server(&self, request: &Value) -> anyhow::Result<ManagedServer> {
         let instance = request.get("instance").cloned().unwrap_or(Value::Null);
+        let cwd = request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
+        // Inject Nautilo-managed MCP servers via a project-scoped opencode
+        // config before the server starts (opencode reads it at startup).
+        let config_cleanup = write_opencode_mcp_config(&cwd, request.get("mcpServers"));
         let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let started = process::start(&ProcessRequest {
             command: executable_of(&instance),
@@ -153,9 +263,12 @@ impl OpenCodePlugin {
             env: Some(env_of(request)),
             idle_timeout_ms: None,
             ..Default::default()
+        })
+        .map_err(|error| {
+            restore_opencode_mcp_config(config_cleanup.as_ref());
+            error
         })?;
         let base_url = format!("http://127.0.0.1:{port}");
-        let cwd = request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
         let handle = started.handle.clone();
         // Keep the server output flowing so its buffers never fill.
         tokio::spawn(async move {
@@ -163,8 +276,9 @@ impl OpenCodePlugin {
             while events.recv().await.is_some() {}
         });
         match wait_for_server(&base_url, &cwd).await {
-            Ok(()) => Ok(ManagedServer { base_url, handle, active_runs: 0, retire_when_idle: false }),
+            Ok(()) => Ok(ManagedServer { base_url, handle, active_runs: 0, retire_when_idle: false, config_cleanup }),
             Err(error) => {
+                restore_opencode_mcp_config(config_cleanup.as_ref());
                 handle.cancel().await;
                 Err(error)
             }
@@ -599,16 +713,17 @@ impl ProviderPlugin for OpenCodePlugin {
     async fn dispose(&self) {
         let servers: Vec<Arc<Mutex<ManagedServer>>> = self.pool.lock().unwrap().servers.drain().map(|(_, s)| s).collect();
         for server in servers {
-            let handle = {
+            let (handle, cleanup) = {
                 let mut server = server.lock().unwrap();
                 server.retire_when_idle = true;
                 if server.active_runs == 0 {
-                    Some(server.handle.clone())
+                    (Some(server.handle.clone()), server.config_cleanup.clone())
                 } else {
-                    None
+                    (None, None)
                 }
             };
             if let Some(handle) = handle {
+                restore_opencode_mcp_config(cleanup.as_ref());
                 handle.cancel().await;
             }
         }
@@ -692,16 +807,17 @@ impl OpenCodePlugin {
                 let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
             }
-            let handle = {
+            let (handle, cleanup) = {
                 let mut server = server_for_task.lock().unwrap();
                 server.active_runs = server.active_runs.saturating_sub(1);
                 if server.retire_when_idle && server.active_runs == 0 {
-                    Some(server.handle.clone())
+                    (Some(server.handle.clone()), server.config_cleanup.clone())
                 } else {
-                    None
+                    (None, None)
                 }
             };
             if let Some(handle) = handle {
+                restore_opencode_mcp_config(cleanup.as_ref());
                 handle.cancel().await;
             }
         });
@@ -809,6 +925,14 @@ async fn server_run_loop(
     let mut pending_task_parts: Vec<String> = vec![];
     let mut child_sessions: HashMap<String, String> = HashMap::new();
     let mut rejected_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Part-id -> part type ("text"/"reasoning"/"tool"/...). OpenCode >=1.18.x
+    // streams incremental output through `message.part.delta` events which only
+    // carry a partID; we learn the part type from the preceding
+    // `message.part.updated` events.
+    let mut part_types: HashMap<String, String> = HashMap::new();
+    // Deltas that arrive before their part type is known (rare reordering) are
+    // buffered here until the matching `message.part.updated` arrives.
+    let mut pending_deltas: HashMap<String, Vec<Value>> = HashMap::new();
 
     let mut stream = stream_response;
     let mut pending = String::new();
@@ -842,6 +966,7 @@ async fn server_run_loop(
                 && event_session_id != session_id
                 && !known_child
                 && event_type != "message.part.updated"
+                && event_type != "message.part.delta"
             {
                 continue;
             }
@@ -898,12 +1023,93 @@ async fn server_run_loop(
                             continue;
                         }
                     }
+                    // Remember the part's type so later `message.part.delta`
+                    // events for the same part can be classified as
+                    // thinking/message, and flush any deltas that arrived
+                    // before this update (out-of-order frames).
+                    let part_id = part
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .or_else(|| part.get("partID").and_then(Value::as_str))
+                        .map(str::to_string);
+                    if let Some(part_id) = &part_id {
+                        if let Some(part_type) = part.get("type").and_then(Value::as_str) {
+                            part_types.insert(part_id.clone(), part_type.to_string());
+                            if let Some(pending) = pending_deltas.remove(part_id) {
+                                for event in match &dispatch_id {
+                                    Some(id) => with_subagent_dispatch(pending, id),
+                                    None => pending,
+                                } {
+                                    if sender.send(event).is_err() {
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let delta = properties.get("delta").and_then(Value::as_str);
                     let events = parse_opencode_part(&part, &raw, delta);
                     for event in match dispatch_id {
                         Some(id) => with_subagent_dispatch(events, &id),
                         None => events,
                     } {
+                        if sender.send(event).is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                // OpenCode >=1.18.x streams part output as dedicated
+                // `message.part.delta` events (properties.partID / delta).
+                // Older versions carried the delta on `message.part.updated`
+                // instead; both are handled so the plugin keeps working across
+                // opencode versions.
+                "message.part.delta" => {
+                    let part_id = properties.get("partID").and_then(Value::as_str).unwrap_or("").to_string();
+                    let delta_text = properties.get("delta").and_then(Value::as_str).unwrap_or("").to_string();
+                    if part_id.is_empty() || delta_text.is_empty() {
+                        continue;
+                    }
+                    let message_id = properties
+                        .get("messageID")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .map(Value::String)
+                        .unwrap_or(Value::Null);
+                    let mut dispatch_id: Option<String> = None;
+                    if !event_session_id.is_empty() && event_session_id != session_id {
+                        dispatch_id = child_sessions.get(&event_session_id).cloned();
+                        if dispatch_id.is_none() && !rejected_sessions.contains(&event_session_id) {
+                            let parent = fetch_session_parent(&base_url, &cwd, &event_session_id).await;
+                            if parent.as_deref() == Some(session_id.as_str()) {
+                                if !pending_task_parts.is_empty() {
+                                    let dispatch = pending_task_parts.remove(0);
+                                    child_sessions.insert(event_session_id.clone(), dispatch.clone());
+                                    dispatch_id = Some(dispatch);
+                                }
+                            } else {
+                                rejected_sessions.insert(event_session_id.clone());
+                            }
+                        }
+                        if dispatch_id.is_none() {
+                            continue;
+                        }
+                    }
+                    let part_type = part_types.get(&part_id).map(|s| s.as_str()).unwrap_or("");
+                    let kind = if part_type == "reasoning" { "thinking" } else { "message" };
+                    let event = json!({
+                        "kind": kind,
+                        "phase": "delta",
+                        "messageId": message_id,
+                        "text": delta_text,
+                        "raw": raw
+                    });
+                    if part_type.is_empty() {
+                        pending_deltas.entry(part_id).or_default().push(event);
+                    } else {
+                        let event = match &dispatch_id {
+                            Some(id) => with_subagent_dispatch(vec![event], id).remove(0),
+                            None => event,
+                        };
                         if sender.send(event).is_err() {
                             return Ok(());
                         }
