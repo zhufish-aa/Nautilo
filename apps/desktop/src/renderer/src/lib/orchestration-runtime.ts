@@ -523,7 +523,6 @@ function toDomainSession(session: UiSession, _team?: UiTeam): DomainSession {
 }
 
 async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: string): Promise<AgentRun | undefined> {
-  standaloneHydrated.add(uiSession.id);
   const [detail, replay, runs, artifacts] = await Promise.all([
     requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: uiSession.id }),
     replayStandaloneEvents(uiSession.id),
@@ -534,6 +533,10 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
   const activeRun = runs.find(shouldPollAgentRun);
   const run = knownRun && shouldPollAgentRun(knownRun) ? knownRun : activeRun ?? knownRun ?? runs[0];
   const store = useSessionsStore.getState();
+  // Mark membership at completion, not just at start: a rapid switch may have
+  // evicted (and de-registered) this session while the hydrate was in flight —
+  // without membership the re-populated caches below would leak forever.
+  standaloneHydrated.add(uiSession.id);
   standaloneMessageCache.set(uiSession.id, detail.messages);
   standaloneEventCache.set(uiSession.id, replay.events);
   standaloneArtifactCache.set(uiSession.id, artifacts);
@@ -578,7 +581,9 @@ function scheduleStandaloneRender(sessionId: string): void {
   if (standaloneRenderFrames.has(sessionId)) return;
   const frame = requestAnimationFrame(() => {
     standaloneRenderFrames.delete(sessionId);
-    renderStandaloneCache(sessionId);
+    // The session may have been evicted while the frame was pending; rendering
+    // it now would re-create store entries nobody will clean up.
+    if (standaloneHydrated.has(sessionId)) renderStandaloneCache(sessionId);
   });
   standaloneRenderFrames.set(sessionId, frame);
 }
