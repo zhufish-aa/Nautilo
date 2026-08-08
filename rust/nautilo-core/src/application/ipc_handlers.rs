@@ -438,6 +438,7 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
                 if after_sequence == 0 {
                     if let Some(session_id) = daemon.subscriptions.session_scope(subscription_id) {
                         daemon.interactions.heal_orphaned(&session_id);
+                        daemon.sessions.heal_follow_ups(&session_id);
                     }
                 }
                 daemon
@@ -457,6 +458,7 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
                 if after_sequence == 0 {
                     if let Some(session_id) = daemon.subscriptions.session_scope(subscription_id) {
                         daemon.interactions.heal_orphaned(&session_id);
+                        daemon.sessions.heal_follow_ups(&session_id);
                     }
                 }
                 daemon

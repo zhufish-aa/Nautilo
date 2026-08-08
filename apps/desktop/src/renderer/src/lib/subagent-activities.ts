@@ -41,8 +41,10 @@ export function collectSubagentActivities(events: RuntimeEvent[]): Map<string, T
     if (!dispatchId) continue;
     switch (event.type) {
       case "agent.message_delta":
+        // Delta payloads are cumulative (daemon accumulates when coalescing)
+        // — replace the text, never append.
         put(dispatchId, `msg:${event.payload.messageId}`, { kind: "message", sender: "agent", text: event.payload.text, streaming: true, messageId: event.payload.messageId }, (current, next) =>
-          current.kind === "message" && next.kind === "message" ? { ...current, text: current.text + next.text } : next);
+          current.kind === "message" && next.kind === "message" ? { ...current, text: next.text } : next);
         break;
       case "agent.message":
         put(dispatchId, `msg:${event.payload.messageId}`, { kind: "message", sender: "agent", text: event.payload.text, streaming: false, messageId: event.payload.messageId }, (current, next) =>
@@ -50,7 +52,7 @@ export function collectSubagentActivities(events: RuntimeEvent[]): Map<string, T
         break;
       case "agent.thinking_delta":
         put(dispatchId, `think:${event.payload.messageId}`, { kind: "reasoning", text: event.payload.text, streaming: true, messageId: event.payload.messageId }, (current, next) =>
-          current.kind === "reasoning" && next.kind === "reasoning" ? { ...current, text: current.text + next.text } : next);
+          current.kind === "reasoning" && next.kind === "reasoning" ? { ...current, text: next.text } : next);
         break;
       case "agent.thinking_summary":
         put(dispatchId, `think:${event.payload.messageId ?? "default"}`, { kind: "reasoning", text: event.payload.text, streaming: false, messageId: event.payload.messageId }, (current, next) =>

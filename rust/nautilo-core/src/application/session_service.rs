@@ -29,6 +29,9 @@ pub struct SessionService {
     events: RwLock<Option<Arc<EventService>>>,
     /// Follow-ups waiting for the active turn to settle, keyed by session id.
     pending_follow_ups: Arc<Mutex<std::collections::HashMap<String, Vec<Value>>>>,
+    /// Sessions whose journal was already scanned for orphaned queued
+    /// follow-ups in this process — the scan is idempotent, so run it once.
+    healed_follow_up_sessions: Mutex<std::collections::HashSet<String>>,
 }
 
 impl SessionService {
@@ -38,6 +41,7 @@ impl SessionService {
             runs: RwLock::new(None),
             events: RwLock::new(None),
             pending_follow_ups: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            healed_follow_up_sessions: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -228,6 +232,9 @@ impl SessionService {
     pub async fn send(&self, input: &Value) -> CoreResult<Value> {
         let session_id = input.get("sessionId").and_then(Value::as_str).unwrap_or("");
         let text = input.get("text").and_then(Value::as_str).unwrap_or("");
+        // Heal replayed zombie queue entries before this run's events make the
+        // renderer re-read the journal (see heal_follow_ups).
+        self.heal_follow_ups(session_id);
         let session = {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().get(session_id)?.ok_or_else(|| not_found("session", session_id))?
@@ -362,6 +369,7 @@ impl SessionService {
             return Err(invalid("text", "Guidance cannot be empty."));
         }
         let mode = input.get("mode").and_then(Value::as_str).unwrap_or("queue");
+        self.heal_follow_ups(session_id);
         let session = {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().get(session_id)?.ok_or_else(|| not_found("session", session_id))?
@@ -469,6 +477,82 @@ impl SessionService {
         Ok(json!({ "accepted": true, "mode": "queue" }))
     }
 
+    /// Journals session.follow_up_cancelled for every queued follow-up in this
+    /// session's journal that was never cancelled and is not pending in THIS
+    /// process. The pending queue is in-memory, so a daemon restart orphans
+    /// the journaled entries and every full replay would show them as queued
+    /// forever. Messages are NOT deleted here — an orphaned entry may belong
+    /// to a turn that actually ran before the restart. Best-effort, once per
+    /// session per process.
+    pub fn heal_follow_ups(&self, session_id: &str) {
+        if session_id.is_empty() || !self.healed_follow_up_sessions.lock().unwrap().insert(session_id.to_string()) {
+            return;
+        }
+        let journal: Vec<Value> = {
+            let db = self.db.lock().unwrap();
+            let mut statement = match db.raw.prepare(
+                "SELECT data FROM runtime_events WHERE session_id = ?1 \
+                 AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled') \
+                 ORDER BY sequence, rowid",
+            ) {
+                Ok(statement) => statement,
+                Err(_) => return,
+            };
+            let rows = match statement.query_map([session_id], |row| row.get::<_, String>(0)) {
+                Ok(rows) => rows,
+                Err(_) => return,
+            };
+            let collected: Vec<Value> = rows
+                .filter_map(|row| row.ok())
+                .filter_map(|data| serde_json::from_str(&data).ok())
+                .collect();
+            collected
+        };
+        // Fold in journal order; entries still pending in this process are
+        // genuinely queued and must survive.
+        let live: std::collections::HashSet<String> = self
+            .pending_follow_ups
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| entry.get("messageId").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let mut open: Vec<String> = Vec::new();
+        for event in &journal {
+            let message_id = event.get("payload").and_then(|payload| payload.get("messageId")).and_then(Value::as_str).unwrap_or("").to_string();
+            if message_id.is_empty() || live.contains(&message_id) {
+                continue;
+            }
+            open.retain(|id| id != &message_id);
+            if event.get("type").and_then(Value::as_str) == Some("session.follow_up_queued") {
+                open.push(message_id);
+            }
+        }
+        if open.is_empty() {
+            return;
+        }
+        let session = {
+            let db = self.db.lock().unwrap();
+            Repositories::new(&db.raw).sessions().get(session_id).ok().flatten()
+        };
+        let Some(session) = session else { return };
+        let Some(events) = self.events.read().unwrap().clone() else { return };
+        for message_id in open {
+            let _ = events.append_for_session(
+                &session,
+                &json!({
+                    "projectRunId": session.get("projectRunId").cloned().unwrap_or(Value::Null),
+                    "taskId": session.get("taskId").cloned().unwrap_or(Value::Null)
+                }),
+                "session.follow_up_cancelled",
+                json!({ "messageId": message_id }),
+            );
+        }
+    }
+
     /// session.followUp.cancel — withdraws a queued follow-up.
     pub fn follow_up_cancel(&self, input: &Value) -> CoreResult<Value> {
         let session_id = input.get("sessionId").and_then(Value::as_str).unwrap_or("");
@@ -478,7 +562,34 @@ impl SessionService {
             Repositories::new(&db.raw).sessions().get(session_id)?.ok_or_else(|| not_found("session", session_id))?
         };
         if self.pending_follow_up(session_id, message_id).is_none() {
-            return Err(invalid("messageId", "Follow-up is no longer queued; it may have already started."));
+            // Not pending in this process: either the turn already started
+            // (reject, same as before) or the entry is a replayed zombie from
+            // before a daemon restart — that one can never start, so journal
+            // the cancellation and let the user withdraw it.
+            let has_active_run = {
+                let db = self.db.lock().unwrap();
+                Repositories::new(&db.raw).runs().list()?.into_iter().any(|run| {
+                    run.get("sessionId").and_then(Value::as_str) == Some(session_id)
+                        && !TERMINAL_RUN_STATUSES.contains(&run.get("status").and_then(Value::as_str).unwrap_or(""))
+                })
+            };
+            if has_active_run {
+                return Err(invalid("messageId", "Follow-up is no longer queued; it may have already started."));
+            }
+            if let Some(events) = self.events.read().unwrap().clone() {
+                let _ = events.append_for_session(
+                    &session,
+                    &json!({
+                        "projectRunId": session.get("projectRunId").cloned().unwrap_or(Value::Null),
+                        "taskId": session.get("taskId").cloned().unwrap_or(Value::Null)
+                    }),
+                    "session.follow_up_cancelled",
+                    json!({ "messageId": message_id }),
+                );
+            }
+            let db = self.db.lock().unwrap();
+            let _ = Repositories::new(&db.raw).sessions().delete_message(session_id, message_id);
+            return Ok(json!({ "cancelled": true }));
         }
         self.runs()?.cancel_queued(session_id, message_id);
         self.untrack_pending_follow_up(session_id, message_id);

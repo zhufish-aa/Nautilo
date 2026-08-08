@@ -14,6 +14,9 @@ export class SessionService {
   private readonly attachments: MessageAttachmentService;
   /** Follow-ups waiting for the active turn to settle, keyed by session id. */
   private readonly pendingFollowUps = new Map<string, Array<{ messageId: string; text: string; queuedAt: string }>>();
+  /** Sessions whose journal was already scanned for orphaned queued
+   * follow-ups in this process — the scan is idempotent, so run it once. */
+  private readonly healedFollowUpSessions = new Set<string>();
   constructor(private readonly database: Database, private readonly runs: RunService, private readonly events: EventService) {
     this.members = new MemberRouter(database);
     this.attachments = new MessageAttachmentService(database);
@@ -52,6 +55,7 @@ export class SessionService {
   async followUp(input: IpcRequestMap["session.followUp"]["input"]): Promise<{ accepted: true; mode: "steer" | "queue" }> {
     const text = input.text.trim();
     if (!text) throw new CoreError("IPC_INVALID_REQUEST", { field: "text", reason: "Guidance cannot be empty." });
+    this.healFollowUps(input.sessionId);
     const session = this.database.sessions.get(input.sessionId);
     if (!session) throw new CoreError("IPC_NOT_FOUND", { resource: "session", id: input.sessionId });
 
@@ -106,13 +110,64 @@ export class SessionService {
     const pending = this.pendingFollowUps.get(input.sessionId);
     const entry = pending?.find((item) => item.messageId === input.messageId);
     if (!entry) {
-      throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is no longer queued; it may have already started." });
+      // Not pending in this process: either the turn already started (reject,
+      // same as before) or the entry is a replayed zombie from before a
+      // daemon restart — that one can never start, so journal the
+      // cancellation and let the user withdraw it.
+      const hasActiveRun = this.database.runs.list().some((run) =>
+        run.sessionId === input.sessionId && !["completed", "failed", "timed_out", "crashed", "cancelled"].includes(run.status)
+      );
+      if (hasActiveRun) {
+        throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is no longer queued; it may have already started." });
+      }
+      this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_cancelled", { messageId: input.messageId });
+      this.database.sessions.deleteMessage(input.sessionId, input.messageId);
+      return { cancelled: true };
     }
     this.runs.cancelQueued(input.sessionId, input.messageId);
     this.untrackPendingFollowUp(input.sessionId, input.messageId);
     this.database.sessions.deleteMessage(input.sessionId, input.messageId);
     this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_cancelled", { messageId: input.messageId });
     return { cancelled: true };
+  }
+  /**
+   * Journals session.follow_up_cancelled for every queued follow-up in this
+   * session's journal that was never cancelled and is not pending in THIS
+   * process. The pending queue is in-memory, so a daemon restart orphans the
+   * journaled entries and every full replay would show them as queued
+   * forever. Messages are NOT deleted here — an orphaned entry may belong to
+   * a turn that actually ran before the restart. Best-effort, once per
+   * session per process.
+   */
+  healFollowUps(sessionId: string): void {
+    if (!sessionId || this.healedFollowUpSessions.has(sessionId)) return;
+    this.healedFollowUpSessions.add(sessionId);
+    try {
+      const rows = this.database.connection.raw
+        .prepare(
+          "SELECT data FROM runtime_events WHERE session_id = ? \
+           AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled') \
+           ORDER BY sequence, rowid"
+        )
+        .all(sessionId) as Array<{ data: string }>;
+      const live = new Set((this.pendingFollowUps.get(sessionId) ?? []).map((entry) => entry.messageId));
+      const open = new Map<string, true>();
+      for (const row of rows) {
+        const event = JSON.parse(row.data) as { type?: string; payload?: { messageId?: string } };
+        const messageId = event.payload?.messageId;
+        if (!messageId || live.has(messageId)) continue;
+        open.delete(messageId);
+        if (event.type === "session.follow_up_queued") open.set(messageId, true);
+      }
+      if (!open.size) return;
+      const session = this.database.sessions.get(sessionId);
+      if (!session) return;
+      for (const messageId of open.keys()) {
+        this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_cancelled", { messageId });
+      }
+    } catch {
+      // Best-effort: the next daemon start retries the heal.
+    }
   }
   private trackPendingFollowUp(sessionId: string, entry: { messageId: string; text: string; queuedAt: string }): void {
     const items = this.pendingFollowUps.get(sessionId) ?? [];
@@ -166,6 +221,9 @@ export class SessionService {
     return updated;
   }
   async send(input: IpcRequestMap["session.send"]["input"]): Promise<{ accepted: true; runId: string }> {
+    // Heal replayed zombie queue entries before this run's events make the
+    // renderer re-read the journal (see healFollowUps).
+    this.healFollowUps(input.sessionId);
     const session = this.database.sessions.get(input.sessionId);
     if (!session) throw new CoreError("IPC_NOT_FOUND", { resource: "session", id: input.sessionId });
     const existingMessages = this.database.sessions.messages(session.id);

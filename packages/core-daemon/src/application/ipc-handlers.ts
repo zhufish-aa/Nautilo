@@ -145,7 +145,9 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   const healBeforeFullReplay = (subscriptionId: string, afterSequence: number): void => {
     if (afterSequence !== 0) return;
     const sessionId = services.subscriptions.sessionScope(subscriptionId);
-    if (sessionId) services.interactions.healOrphaned(sessionId);
+    if (!sessionId) return;
+    services.interactions.healOrphaned(sessionId);
+    services.sessions.healFollowUps(sessionId);
   };
   gateway.register("event.replay", async ({ subscriptionId, afterSequence }) => {
     healBeforeFullReplay(subscriptionId, afterSequence);

@@ -527,7 +527,9 @@ function applyStandaloneDeltas(sessionId: string, events: RuntimeEvent[]): boole
     const row = rows[index].data;
     if (row.kind !== "message" && row.kind !== "reasoning") return false;
     if (!next) next = [...timeline];
-    next[index] = { ...next[index], data: { ...row, text: row.text + event.payload.text } };
+    // The daemon coalesces delta rows by ACCUMULATING chunk text, so every
+    // delta payload carries the full text so far — replace, don't append.
+    next[index] = { ...next[index], data: { ...row, text: event.payload.text } };
   }
   if (next) store._replaceEvents(sessionId, next);
   return true;
@@ -985,13 +987,16 @@ function appendRuntimeEvents(
       if (segmentIndex < (persistedSegmentsByRun.get(runId) ?? 0)) continue;
       const key = `${runId}:${event.payload.messageId}`;
       const index = streaming.get(key);
+      // Delta payloads are cumulative (the daemon accumulates chunk text when
+      // coalescing), so each event REPLACES the row text — appending would
+      // duplicate everything.
       if (index === undefined) {
         const row = push(event, { kind: "message", sender: "agent", text: event.payload.text, streaming: true, messageId: event.payload.messageId });
         streaming.set(key, row);
         streamingMessageRows.set(row, runId);
       } else {
         const current = timeline[index].data;
-        if (current.kind === "message") timeline[index] = { ...timeline[index], data: { ...current, text: current.text + event.payload.text } };
+        if (current.kind === "message") timeline[index] = { ...timeline[index], data: { ...current, text: event.payload.text } };
       }
       continue;
     }
@@ -1007,7 +1012,8 @@ function appendRuntimeEvents(
         runningReasoningRows.set(row, runId);
       } else {
         const current = timeline[index].data;
-        if (current.kind === "reasoning") timeline[index] = { ...timeline[index], data: { ...current, text: current.text + event.payload.text } };
+        // Cumulative payload — replace (see agent.message_delta above).
+        if (current.kind === "reasoning") timeline[index] = { ...timeline[index], data: { ...current, text: event.payload.text } };
       }
       continue;
     }
