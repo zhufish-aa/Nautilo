@@ -512,10 +512,38 @@ impl<'a> EventRepository<'a> {
     /// sharing the data dir cannot allocate the same sequence (which the
     /// renderer's `sequence > afterSequence` polling would silently drop).
     /// Fills the allocated sequence into the event and returns it.
+    ///
+    /// Streaming deltas are coalesced inside the same transaction: only the
+    /// newest delta per (session, type, messageId) survives, and a terminal
+    /// run event purges the session's remaining delta rows. Journaling every
+    /// delta verbatim grew the event table to millions of rows (97% deltas).
     pub fn append_allocating_sequence(&self, event: &mut Value, session_id: Option<&str>, run_id: Option<&str>) -> CoreResult<i64> {
         self.db.execute_batch("BEGIN IMMEDIATE").map_err(db_fail)?;
         let result = (|| {
+            let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+            // Allocate BEFORE the coalescing delete: the superseded delta row
+            // usually holds the current MAX(sequence), so deleting first would
+            // reissue an already-consumed sequence and break the renderer's
+            // `sequence > afterSequence` polling.
             let sequence = self.next_sequence(session_id, run_id)?;
+            if event_type.ends_with("_delta") {
+                let message_id = event.pointer("/payload/messageId").and_then(Value::as_str).unwrap_or("");
+                self.db
+                    .prepare(
+                        "DELETE FROM runtime_events WHERE session_id = ?1 \
+                         AND json_extract(data, '$.type') = ?2 \
+                         AND json_extract(data, '$.payload.messageId') = ?3",
+                    )
+                    .map_err(db_fail)?
+                    .execute(params![session_id.unwrap_or(""), event_type, message_id])
+                    .map_err(db_fail)?;
+            } else if matches!(event_type, "run.completed" | "run.failed") {
+                self.db
+                    .prepare("DELETE FROM runtime_events WHERE session_id = ?1 AND json_extract(data, '$.type') LIKE '%\\_delta' ESCAPE '\\'")
+                    .map_err(db_fail)?
+                    .execute(params![session_id.unwrap_or("")])
+                    .map_err(db_fail)?;
+            }
             if let Some(map) = event.as_object_mut() {
                 map.insert("sequence".to_string(), json!(sequence));
             }
@@ -892,5 +920,84 @@ impl<'a> CredentialRepository<'a> {
             .execute(params![agent_instance_id])
             .map_err(db_fail)?;
         Ok(changes > 0)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Database;
+
+    fn open_test_db() -> Database {
+        let file = std::env::temp_dir().join(format!("nautilo-repo-test-{}.sqlite", uuid::Uuid::new_v4()));
+        Database::open(&file).expect("open test database")
+    }
+
+    fn delta_event(session: &str, message_id: &str, text: &str) -> Value {
+        json!({
+            "eventId": uuid::Uuid::new_v4().to_string(),
+            "sessionId": session,
+            "type": "agent.message_delta",
+            "timestamp": "2026-08-08T00:00:00.000Z",
+            "payload": { "messageId": message_id, "text": text }
+        })
+    }
+
+    fn delta_rows(db: &Connection, session: &str) -> Vec<(String, String)> {
+        let mut statement = db
+            .prepare("SELECT json_extract(data, '$.payload.messageId'), json_extract(data, '$.payload.text') FROM runtime_events WHERE session_id = ?1 AND json_extract(data, '$.type') LIKE '%\\_delta' ESCAPE '\\' ORDER BY sequence")
+            .unwrap();
+        statement
+            .query_map(params![session], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn delta_events_coalesce_per_message_and_purge_on_run_end() {
+        let db = open_test_db();
+        let events = Repositories::new(&db.raw).events();
+
+        let mut first = delta_event("s1", "m1", "he");
+        let mut second = delta_event("s1", "m1", "hel");
+        let mut third = delta_event("s1", "m1", "hello");
+        let mut other_message = delta_event("s1", "m2", "world");
+        let mut other_session = delta_event("s2", "m1", "untouched");
+        for (event, scope) in [
+            (&mut first, "s1"),
+            (&mut second, "s1"),
+            (&mut third, "s1"),
+            (&mut other_message, "s1"),
+            (&mut other_session, "s2"),
+        ] {
+            events.append_allocating_sequence(event, Some(scope), None).unwrap();
+        }
+
+        // Coalesced: one row per (session, type, messageId), keeping the newest text.
+        assert_eq!(
+            delta_rows(&db.raw, "s1"),
+            vec![("m1".to_string(), "hello".to_string()), ("m2".to_string(), "world".to_string())]
+        );
+        assert_eq!(delta_rows(&db.raw, "s2").len(), 1);
+
+        // Sequences are strictly increasing despite coalescing.
+        let s1 = first.get("sequence").and_then(Value::as_i64).unwrap();
+        let s2 = second.get("sequence").and_then(Value::as_i64).unwrap();
+        let s3 = third.get("sequence").and_then(Value::as_i64).unwrap();
+        assert!(s1 < s2 && s2 < s3, "sequences must increase: {s1} {s2} {s3}");
+
+        // A terminal run event purges the session's remaining delta rows only.
+        let mut done = json!({
+            "eventId": uuid::Uuid::new_v4().to_string(),
+            "sessionId": "s1",
+            "type": "run.completed",
+            "timestamp": "2026-08-08T00:00:01.000Z",
+            "payload": {}
+        });
+        events.append_allocating_sequence(&mut done, Some("s1"), None).unwrap();
+        assert!(delta_rows(&db.raw, "s1").is_empty());
+        assert_eq!(delta_rows(&db.raw, "s2").len(), 1);
     }
 }

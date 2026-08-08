@@ -37,6 +37,16 @@ export class Database {
   constructor(filePath: string) {
     this.connection = new DatabaseConnection(filePath);
     migrateDatabase(this.connection.raw);
+    // One-time compaction: drop verbatim streaming deltas journaled by older
+    // builds (writes are coalesced now), and reclaim the file when the backlog
+    // was large. Best-effort: VACUUM just fails while another daemon holds
+    // the database open.
+    const purged = this.connection.raw
+      .prepare("DELETE FROM runtime_events WHERE json_extract(data, '$.type') LIKE '%_delta' ESCAPE '\\'")
+      .run().changes;
+    if (purged > 50_000) {
+      try { this.connection.raw.exec("VACUUM"); } catch { /* another daemon holds the lock */ }
+    }
     this.projects = new ProjectRepository(this.connection.raw);
     this.agents = new AgentRepository(this.connection.raw);
     this.teams = new TeamRepository(this.connection.raw);

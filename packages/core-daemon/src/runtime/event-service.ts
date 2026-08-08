@@ -24,6 +24,21 @@ export class EventService {
     let event: RuntimeEvent;
     try {
       event = { schemaVersion: 1 as const, eventId: randomUUID(), sequence: this.database.events.nextSequence(session.id), projectId: session.projectId, runId: context.runId, projectRunId: context.projectRunId, taskId: context.taskId, sessionId: session.id, type, timestamp: new Date().toISOString(), payload: this.redaction.value(payload) } as RuntimeEvent;
+      // Streaming deltas are coalesced: only the newest delta per message
+      // survives, and a terminal run event purges the session's remaining
+      // delta rows. Journaling every delta verbatim grew the event table to
+      // millions of rows (97% deltas).
+      const typeName = event.type as string;
+      if (typeName.endsWith("_delta")) {
+        const messageId = (event.payload as { messageId?: string } | undefined)?.messageId ?? "";
+        this.database.connection.raw
+          .prepare("DELETE FROM runtime_events WHERE session_id = ? AND json_extract(data, '$.type') = ? AND json_extract(data, '$.payload.messageId') = ?")
+          .run(session.id, typeName, messageId);
+      } else if (typeName === "run.completed" || typeName === "run.failed") {
+        this.database.connection.raw
+          .prepare("DELETE FROM runtime_events WHERE session_id = ? AND json_extract(data, '$.type') LIKE '%_delta' ESCAPE '\\'")
+          .run(session.id);
+      }
       this.database.events.append(event);
       this.database.connection.raw.exec("COMMIT");
     } catch (error) {
