@@ -126,14 +126,20 @@ impl CoreDaemonClient {
         // connects in the gap gets ERROR_PIPE_BUSY (os error 231) and must
         // wait for the next instance — Node's net.connect did this wait
         // internally, so the shell has to retry explicitly.
+        // The daemon pre-creates a small pool of pipe instances, but a client
+        // can still hit ERROR_PIPE_BUSY (os error 231) while the daemon is
+        // busy (e.g. loading a large database on startup, or handling a burst
+        // of IPC requests). Node's net.connect waited internally, so the shell
+        // has to retry explicitly. Keep the window generous (up to ~20s) so a
+        // busy daemon doesn't surface a spurious "connect failed" error.
         let mut stream = None;
-        for attempt in 0..100 {
+        for attempt in 0..400 {
             match tokio::net::windows::named_pipe::ClientOptions::new().open(&socket_path) {
                 Ok(pipe) => {
                     stream = Some(pipe);
                     break;
                 }
-                Err(error) if error.raw_os_error() == Some(231) && attempt < 99 => {
+                Err(error) if error.raw_os_error() == Some(231) && attempt < 399 => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(error) => return Err(format!("Core Daemon connect failed: {error}")),

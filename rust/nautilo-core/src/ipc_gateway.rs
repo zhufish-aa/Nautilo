@@ -98,9 +98,18 @@ impl GatewayResponse {
 trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
+/// Pre-created pipe instances so concurrent clients rarely hit
+/// ERROR_PIPE_BUSY (os error 231): the accept loop pops a ready instance,
+/// connects it, then refills the pool instead of creating the next instance
+/// only after the previous client has connected.
+const PIPE_INSTANCE_POOL: usize = 4;
+
 enum Listener {
     #[cfg(windows)]
-    Pipe { path: String, pending: Option<tokio::net::windows::named_pipe::NamedPipeServer> },
+    Pipe {
+        path: String,
+        instances: std::collections::VecDeque<tokio::net::windows::named_pipe::NamedPipeServer>,
+    },
     #[cfg(unix)]
     Unix(tokio::net::UnixListener),
 }
@@ -110,8 +119,18 @@ impl Listener {
         #[cfg(windows)]
         {
             use tokio::net::windows::named_pipe::ServerOptions;
-            let server = ServerOptions::new().first_pipe_instance(true).create(path)?;
-            return Ok(Self::Pipe { path: path.to_string(), pending: Some(server) });
+            let mut instances = std::collections::VecDeque::new();
+            // The first instance establishes the pipe name; the rest are extra
+            // instances of the same pipe (up to PIPE_UNLIMITED_INSTANCES).
+            let first = ServerOptions::new().first_pipe_instance(true).create(path)?;
+            instances.push_back(first);
+            for _ in 1..PIPE_INSTANCE_POOL {
+                match ServerOptions::new().create(path) {
+                    Ok(instance) => instances.push_back(instance),
+                    Err(_) => break, // pool is best-effort; single instance still works
+                }
+            }
+            return Ok(Self::Pipe { path: path.to_string(), instances });
         }
         #[cfg(unix)]
         {
@@ -131,11 +150,18 @@ impl Listener {
     async fn accept(&mut self) -> std::io::Result<Box<dyn Stream>> {
         match self {
             #[cfg(windows)]
-            Self::Pipe { path, pending } => {
-                let server = pending.take().expect("named pipe instance");
-                server.connect().await?;
+            Self::Pipe { path, instances } => {
                 use tokio::net::windows::named_pipe::ServerOptions;
-                *pending = Some(ServerOptions::new().create(path)?);
+                // Refill the pool first so concurrent clients have a ready
+                // instance to connect to.
+                while instances.len() < PIPE_INSTANCE_POOL {
+                    match ServerOptions::new().create(path.as_str()) {
+                        Ok(instance) => instances.push_back(instance),
+                        Err(_) => break,
+                    }
+                }
+                let server = instances.pop_front().expect("named pipe instance pool must not be empty");
+                server.connect().await?;
                 Ok(Box::new(server))
             }
             #[cfg(unix)]
