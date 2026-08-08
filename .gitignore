@@ -66,3 +66,7 @@ apps/desktop/out/
 /packages/domain/src/*.d.ts
 /packages/domain/src/*.map
 /packages/provider-sdk/src/*.js
+
+# Toolchains & Rust build artifacts
+.toolchains/
+rust/target/

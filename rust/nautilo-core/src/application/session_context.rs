@@ -1,0 +1,155 @@
+//! Session turn context — port of application/session-context.ts.
+
+use std::path::Path;
+
+use serde_json::Value;
+
+const MAX_HISTORY_MESSAGES: usize = 24;
+const MAX_TRANSCRIPT_CHARS: usize = 18_000;
+
+fn image_reference() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"(?i)(?:图|图片|图像|照片|画面|刚才.*生成|image|photo|picture)").unwrap())
+}
+
+pub struct SessionTurnContext {
+    pub prompt: String,
+    pub local_image_paths: Vec<String>,
+    pub recovered: bool,
+}
+
+/// Prepended when a "work" session (re)creates its provider thread.
+pub fn work_mode_guidance(workspace_root: Option<&str>) -> String {
+    [
+        "<agenthub_work_mode>",
+        "This is an Nautilo Work session. Your job is producing office deliverables, not modifying a code repository.",
+        &match workspace_root {
+            Some(root) => format!("Write every deliverable inside the workspace directory: {root}"),
+            None => "Write every deliverable inside the session workspace directory.".to_string(),
+        },
+        "Prefer real office formats: .docx for documents, .xlsx for spreadsheets, .pptx for slides, .md for drafts/notes, .csv for raw data.",
+        "If your environment provides office skills (documents, spreadsheets, presentations, research), follow their workflow and verification rules.",
+        "Whenever you create or update a deliverable, end your reply with the exact file path(s) so the user can preview them.",
+        "</agenthub_work_mode>",
+    ]
+    .join("\n")
+}
+
+pub struct TurnContextInput<'a> {
+    pub current_text: &'a str,
+    pub messages: &'a [Value],
+    pub artifacts: &'a [Value],
+    pub current_attachments: &'a [Value],
+    pub recover_provider_context: bool,
+    pub work_mode: bool,
+    pub workspace_root: Option<&'a str>,
+}
+
+fn artifact_image_path(artifact: &Value) -> Option<String> {
+    if artifact.get("kind").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let path = artifact.get("path").and_then(Value::as_str)?;
+    if Path::new(path).exists() {
+        Some(path.to_string())
+    } else {
+        None
+    }
+}
+
+pub fn build_session_turn_context(input: TurnContextInput) -> SessionTurnContext {
+    let images: Vec<String> = input.artifacts.iter().filter_map(artifact_image_path).collect();
+    let latest_image = if image_reference().is_match(input.current_text) { images.last().cloned() } else { None };
+    let mut local_image_paths: Vec<String> = vec![];
+    for artifact in input.current_attachments {
+        if let Some(path) = artifact_image_path(artifact) {
+            if !local_image_paths.contains(&path) {
+                local_image_paths.push(path);
+            }
+        }
+    }
+    if let Some(latest) = latest_image {
+        if !local_image_paths.contains(&latest) {
+            local_image_paths.push(latest);
+        }
+    }
+    if !input.recover_provider_context {
+        return SessionTurnContext { prompt: input.current_text.to_string(), local_image_paths, recovered: false };
+    }
+    let guidance = if input.work_mode { work_mode_guidance(input.workspace_root) } else { String::new() };
+    if input.messages.is_empty() && input.artifacts.is_empty() {
+        let prompt = [guidance, input.current_text.to_string()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return SessionTurnContext { prompt, local_image_paths, recovered: true };
+    }
+
+    let transcript = select_history(input.messages)
+        .iter()
+        .map(|message| {
+            let sender = match message.get("sender").and_then(Value::as_str) {
+                Some("user") => "User",
+                Some("agent") => "Assistant",
+                _ => "System",
+            };
+            format!("{}: {}", sender, message.get("text").and_then(Value::as_str).unwrap_or(""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let artifact_inventory = input
+        .artifacts
+        .iter()
+        .rev()
+        .take(8)
+        .rev()
+        .map(|artifact| {
+            let kind = artifact.get("kind").and_then(Value::as_str).unwrap_or("file");
+            let name = artifact.get("name").and_then(Value::as_str).unwrap_or("");
+            let path = artifact.get("path").and_then(Value::as_str).map(|p| format!(" ({p})")).unwrap_or_default();
+            format!("- {kind}: {name}{path}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = [
+        guidance,
+        "<agenthub_recovered_context>".to_string(),
+        "Nautilo recovered the following conversation history and artifacts from its persistent session store because the provider thread was recreated or its synchronization state was unknown. Treat this as prior context, not as a new user request.".to_string(),
+        if transcript.is_empty() { "(No earlier chat messages.)".to_string() } else { transcript },
+        if artifact_inventory.is_empty() { String::new() } else { format!("Available session artifacts:\n{artifact_inventory}") },
+        "</agenthub_recovered_context>".to_string(),
+        "<current_user_message>".to_string(),
+        input.current_text.to_string(),
+        "</current_user_message>".to_string(),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
+    SessionTurnContext { prompt, local_image_paths, recovered: true }
+}
+
+fn select_history(messages: &[Value]) -> Vec<Value> {
+    let candidates: Vec<Value> = if messages.len() <= MAX_HISTORY_MESSAGES {
+        messages.to_vec()
+    } else {
+        messages[..2].iter().chain(&messages[messages.len() - (MAX_HISTORY_MESSAGES - 2)..]).cloned().collect()
+    };
+    let mut selected: Vec<Value> = vec![];
+    let mut chars = 0usize;
+    for message in candidates.iter().rev() {
+        let length = message.get("text").and_then(Value::as_str).unwrap_or("").len();
+        if !selected.is_empty() && chars + length > MAX_TRANSCRIPT_CHARS {
+            break;
+        }
+        selected.insert(0, message.clone());
+        chars += length;
+    }
+    if let (Some(first_candidate), Some(first_selected)) = (candidates.first(), selected.first()) {
+        if first_candidate.get("id") != first_selected.get("id") {
+            selected.insert(0, first_candidate.clone());
+        }
+    }
+    selected
+}

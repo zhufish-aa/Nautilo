@@ -1,0 +1,21 @@
+[package]
+name = "nautilo-core"
+version = "0.1.0"
+edition = "2021"
+description = "Nautilo core daemon (Rust port of @agenthub/core-daemon)"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+dirs = "5"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+regex = "1"
+async-trait = "0.1"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
