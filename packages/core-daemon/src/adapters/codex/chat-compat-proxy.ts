@@ -42,6 +42,7 @@ interface FunctionCallContext {
   itemId: string;
   callId: string;
   name: string;
+  namespace: string;
   arguments: string;
   outputIndex: number;
   started: boolean;
@@ -473,21 +474,24 @@ function chatToolChoice(value: unknown): unknown {
 }
 
 /**
- * Registry of chat-side tool names -> { codexName, type }.
+ * Registry of chat-side tool names -> { namespace, codexName, type }.
  *
  * Namespaced tools (multi_agent_v1.*, mcp__*) are exposed to the chat model
- * as `{namespace}-{sub}` functions and come back to codex as `{namespace}.{sub}`
- * custom tool calls, so the call-back must be re-mapped to the dotted name.
+ * as `{namespace}-{sub}` functions and come back to codex as `custom_tool_call`
+ * items carrying the separate `namespace`/`name` fields (codex routes on the
+ * ToolName split, so a single flattened name is never found). Both the
+ * hyphenated chat name and the dotted codex name are registered so whichever
+ * the model calls, the call-back routes correctly.
  */
-function responseToolTypes(value: unknown): Map<string, { codexName: string; type: "function" | "custom" }> {
-  const result = new Map<string, { codexName: string; type: "function" | "custom" }>();
+function responseToolTypes(value: unknown): Map<string, { namespace: string; codexName: string; type: "function" | "custom" }> {
+  const result = new Map<string, { namespace: string; codexName: string; type: "function" | "custom" }>();
   if (!Array.isArray(value)) return result;
   for (const raw of value) {
     const tool = asRecord(raw);
     const name = stringValue(tool?.name);
     if (!name) continue;
     if (tool?.type === "function" || tool?.type === "custom") {
-      result.set(name, { codexName: name, type: tool.type });
+      result.set(name, { namespace: "", codexName: name, type: tool.type });
     } else if (tool?.type === "namespace") {
       const subs = Array.isArray(tool.tools) ? tool.tools : [];
       for (const sub of subs) {
@@ -495,7 +499,9 @@ function responseToolTypes(value: unknown): Map<string, { codexName: string; typ
         const subType = subRecord?.type;
         const subName = stringValue(subRecord?.name);
         if (!subName || (subType !== "function" && subType !== "custom")) continue;
-        result.set(`${name}-${subName}`, { codexName: `${name}.${subName}`, type: "custom" });
+        const value = { namespace: name, codexName: subName, type: "custom" as const };
+        result.set(`${name}-${subName}`, value);
+        result.set(`${name}.${subName}`, value);
       }
     }
   }
@@ -619,10 +625,7 @@ async function writeResponsesStream(
         arguments: call.arguments
       });
     }
-    writeEvent(response, "response.output_item.done", {
-      type: "response.output_item.done",
-      output_index: call.outputIndex,
-      item: call.toolType === "custom" ? {
+    const doneItem: RecordValue = call.toolType === "custom" ? {
         id: call.itemId,
         type: "custom_tool_call",
         status: "completed",
@@ -636,7 +639,12 @@ async function writeResponsesStream(
         call_id: call.callId,
         name: call.name,
         arguments: call.arguments
-      }
+      };
+    if (call.toolType === "custom" && call.namespace) doneItem.namespace = call.namespace;
+    writeEvent(response, "response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: call.outputIndex,
+      item: doneItem
     });
   }
   if (!context.text && !toolCalls.length) {
@@ -689,14 +697,18 @@ async function writeResponsesStream(
   }
   context.output = [
     ...(context.reasoningStarted ? [{ id: context.reasoningId, type: "reasoning", status: "completed", summary: [{ type: "summary_text", text: context.reasoning }] }] : []),
-    ...toolCalls.map((call) => ({
-      id: call.itemId,
-      type: call.toolType === "custom" ? "custom_tool_call" : "function_call",
-      status: "completed",
-      call_id: call.callId,
-      name: call.name,
-      ...(call.toolType === "custom" ? { input: customToolInput(call.arguments) } : { arguments: call.arguments })
-    })),
+    ...toolCalls.map((call) => {
+      const item: RecordValue = {
+        id: call.itemId,
+        type: call.toolType === "custom" ? "custom_tool_call" : "function_call",
+        status: "completed",
+        call_id: call.callId,
+        name: call.name,
+        ...(call.toolType === "custom" ? { input: customToolInput(call.arguments) } : { arguments: call.arguments })
+      };
+      if (call.toolType === "custom" && call.namespace) item.namespace = call.namespace;
+      return item;
+    }),
     ...(message ? [message] : [])
   ];
   writeEvent(response, "response.completed", {
@@ -710,7 +722,7 @@ function appendFunctionCallDelta(
   response: ServerResponse,
   context: ResponseContext,
   value: unknown,
-  toolTypes: Map<string, { codexName: string; type: "function" | "custom" }>
+  toolTypes: Map<string, { namespace: string; codexName: string; type: "function" | "custom" }>
 ): void {
   const raw = asRecord(value);
   if (!raw) return;
@@ -720,15 +732,16 @@ function appendFunctionCallDelta(
   let call = context.toolCalls.get(index);
   if (!call) {
     const name = incomingName ?? "function";
-    // Chat-side name -> { codex dotted name, wire type }. Namespaced tools are
-    // re-mapped so the codex CLI receives e.g. `multi_agent_v1.spawn_agent`
-    // rather than the hyphenated chat name.
-    const mapped = toolTypes.get(name) ?? { codexName: name, type: "function" as const };
+    // Chat-side name -> { namespace, codex name, wire type }. Namespaced tools
+    // are re-mapped so the codex CLI receives a `custom_tool_call` with the
+    // separate namespace/name fields it routes on.
+    const mapped = toolTypes.get(name) ?? { namespace: "", codexName: name, type: "function" as const };
     call = {
       index,
       itemId: `fc-${randomUUID()}`,
       callId: stringValue(raw.id) ?? `call-${randomUUID()}`,
       name: mapped.codexName,
+      namespace: mapped.namespace,
       arguments: "",
       outputIndex: (context.reasoningStarted ? 1 : 0) + context.toolCalls.size,
       started: false,
@@ -741,22 +754,25 @@ function appendFunctionCallDelta(
     const mapped = toolTypes.get(incomingName);
     if (mapped) {
       call.name = mapped.codexName;
+      call.namespace = mapped.namespace;
       call.toolType = mapped.type;
     }
   }
   if (!call.started) {
     call.started = true;
+    const item: RecordValue = {
+      id: call.itemId,
+      type: call.toolType === "custom" ? "custom_tool_call" : "function_call",
+      status: "in_progress",
+      call_id: call.callId,
+      name: call.name,
+      ...(call.toolType === "custom" ? { input: "" } : { arguments: "" })
+    };
+    if (call.toolType === "custom" && call.namespace) item.namespace = call.namespace;
     writeEvent(response, "response.output_item.added", {
       type: "response.output_item.added",
       output_index: call.outputIndex,
-      item: {
-        id: call.itemId,
-        type: call.toolType === "custom" ? "custom_tool_call" : "function_call",
-        status: "in_progress",
-        call_id: call.callId,
-        name: call.name,
-        ...(call.toolType === "custom" ? { input: "" } : { arguments: "" })
-      }
+      item
     });
   }
   const argumentDelta = stringValue(functionValue?.arguments);

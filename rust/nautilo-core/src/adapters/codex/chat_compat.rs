@@ -141,20 +141,28 @@ mod tests {
         assert!(names.contains(&"multi_agent_v1-spawn_agent".to_string()), "namespace sub-tool must be flattened into a chat function");
     }
 
-    /// The response direction must re-map the hyphenated chat name back to the
-    /// codex dotted name so the CLI recognizes the namespaced tool call.
+    /// The response direction must re-map the hyphenated (and dotted) chat name
+    /// back to the codex namespace + name pair so the CLI routes the call.
     #[test]
-    fn response_tool_types_maps_namespace_back_to_dotted_name() {
+    fn response_tool_types_maps_namespace_and_name() {
         let types = response_tool_types(Some(&sample_tools()));
         assert_eq!(
             types.get("agenthub_delegate"),
-            Some(&("agenthub_delegate".to_string(), "function".to_string())),
+            Some(&(String::new(), "agenthub_delegate".to_string(), "function".to_string())),
             "regular function keeps its identity"
         );
+        // Both the hyphenated chat name and the dotted codex name route to the
+        // same (namespace, name, custom) triple.
+        let expected = ("multi_agent_v1".to_string(), "spawn_agent".to_string(), "custom".to_string());
         assert_eq!(
             types.get("multi_agent_v1-spawn_agent"),
-            Some(&("multi_agent_v1.spawn_agent".to_string(), "custom".to_string())),
-            "namespace sub-tool maps to the dotted codex name as a custom call"
+            Some(&expected),
+            "hyphenated chat name maps to namespace + name as a custom call"
+        );
+        assert_eq!(
+            types.get("multi_agent_v1.spawn_agent"),
+            Some(&expected),
+            "dotted codex name also maps to namespace + name as a custom call"
         );
     }
 }
@@ -718,12 +726,15 @@ fn chat_tool_choice(value: &Value) -> Value {
     }
 }
 
-/// Registry of chat-side tool names -> (codex-side tool name, wire type).
+/// Registry of chat-side tool names -> (codex namespace, codex name, wire type).
 ///
 /// Namespaced tools (multi_agent_v1.*, mcp__*) are exposed to the chat model
-/// as `{namespace}-{sub}` functions and come back to codex as `{namespace}.{sub}`
-/// custom tool calls, so the call-back must be re-mapped to the dotted name.
-fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String)> {
+/// as `{namespace}-{sub}` functions and come back to codex as `custom_tool_call`
+/// items carrying the separate `namespace` and `name` fields (codex routes on
+/// the ToolName split, so a single flattened name is never found). Both the
+/// hyphenated chat name and the dotted codex name are registered so whichever
+/// the model calls, the call-back routes correctly.
+fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String, String)> {
     let mut result = HashMap::new();
     let Some(tools) = value.and_then(Value::as_array) else {
         return result;
@@ -733,7 +744,7 @@ fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String
         let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("");
         match tool_type {
             "function" | "custom" if !name.is_empty() => {
-                result.insert(name.to_string(), (name.to_string(), tool_type.to_string()));
+                result.insert(name.to_string(), (String::new(), name.to_string(), tool_type.to_string()));
             }
             "namespace" if !name.is_empty() => {
                 let namespace = name;
@@ -744,9 +755,11 @@ fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String
                             continue;
                         };
                         if sub_type == "function" || sub_type == "custom" {
-                            let codex_name = format!("{namespace}.{sub_name}");
                             let chat_name = format!("{namespace}-{sub_name}");
-                            result.insert(chat_name, (codex_name, "custom".to_string()));
+                            let codex_name = format!("{namespace}.{sub_name}");
+                            let value = (namespace.to_string(), sub_name.to_string(), "custom".to_string());
+                            result.insert(chat_name, value.clone());
+                            result.insert(codex_name, value);
                         }
                     }
                 }
@@ -791,6 +804,7 @@ struct FunctionCallContext {
     item_id: String,
     call_id: String,
     name: String,
+    namespace: String,
     arguments: String,
     output_index: i64,
     started: bool,
@@ -888,7 +902,7 @@ async fn process_chat_chunk(
     chunk: &Value,
     context: &mut ResponseContext,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
-    tool_types: &HashMap<String, (String, String)>,
+    tool_types: &HashMap<String, (String, String, String)>,
 ) -> anyhow::Result<()> {
     let choice = chunk.get("choices").and_then(Value::as_array).and_then(|c| c.first()).cloned().unwrap_or(Value::Null);
     let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
@@ -995,17 +1009,20 @@ async fn append_function_call_delta(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     context: &mut ResponseContext,
     value: &Value,
-    tool_types: &HashMap<String, (String, String)>,
+    tool_types: &HashMap<String, (String, String, String)>,
 ) -> anyhow::Result<()> {
     let function = value.get("function").cloned().unwrap_or(Value::Null);
     let index = value.get("index").and_then(as_number).unwrap_or(context.tool_calls.len() as i64);
     let incoming_name = function.get("name").and_then(Value::as_str).map(str::to_string);
     if !context.tool_calls.contains_key(&index) {
         let name = incoming_name.clone().unwrap_or_else(|| "function".to_string());
-        // Chat-side name -> (codex dotted name, wire type). Namespaced tools are
-        // re-mapped so the codex CLI receives e.g. `multi_agent_v1.spawn_agent`
-        // rather than the hyphenated chat name.
-        let (codex_name, tool_type) = tool_types.get(&name).cloned().unwrap_or_else(|| (name.clone(), "function".to_string()));
+        // Chat-side name -> (codex namespace, codex name, wire type). Namespaced
+        // tools are re-mapped so the codex CLI receives a `custom_tool_call`
+        // with the separate `namespace`/`name` fields it routes on.
+        let (namespace, codex_name, tool_type) = tool_types
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| (String::new(), name.clone(), "function".to_string()));
         let call_id = value
             .get("id")
             .and_then(Value::as_str)
@@ -1019,6 +1036,7 @@ async fn append_function_call_delta(
                 item_id: format!("fc-{}", Uuid::new_v4()),
                 call_id,
                 name: codex_name,
+                namespace,
                 arguments: String::new(),
                 output_index,
                 started: false,
@@ -1026,29 +1044,43 @@ async fn append_function_call_delta(
             },
         );
     }
-    let (item_id, call_id, name, output_index, tool_type, started) = {
+    let (item_id, call_id, name, namespace, output_index, tool_type, started) = {
         let call = context.tool_calls.get_mut(&index).unwrap();
         if let Some(id) = value.get("id").and_then(Value::as_str) {
             call.call_id = id.to_string();
         }
         if let Some(name) = &incoming_name {
-            if let Some((codex_name, mapped)) = tool_types.get(name) {
+            if let Some((ns, codex_name, mapped)) = tool_types.get(name) {
+                call.namespace = ns.clone();
                 call.name = codex_name.clone();
                 call.tool_type = mapped.clone();
             }
         }
-        (call.item_id.clone(), call.call_id.clone(), call.name.clone(), call.output_index, call.tool_type.clone(), call.started)
+        (
+            call.item_id.clone(),
+            call.call_id.clone(),
+            call.name.clone(),
+            call.namespace.clone(),
+            call.output_index,
+            call.tool_type.clone(),
+            call.started,
+        )
     };
     if !started {
         context.tool_calls.get_mut(&index).unwrap().started = true;
+        let item = if tool_type == "custom" {
+            let mut value = json!({ "id": item_id, "type": "custom_tool_call", "status": "in_progress", "call_id": call_id, "name": name, "input": "" });
+            if !namespace.is_empty() {
+                value.as_object_mut().unwrap().insert("namespace".to_string(), json!(namespace));
+            }
+            value
+        } else {
+            json!({ "id": item_id, "type": "function_call", "status": "in_progress", "call_id": call_id, "name": name, "arguments": "" })
+        };
         write_sse(writer, "response.output_item.added", &json!({
             "type": "response.output_item.added",
             "output_index": output_index,
-            "item": if tool_type == "custom" {
-                json!({ "id": item_id, "type": "custom_tool_call", "status": "in_progress", "call_id": call_id, "name": name, "input": "" })
-            } else {
-                json!({ "id": item_id, "type": "function_call", "status": "in_progress", "call_id": call_id, "name": name, "arguments": "" })
-            }
+            "item": item
         }))
         .await?;
     }
@@ -1110,15 +1142,24 @@ async fn finalize_responses_stream(
         }))
         .await?;
     }
-    let mut calls: Vec<(i64, String, String, String, String, i64, String)> = context
+    let mut calls: Vec<(i64, String, String, String, String, String, i64, String)> = context
         .tool_calls
         .values()
         .map(|call| {
-            (call.index, call.item_id.clone(), call.call_id.clone(), call.name.clone(), call.arguments.clone(), call.output_index, call.tool_type.clone())
+            (
+                call.index,
+                call.item_id.clone(),
+                call.call_id.clone(),
+                call.name.clone(),
+                call.namespace.clone(),
+                call.arguments.clone(),
+                call.output_index,
+                call.tool_type.clone(),
+            )
         })
         .collect();
     calls.sort_by_key(|call| call.0);
-    for (_, item_id, call_id, name, arguments, output_index, tool_type) in &calls {
+    for (_, item_id, call_id, name, namespace, arguments, output_index, tool_type) in &calls {
         if tool_type == "custom" {
             let input = custom_tool_input(arguments);
             write_sse(writer, "response.custom_tool_call_input.delta", &json!({
@@ -1144,14 +1185,18 @@ async fn finalize_responses_stream(
             }))
             .await?;
         }
+        let mut item = if tool_type == "custom" {
+            json!({ "id": item_id, "type": "custom_tool_call", "status": "completed", "call_id": call_id, "name": name, "input": custom_tool_input(arguments) })
+        } else {
+            json!({ "id": item_id, "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": arguments })
+        };
+        if tool_type == "custom" && !namespace.is_empty() {
+            item.as_object_mut().unwrap().insert("namespace".to_string(), json!(namespace));
+        }
         write_sse(writer, "response.output_item.done", &json!({
             "type": "response.output_item.done",
             "output_index": output_index,
-            "item": if tool_type == "custom" {
-                json!({ "id": item_id, "type": "custom_tool_call", "status": "completed", "call_id": call_id, "name": name, "input": custom_tool_input(arguments) })
-            } else {
-                json!({ "id": item_id, "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": arguments })
-            }
+            "item": item
         }))
         .await?;
     }
@@ -1215,12 +1260,16 @@ async fn finalize_responses_stream(
     if context.reasoning_started {
         output.push(json!({ "id": context.reasoning_id, "type": "reasoning", "status": "completed", "summary": [{ "type": "summary_text", "text": context.reasoning }] }));
     }
-    for (_, item_id, call_id, name, arguments, _, tool_type) in &calls {
-        output.push(if tool_type == "custom" {
+    for (_, item_id, call_id, name, namespace, arguments, _, tool_type) in &calls {
+        let mut item = if tool_type == "custom" {
             json!({ "id": item_id, "type": "custom_tool_call", "status": "completed", "call_id": call_id, "name": name, "input": custom_tool_input(arguments) })
         } else {
             json!({ "id": item_id, "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": arguments })
-        });
+        };
+        if tool_type == "custom" && !namespace.is_empty() {
+            item.as_object_mut().unwrap().insert("namespace".to_string(), json!(namespace));
+        }
+        output.push(item);
     }
     if let Some(message) = &message {
         output.push(message.clone());
