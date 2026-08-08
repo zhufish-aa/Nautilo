@@ -378,6 +378,8 @@ export interface Session {
   providerContextSyncedAt?: string;
   /** Nautilo runtime-tool contract installed into the native provider thread. */
   runtimeToolVersion?: number;
+  /** Last context window reported by the provider itself; wins over stale model-catalog entries. */
+  providerContextWindow?: number;
   unreadCount: number;
   lastMessageAt?: string;
   createdAt: string;

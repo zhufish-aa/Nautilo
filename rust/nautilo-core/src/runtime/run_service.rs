@@ -292,7 +292,15 @@ impl RunService {
                     None
                 }
             });
-        let mut context_window = configured_context_window;
+        // A window previously reported by the provider itself wins over the
+        // configured catalog entry — catalogs go stale (K3-256k catalogs
+        // 256k while the provider actually runs 1M), and the kimi usage
+        // fallback divides by this value.
+        let mut context_window = session
+            .get("providerContextWindow")
+            .and_then(Value::as_i64)
+            .filter(|window| *window > 0)
+            .or(configured_context_window);
         let provider_id = agent.get("providerId").and_then(Value::as_str).unwrap_or("");
         if context_window.is_none() {
             let discovery = self.adapters
@@ -881,13 +889,31 @@ impl RunService {
                 }
                 None
             }
-            AdapterEvent::Usage { input_tokens, output_tokens, context_used, context_window, .. } => {
+            AdapterEvent::Usage { input_tokens, output_tokens, context_used, context_window, raw, .. } => {
                 let _ = self.events.append(run, session, "usage.updated", json!({
                     "inputTokens": input_tokens.map(Value::from).unwrap_or(Value::Null),
                     "outputTokens": output_tokens.map(Value::from).unwrap_or(Value::Null),
                     "contextUsed": context_used.map(Value::from).unwrap_or(Value::Null),
                     "contextWindow": context.context_window_override.or(*context_window).map(Value::from).unwrap_or(Value::Null)
                 }));
+                // Provider-reported windows are ground truth (raw is set only
+                // on live provider usage, not on computed fallbacks): persist
+                // the window so future runs can prefer it over a stale model
+                // catalog entry (e.g. K3-256k catalogs 256k, provider is 1M).
+                if raw.is_some() {
+                    if let Some(window) = context_window.filter(|w| *w > 0) {
+                        let guard = self.db.lock().unwrap();
+                        let repos = Repositories::new(&guard.raw);
+                        if let Ok(Some(current)) = repos.sessions().get(session.get("id").and_then(Value::as_str).unwrap_or("")) {
+                            if current.get("providerContextWindow").and_then(Value::as_i64) != Some(window) {
+                                let mut updated = current.as_object().cloned().unwrap_or_default();
+                                updated.insert("providerContextWindow".to_string(), json!(window));
+                                updated.insert("updatedAt".to_string(), json!(now_iso()));
+                                let _ = repos.sessions().save(&Value::Object(updated));
+                            }
+                        }
+                    }
+                }
                 None
             }
             AdapterEvent::Commands { commands, .. } => {

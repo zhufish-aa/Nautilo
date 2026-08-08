@@ -1,4 +1,5 @@
 import { open, readdir, stat } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AdapterEvent } from "../types.js";
@@ -11,12 +12,35 @@ export async function readKimiSessionUsage(
   contextWindow: number | undefined,
   kimiHome = process.env.KIMI_CODE_HOME || join(homedir(), ".kimi-code")
 ): Promise<AdapterEvent | undefined> {
-  if (!contextWindow) return undefined;
+  // The wire log's maxTokens is the REMAINING context, so the denominator
+  // must be the window the CLI itself runs with — its own config.toml, not
+  // the desktop's model catalog (catalogs go stale: K3-256k catalogs 256k
+  // while the CLI runs k3 at 1M, which clamped every reading to 0).
+  const window = readCliConfiguredWindow(kimiHome) ?? contextWindow;
+  if (!window) return undefined;
   const wirePath = await findWirePath(join(kimiHome, "sessions"), providerSessionId);
   if (!wirePath) return undefined;
   const text = await readTail(wirePath);
-  const used = parseKimiWireContextUsed(text, contextWindow);
-  return used === undefined ? undefined : { kind: "usage", contextUsed: used, contextWindow };
+  const used = parseKimiWireContextUsed(text, window);
+  return used === undefined ? undefined : { kind: "usage", contextUsed: used, contextWindow: window };
+}
+
+/** Reads `max_context_size` from the CLI's own config.toml (plain line scan;
+ * the file is small and the key is top-level). */
+function readCliConfiguredWindow(kimiHome: string): number | undefined {
+  let text: string;
+  try {
+    text = readFileSync(join(kimiHome, "config.toml"), "utf8");
+  } catch {
+    return undefined;
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#") || !trimmed.startsWith("max_context_size")) continue;
+    const value = Number(trimmed.split("=")[1]?.trim().replace(/^"|"$/g, ""));
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
 }
 
 export function parseKimiWireContextUsed(text: string, contextWindow: number): number | undefined {

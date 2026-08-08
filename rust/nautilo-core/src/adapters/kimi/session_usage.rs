@@ -14,11 +14,16 @@ pub async fn read_kimi_session_usage(
     context_window: Option<i64>,
     kimi_home: Option<&str>,
 ) -> Option<AdapterEvent> {
-    let context_window = context_window?;
     let home = kimi_home
         .map(str::to_string)
         .or_else(|| std::env::var("KIMI_CODE_HOME").ok().filter(|v| !v.trim().is_empty()))
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| Path::new(".").to_path_buf()).join(".kimi-code").to_string_lossy().into_owned());
+    // The wire log's maxTokens is the REMAINING context, so the denominator
+    // must be the window the CLI itself runs with — its own config.toml, not
+    // the desktop's model catalog (catalogs go stale: K3-256k catalogs 256k
+    // while the CLI runs k3 at 1M, which clamped every reading to 0).
+    let context_window = read_cli_configured_window(Path::new(&home)).or(context_window);
+    let context_window = context_window?;
     let wire_path = find_wire_path(Path::new(&home).join("sessions"), provider_session_id).await?;
     let text = read_tail(&wire_path).await?;
     let used = parse_kimi_wire_context_used(&text, context_window)?;
@@ -31,6 +36,24 @@ pub async fn read_kimi_session_usage(
         context_window: Some(context_window),
         raw: None,
     })
+}
+
+/// Reads `max_context_size` from the CLI's own config.toml (plain line scan;
+/// the file is small and the key is top-level).
+fn read_cli_configured_window(home: &Path) -> Option<i64> {
+    let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || !line.starts_with("max_context_size") {
+            continue;
+        }
+        if let Some(value) = line.split_once('=').and_then(|(_, raw)| raw.trim().trim_matches('"').parse::<i64>().ok()) {
+            if value > 0 {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 pub fn parse_kimi_wire_context_used(text: &str, context_window: i64) -> Option<i64> {

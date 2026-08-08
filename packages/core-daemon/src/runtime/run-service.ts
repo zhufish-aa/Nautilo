@@ -174,7 +174,13 @@ export class RunService {
     // live discovery (kimi/claude) only runs when nothing is configured.
     const configuredContextWindow = agent.models?.find((entry) => entry.id === session.model)?.contextWindow
       ?? (!session.model && agent.models?.length === 1 ? agent.models[0].contextWindow : undefined);
-    let contextWindow: number | undefined = configuredContextWindow;
+    // A window previously reported by the provider itself wins over the
+    // configured catalog entry — catalogs go stale (K3-256k catalogs 256k
+    // while the provider actually runs 1M), and the kimi usage fallback
+    // divides by this value.
+    let contextWindow: number | undefined = session.providerContextWindow && session.providerContextWindow > 0
+      ? session.providerContextWindow
+      : configuredContextWindow;
     if (!contextWindow && this.adapters.find(agent.providerId)?.descriptor?.contextWindowDiscovery) {
       const catalog = await this.adapters.listModels(agent).catch(() => undefined);
       const modelId = session.model || catalog?.defaultModel;
@@ -459,12 +465,23 @@ export class RunService {
         runtimeToolVersion: context.runtimeToolVersion ?? current.runtimeToolVersion,
         updatedAt: now
       });
-    } else if (event.kind === "usage") this.events.append(session, run, "usage.updated", {
-      inputTokens: event.inputTokens,
-      outputTokens: event.outputTokens,
-      contextUsed: event.contextUsed,
-      contextWindow: context.contextWindowOverride ?? event.contextWindow
-    });
+    } else if (event.kind === "usage") {
+      this.events.append(session, run, "usage.updated", {
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        contextUsed: event.contextUsed,
+        contextWindow: context.contextWindowOverride ?? event.contextWindow
+      });
+      // Provider-reported windows are ground truth (raw is set only on live
+      // provider usage, not on computed fallbacks): persist the window so
+      // future runs can prefer it over a stale model-catalog entry.
+      if (event.raw && event.contextWindow && event.contextWindow > 0) {
+        const current = this.database.sessions.get(session.id);
+        if (current && current.providerContextWindow !== event.contextWindow) {
+          this.database.sessions.save({ ...current, providerContextWindow: event.contextWindow, updatedAt: new Date().toISOString() });
+        }
+      }
+    }
     else if (event.kind === "commands") this.events.append(session, run, "provider.commands_updated", {
       providerId: this.database.agents.get(session.agentInstanceId ?? "")?.providerId ?? "unknown",
       commands: event.commands

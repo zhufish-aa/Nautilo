@@ -273,7 +273,10 @@ pub fn resolve_codex_invocation(executable: &str, args: &[String], path_value: O
     let node = if bundled_node.exists() {
         bundled_node.to_string_lossy().into_owned()
     } else {
-        std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "node".to_string())
+        // The TS daemon fell back to process.execPath here, which WAS node;
+        // in the Rust daemon current_exe() is nautilo-core itself and cannot
+        // run a JS entrypoint. Find a real node on the effective PATH.
+        find_on_path("node.exe", path_value).unwrap_or_else(|| "node".to_string())
     };
     let mut full_args = vec![entrypoint.to_string_lossy().into_owned()];
     full_args.extend(args.iter().cloned());
@@ -291,6 +294,22 @@ fn npm_bin_directory(executable: &str, path_value: Option<&str>) -> Option<Strin
     for directory in path_value.split(';').filter(|d| !d.is_empty()) {
         if Path::new(directory).join("node_modules").join("@openai").join("codex").join("bin").join("codex.js").exists() {
             return Some(directory.to_string());
+        }
+    }
+    None
+}
+
+/// Locates an executable by name across the effective PATH (falling back to
+/// the process PATH when the caller did not override it).
+fn find_on_path(name: &str, path_value: Option<&str>) -> Option<String> {
+    let path_value = match path_value {
+        Some(value) => value.to_string(),
+        None => std::env::var("PATH").unwrap_or_default(),
+    };
+    for directory in path_value.split(';').filter(|d| !d.is_empty()) {
+        let candidate = Path::new(directory).join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
         }
     }
     None
