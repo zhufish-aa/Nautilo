@@ -47,6 +47,10 @@ const standaloneHydrated = new Set<string>();
 // previous session stays cached so switching back is instant; anything older
 // without a live poll is evicted.
 const standaloneRecent: string[] = [];
+// Refcount of mounted workbenches currently displaying a session (Sessions
+// and Work pages stay mounted at the same time). An evicted-but-displayed
+// session would blank its chat until reopened, so display wins over LRU.
+const standaloneDisplayed = new Map<string, number>();
 // Sessions whose daemon queue has been fetched once; afterwards the
 // session.follow_up_queued/cancelled events keep the store list in sync.
 const followUpListSynced = new Set<string>();
@@ -394,6 +398,7 @@ function clearSessionRuntime(sessionId: string): void {
   standaloneMessageCache.delete(sessionId);
   standaloneArtifactCache.delete(sessionId);
   standaloneHydrated.delete(sessionId);
+  standaloneDisplayed.delete(sessionId);
   const recentIndex = standaloneRecent.indexOf(sessionId);
   if (recentIndex !== -1) standaloneRecent.splice(recentIndex, 1);
   // Cancel a coalesced render still waiting for its animation frame; letting it
@@ -441,10 +446,21 @@ function touchStandaloneRecent(sessionId: string): void {
   if (standaloneRecent.length > 2) standaloneRecent.pop();
 }
 
+/** Marks a session as displayed by a mounted workbench; returns the unregister. */
+export function registerStandaloneSessionView(sessionId: string): () => void {
+  standaloneDisplayed.set(sessionId, (standaloneDisplayed.get(sessionId) ?? 0) + 1);
+  return () => {
+    const count = (standaloneDisplayed.get(sessionId) ?? 1) - 1;
+    if (count <= 0) standaloneDisplayed.delete(sessionId);
+    else standaloneDisplayed.set(sessionId, count);
+  };
+}
+
 function evictStandaloneViewCaches(): void {
   const keep = new Set(standaloneRecent);
   for (const sessionId of [...standaloneHydrated]) {
     if (keep.has(sessionId)) continue;
+    if (standaloneDisplayed.has(sessionId)) continue;
     if (standaloneStreams.has(sessionId)) continue;
     standaloneHydrated.delete(sessionId);
     standaloneEventCache.delete(sessionId);
