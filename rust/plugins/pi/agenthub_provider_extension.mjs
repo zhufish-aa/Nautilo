@@ -57,7 +57,7 @@ class StdioMcpClient {
 
   async start() {
     if (!this.config.command) throw new Error("STDIO MCP server is missing command");
-    const useShell = process.platform === "win32" && /\\.(cmd|bat)$/i.test(this.config.command);
+    const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(this.config.command);
     this.child = spawn(this.config.command, this.config.args || [], {
       cwd: this.config.cwd || undefined,
       env: { ...process.env, ...(this.config.env || {}) },
@@ -68,7 +68,7 @@ class StdioMcpClient {
     this.child.stdout.on("data", (chunk) => this.onData(chunk));
     this.child.stderr.on("data", (chunk) => {
       const text = String(chunk).trim();
-      if (text) process.stderr.write("[AgentHub MCP " + this.config.name + "] " + text + "\\n");
+      if (text) process.stderr.write("[AgentHub MCP " + this.config.name + "] " + text + "\n");
     });
     this.child.on("close", (code) => {
       const error = new Error("MCP server " + this.config.name + " exited with code " + String(code));
@@ -89,7 +89,7 @@ class StdioMcpClient {
 
   onData(chunk) {
     this.buffer += String(chunk);
-    const lines = this.buffer.split(/\\r?\\n/);
+    const lines = this.buffer.split(/\r?\n/);
     this.buffer = lines.pop() || "";
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -106,7 +106,7 @@ class StdioMcpClient {
 
   write(message) {
     if (!this.child?.stdin?.writable) throw new Error("MCP server " + this.config.name + " is not connected");
-    this.child.stdin.write(JSON.stringify(message) + "\\n");
+    this.child.stdin.write(JSON.stringify(message) + "\n");
   }
 
   request(method, params, signal) {
@@ -192,11 +192,11 @@ class HttpMcpClient {
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/event-stream")) {
       const messages = [];
-      for (const block of text.split(/\\r?\\n\\r?\\n/)) {
-        const data = block.split(/\\r?\\n/)
+      for (const block of text.split(/\r?\n\r?\n/)) {
+        const data = block.split(/\r?\n/)
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trimStart())
-          .join("\\n");
+          .join("\n");
         if (!data || data === "[DONE]") continue;
         try { messages.push(JSON.parse(data)); } catch { /* ignore non-JSON SSE data */ }
       }
@@ -360,7 +360,7 @@ export default async function (pi) {
           const exitCode = code ?? 1;
           const text = output || "Command completed with no output";
           resolve({
-            content: [{ type: "text", text: text + "\\n\\nProcess exited with code " + exitCode }],
+            content: [{ type: "text", text: text + "\n\nProcess exited with code " + exitCode }],
             details: { exitCode },
             isError: exitCode !== 0
           });
