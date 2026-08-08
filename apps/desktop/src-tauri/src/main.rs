@@ -21,7 +21,13 @@ use shell_commands::ShellPaths;
 
 /// Same directory the Electron shell used (`app.getPath("userData")` with the
 /// sanitized package name), so user data survives the migration untouched.
+/// AGENTHUB_DATA_DIR overrides it — test instances must NEVER share the real
+/// directory: the daemon rotates core.token on startup, which would break the
+/// auth of a concurrently running instance.
 fn legacy_user_data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("AGENTHUB_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("@agenthub")

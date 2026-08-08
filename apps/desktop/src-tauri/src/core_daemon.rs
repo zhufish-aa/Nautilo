@@ -112,9 +112,24 @@ impl CoreDaemonClient {
             .trim()
             .to_string();
 
-        let mut stream = tokio::net::windows::named_pipe::ClientOptions::new()
-            .open(&socket_path)
-            .map_err(|e| format!("Core Daemon connect failed: {e}"))?;
+        // The daemon accepts one pipe instance at a time; a client that
+        // connects in the gap gets ERROR_PIPE_BUSY (os error 231) and must
+        // wait for the next instance — Node's net.connect did this wait
+        // internally, so the shell has to retry explicitly.
+        let mut stream = None;
+        for attempt in 0..100 {
+            match tokio::net::windows::named_pipe::ClientOptions::new().open(&socket_path) {
+                Ok(pipe) => {
+                    stream = Some(pipe);
+                    break;
+                }
+                Err(error) if error.raw_os_error() == Some(231) && attempt < 99 => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(format!("Core Daemon connect failed: {error}")),
+            }
+        }
+        let mut stream = stream.ok_or("Core Daemon connect failed: pipe busy")?;
         let (reader, mut writer) = tokio::io::split(&mut stream);
         let mut lines = BufReader::new(reader).lines();
 
