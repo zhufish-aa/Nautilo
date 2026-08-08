@@ -73,3 +73,6 @@ rust/target/
 
 # Tauri renderer build output
 apps/desktop/src-tauri/dist/
+
+# Native plugin executables synced into source dirs by scripts/sync-rust-plugins.mjs
+rust/plugins/*/agenthub-plugin-*.exe

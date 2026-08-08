@@ -105,10 +105,17 @@ if (existsSync(iconSource)) {
 // The shell resolves the daemon next to itself (packaged layout).
 copyFileSync(daemonExecutable, join(applicationDirectory, "nautilo-core.exe"));
 
+// Bundled for manual "install from local folder": plugins/<id>/ with the
+// manifest + executable, the same self-contained layout install_local needs.
 const pluginDirectory = join(applicationDirectory, "plugins");
-mkdirSync(pluginDirectory, { recursive: true });
 for (const name of pluginNames) {
-  copyFileSync(join(rustTargetDirectory, name), join(pluginDirectory, name));
+  const id = name.replace(/^agenthub-plugin-(.+)\.exe$/, "$1");
+  const target = join(pluginDirectory, id);
+  mkdirSync(target, { recursive: true });
+  copyFileSync(join(rustTargetDirectory, name), join(target, name));
+  const manifest = join(repositoryRoot, "rust", "plugins", id, "agenthub-plugin.json");
+  if (!existsSync(manifest)) throw new Error(`Required plugin manifest is missing: ${manifest}`);
+  copyFileSync(manifest, join(target, "agenthub-plugin.json"));
 }
 
 const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
