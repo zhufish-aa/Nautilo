@@ -27,6 +27,9 @@ function showFatalOverlay(text: string): void {
   document.body.appendChild(overlay);
 }
 window.addEventListener("error", (event) => {
+  // Benign browser notice: a ResizeObserver callback changed layout within
+  // the same frame. It is not an app failure — don't scare the user.
+  if (event.message.includes("ResizeObserver loop")) return;
   showFatalOverlay(`${event.message}\n${event.error?.stack ?? ""}`.trim());
 });
 window.addEventListener("unhandledrejection", (event) => {
