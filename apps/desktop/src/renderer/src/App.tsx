@@ -69,17 +69,7 @@ function useDocumentPreferences(): void {
 export default function App(): JSX.Element {
   useDocumentPreferences();
   const reduceMotion = useSettingsStore((state) => state.reduceMotion);
-
-  // Tauri: reveal the window the moment React has mounted — the page is
-  // already rendered, so there is no dark frame. No-op on Electron.
-  useEffect(() => {
-    if (window.__TAURI_INTERNALS__) {
-      const win = getCurrentWindow();
-      void win.show().catch(() => {});
-      void win.setFocus().catch(() => {});
-    }
-  }, []);
-
+  
   useEffect(() => {
     void initializeCoreState().catch((error) => console.error("Failed to initialize Core Daemon state", error));
   }, []);

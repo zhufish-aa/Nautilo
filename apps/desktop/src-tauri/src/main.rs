@@ -115,7 +115,7 @@ fn main() {
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(8)).await;
+                    tokio::time::sleep(Duration::from_millis(800)).await;
                     if let Some(w) = app_handle.get_webview_window("main") {
                         let _ = w.show();
                         let _ = w.set_focus();
