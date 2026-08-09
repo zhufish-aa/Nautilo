@@ -19,6 +19,16 @@ export function artifactUrlForPath(path: string): string {
   return `${base}?path=${encodeURIComponent(path)}`;
 }
 
+/**
+ * Downscaled variant for inline timeline display. A full-resolution paste
+ * decodes to tens of MB in the webview even at thumbnail size; the shell
+ * serves a disk-cached downscale for this URL. The full image still loads in
+ * the lightbox via artifactUrlForPath.
+ */
+export function artifactThumbUrlForPath(path: string): string {
+  return `${artifactUrlForPath(path)}&thumb=1`;
+}
+
 /** Extracts the local file path from an agenthub-artifact…?path= URL. */
 export function artifactPathFromSrc(src: string): string | undefined {
   if (!src.startsWith("agenthub-artifact:") && !src.startsWith("http://agenthub-artifact.localhost/")) return undefined;

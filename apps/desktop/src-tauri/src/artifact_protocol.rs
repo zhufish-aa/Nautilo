@@ -96,6 +96,16 @@ pub fn handle(request: Request<Vec<u8>>, data_dir: &Path, workspace_roots: &Work
     if !allowed_roots.iter().any(|root| is_within(root, &candidate)) {
         return respond(StatusCode::FORBIDDEN, "Forbidden");
     }
+    // Timeline thumbnails: a 2560px screenshot decodes to ~14 MB in the
+    // webview even when rendered 300 px tall; a long session pastes dozens.
+    // Serve a downscaled, disk-cached JPEG instead (full image still loads in
+    // the lightbox via the plain URL).
+    let wants_thumb = url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| key == "thumb" && value == "1");
+    if wants_thumb {
+        if let Some(response) = thumbnail_response(&candidate, data_dir) {
+            return response;
+        }
+    }
     match std::fs::read(&candidate) {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
@@ -103,5 +113,94 @@ pub fn handle(request: Request<Vec<u8>>, data_dir: &Path, workspace_roots: &Work
             .body(bytes)
             .unwrap(),
         Err(_) => respond(StatusCode::NOT_FOUND, "Artifact not found"),
+    }
+}
+
+/// Longest-edge cap for timeline thumbnails (display is ~300 px tall, hi-dpi
+/// headroom included).
+const THUMB_MAX_EDGE: u32 = 640;
+
+fn thumbnail_response(path: &Path, data_dir: &Path) -> Option<Response<Vec<u8>>> {
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase())?;
+    // gif stays passthrough (animation); svg/avif are tiny or unsupported.
+    if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp") {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < 128 * 1024 {
+        return None; // already small — a re-encode would not pay off
+    }
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    let thumb_dir = data_dir.join("attachments").join(".thumbs");
+    let thumb_path = thumb_dir.join(format!("{:x}-{:x}.jpg", fnv1a(path.to_string_lossy().as_bytes()), mtime));
+    if let Some(cached) = std::fs::read(&thumb_path).ok() {
+        return Some(jpeg_response(cached));
+    }
+    let image = image::load_from_memory(&bytes).ok()?;
+    if image.width() <= THUMB_MAX_EDGE && image.height() <= THUMB_MAX_EDGE {
+        return None;
+    }
+    let thumb = image.thumbnail(THUMB_MAX_EDGE, THUMB_MAX_EDGE);
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    thumb.write_to(&mut buffer, image::ImageFormat::Jpeg).ok()?;
+    let jpeg = buffer.into_inner();
+    let _ = std::fs::create_dir_all(&thumb_dir);
+    let _ = std::fs::write(&thumb_path, &jpeg);
+    Some(jpeg_response(jpeg))
+}
+
+fn jpeg_response(bytes: Vec<u8>) -> Response<Vec<u8>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "image/jpeg")
+        .header("Cache-Control", "public, max-age=31536000, immutable")
+        .body(bytes)
+        .unwrap()
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumbnail_downscales_large_images_and_caches() {
+        let dir = std::env::temp_dir().join(format!("nautilo-thumb-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("big.png");
+        // Random pixels: a solid-color PNG compresses below the size floor
+        // and would legitimately skip thumbnailing.
+        let mut pixels = vec![0u8; 2560 * 1400 * 3];
+        let mut seed: u64 = 42;
+        for byte in pixels.iter_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *byte = (seed >> 33) as u8;
+        }
+        let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_raw(2560, 1400, pixels).unwrap());
+        image.save(&source).unwrap();
+
+        let first = thumbnail_response(&source, &dir).expect("thumbnail expected");
+        assert_eq!(first.headers().get("Content-Type").unwrap(), "image/jpeg");
+        let decoded = image::load_from_memory(first.body()).unwrap();
+        assert!(decoded.width() <= THUMB_MAX_EDGE && decoded.height() <= THUMB_MAX_EDGE);
+
+        // Second call serves the disk cache (same bytes).
+        let second = thumbnail_response(&source, &dir).expect("cached thumbnail expected");
+        assert_eq!(first.body(), second.body());
+
+        // Small images pass through untouched (None → original bytes served).
+        let small = dir.join("small.png");
+        image::DynamicImage::new_rgb8(64, 64).save(&small).unwrap();
+        assert!(thumbnail_response(&small, &dir).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,7 +3,7 @@ import { ImageOff } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { openLightbox } from "../../stores/lightbox";
-import { artifactPathFromSrc, popupImageMenu } from "./media-actions";
+import { artifactPathFromSrc, artifactThumbUrlForPath, popupImageMenu } from "./media-actions";
 
 /**
  * Conversation image: click opens the lightbox, right-click shows the native
@@ -25,6 +25,10 @@ export function TimelineImage({
   const { t } = useI18n();
   const [failed, setFailed] = useState(false);
   const resolvedPath = path ?? artifactPathFromSrc(src);
+  // Inline display uses the shell's downscaled thumbnail (full-resolution
+  // pastes decode to tens of MB each in the webview); the lightbox and the
+  // context menu keep the original URL.
+  const displaySrc = resolvedPath ? artifactThumbUrlForPath(resolvedPath) : src;
 
   if (failed) {
     return (
@@ -37,9 +41,11 @@ export function TimelineImage({
 
   return (
     <img
-      src={src}
+      src={displaySrc}
       alt={alt}
       title={t("sessions.media.enlargeHint")}
+      loading="lazy"
+      decoding="async"
       onError={() => setFailed(true)}
       onClick={() => openLightbox({ src, name: name ?? alt, path: resolvedPath })}
       onContextMenu={(event) => {
