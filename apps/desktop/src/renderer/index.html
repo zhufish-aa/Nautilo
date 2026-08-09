@@ -1,28 +1,12 @@
 <!doctype html>
 <html lang="zh-CN" class="dark">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Nautilo</title>
-  </head>
-  <body>
-    <div id="root">
-      <!-- Static splash: covers the window between WebView init and React's
-           first paint so startup shows feedback instead of a black flash. -->
-      <div style="position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:#090b10;color:#8b93a7;font:13px/1.5 system-ui,sans-serif">
-        <div style="width:28px;height:28px;border:3px solid rgba(255,255,255,.12);border-top-color:#4f9cf9;border-radius:50%;animation:ah-spin .8s linear infinite"></div>
-        <div>Nautilo 加载中…</div>
-      </div>
-      <style>@keyframes ah-spin{to{transform:rotate(360deg)}}</style>
-    </div>
-    <script>
-      // Reveal the window the moment this static splash is in the DOM — the
-      // splash (not a black frame) is what the user sees first, and React/data
-      // can finish underneath it. Tauri only; no-op elsewhere.
-      if (window.__TAURI_INTERNALS__) {
-        try { window.__TAURI_INTERNALS__.invoke("show_main_window").catch(function () {}); } catch (e) {}
-      }
-    </script>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nautilo</title>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.tsx"></script>
+</body>
 </html>
