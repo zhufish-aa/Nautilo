@@ -538,7 +538,11 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
   // without membership the re-populated caches below would leak forever.
   standaloneHydrated.add(uiSession.id);
   standaloneMessageCache.set(uiSession.id, detail.messages);
-  standaloneEventCache.set(uiSession.id, replay.events);
+  const existingEvents = standaloneEventCache.get(uiSession.id);
+  standaloneEventCache.set(
+    uiSession.id,
+    existingEvents?.length ? [...existingEvents, ...replay.events] : replay.events
+  );
   standaloneArtifactCache.set(uiSession.id, artifacts);
   ingestInteractionEvents(replay.events);
   ingestFollowUpEvents(uiSession.id, replay.events);
@@ -641,15 +645,18 @@ async function replayStandaloneEvents(sessionId: string): Promise<{ events: Runt
     subscriptionId = subscription.subscriptionId;
     standaloneSubscriptions.set(sessionId, subscriptionId);
   }
+  // Incremental: resume from the last sequence we already hold so reopening a
+  // session does not re-download the whole journal (multi-MB for long chats).
+  const afterSequence = standaloneSequences.get(sessionId) ?? 0;
   try {
-    const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId, afterSequence: 0 });
+    const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId, afterSequence });
     standaloneSequences.set(sessionId, replay.lastSequence);
     return replay;
   } catch {
     standaloneSubscriptions.delete(sessionId);
     const subscription = await requestCore<{ subscriptionId: string }>("event.subscribe", { sessionId });
     standaloneSubscriptions.set(sessionId, subscription.subscriptionId);
-    const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId: subscription.subscriptionId, afterSequence: 0 });
+    const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId: subscription.subscriptionId, afterSequence });
     standaloneSequences.set(sessionId, replay.lastSequence);
     return replay;
   }
