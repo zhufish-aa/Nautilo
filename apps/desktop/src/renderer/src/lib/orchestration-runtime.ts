@@ -689,11 +689,11 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
   // without membership the re-populated caches below would leak forever.
   standaloneHydrated.add(uiSession.id);
   standaloneMessageCache.set(uiSession.id, detail.messages);
-  const existingEvents = standaloneEventCache.get(uiSession.id);
-  standaloneEventCache.set(
-    uiSession.id,
-    existingEvents?.length ? [...existingEvents, ...replay.events] : replay.events
-  );
+  // replayStandaloneEvents always replays from sequence 0, so it REPLACES the
+  // cache — appending doubled the journal on every hydrate (which the poll
+  // loop triggers per assistant message) and ballooned the renderer by
+  // hundreds of MB per turn.
+  standaloneEventCache.set(uiSession.id, replay.events);
   standaloneArtifactCache.set(uiSession.id, artifacts);
   ingestInteractionEvents(replay.events);
   ingestFollowUpEvents(uiSession.id, replay.events);
@@ -704,6 +704,35 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
   store._setForeground(uiSession.id, standaloneLifecycle(detail.session, run));
   store._setActiveAgentRun(uiSession.id, run && shouldPollAgentRun(run) ? run.id : undefined);
   // A new run after the known one means the oldest queued follow-up started.
+  if (run && shouldPollAgentRun(run) && knownRunId && run.id !== knownRunId) store._shiftQueuedFollowUp(uiSession.id);
+  return run;
+}
+
+/**
+ * Persistence resync for an actively polled session — skips the event replay
+ * entirely: the poll loop is already merging every event incrementally, so
+ * re-reading the whole journal here (per assistant message!) only re-parses
+ * megabytes of JSON and doubles as GC churn. Refreshes messages/artifacts/run
+ * state and re-renders from the existing event cache.
+ */
+async function refreshStandaloneSessionState(uiSession: UiSession, knownRunId?: string): Promise<AgentRun | undefined> {
+  const [detail, runs, artifacts] = await Promise.all([
+    requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: uiSession.id }),
+    requestCore<AgentRun[]>("run.list", { sessionId: uiSession.id }),
+    requestCore<Artifact[]>("artifact.list", { sessionId: uiSession.id })
+  ]);
+  const knownRun = knownRunId ? runs.find((item) => item.id === knownRunId) : undefined;
+  const activeRun = runs.find(shouldPollAgentRun);
+  const run = knownRun && shouldPollAgentRun(knownRun) ? knownRun : activeRun ?? knownRun ?? runs[0];
+  const store = useSessionsStore.getState();
+  standaloneMessageCache.set(uiSession.id, detail.messages);
+  standaloneArtifactCache.set(uiSession.id, artifacts);
+  await syncQueuedFollowUps(uiSession.id);
+  store._upsertExternalSession(toStandaloneUiSession(detail.session));
+  if (standaloneHydrated.has(uiSession.id)) renderStandaloneCache(uiSession.id);
+  store._setRunning(uiSession.id, standaloneLifecycle(detail.session, run));
+  store._setForeground(uiSession.id, standaloneLifecycle(detail.session, run));
+  store._setActiveAgentRun(uiSession.id, run && shouldPollAgentRun(run) ? run.id : undefined);
   if (run && shouldPollAgentRun(run) && knownRunId && run.id !== knownRunId) store._shiftQueuedFollowUp(uiSession.id);
   return run;
 }
@@ -1111,7 +1140,10 @@ function scheduleStandalonePoll(sessionId: string, runId: string): void {
         mergeStandaloneEvents(sessionId, update.events);
         const needsPersistenceSync = update.events.some((event) => event.type === "agent.message" || event.type === "artifact.created" || event.type === "run.completed" || event.type === "run.failed");
         if (needsPersistenceSync) {
-          const run = await hydrateStandaloneSession(session, runId);
+          // Light refresh: the event cache is already fed incrementally by
+          // this very poll loop, so a full replay here would only re-transfer
+          // the whole journal. Only the persisted side needs a resync.
+          const run = await refreshStandaloneSessionState(session, runId);
           if (!run || !shouldPollAgentRun(run)) {
             if ((useSessionsStore.getState().queuedFollowUps[sessionId]?.length ?? 0) > 0) {
               await new Promise((resolve) => setTimeout(resolve, 200));
