@@ -278,9 +278,13 @@ function CardShell({
     info: "border-info/20 bg-info/10 text-info",
     muted: "border-line bg-card-hover text-ink-3"
   };
+  // Reopening a historical session mounts many cards in one frame; only cards
+  // from the live window (or a freshly streamed event) earn the spring-in so
+  // the first frame lays out statically instead of animating dozens at once.
+  const animateIn = typeof time === "string" && Date.now() - new Date(time).getTime() < 10_000;
   return (
     <motion.article
-      initial={{ opacity: 0, y: 14, scale: 0.985 }}
+      initial={animateIn ? { opacity: 0, y: 14, scale: 0.985 } : false}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 320, damping: 28 }}
       className={cn("flex gap-3", className)}
@@ -321,7 +325,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
   if (isSystem) {
     return (
       <motion.p
-        initial={{ opacity: 0 }}
+        initial={animateIn ? { opacity: 0 } : false}
         animate={{ opacity: 1 }}
         className="log-line py-1 text-center text-ink-3"
       >
@@ -439,8 +443,9 @@ function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind
   if (event.data.phase === "completed") {
     return null;
   }
+  const animateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
   return (
-    <motion.div initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} className="log-line flex items-center gap-2 py-0.5 text-ink-3">
+    <motion.div initial={animateIn ? { opacity: 0, x: -6 } : false} animate={{ opacity: 1, x: 0 }} className="log-line flex items-center gap-2 py-0.5 text-ink-3">
       <span className="relative mx-1 flex h-1.5 w-1.5" aria-hidden>
         <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" />
         <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-br from-accent to-info" />
@@ -487,8 +492,11 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
     setShowJumpToLatest(!atLatest);
   };
 
+  // Live reasoning streams in place; historical rows (reopened sessions) lay
+  // out statically so the first frame does not animate every card.
+  const animateIn = Boolean(event.data.streaming) || Date.now() - new Date(event.timestamp).getTime() < 10_000;
   return (
-    <motion.article initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="reasoning-card rounded-xl border border-line bg-card/70">
+    <motion.article initial={animateIn ? { opacity: 0, y: 6 } : false} animate={{ opacity: 1, y: 0 }} className="reasoning-card rounded-xl border border-line bg-card/70">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -543,8 +551,9 @@ function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { 
   const details = Boolean(resolvedFileDiff || input || output);
   const zh = locale === "zh-CN";
   const label = toolActivityLabel(toolName, status, input, locale);
+  const animateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
   return (
-    <motion.article initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} className="flex gap-2.5 text-[13px]">
+    <motion.article initial={animateIn ? { opacity: 0, y: 4 } : false} animate={{ opacity: 1, y: 0 }} className="flex gap-2.5 text-[13px]">
       <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-info/10 text-info">
         {status === "running" ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Wrench className="h-3.5 w-3.5" aria-hidden />}
       </span>
@@ -901,9 +910,10 @@ function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
             ? preview.data.command
             : "";
 
+  const animateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
   return (
     <motion.article
-      initial={{ opacity: 0, y: 10, scale: 0.99 }}
+      initial={animateIn ? { opacity: 0, y: 10, scale: 0.99 } : false}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 320, damping: 28 }}
       className={cn(
@@ -1305,21 +1315,24 @@ function TimelineEventViewImpl({
       return <HandoffCard event={event as TimelineEvent & { data: { kind: "handoff" } }} t={t} locale={locale} onOpenSession={onOpenSession} />;
     case "run_status":
       if (data.run.status === "completed") return null;
+      const runStatusAnimateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
       return (
-        <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line py-0.5 text-center text-ink-3">
+        <motion.p initial={runStatusAnimateIn ? { opacity: 0 } : false} animate={{ opacity: 1 }} className="log-line py-0.5 text-center text-ink-3">
           — {t(`sessions.status.${data.run.status === "waiting_approval" ? "waiting_approval" : data.run.status}` as MessageKey)}
           {data.run.reason ? ` · ${data.run.reason}` : ""} · {formatDateTime(event.timestamp, locale)} —
         </motion.p>
       );
     case "approval_resolved":
+      const approvalAnimateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
       return (
-        <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line py-0.5 text-center text-ink-3">
+        <motion.p initial={approvalAnimateIn ? { opacity: 0 } : false} animate={{ opacity: 1 }} className="log-line py-0.5 text-center text-ink-3">
           — {t(data.decision === "approved" ? "sessions.cards.approved" : "sessions.cards.rejected")} · {formatDateTime(event.timestamp, locale)} —
         </motion.p>
       );
     case "checkpoint_reverted":
+      const checkpointAnimateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
       return (
-        <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line py-0.5 text-center text-ink-3">
+        <motion.p initial={checkpointAnimateIn ? { opacity: 0 } : false} animate={{ opacity: 1 }} className="log-line py-0.5 text-center text-ink-3">
           — {t("sessions.checkpoint.reverted", { restored: data.restored.length, removed: data.removed.length })}
           {data.warning ? ` · ${t("sessions.checkpoint.truncatedWarning")}` : ""} · {formatDateTime(event.timestamp, locale)} —
         </motion.p>
