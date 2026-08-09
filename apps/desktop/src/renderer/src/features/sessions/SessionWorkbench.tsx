@@ -356,10 +356,7 @@ export function SessionWorkbench({
       : undefined;
     timelineRows.push(
       shell(turn.key, (
-        <section
-          className={cn("turn-block pl-6", live && "motion-safe:animate-[rise-in_0.28s_ease-out_both]")}
-          data-live={live}
-        >
+        <section className="turn-block pl-6 motion-safe:animate-[rise-in_0.28s_ease-out_both]" data-live={live}>
           {turn.header && (
             <TimelineEventView
               event={turn.header}
