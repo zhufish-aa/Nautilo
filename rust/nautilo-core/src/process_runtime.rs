@@ -67,6 +67,13 @@ pub struct ProcessHandle {
 }
 
 impl ProcessHandle {
+    /// True while the child process is still running (false after a natural
+    /// exit or a kill). Lets a reused app-server connection detect that its
+    /// backing process died before handing it to the next turn.
+    pub fn is_alive(&self) -> bool {
+        !*self.exit_watch.borrow()
+    }
+
     /// Node's child.stdin.write(); delivery is best-effort and asynchronous.
     pub fn write(&self, input: &str) {
         let stdin = self.stdin.clone();

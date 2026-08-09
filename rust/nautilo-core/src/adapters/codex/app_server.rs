@@ -2,7 +2,8 @@
 //! Speaks JSON-RPC over stdio to `codex app-server --stdio`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
@@ -245,9 +246,74 @@ pub fn build_codex_app_server_args(
     Ok(args)
 }
 
-/// Starts `codex app-server --stdio` and drives one thread turn over JSON-RPC.
-pub fn start_codex_app_server(request: AdapterStartRequest, resume_session: Option<String>) -> CoreResult<AdapterRun> {
-    let model_catalog = create_codex_custom_model_catalog_file(&request.instance, request.model.as_deref())?;
+/// One resident `codex app-server` connection, reused across turns of an
+/// agent instance. This mirrors the official Codex desktop app, which keeps a
+/// single `codex.exe app-server` process alive for the app's lifetime: every
+/// turn creates or resumes a thread over the same JSON-RPC connection instead
+/// of cold-starting a CLI process per message.
+pub struct PooledCodexAppServer {
+    pub rpc: Arc<JsonRpcProcessClient>,
+    /// One turn at a time per instance: Nautilo serializes per session, but
+    /// sessions of the same instance can otherwise run in parallel and would
+    /// collide on the same RPC stream.
+    pub turn_lock: tokio::sync::Mutex<()>,
+    initialized: AtomicBool,
+    instance_key: String,
+    /// Hash of the instance/credentials/executable the process was started
+    /// with; a config edit evicts the stale connection so the next turn
+    /// cold-starts a fresh one with the new settings.
+    config_fingerprint: u64,
+    /// Temp model catalog created at cold start; removed with the process.
+    catalog_cleanup: Mutex<Option<PathBufCleanup>>,
+}
+
+static CODEX_APP_SERVER_POOL: LazyLock<Mutex<HashMap<String, Arc<PooledCodexAppServer>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn codex_instance_key(request: &AdapterStartRequest) -> String {
+    request
+        .instance
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            request
+                .instance
+                .get("executable")
+                .and_then(Value::as_str)
+                .unwrap_or("codex")
+                .to_string()
+        })
+}
+
+/// Returns the resident app-server connection for this agent instance,
+/// starting one on first use. Dead connections are replaced transparently.
+/// Process spawn is synchronous and fast (the child streams in the background),
+/// so this stays a plain function callable from the sync adapter start path.
+pub fn acquire_codex_app_server(request: &AdapterStartRequest) -> CoreResult<Arc<PooledCodexAppServer>> {
+    let key = codex_instance_key(request);
+    let fingerprint = codex_config_fingerprint(request);
+    // Hold the pool lock across the cold start: two parallel runs of the same
+    // instance would otherwise each spawn a process and orphan one of them.
+    let mut pool = CODEX_APP_SERVER_POOL.lock().unwrap();
+    if let Some(existing) = pool.get(&key) {
+        if existing.config_fingerprint == fingerprint && existing.rpc.process_handle().is_alive() {
+            return Ok(existing.clone());
+        }
+        // Config changed or the process died: replace the stale entry.
+        if let Some(cleanup) = existing.catalog_cleanup.lock().unwrap().take() {
+            cleanup.cleanup();
+        }
+        pool.remove(&key);
+    }
+
+    // Cold start: build the same `codex app-server --stdio` command line the
+    // per-run path used, but without turn-scoped timeouts -- a resident
+    // process must outlive one turn. Per-turn bounds are enforced by the pump.
+    // Use the instance's full configured model list (not the per-run
+    // model): a reused resident process serves every model switch, so
+    // the catalog must not depend on the first turn's selection.
+    let model_catalog = create_codex_custom_model_catalog_file(&request.instance, None)?;
     let args = match build_codex_app_server_args(
         &request.instance,
         request.env.as_ref(),
@@ -270,13 +336,72 @@ pub fn start_codex_app_server(request: AdapterStartRequest, resume_session: Opti
         args,
         cwd: Some(request.cwd.clone()),
         env: request.env.clone(),
-        timeout_ms: request.timeout_ms,
-        idle_timeout_ms: request.idle_timeout_ms,
+        timeout_ms: None,
+        idle_timeout_ms: None,
         max_output_bytes: Some(request.max_output_bytes.unwrap_or(20 * 1024 * 1024)),
     })
     .map_err(|e| CoreError::reason(ErrorCode::RunStartFailed, e.to_string()))?;
-    let process = started.handle.clone();
     let rpc = Arc::new(JsonRpcProcessClient::new(started.handle, started.events));
+    let pooled = Arc::new(PooledCodexAppServer {
+        rpc,
+        turn_lock: tokio::sync::Mutex::new(()),
+        initialized: AtomicBool::new(false),
+        catalog_cleanup: Mutex::new(model_catalog.map(|(_, cleanup)| cleanup)),
+        config_fingerprint: fingerprint,
+        instance_key: key.clone(),
+    });
+    pool.insert(key, pooled.clone());
+    Ok(pooled)
+}
+
+fn codex_config_fingerprint(request: &AdapterStartRequest) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    let mut hash_str = |value: &str| value.hash(&mut hasher);
+    hash_str(request.instance.get("executable").and_then(Value::as_str).unwrap_or(""));
+    hash_str(request.instance.get("profile").and_then(Value::as_str).unwrap_or(""));
+    if let Some(opts) = request.instance.get("providerOptions") {
+        opts.to_string().hash(&mut hasher);
+    }
+    if let Some(servers) = &request.mcp_servers {
+        json!(servers).to_string().hash(&mut hasher);
+    }
+    if let Some(env) = &request.env {
+        let mut keys: Vec<&String> = env.keys().collect();
+        keys.sort();
+        for key in keys {
+            key.hash(&mut hasher);
+            env[key].hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+
+/// Drops the pool entry for a connection that can no longer be reused (a
+/// killed process), so the next turn cold-starts a fresh one.
+pub fn discard_codex_app_server(pooled: &Arc<PooledCodexAppServer>) {
+    let key = &pooled.instance_key;
+    let mut pool = CODEX_APP_SERVER_POOL.lock().unwrap();
+    if let Some(existing) = pool.get(key) {
+        if Arc::ptr_eq(existing, pooled) {
+            pool.remove(key);
+        }
+    }
+    // The temp model catalog dies with the process it was started for.
+    if let Some(cleanup) = pooled.catalog_cleanup.lock().unwrap().take() {
+        cleanup.cleanup();
+    }
+}
+
+/// Starts (or reuses) `codex app-server --stdio` and drives one thread turn
+/// over JSON-RPC. On normal completion the resident process stays alive for
+/// the next turn; errors and per-turn timeouts kill it and evict the pool
+/// entry so the following run cold-starts a clean connection.
+pub fn start_codex_app_server(request: AdapterStartRequest, resume_session: Option<String>) -> CoreResult<AdapterRun> {
+    let pooled = acquire_codex_app_server(&request)?;
+    let rpc = pooled.rpc.clone();
     let (sender, receiver) = mpsc::unbounded_channel::<AdapterEvent>();
     let state = Arc::new(Mutex::new(AppServerState::default()));
 
@@ -285,13 +410,34 @@ pub fn start_codex_app_server(request: AdapterStartRequest, resume_session: Opti
         let state = state.clone();
         let sender = sender.clone();
         let request = request.clone();
-        let process = process.clone();
+        let pooled = pooled.clone();
         async move {
-            let result = run_turn(rpc.clone(), &request, resume_session, state.clone(), sender.clone()).await;
-            if let Err(error) = result {
-                let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
-                if !state.lock().unwrap().finished {
-                    process.cancel().await;
+            let _turn_guard = pooled.turn_lock.lock().await;
+            let already_initialized = pooled.initialized.load(Ordering::SeqCst);
+            let turn_timeout = request.timeout_ms.unwrap_or(30 * 60_000);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(turn_timeout),
+                run_turn(rpc.clone(), &request, resume_session, state.clone(), sender.clone(), already_initialized),
+            )
+            .await;
+            match result {
+                Ok(Ok(())) => {
+                    // Normal completion keeps the resident process warm for the
+                    // next turn; mark the connection initialized so the next
+                    // turn skips the JSON-RPC handshake.
+                    pooled.initialized.store(true, Ordering::SeqCst);
+                }
+                Ok(Err(error)) => {
+                    let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
+                    if !state.lock().unwrap().finished {
+                        pooled.rpc.process_handle().cancel().await;
+                        discard_codex_app_server(&pooled);
+                    }
+                }
+                Err(_elapsed) => {
+                    let _ = sender.send(AdapterEvent::Timeout { reason: TimeoutKind::Timeout });
+                    pooled.rpc.process_handle().cancel().await;
+                    discard_codex_app_server(&pooled);
                 }
             }
         }
@@ -301,24 +447,28 @@ pub fn start_codex_app_server(request: AdapterStartRequest, resume_session: Opti
     // steer / cancel talk to the RPC client shared with the pump.
     let steer_rpc = rpc.clone();
     let steer_state = state.clone();
-    let cancel_rpc = rpc.clone();
     let cancel_state = state.clone();
-    let cancel_process = process.clone();
-    let catalog_cleanup = model_catalog.map(|(_, cleanup)| cleanup);
+    let cancel_pooled = pooled.clone();
     let mut run = AdapterRun::new(
         receiver,
         move || {
+            let pooled = cancel_pooled.clone();
+            let state = cancel_state.clone();
             Box::pin(async move {
                 let (thread_id, turn_id) = {
-                    let state = cancel_state.lock().unwrap();
+                    let state = state.lock().unwrap();
                     (state.thread_id.clone(), state.turn_id.clone())
                 };
                 if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
-                    cancel_rpc.notify("turn/interrupt", json!({ "threadId": thread_id, "turnId": turn_id }));
+                    pooled.rpc.notify("turn/interrupt", json!({ "threadId": thread_id, "turnId": turn_id }));
                 }
-                cancel_process.cancel().await;
-                if let Some(cleanup) = catalog_cleanup {
-                    cleanup.cleanup();
+                // Give the turn a moment to wind down; only kill (and evict
+                // the pooled connection) if it is genuinely stuck.
+                tokio::time::sleep(std::time::Duration::from_millis(3_000)).await;
+                let finished = state.lock().unwrap().finished;
+                if !finished && pooled.rpc.process_handle().is_alive() {
+                    pooled.rpc.process_handle().cancel().await;
+                    discard_codex_app_server(&pooled);
                 }
             }) as crate::adapters::BoxFuture<()>
         },
@@ -372,9 +522,12 @@ async fn run_turn(
     resume_session: Option<String>,
     state: Arc<Mutex<AppServerState>>,
     sender: mpsc::UnboundedSender<AdapterEvent>,
+    already_initialized: bool,
 ) -> anyhow::Result<()> {
-    rpc.request("initialize", codex_app_server_initialize_params()).await?;
-    rpc.notify("initialized", json!({}));
+    if !already_initialized {
+        rpc.request("initialize", codex_app_server_initialize_params()).await?;
+        rpc.notify("initialized", json!({}));
+    }
     let mut thread_params = thread_options(request, true)?;
     let method = if resume_session.is_some() { "thread/resume" } else { "thread/start" };
     if let Some(session) = &resume_session {
@@ -467,13 +620,13 @@ async fn run_turn(
                         subagent_dispatch_id: None,
                         raw: None,
                     });
-                    rpc.process_handle().cancel().await;
+                    // Do NOT kill the resident app-server: reuse it for the next turn (matches the official Codex desktop app).
                     let _ = sender.send(AdapterEvent::Exit { exit_code: Some(0), signal: None });
                     return Ok(());
                 }
                 if method == "turn/completed" {
                     state.lock().unwrap().finished = true;
-                    rpc.process_handle().cancel().await;
+                    // Do NOT kill the resident app-server: reuse it for the next turn (matches the official Codex desktop app).
                     let _ = sender.send(AdapterEvent::Exit { exit_code: Some(0), signal: None });
                     return Ok(());
                 }
