@@ -77,7 +77,6 @@ export function TimelineViewport({
   className?: string;
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const totalRef = useRef<HTMLDivElement>(null);
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const previousForceFollowKeyRef = useRef(forceFollowKey);
@@ -133,15 +132,18 @@ export function TimelineViewport({
     virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
   }, [forceFollowKey, rows.length, virtualizer]);
 
-  // Height-only changes (markdown layout, images, framer-motion settling) are
-  // not covered by contentKey; while following, keep the tail pinned.
-  useEffect(() => {
-    const content = totalRef.current;
-    if (!active || !content || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => scrollToTail());
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, [active, scrollToTail]);
+  // Height-only changes (markdown layout, images, framer-motion settling) and
+  // the virtualizer's own row measurement update the total height. Follow the
+  // tail on those changes WITHOUT a ResizeObserver: observing the sized
+  // container and scrolling from its callback re-measured rows every frame and
+  // produced "ResizeObserver loop completed with undelivered notifications".
+  const totalSize = virtualizer.getTotalSize();
+  const previousTotalSizeRef = useRef(totalSize);
+  useLayoutEffect(() => {
+    if (totalSize === previousTotalSizeRef.current) return;
+    previousTotalSizeRef.current = totalSize;
+    scrollToTail();
+  }, [totalSize, scrollToTail]);
 
   return (
     <div
@@ -167,7 +169,7 @@ export function TimelineViewport({
       className={cn("relative h-full overflow-y-auto", className)}
       aria-live="polite"
     >
-      <div ref={totalRef} style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+      <div style={{ height: totalSize, position: "relative", width: "100%" }}>
         {virtualizer.getVirtualItems().map((virtualRow) => (
           <div
             key={virtualRow.key}
