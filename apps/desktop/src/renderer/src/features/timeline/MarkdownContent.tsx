@@ -128,9 +128,12 @@ function renderMarkdown(source: string, inverted: boolean, onOpenLocalFile: Open
           return <code className={cn("rounded px-1.5 py-0.5 font-mono text-[12px]", inverted ? "bg-white/15" : "bg-card-hover text-accent")}>{children}</code>;
         },
         pre: ({ children }) => <pre className="my-2 max-w-full overflow-auto rounded-xl border border-line bg-card-hover p-3 font-mono text-[12px] leading-relaxed text-ink-2">{children}</pre>,
-        table: ({ children }) => <table className="my-3 w-full border-collapse overflow-hidden text-left text-[12px]">{children}</table>,
-        th: ({ children }) => <th className="border border-line bg-card-hover px-2.5 py-2 font-semibold">{children}</th>,
-        td: ({ children }) => <td className="border border-line px-2.5 py-2 align-top">{renderWithFileRefs(children, inverted, onOpenLocalFile)}</td>,
+        // table-fixed keeps column widths driven by the container (never the
+        // widest cell), so a long path/code cell wraps instead of blowing the
+        // table past the message bubble / timeline width.
+        table: ({ children }) => <table className="my-3 w-full table-fixed border-collapse text-left text-[12px]">{children}</table>,
+        th: ({ children }) => <th className="break-words border border-line bg-card-hover px-2.5 py-2 font-semibold">{children}</th>,
+        td: ({ children }) => <td className="break-words border border-line px-2.5 py-2 align-top">{renderWithFileRefs(children, inverted, onOpenLocalFile)}</td>,
         hr: () => <hr className="my-4 border-line" />,
         img: ({ src, alt }) => {
           if (typeof src !== "string") return null;
