@@ -89,7 +89,9 @@ function streamKeyOf(event: RuntimeEvent): string {
  * snapshots: the daemon coalesces them into one journal row and re-issues
  * each merge with a NEW eventId and sequence, so appending them would store
  * every intermediate streaming state and grow the cache quadratically
- * mid-turn. The cached row for the same stream is replaced instead.
+ * mid-turn. The cached row for the same stream is replaced instead — keeping
+ * the FIRST eventId/timestamp, because timeline rows are keyed by eventId and
+ * a changing key remounts the card on every rebuild (visible as flicker).
  */
 function mergeEventCache(current: RuntimeEvent[], fresh: RuntimeEvent[]): RuntimeEvent[] {
   if (!fresh.some((event) => STREAMING_DELTA_TYPES.has(event.type))) return [...current, ...fresh];
@@ -103,7 +105,8 @@ function mergeEventCache(current: RuntimeEvent[], fresh: RuntimeEvent[]): Runtim
     if (STREAMING_DELTA_TYPES.has(event.type)) {
       const existing = streamIndex.get(streamKeyOf(event));
       if (existing !== undefined) {
-        next[existing] = event;
+        const previous = next[existing]!;
+        next[existing] = { ...event, eventId: previous.eventId, timestamp: previous.timestamp };
         continue;
       }
       streamIndex.set(streamKeyOf(event), next.length);
@@ -466,10 +469,10 @@ function clearSessionRuntime(sessionId: string): void {
   standaloneDisplayed.delete(sessionId);
   const recentIndex = standaloneRecent.indexOf(sessionId);
   if (recentIndex !== -1) standaloneRecent.splice(recentIndex, 1);
-  // Cancel a coalesced render still waiting for its animation frame; letting it
+  // Cancel a coalesced render still waiting for its timer; letting it
   // fire would rebuild a timeline for a session that no longer exists.
   const frame = standaloneRenderFrames.get(sessionId);
-  if (frame !== undefined) cancelAnimationFrame(frame);
+  if (frame !== undefined) clearTimeout(frame);
   standaloneRenderFrames.delete(sessionId);
   projectSessionSubscriptions.delete(sessionId);
   projectSessionSequences.delete(sessionId);
@@ -725,18 +728,26 @@ function mergeStandaloneEvents(sessionId: string, events: RuntimeEvent[]): void 
 }
 
 /**
- * Coalesces structural timeline rebuilds to one per animation frame. Streaming
- * deltas take the direct patch path above so the live text and its scroll
- * height are observable immediately.
+ * Coalesces structural timeline rebuilds. Streaming deltas take the direct
+ * patch path below, so full rebuilds only carry structural changes (tool
+ * cards, statuses) — those are capped at ~5/s: during a heavy turn the rAF
+ * cadence rebuilt the entire timeline of a multi-thousand-event session up to
+ * 60 times per second, which dominated the renderer's transient memory churn.
  */
+const STANDALONE_REBUILD_MIN_INTERVAL_MS = 200;
+const standaloneLastRebuildAt = new Map<string, number>();
+
 function scheduleStandaloneRender(sessionId: string): void {
   if (standaloneRenderFrames.has(sessionId)) return;
-  const frame = requestAnimationFrame(() => {
+  const elapsed = Date.now() - (standaloneLastRebuildAt.get(sessionId) ?? 0);
+  const delay = Math.max(0, STANDALONE_REBUILD_MIN_INTERVAL_MS - elapsed);
+  const frame = window.setTimeout(() => {
     standaloneRenderFrames.delete(sessionId);
+    standaloneLastRebuildAt.set(sessionId, Date.now());
     // The session may have been evicted while the frame was pending; rendering
     // it now would re-create store entries nobody will clean up.
     if (standaloneHydrated.has(sessionId)) renderStandaloneCache(sessionId);
-  });
+  }, delay);
   standaloneRenderFrames.set(sessionId, frame);
 }
 
