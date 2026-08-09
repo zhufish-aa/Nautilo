@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { MotionConfig } from "framer-motion";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AppShell } from "./components/layout/AppShell";
 import { Toaster } from "./components/ui/Toaster";
 import { TooltipProvider } from "./components/ui/Tooltip";
@@ -68,6 +69,18 @@ function useDocumentPreferences(): void {
 export default function App(): JSX.Element {
   useDocumentPreferences();
   const reduceMotion = useSettingsStore((state) => state.reduceMotion);
+
+  // Tauri: the shell keeps the window hidden (visible:false) so its dark
+  // background never flashes before the UI is ready. Reveal it now — React
+  // has committed the first frame and the browser hasn't painted yet, so
+  // there is no black flash. No-op on Electron.
+  useLayoutEffect(() => {
+    if (window.__TAURI_INTERNALS__) {
+      const win = getCurrentWindow();
+      void win.show().catch(() => {});
+      void win.setFocus().catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     void initializeCoreState().catch((error) => console.error("Failed to initialize Core Daemon state", error));

@@ -62,6 +62,7 @@ fn main() {
             artifact_protocol::handle(request, &protocol_data_dir, ctx.app_handle().state::<WorkspaceRoots>().inner())
         })
         .invoke_handler(tauri::generate_handler![
+            show_main_window,
             shell_commands::app_get_info,
             shell_commands::core_request,
             shell_commands::dialog_pick_directory,
@@ -107,8 +108,21 @@ fn main() {
                 }
             });
 
-            window.show().map_err(|e| e.to_string())?;
-            let _ = window.set_focus();
+            // The window starts hidden (visible: false). The renderer calls
+            // show_main_window once React has painted its first frame, so the
+            // dark background never flashes before the UI is ready.
+            // Safety net: if the renderer never signals (crash or a blank
+            // error overlay), force-show so the app is never stuck invisible.
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(8)).await;
+                    if let Some(w) = app_handle.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -118,4 +132,13 @@ fn main() {
                 app.state::<CoreDaemonClient>().stop();
             }
         });
+}
+
+/// Called by the renderer after React has painted its first frame, so the
+/// window never flashes its dark background before the UI is ready.
+#[tauri::command]
+fn show_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
 }
