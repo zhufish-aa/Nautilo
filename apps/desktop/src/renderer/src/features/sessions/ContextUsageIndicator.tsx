@@ -116,7 +116,7 @@ export function ContextUsageIndicator({
                 strokeDasharray={CIRCUMFERENCE}
                 initial={false}
                 animate={{ strokeDashoffset: CIRCUMFERENCE * (1 - percentage / 100) }}
-                transition={{ type: "spring", stiffness: 260, damping: 30 }}
+                transition={{ type: "spring", stiffness: 260, damping: 32 }}
               />
             ) : (
               <circle cx="12" cy="12" r="1.5" fill="currentColor" opacity="0.55" />

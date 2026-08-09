@@ -49,7 +49,7 @@ function GroupLabel({ label }: { label: string }): JSX.Element {
     <motion.div
       variants={{
         hidden: { opacity: 0, y: 14 },
-        show: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 260, damping: 26 } }
+        show: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 260, damping: 32 } }
       }}
       className="mt-2 flex items-center gap-3 lg:col-span-2"
     >

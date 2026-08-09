@@ -58,7 +58,7 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
     <motion.div
       initial={{ opacity: 0, y: 12, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 300, damping: 26 }}
+      transition={{ type: "spring", stiffness: 300, damping: 35 }}
       className="run-indicator run-border relative mt-4 overflow-hidden rounded-2xl border border-accent/25 bg-card/80 shadow-[0_14px_44px_-16px_var(--accent)] backdrop-blur-md"
       role="status"
       aria-live="polite"

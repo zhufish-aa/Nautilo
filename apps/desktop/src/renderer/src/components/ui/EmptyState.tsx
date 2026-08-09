@@ -17,7 +17,7 @@ export function EmptyState({
     <motion.div
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ type: "spring", stiffness: 220, damping: 24 }}
+      transition={{ type: "spring", stiffness: 220, damping: 30 }}
       className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-line-strong bg-card/50 px-8 py-16 text-center"
     >
       <div className="relative mb-5">

@@ -41,7 +41,7 @@ export function Sidebar(): JSX.Element {
             {active && (
               <motion.span
                 layoutId="nav-active-rail"
-                transition={{ type: "spring", stiffness: 460, damping: 36 }}
+        transition={{ type: "spring", stiffness: 460, damping: 43 }}
                 className="absolute -left-2 h-5 w-0.5 rounded-r-full bg-accent shadow-[0_0_10px_var(--accent)]"
                 aria-hidden
               />
@@ -49,7 +49,7 @@ export function Sidebar(): JSX.Element {
             <Icon
               className={cn(
                 "relative z-10 h-[18px] w-[18px] transition-transform duration-200",
-                active ? "scale-105 text-accent" : "group-hover:scale-105"
+                active ? "scale-105 text-accent" : "[@media(hover:hover)]:group-hover:scale-105"
               )}
               aria-hidden
             />

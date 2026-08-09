@@ -18,7 +18,7 @@ export function PlaceholderPage({
       <motion.div
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ type: "spring", stiffness: 220, damping: 24 }}
+        transition={{ type: "spring", stiffness: 220, damping: 30 }}
         className="relative flex max-w-md flex-col items-center px-8 py-12 text-center"
       >
         <div

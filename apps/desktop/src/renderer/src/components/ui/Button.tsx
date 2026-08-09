@@ -36,7 +36,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     <motion.button
       ref={ref}
       whileTap={disabled ? undefined : { scale: 0.97 }}
-      transition={{ type: "spring", stiffness: 500, damping: 30 }}
+      transition={{ type: "spring", stiffness: 500, damping: 45 }}
       className={cn(
         "ui-button",
         `ui-button-${variant}`,

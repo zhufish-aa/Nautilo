@@ -41,12 +41,15 @@ export function PageTransition({
   children: ReactNode;
   className?: string;
 }): JSX.Element {
+  // Apple-style page transition: critically damped spring (damping ratio 1.0,
+  // no overshoot — bounce is reserved for momentum-driven gestures), a small
+  // restrained offset, and a symmetric enter/exit path (leave the way you came).
   return (
     <motion.div
-      initial={{ opacity: 0, y: 14 }}
+      initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -8 }}
-      transition={{ type: "spring", stiffness: 300, damping: 30 }}
+      exit={{ opacity: 0, y: -10 }}
+      transition={{ type: "spring", stiffness: 500, damping: 45 }}
       className={cn("min-h-full", className)}
     >
       {children}

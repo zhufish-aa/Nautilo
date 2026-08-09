@@ -62,7 +62,7 @@ export function ModeSwitch({ mode }: { mode: "code" | "work" }): JSX.Element {
                   layoutId="mode-switch-active-pill"
                   aria-hidden
                   className="absolute inset-0 rounded-full bg-ink shadow-sm"
-                  transition={{ type: "spring", stiffness: 480, damping: 38 }}
+                  transition={{ type: "spring", stiffness: 480, damping: 44 }}
                 />
               )}
               <span className="relative z-10 flex items-center gap-1.5">

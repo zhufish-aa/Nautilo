@@ -68,7 +68,7 @@ export function Drawer({
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
-            transition={{ type: "spring", stiffness: 360, damping: 36 }}
+            transition={{ type: "spring", stiffness: 360, damping: 38 }}
             style={{ width }}
             className="fixed inset-y-0 right-0 z-50 flex max-w-[94vw] flex-col border-l border-line bg-card shadow-pop"
           >

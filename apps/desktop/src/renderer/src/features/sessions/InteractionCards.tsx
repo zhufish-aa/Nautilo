@@ -80,7 +80,7 @@ function CardShell({
     <motion.article
       initial={{ opacity: 0, y: 14, scale: 0.985 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 320, damping: 28 }}
+      transition={{ type: "spring", stiffness: 320, damping: 36 }}
       className="flex gap-3"
     >
       <span aria-hidden className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border", toneClasses[tone])}>

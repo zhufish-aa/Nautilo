@@ -116,7 +116,7 @@ export function OnboardingTour(): JSX.Element | null {
         left: Math.max(16, (window.innerWidth - CARD_WIDTH) / 2)
       };
 
-  const transition = reduceMotion ? { duration: 0 } : { type: "spring" as const, stiffness: 320, damping: 30 };
+  const transition = reduceMotion ? { duration: 0 } : { type: "spring" as const, stiffness: 320, damping: 36 };
 
   return (
     <div className="fixed inset-0 z-[80]" role="presentation">

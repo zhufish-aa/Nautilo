@@ -20,7 +20,7 @@ export function SnippetMenu({
       initial={{ opacity: 0, y: 8, scale: 0.985 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: 6, scale: 0.99 }}
-      transition={{ type: "spring", stiffness: 430, damping: 34 }}
+      transition={{ type: "spring", stiffness: 430, damping: 41 }}
       role="listbox"
       aria-label="提示词片段"
       className="absolute inset-x-0 bottom-[calc(100%+10px)] z-30 max-h-80 overflow-y-auto rounded-2xl border border-line bg-card/98 p-1.5 shadow-pop backdrop-blur-xl"

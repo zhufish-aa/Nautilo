@@ -206,7 +206,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
             initial={{ opacity: 0, y: 8, scale: 0.97, width: panelWidth }}
             animate={{ opacity: 1, y: 0, scale: 1, width: panelWidth }}
             exit={{ opacity: 0, y: 6, scale: 0.98 }}
-            transition={{ type: "spring", stiffness: 430, damping: 34, mass: 0.7 }}
+            transition={{ type: "spring", stiffness: 430, damping: 41, mass: 0.7 }}
             className="absolute right-0 bottom-full z-40 mb-2 overflow-hidden rounded-2xl border border-line/80 bg-card p-1.5 shadow-pop"
           >
             {/* Keep initial (no initial={false}): the inner view switch
@@ -219,7 +219,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                 initial={{ opacity: 0, x: view === "summary" ? 0 : 18 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: view === "summary" ? 0 : -14 }}
-                transition={{ opacity: { duration: 0.15 }, x: { type: "spring", stiffness: 460, damping: 36 }, layout: { type: "spring", stiffness: 360, damping: 32 } }}
+                transition={{ opacity: { duration: 0.15 }, x: { type: "spring", stiffness: 460, damping: 43 }, layout: { type: "spring", stiffness: 360, damping: 38 } }}
               >
                 {view === "summary" && !advancedDetails && (
                 <>
@@ -253,7 +253,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                           <motion.div
                             className={`session-effort-fill ${fastActive ? "is-fast" : ""}`}
                             animate={{ width: `${progress}%` }}
-                            transition={{ type: "spring", stiffness: 420, damping: 36 }}
+                            transition={{ type: "spring", stiffness: 420, damping: 41 }}
                           >
                             <span className="session-speed-particles" aria-hidden />
                           </motion.div>
@@ -489,7 +489,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
 
       <motion.button
         animate={{ width: open ? panelWidth : 224 }}
-        transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.65 }}
+        transition={{ type: "spring", stiffness: 420, damping: 41, mass: 0.65 }}
         type="button"
         onClick={toggle}
         disabled={disabled}

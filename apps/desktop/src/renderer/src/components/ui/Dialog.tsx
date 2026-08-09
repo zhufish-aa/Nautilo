@@ -42,7 +42,7 @@ export function Dialog({
                 initial={{ opacity: 0, scale: 0.96, y: 12 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.97, y: 8 }}
-                transition={{ type: "spring", stiffness: 380, damping: 30 }}
+        transition={{ type: "spring", stiffness: 380, damping: 39 }}
                 className={cn(
                   "ui-dialog fixed top-1/2 left-1/2 z-50 flex max-h-[86vh] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-line bg-card shadow-pop outline-none",
                   widthClass
