@@ -105,6 +105,13 @@ if (existsSync(iconSource)) {
 // The shell resolves the daemon next to itself (packaged layout).
 copyFileSync(daemonExecutable, join(applicationDirectory, "nautilo-core.exe"));
 
+// The Tauri shell links WebView2Loader.dll dynamically; the official bundler
+// ships it next to the executable, so the portable bundle must too.
+const webview2Loader = join(dirname(shellExecutable), "WebView2Loader.dll");
+if (existsSync(webview2Loader)) {
+  copyFileSync(webview2Loader, join(applicationDirectory, "WebView2Loader.dll"));
+}
+
 // Bundled for manual "install from local folder": plugins/<id>/ with the
 // manifest + executable, the same self-contained layout install_local needs.
 const pluginDirectory = join(applicationDirectory, "plugins");
