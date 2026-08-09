@@ -110,7 +110,7 @@ function SessionItem({
         onClick={onSelect}
         aria-current={active ? "page" : undefined}
         className={cn(
-          "relative flex w-full min-w-0 items-start gap-2 overflow-hidden rounded-lg py-2 pr-8 pl-2 text-left transition-colors duration-150 outline-none",
+          "relative flex w-full min-w-0 items-start gap-2 overflow-hidden rounded-lg py-2 pr-8 pl-2 text-left transition-[background-color,box-shadow] duration-150 outline-none",
           "focus-visible:ring-2 focus-visible:ring-accent/70",
           active
             ? "bg-accent-soft/80 shadow-[inset_2px_0_0_var(--color-accent)]"

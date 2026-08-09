@@ -411,7 +411,7 @@ export function Composer({
               disabled={!canSend}
               aria-label={t("sessions.composer.send")}
               title={t("sessions.composer.send")}
-              className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
+              className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
             >
               <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden />
             </button>
