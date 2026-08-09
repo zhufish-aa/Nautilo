@@ -2,6 +2,8 @@
 //! provider-plugin-opencode. Uses OpenCode's headless server API and reuses
 //! one server per configured instance/workspace.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

@@ -1,6 +1,8 @@
 //! Nautilo native provider plugin for Pi — port of provider-plugin-pi.
 //! Pi is driven as a long-lived JSONL RPC child process for each turn.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

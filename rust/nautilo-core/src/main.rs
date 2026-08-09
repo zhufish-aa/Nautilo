@@ -5,6 +5,8 @@
 //!   nautilo-core --serve   -> starts the IPC gateway, prints the ready line
 //!                             {"service":"core-daemon","status":"ok","version":...,"socketPath":...}
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod adapters;
 mod application;
 mod database;

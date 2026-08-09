@@ -1,5 +1,7 @@
 //! Nautilo desktop shell (Tauri). Mirrors apps/desktop/src/main/index.ts.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod artifact_protocol;
 mod attachment_files;
 mod core_daemon;

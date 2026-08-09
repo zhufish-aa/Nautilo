@@ -3,6 +3,8 @@
 //! Drives both Trae CLIs: the official ACP-native `traecli` (ndjson JSON-RPC
 //! via `traecli acp serve`) and the open-source `trae-cli` (plain stdout).
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
