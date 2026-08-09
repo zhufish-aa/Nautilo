@@ -96,10 +96,15 @@ export function TimelineViewport({
 
   const scrollToTail = useCallback(() => {
     if (!active || !followTailRef.current) return;
-    // Run after the DOM commit; the virtualizer schedules its own frame, so
-    // a plain offset scroll keeps the tail pinned without racing the measure.
-    virtualizer.scrollToOffset(virtualizer.getTotalSize(), { align: "end" });
-  }, [active, virtualizer]);
+    const element = scrollRef.current;
+    if (!element) return;
+    // Direct DOM pin to the tail, exactly like the pre-virtualization version:
+    // scrollTop = scrollHeight reflects the real, freshly laid-out content
+    // height (no virtualizer state lag). The virtualizer observes scroll via
+    // the scroll event and re-windows accordingly.
+    element.scrollTop = element.scrollHeight;
+    lastScrollTopRef.current = element.scrollTop;
+  }, [active]);
 
   // A newly opened session (or a page becoming visible again) starts at the
   // tail. This runs after the layout has a real height, unlike a one-time
@@ -132,8 +137,8 @@ export function TimelineViewport({
     previousForceFollowKeyRef.current = forceFollowKey;
     if (forceFollowKey === undefined) return;
     followTailRef.current = true;
-    virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
-  }, [forceFollowKey, rows.length, virtualizer]);
+    scrollToTail();
+  }, [forceFollowKey, scrollToTail]);
 
   // Height-only changes (markdown layout, images, framer-motion settling) and
   // the virtualizer's own row measurement update the total height. Follow the
