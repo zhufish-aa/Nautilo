@@ -29,6 +29,10 @@ pub fn work_mode_guidance(workspace_root: Option<&str>) -> String {
         },
         "Prefer real office formats: .docx for documents, .xlsx for spreadsheets, .pptx for slides, .md for drafts/notes, .csv for raw data.",
         "If your environment provides office skills (documents, spreadsheets, presentations, research), follow their workflow and verification rules.",
+        "BEFORE running any office script, prepare the Python environment inside the workspace:",
+        "1. If `.venv` does not exist, create it: `python -m venv .venv`",
+        "2. Install the office toolchain dependencies (idempotent): `.venv\\Scripts\\python -m pip install python-pptx openpyxl python-docx` (Windows) or `.venv/bin/python -m pip install python-pptx openpyxl python-docx` (macOS/Linux).",
+        "3. Run every office script with the venv interpreter, never the system Python. If a script reports a missing dependency, install it into `.venv` and retry.",
         "Whenever you create or update a deliverable, end your reply with the exact file path(s) so the user can preview them.",
         "</agenthub_work_mode>",
     ]
