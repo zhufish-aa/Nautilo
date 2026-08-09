@@ -187,11 +187,18 @@ impl PluginService {
         // bsdtar ships with Windows 10+ and every supported unix. Relative
         // paths inside the scratch dir: GNU tar treats a "C:"-prefixed path as
         // a remote host spec.
-        let status = std::process::Command::new("tar")
-            .args(["-xzf", "plugin.tgz", "-C", "extract"])
-            .current_dir(scratch)
-            .output()
-            .map_err(|e| plugin_fail(ErrorCode::PluginInvalid, tarball_url, e.to_string()))?;
+        let status = {
+            let mut cmd = std::process::Command::new("tar");
+            cmd.args(["-xzf", "plugin.tgz", "-C", "extract"]).current_dir(scratch);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                // CREATE_NO_WINDOW — don't flash a console while extracting.
+                cmd.creation_flags(0x0800_0000);
+            }
+            cmd.output()
+        }
+        .map_err(|e| plugin_fail(ErrorCode::PluginInvalid, tarball_url, e.to_string()))?;
         if !status.status.success() {
             return Err(plugin_fail(
                 ErrorCode::PluginInvalid,

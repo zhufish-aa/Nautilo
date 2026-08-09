@@ -67,11 +67,15 @@ pub fn inspect_project(project: &Value) -> Value {
 }
 
 fn git(root: &Path, args: &[&str]) -> (bool, String) {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output();
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW — a GUI shell must not flash a console per git probe.
+        cmd.creation_flags(0x0800_0000);
+    }
+    let output = cmd.output();
     match output {
         Ok(out) if out.status.success() => (true, String::from_utf8_lossy(&out.stdout).trim().to_string()),
         Ok(out) => (false, String::from_utf8_lossy(&out.stdout).trim().to_string()),

@@ -292,15 +292,31 @@ impl ProcessRuntime {
                                 // Kill the whole tree; fall back to a direct kill
                                 // when taskkill is denied (see the TS comment).
                                 let killed = match pid {
-                                    Some(pid) => matches!(
-                                        tokio::process::Command::new("taskkill")
-                                            .args(["/pid", &pid.to_string(), "/T", "/F"])
-                                            .stdout(Stdio::null())
-                                            .stderr(Stdio::null())
-                                            .status()
-                                            .await,
-                                        Ok(status) if status.success()
-                                    ),
+                                    Some(pid) => {
+                                        #[cfg(windows)]
+                                        {
+                                            use std::os::windows::process::CommandExt;
+                                            let mut kill = tokio::process::Command::new("taskkill");
+                                            kill.args(["/pid", &pid.to_string(), "/T", "/F"])
+                                                .stdout(Stdio::null())
+                                                .stderr(Stdio::null())
+                                                // CREATE_NO_WINDOW — no console flash when killing.
+                                                .creation_flags(0x0800_0000);
+                                            matches!(kill.status().await, Ok(status) if status.success())
+                                        }
+                                        #[cfg(not(windows))]
+                                        {
+                                            matches!(
+                                                tokio::process::Command::new("kill")
+                                                    .args(["-9", &pid.to_string()])
+                                                    .stdout(Stdio::null())
+                                                    .stderr(Stdio::null())
+                                                    .status()
+                                                    .await,
+                                                Ok(status) if status.success()
+                                            )
+                                        }
+                                    }
                                     None => false,
                                 };
                                 if !killed {
@@ -330,4 +346,3 @@ impl ProcessRuntime {
         Ok(StartedProcess { handle, events: receiver })
     }
 }
-
