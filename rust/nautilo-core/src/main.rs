@@ -91,6 +91,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Keep the SQLite WAL bounded: writers only append to the WAL, so without
+    // an idle checkpoint it grows without limit while the main DB stays small.
+    // Checkpoint when the connection is free so it never stalls an active run.
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                daemon.checkpoint_wal();
+            }
+        });
+    }
+
     tokio::signal::ctrl_c().await?;
     let _ = daemon.audit.flush();
     gateway.cleanup();

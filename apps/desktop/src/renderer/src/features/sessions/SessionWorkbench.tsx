@@ -16,7 +16,12 @@ import { useProjectsStore } from "../../stores/projects";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
 import { hasRunningDelegatedTask, isActiveLifecycle, visibleSessionStatus } from "../../lib/session-lifecycle";
-import { ensureStandaloneSessionHydrated, registerStandaloneSessionView } from "../../lib/orchestration-runtime";
+import {
+  ensureProjectRunHydrated,
+  ensureStandaloneSessionHydrated,
+  registerProjectSessionView,
+  registerStandaloneSessionView
+} from "../../lib/orchestration-runtime";
 import { useProgressiveRows } from "../../lib/use-progressive-rows";
 import { cn } from "../../lib/utils";
 import { collectChangedFiles } from "../../lib/changed-files";
@@ -251,10 +256,18 @@ export function SessionWorkbench({
   }, [active, previewRootPath, setPreviewBasePaths]);
 
   // Lazy hydration: standalone sessions load their event journal on first
-  // display instead of all at startup (memory); older views are evicted LRU,
-  // but a session displayed by any mounted workbench is never evicted.
+  // display instead of all at startup (memory); project sessions hydrate
+  // their whole run on demand. Older views are evicted LRU, but anything
+  // displayed by a mounted workbench is never evicted.
   useEffect(() => {
     if (!active) return;
+    const current = useSessionsStore.getState().sessions.find((item) => item.id === sessionId);
+    const projectRunId = current?.projectRunId;
+    if (projectRunId) {
+      const unregister = registerProjectSessionView(sessionId, projectRunId);
+      void ensureProjectRunHydrated(projectRunId);
+      return unregister;
+    }
     const unregister = registerStandaloneSessionView(sessionId);
     void ensureStandaloneSessionHydrated(sessionId);
     return unregister;

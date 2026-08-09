@@ -31,6 +31,17 @@ const projectSessionSubscriptions = new Map<string, string>();
 const projectSessionSequences = new Map<string, number>();
 const projectSessionEventCache = new Map<string, RuntimeEvent[]>();
 const projectSessionBuilt = new Set<string>();
+// Project-run view caches mirror the standalone LRU: a run keeps its
+// materialized event journal while it is displayed, recently opened, or still
+// being polled (live). Completed runs the user navigated away from are evicted
+// so long chat histories don't pin renderer memory for the app's lifetime.
+const projectRunRecent: string[] = [];
+const projectRunDisplayed = new Map<string, number>();
+const projectRunHydrated = new Set<string>();
+// Session-level display tracking for project sessions. hydrateProjectRun only
+// materializes timelines for sessions a workbench is actually showing (plus
+// their descendants), so poll ticks stop rebuilding every session of a run.
+const projectSessionDisplayed = new Map<string, number>();
 const standaloneStreams = new Map<string, { cancelled: boolean }>();
 const standaloneSubscriptions = new Map<string, string>();
 const standaloneSequences = new Map<string, number>();
@@ -67,6 +78,14 @@ const projectRunActiveRuns = new Map<string, number>();
 
 const STREAMING_DELTA_TYPES = new Set(["agent.message_delta", "agent.thinking_delta"]);
 
+/** Reasoning streams are display-only and can run to hundreds of KB. The
+ * collapsed preview reads the latest line, so oversized text is capped at the
+ * TAIL (newest content) rather than the head. The daemon caps too; this is a
+ * defensive bound for older daemons / replayed journals. */
+function capReasoningText(text: string, limit = 20_000): string {
+  return text.length > limit ? text.slice(-limit) : text;
+}
+
 export async function resumeWorkbenchRuns(): Promise<void> {
   if (!getBridge()) return;
   // A terminal-looking project run can still own live child sessions (the
@@ -95,6 +114,7 @@ export async function hydrateWorkbenchSessions(): Promise<void> {
   const instances = useAgentsStore.getState().instances;
   const uiSessions: UiSession[] = [];
   const runIds = new Set<string>();
+  const terminalRunIds = new Set<string>();
 
   for (const project of projects) {
     const [domainSessions, projectRuns] = await Promise.all([
@@ -119,6 +139,7 @@ export async function hydrateWorkbenchSessions(): Promise<void> {
       if (run && team) {
         uiSessions.push(toUiSession(session, run, team));
         runIds.add(run.id);
+        if (["completed", "failed", "cancelled"].includes(run.status)) terminalRunIds.add(run.id);
       } else {
         uiSessions.push(toStandaloneUiSession(session));
       }
@@ -137,7 +158,16 @@ export async function hydrateWorkbenchSessions(): Promise<void> {
     const run = await hydrateStandaloneSession(session, liveRun.id);
     if (run && shouldPollAgentRun(run)) scheduleStandalonePoll(session.id, run.id);
   }
-  for (const projectRunId of runIds) await hydrateProjectRun(projectRunId);
+  // Completed runs hydrate lazily on open (see ensureProjectRunHydrated);
+  // materializing every run's journal at startup pinned them all in memory
+  // for the app's lifetime. resumeWorkbenchRuns() right after this handles
+  // the live runs (non-terminal or with active child AgentRuns).
+  const activeProjectRunIds = new Set(allRuns.filter(shouldPollAgentRun).map((run) => run.projectRunId).filter(Boolean));
+  for (const projectRunId of runIds) {
+    if (!terminalRunIds.has(projectRunId) || activeProjectRunIds.has(projectRunId)) {
+      await hydrateProjectRun(projectRunId);
+    }
+  }
 }
 
 export async function sendWorkbenchMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], editMessageId?: string): Promise<void> {
@@ -472,6 +502,89 @@ function evictStandaloneViewCaches(): void {
   }
 }
 
+/** Marks a project run as displayed by a mounted workbench; returns unregister. */
+export function registerProjectRunView(projectRunId: string): () => void {
+  projectRunDisplayed.set(projectRunId, (projectRunDisplayed.get(projectRunId) ?? 0) + 1);
+  return () => {
+    const count = (projectRunDisplayed.get(projectRunId) ?? 1) - 1;
+    if (count <= 0) projectRunDisplayed.delete(projectRunId);
+    else projectRunDisplayed.set(projectRunId, count);
+  };
+}
+
+/**
+ * Marks one session of a project run as displayed by a mounted workbench
+ * (plus its run). hydrateProjectRun materializes timelines only for displayed
+ * sessions and their descendants, so this must be kept in sync on open/close.
+ */
+export function registerProjectSessionView(sessionId: string, projectRunId: string): () => void {
+  const unregisterRun = registerProjectRunView(projectRunId);
+  projectSessionDisplayed.set(sessionId, (projectSessionDisplayed.get(sessionId) ?? 0) + 1);
+  return () => {
+    const count = (projectSessionDisplayed.get(sessionId) ?? 1) - 1;
+    if (count <= 0) projectSessionDisplayed.delete(sessionId);
+    else projectSessionDisplayed.set(sessionId, count);
+    unregisterRun();
+  };
+}
+
+function touchProjectRunRecent(projectRunId: string): void {
+  const index = projectRunRecent.indexOf(projectRunId);
+  if (index !== -1) projectRunRecent.splice(index, 1);
+  projectRunRecent.unshift(projectRunId);
+  if (projectRunRecent.length > 2) projectRunRecent.pop();
+}
+
+function sessionsOfProjectRun(projectRunId: string): UiSession[] {
+  return useSessionsStore.getState().sessions.filter((session) => session.projectRunId === projectRunId);
+}
+
+/**
+ * Drops the materialized view caches (raw event journal + store timelines) of
+ * project runs that are neither displayed, recently opened, nor being polled.
+ * A live poll re-materializes every tick, so only terminal/idle runs qualify.
+ * Reopening re-hydrates via the incremental replay (cache starts empty).
+ */
+function evictProjectRunViewCaches(): void {
+  for (const runId of [...projectRunHydrated]) {
+    if (projectRunRecent.includes(runId)) continue;
+    if (projectRunDisplayed.has(runId)) continue;
+    if (projectPollers.has(runId)) continue;
+    const sessions = sessionsOfProjectRun(runId);
+    if (sessions.some((session) => standaloneDisplayed.has(session.id))) continue;
+    projectRunHydrated.delete(runId);
+    for (const session of sessions) {
+      projectSessionEventCache.delete(session.id);
+      projectSessionSequences.delete(session.id);
+      projectSessionSubscriptions.delete(session.id);
+      projectSessionBuilt.delete(session.id);
+      followUpListSynced.delete(session.id);
+      useSessionsStore.getState()._evictSessionView(session.id);
+    }
+  }
+}
+
+/**
+ * Hydrates a project run on demand (opening one of its sessions). Completed
+ * runs are otherwise left alone at startup and only materialized here, so the
+ * renderer never pins every run's full journal at once.
+ */
+export async function ensureProjectRunHydrated(projectRunId: string): Promise<void> {
+  if (!getBridge()) return;
+  touchProjectRunRecent(projectRunId);
+  projectRunHydrated.add(projectRunId);
+  try {
+    const projectRun = await hydrateProjectRun(projectRunId);
+    if (shouldPollProjectRun(projectRun) || hasQueuedFollowUpForProject(projectRunId)) {
+      schedulePoll(projectRunId);
+    }
+  } catch (error) {
+    projectRunHydrated.delete(projectRunId);
+    console.error(`Failed to hydrate project run ${projectRunId}`, error);
+  }
+  evictProjectRunViewCaches();
+}
+
 async function syncProjectAndAgents(session: UiSession): Promise<void> {
   const project = useProjectsStore.getState().projects.find((item) => item.id === session.projectId);
   if (!project) throw new Error(`Project ${session.projectId} is missing`);
@@ -719,6 +832,7 @@ function sameUiSession(current: UiSession, next: UiSession): boolean {
 }
 
 async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
+  projectRunHydrated.add(projectRunId);
   const { projectRun } = await requestCore<{ projectRun: ProjectRun; mainSession: DomainSession }>("projectRun.get", { projectRunId });
   const team = requireUiTeam(String(projectRun.teamId));
   const legacyMain = team.members.find((member) => member.id === projectRun.mainMemberId);
@@ -751,6 +865,28 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   const store = useSessionsStore.getState();
   let activeRunCount = 0;
 
+  // Only sessions a workbench is showing (plus their descendants) need a
+  // materialized timeline. Everything else still streams its raw event
+  // journal into the cache and keeps lightweight state in sync, but skips
+  // the full-history rebuild until it is actually opened.
+  const neededSessionIds = new Set<string>();
+  const childrenByParent = new Map<string, string[]>();
+  for (const session of sessions) {
+    if (session.parentSessionId) {
+      const list = childrenByParent.get(session.parentSessionId) ?? [];
+      list.push(session.id);
+      childrenByParent.set(session.parentSessionId, list);
+    }
+  }
+  const expandNeeded = (id: string): void => {
+    if (neededSessionIds.has(id)) return;
+    neededSessionIds.add(id);
+    for (const childId of childrenByParent.get(id) ?? []) expandNeeded(childId);
+  };
+  for (const session of sessions) {
+    if (projectSessionDisplayed.has(session.id)) expandNeeded(session.id);
+  }
+
   for (const session of sessions) {
     const [detail, feed] = await Promise.all([
       requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: session.id }),
@@ -766,8 +902,9 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     }
     if (feed.hasNew) changed = true;
     // Rebuilding the timeline walks the full event history; skip it entirely
-    // on poll ticks that delivered no new events for this session.
-    const timelineDirty = feed.hasNew || !projectSessionBuilt.has(session.id);
+    // on poll ticks that delivered no new events, and for sessions no
+    // workbench is showing (their timeline materializes on first open).
+    const timelineDirty = neededSessionIds.has(session.id) && (feed.hasNew || !projectSessionBuilt.has(session.id));
     if (timelineDirty) {
       store._replaceEvents(session.id, buildTimeline(detail.messages, feed.events, projectRun, team, tasks, sessionArtifacts, verifications, session.id === projectRun.mainSessionId));
       store._replaceContextUsage(session.id, latestContextUsage(feed.events));
@@ -885,6 +1022,9 @@ function schedulePoll(projectRunId: string): void {
         projectRunActivity.delete(projectRunId);
         projectRunUpdatedAt.delete(projectRunId);
         projectRunActiveRuns.delete(projectRunId);
+        // A run that just went terminal no longer re-materializes itself on
+        // poll ticks; drop its caches now unless it is displayed or recent.
+        evictProjectRunViewCaches();
         return;
       }
       // Any change observed by the tick resets the streak; otherwise back off
@@ -1100,15 +1240,16 @@ function appendRuntimeEvents(
       const key = `${runId}:${event.payload.messageId}:${generation}`;
       const index = reasoning.get(key);
       if (index === undefined) {
-        if (!event.payload.text.trim()) continue;
-        const row = push(event, { kind: "reasoning", text: event.payload.text, streaming: true, messageId: event.payload.messageId });
+        const text = capReasoningText(event.payload.text);
+        if (!text.trim()) continue;
+        const row = push(event, { kind: "reasoning", text, streaming: true, messageId: event.payload.messageId });
         reasoning.set(key, row);
         latestReasoning.set(runId, key);
         runningReasoningRows.set(row, runId);
       } else {
         const current = timeline[index].data;
         // Cumulative payload — replace (see agent.message_delta above).
-        if (current.kind === "reasoning") timeline[index] = { ...timeline[index], data: { ...current, text: event.payload.text } };
+        if (current.kind === "reasoning") timeline[index] = { ...timeline[index], data: { ...current, text: capReasoningText(event.payload.text) } };
       }
       continue;
     }
@@ -1118,14 +1259,15 @@ function appendRuntimeEvents(
         : undefined);
       const index = key ? reasoning.get(key) : undefined;
       if (index === undefined) {
-        if (!event.payload.text.trim()) continue;
-        const row = push(event, { kind: "reasoning", text: event.payload.text, streaming: false, messageId: event.payload.messageId });
+        const text = capReasoningText(event.payload.text);
+        if (!text.trim()) continue;
+        const row = push(event, { kind: "reasoning", text, streaming: false, messageId: event.payload.messageId });
         if (key) reasoning.set(key, row);
       } else {
         const current = timeline[index].data;
         if (current.kind === "reasoning") timeline[index] = {
           ...timeline[index],
-          data: { ...current, text: current.text || event.payload.text, streaming: false }
+          data: { ...current, text: capReasoningText(current.text || event.payload.text), streaming: false }
         };
         runningReasoningRows.delete(index);
       }
@@ -1384,7 +1526,11 @@ function runtimePayload(
   }
   if (event.type === "verification.finished") {
     const verification = verifications.get(event.payload.verificationId);
-    const output = event.payload.outputArtifactId ? artifacts.get(event.payload.outputArtifactId)?.content ?? "" : "";
+    const fullOutput = event.payload.outputArtifactId ? artifacts.get(event.payload.outputArtifactId)?.content ?? "" : "";
+    // Verification logs can be huge (test_report artifact content); keep the
+    // tail so the failure summary at the end stays visible while bounding
+    // the memory held per verification row.
+    const output = fullOutput.length > 20_000 ? fullOutput.slice(-20_000) : fullOutput;
     return {
       kind: "verification",
       command: verification ? [verification.command, ...verification.args].join(" ") : event.payload.verificationId,

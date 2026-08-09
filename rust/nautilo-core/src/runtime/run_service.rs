@@ -856,13 +856,13 @@ impl RunService {
                 if phase.as_deref() == Some("delta") {
                     let _ = self.events.append(run, session, "agent.thinking_delta", json!({
                         "messageId": message_id.clone().unwrap_or_else(|| "default".to_string()),
-                        "text": self.redaction.text(text),
+                        "text": self.redaction.text(&cap_tail(text, THINKING_TEXT_LIMIT)),
                         "subagentDispatchId": subagent_dispatch_id.clone().map(Value::String).unwrap_or(Value::Null)
                     }));
                 } else {
                     let _ = self.events.append(run, session, "agent.thinking_summary", json!({
                         "messageId": message_id.clone().map(Value::String).unwrap_or(Value::Null),
-                        "text": self.redaction.text(text),
+                        "text": self.redaction.text(&cap_tail(text, THINKING_TEXT_LIMIT)),
                         "subagentDispatchId": subagent_dispatch_id.clone().map(Value::String).unwrap_or(Value::Null)
                     }));
                 }
@@ -1187,6 +1187,21 @@ fn tool_input_limit(tool_name: &str) -> usize {
     } else {
         2_000
     }
+}
+
+/// Reasoning streams are display-only; the collapsed preview reads the latest
+/// lines, so oversized streams are capped at the TAIL (keeping the newest
+/// content) instead of the head. 20k chars is far beyond what the 384px
+/// reasoning card renders usefully, and it bounds both the DB row and every
+/// replay copy shipped to the renderer.
+const THINKING_TEXT_LIMIT: usize = 20_000;
+
+fn cap_tail(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_string();
+    }
+    text.chars().skip(count - limit).collect()
 }
 
 fn event_file_diff(value: Option<&Value>) -> Option<Value> {

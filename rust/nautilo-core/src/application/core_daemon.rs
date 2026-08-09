@@ -135,6 +135,17 @@ impl Daemon {
         Ok(daemon)
     }
 
+    /// Copies WAL frames back into the main database and truncates the WAL
+    /// file. Without an idle checkpoint the WAL grows without bound (writers
+    /// only append), which ballooned the data dir to 700MB+ while the main
+    /// DB stayed at ~110MB. Best-effort: skip on lock contention/errors so a
+    /// checkpoint never disturbs an active run.
+    pub fn checkpoint_wal(&self) {
+        if let Ok(db) = self.db.try_lock() {
+            let _ = db.raw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+    }
+
     pub fn router(self: &Arc<Self>) -> Router {
         let mut router = Router::default();
 
