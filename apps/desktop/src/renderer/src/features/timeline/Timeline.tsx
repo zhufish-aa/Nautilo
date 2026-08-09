@@ -133,7 +133,7 @@ export function TimelineViewport({
         // Wheel input is the other explicit way to pause follow mode.
         if (event.deltaY < 0) followTailRef.current = false;
       }}
-      style={{ overflowAnchor: "none" }}
+      style={{ overflowAnchor: "none", willChange: "scroll-position" }}
       className={cn("relative h-full overflow-y-auto", className)}
       aria-live="polite"
     >
@@ -221,8 +221,8 @@ function CardShell({
   };
   return (
     <motion.article
-      initial={{ opacity: 0, y: 14, scale: 0.985, filter: "blur(5px)" }}
-      animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
+      initial={{ opacity: 0, y: 14, scale: 0.985 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 320, damping: 28 }}
       className={cn("flex gap-3", className)}
     >
@@ -844,8 +844,8 @@ function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
 
   return (
     <motion.article
-      initial={{ opacity: 0, y: 10, scale: 0.99, filter: "blur(4px)" }}
-      animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
+      initial={{ opacity: 0, y: 10, scale: 0.99 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 320, damping: 28 }}
       className={cn(
         "run-border relative overflow-hidden rounded-xl border bg-card/70 transition-[border-color,box-shadow] duration-700",
