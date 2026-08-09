@@ -86,7 +86,10 @@ export function TimelineViewport({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 120,
+    // A folded turn block (header + fold row + answer) is typically under
+    // 100px; estimate low so the scrollbar starts near the measured total
+    // instead of visibly shrinking as rows get measured.
+    estimateSize: () => 96,
     overscan: 4,
     getItemKey: (index) => rows[index]?.key ?? String(index)
   });
