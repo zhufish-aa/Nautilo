@@ -90,7 +90,9 @@ export function TimelineViewport({
     // 100px; estimate low so the scrollbar starts near the measured total
     // instead of visibly shrinking as rows get measured.
     estimateSize: () => 96,
-    overscan: 4,
+    // Keep overscan tight: each row renders markdown on mount, and extra
+    // off-screen rows would parse long answers before they are visible.
+    overscan: 2,
     getItemKey: (index) => rows[index]?.key ?? String(index)
   });
 

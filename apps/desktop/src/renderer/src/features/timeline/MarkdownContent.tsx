@@ -31,6 +31,9 @@ function basename(path: string): string {
 function renderWithFileRefs(children: ReactNode, inverted: boolean, onOpenLocalFile?: OpenLocalFile): ReactNode {
   return Children.map(children, (child) => {
     if (typeof child === "string") {
+      // A file reference always contains a path separator; skip the regex
+      // entirely for plain text (long messages render many paragraphs).
+      if (!child.includes("/") && !child.includes("\\")) return child;
       const segments = splitTextByFileReferences(child);
       if (segments.length === 1 && segments[0]?.kind === "text") return child;
       return segments.map((segment, index) =>
@@ -66,7 +69,9 @@ export function MarkdownContent({
   const cached = markdownRenderCache.get(key);
   if (cached) return cached;
   const rendered = renderMarkdown(normalizedSource, inverted, onOpenLocalFile, t);
-  if (markdownRenderCache.size >= 150) {
+  // Long sessions mount many messages on first open; a small cache would
+  // evict entries and re-parse markdown when rows scroll back into view.
+  if (markdownRenderCache.size >= 600) {
     const oldest = markdownRenderCache.keys().next().value;
     if (oldest !== undefined) markdownRenderCache.delete(oldest);
   }
