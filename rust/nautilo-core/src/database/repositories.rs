@@ -886,6 +886,17 @@ impl<'a> AuditRepository<'a> {
         self.append_many(std::slice::from_ref(record))
     }
 
+    /// Deletes audit rows older than `timestamp` (ISO-8601) for retention.
+    pub fn delete_before(&self, timestamp: &str) -> CoreResult<usize> {
+        let deleted = self
+            .db
+            .prepare("DELETE FROM audit_logs WHERE timestamp < ?1")
+            .map_err(db_fail)?
+            .execute(params![timestamp])
+            .map_err(db_fail)?;
+        Ok(deleted)
+    }
+
     pub fn list(&self, limit: Option<i64>, resource_id: Option<&str>) -> CoreResult<Vec<Value>> {
         let limit = limit.unwrap_or(200).clamp(1, 2_000);
         let rows: Vec<String> = match resource_id {

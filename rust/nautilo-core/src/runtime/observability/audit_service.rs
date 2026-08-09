@@ -11,6 +11,9 @@ use uuid::Uuid;
 
 
 const AUDIT_FLUSH_THRESHOLD: usize = 50;
+/// Non-IPC audit rows are low-volume; prune anything older than this so the
+/// trail never silently grows without bound.
+const AUDIT_RETENTION_DAYS: i64 = 7;
 
 /// Buffers audit records briefly so high-frequency IPC does not hit SQLite
 /// per request; a background task flushes every 500ms like the TS timer.
@@ -25,9 +28,15 @@ impl AuditService {
         let service = Arc::new(Self { db, redaction, pending: Mutex::new(vec![]) });
         let flusher = service.clone();
         tokio::spawn(async move {
+            let mut flush_count: u64 = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let _ = flusher.flush();
+                flush_count += 1;
+                // Every ~60s prune expired rows (retention window).
+                if flush_count % 120 == 0 {
+                    let _ = flusher.prune_old();
+                }
             }
         });
         service
@@ -71,5 +80,13 @@ impl AuditService {
             return Ok(());
         }
         Repositories::new(&lock(&self.db).raw).audit().append_many(&batch)
+    }
+
+    /// Removes audit rows older than the retention window. Returns the number
+    /// of rows deleted (0 when there is nothing to prune yet).
+    pub fn prune_old(&self) -> CoreResult<usize> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(AUDIT_RETENTION_DAYS);
+        let timestamp = cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        Repositories::new(&lock(&self.db).raw).audit().delete_before(&timestamp)
     }
 }

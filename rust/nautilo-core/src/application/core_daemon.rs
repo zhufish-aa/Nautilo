@@ -138,8 +138,53 @@ impl Daemon {
     pub fn router(self: &Arc<Self>) -> Router {
         let mut router = Router::default();
 
+        // Read-only IPC (polling, hydration, listings) is not audited: it used
+        // to record ~99.9% of all audit rows (600k+ event.wait rows alone) and
+        // ballooned the database. Only failures and mutations keep a trail.
+        const READ_ONLY_IPC: &[&str] = &[
+            "health.get",
+            "project.list",
+            "agent.list",
+            "team.list",
+            "team.get",
+            "capability.list",
+            "policy.list",
+            "approval.list",
+            "credential.status",
+            "audit.list",
+            "metrics.get",
+            "session.list",
+            "session.get",
+            "session.followUp.list",
+            "run.list",
+            "run.get",
+            "task.list",
+            "projectRun.list",
+            "projectRun.get",
+            "artifact.list",
+            "verification.list",
+            "provider.catalog",
+            "provider.detect",
+            "provider.models",
+            "interaction.list",
+            "plugin.list",
+            "plugin.registry",
+            "capability.parseImport",
+            "capability.discoverMcp",
+            "capability.scanSkills",
+            "slashCommand.list",
+            "artifact.read",
+            "recovery.list",
+            "diagnostics.export",
+            "event.subscribe",
+            "event.replay",
+            "event.wait",
+        ];
         let audit = self.audit.clone();
         router.set_observer(Arc::new(move |request, response| {
+            if response.ok && READ_ONLY_IPC.contains(&request.method.as_str()) {
+                return;
+            }
             let outcome = if response.ok {
                 "success"
             } else if response.error.as_ref().is_some_and(|e| e.code == "COMMAND_BLOCKED") {
@@ -155,4 +200,3 @@ impl Daemon {
         router
     }
 }
-
