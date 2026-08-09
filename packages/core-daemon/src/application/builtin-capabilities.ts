@@ -22,7 +22,13 @@ import { LEGACY_BODIES } from "./builtin-skill-legacy.js";
 const COMMON_RULES = `
 ## Environment rules
 - Work inside the session workspace directory. Never touch files outside it.
-- Third-party Python packages go into an isolated environment (\`python -m venv .venv\` in the workspace), never the system Python. The bundled scripts print the exact setup command when a dependency is missing.
+- FIRST, prepare the Python environment before running any script (do this now, in the workspace):
+  1. If \`.venv\` does not exist, create it: \`python -m venv .venv\`
+  2. Install the office toolchain's dependencies (idempotent):
+     Windows: \`.venv\\Scripts\\python -m pip install python-pptx openpyxl python-docx\`
+     macOS/Linux: \`.venv/bin/python -m pip install python-pptx openpyxl python-docx\`
+  3. Run every script with the venv interpreter — \`python\` below means \`.venv\\Scripts\\python\` (Windows) or \`.venv/bin/python\` (macOS/Linux). Never use the system Python.
+- If a script still reports a missing dependency, install that package into \`.venv\` and retry. Never fall back to the system Python.
 - Verify before you report: run \`inspect\` (and \`render\` when LibreOffice is available) and fix every issue it finds. Never claim quality without evidence.
 - End your reply with the exact path of every deliverable you created or updated.
 `.trim();
