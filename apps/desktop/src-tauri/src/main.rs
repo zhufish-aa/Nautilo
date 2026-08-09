@@ -108,12 +108,10 @@ fn main() {
                 }
             });
 
-            // The window stays hidden until index.html's static splash is in
-            // the DOM — its inline script calls show_main_window right after
-            // the page parses, so the window appears already showing the
-            // loading splash (never a black frame) and long before React or
-            // data finish. Safety net: force-show after 8s if that script is
-            // skipped (e.g. a blank renderer).
+            // The window starts hidden (visible:false). The renderer calls
+            // show_main_window once React has mounted, so the window appears
+            // already showing the page — no dark frame, no dead wait.
+            // Safety net: force-show after 8s if the renderer never signals.
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
