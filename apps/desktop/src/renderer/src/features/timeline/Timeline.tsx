@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
   ArrowRightLeft,
@@ -280,9 +280,9 @@ function CardShell({
   };
   return (
     <motion.article
-      initial={{ opacity: 0, y: 14, scale: 0.985 }}
+      initial={{ opacity: 0, y: 10, scale: 0.99 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 320, damping: 28 }}
+      transition={{ type: "spring", stiffness: 500, damping: 45 }}
       className={cn("flex gap-3", className)}
     >
       <span
@@ -330,10 +330,10 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
     );
   }
   return (
-    <motion.div
+      <motion.div
       initial={animateIn ? { opacity: 0, y: 10 } : false}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ type: "spring", stiffness: 320, damping: 28 }}
+      transition={{ type: "spring", stiffness: 500, damping: 45 }}
       className="group flex"
     >
       <div className={cn("min-w-0 flex-1", isUser && "flex flex-col items-end")}>
@@ -518,17 +518,23 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
               <MarkdownContent source={event.data.text} />
               {event.data.streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-hidden />}
             </div>
-            {showJumpToLatest && (
-              <button
-                type="button"
-                onClick={scrollToLatest}
-                className="absolute bottom-2 right-3 inline-flex items-center gap-1 rounded-full border border-line bg-card px-2 py-1 text-[11px] text-ink-2 shadow-pop transition-colors hover:bg-card-hover"
-                aria-label={zh ? "滚动到最新推理" : "Scroll to latest reasoning"}
-              >
-                <ChevronDown className="h-3 w-3" aria-hidden />
-                {zh ? "回到底部" : "Latest"}
-              </button>
-            )}
+            <AnimatePresence>
+              {showJumpToLatest && (
+                <motion.button
+                  type="button"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  transition={{ duration: 0.15, ease: "easeOut" }}
+                  onClick={scrollToLatest}
+                  className="absolute bottom-2 right-3 inline-flex items-center gap-1 rounded-full border border-line bg-card px-2 py-1 text-[11px] text-ink-2 shadow-pop transition-colors hover:bg-card-hover"
+                  aria-label={zh ? "滚动到最新推理" : "Scroll to latest reasoning"}
+                >
+                  <ChevronDown className="h-3 w-3" aria-hidden />
+                  {zh ? "回到底部" : "Latest"}
+                </motion.button>
+              )}
+            </AnimatePresence>
           </div>
         </motion.div>
       )}
@@ -905,9 +911,9 @@ function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
     <motion.article
       initial={{ opacity: 0, y: 10, scale: 0.99 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 320, damping: 28 }}
+      transition={{ type: "spring", stiffness: 500, damping: 45 }}
       className={cn(
-        "run-border relative overflow-hidden rounded-xl border bg-card/70 transition-[border-color,box-shadow] duration-700",
+        "run-border relative overflow-hidden rounded-xl border bg-card/70 transition-[border-color,box-shadow] duration-250",
         flowRunning
           ? "run-border-active border-accent/30 shadow-[0_14px_44px_-18px_var(--accent)]"
           : "border-line"

@@ -32,7 +32,7 @@ export function RadioCardGroup({
           key={item.value}
           value={item.value}
           className={cn(
-            "group flex flex-col items-start gap-2 rounded-xl border border-line bg-card p-3.5 text-left outline-none transition-all duration-150",
+            "group flex flex-col items-start gap-2 rounded-xl border border-line bg-card p-3.5 text-left outline-none transition-colors duration-150",
             "hover:border-accent/40 hover:bg-card-hover",
             "focus-visible:ring-2 focus-visible:ring-accent/70",
             "data-[state=checked]:border-accent/60 data-[state=checked]:bg-accent-soft/60 data-[state=checked]:shadow-glow"

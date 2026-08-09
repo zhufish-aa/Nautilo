@@ -32,7 +32,7 @@ export function Tabs({
             key={item.value}
             value={item.value}
             className={cn(
-              "inline-flex h-8 items-center gap-1.5 rounded-lg px-3.5 text-sm font-medium text-ink-3 outline-none transition-all duration-150",
+              "inline-flex h-8 items-center gap-1.5 rounded-lg px-3.5 text-sm font-medium text-ink-3 outline-none transition-colors duration-150",
               "hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/70",
               "data-[state=active]:bg-accent-soft data-[state=active]:text-accent data-[state=active]:shadow-[inset_0_0_0_1px_var(--accent-soft)]"
             )}
@@ -78,7 +78,7 @@ export function TabBar({
             aria-selected={active}
             onClick={() => onValueChange(item.value)}
             className={cn(
-              "inline-flex h-8 items-center gap-1.5 rounded-lg px-3.5 text-sm font-medium outline-none transition-all duration-150",
+              "inline-flex h-8 items-center gap-1.5 rounded-lg px-3.5 text-sm font-medium outline-none transition-colors duration-150",
               "focus-visible:ring-2 focus-visible:ring-accent/70",
               active ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink"
             )}

@@ -232,7 +232,7 @@ export function TeamEditorPage(): JSX.Element {
                     role="radio"
                     aria-checked={active}
                     onClick={() => updateTeam(team.id, { delegationPolicy: policy })}
-                    className={`rounded-xl border p-3.5 text-left transition-all duration-150 outline-none focus-visible:ring-2 focus-visible:ring-accent/70 ${
+                    className={`rounded-xl border p-3.5 text-left transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-accent/70 ${
                       active
                         ? "border-accent/60 bg-accent-soft/60 shadow-glow"
                         : "border-line bg-card hover:border-accent/40 hover:bg-card-hover"

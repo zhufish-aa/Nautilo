@@ -50,7 +50,7 @@ function SessionCard({
       type="button"
       onClick={onOpen}
       aria-label={`${t("runsPage.open")}: ${session.title || t("runsPage.untitled")}`}
-      className="group flex w-full flex-col gap-1.5 rounded-2xl border border-line bg-card px-4 py-3.5 text-left transition-all hover:border-accent/50 hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45"
+      className="group flex w-full flex-col gap-1.5 rounded-2xl border border-line bg-card px-4 py-3.5 text-left transition-[background-color,border-color,box-shadow] hover:border-accent/50 hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45"
     >
       <div className="flex w-full items-center justify-between gap-3">
         <span className="min-w-0 truncate text-sm font-medium text-ink">{session.title || t("runsPage.untitled")}</span>
@@ -125,7 +125,7 @@ export function RunsPage(): JSX.Element {
               key={section.key}
               initial={{ opacity: 0, y: 14 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ type: "spring", stiffness: 240, damping: 26, delay: sectionIndex * 0.08 }}
+              transition={{ type: "spring", stiffness: 240, damping: 31, delay: sectionIndex * 0.08 }}
               className="flex flex-col gap-2.5"
             >
               <h2 className="flex items-center gap-2 px-1 text-xs font-semibold tracking-[0.16em] text-ink-3">
@@ -142,7 +142,7 @@ export function RunsPage(): JSX.Element {
                       key={session.id}
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
-                      transition={{ type: "spring", stiffness: 260, damping: 26, delay: 0.12 + sectionIndex * 0.08 + cardIndex * 0.045 }}
+                      transition={{ type: "spring", stiffness: 260, damping: 32, delay: 0.12 + sectionIndex * 0.08 + cardIndex * 0.045 }}
                     >
                       <SessionCard
                         session={session}

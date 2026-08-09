@@ -78,7 +78,7 @@ function SessionEntryRow({
         onClick={() => onOpen(session.id)}
         aria-current={active ? "page" : undefined}
         className={cn(
-          "group flex w-full items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-150 outline-none",
+          "group flex w-full items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors duration-150 outline-none",
           "focus-visible:ring-2 focus-visible:ring-accent/70",
           active ? "border-accent/40 bg-accent-soft/70" : "border-line bg-card hover:border-accent/30 hover:bg-card-hover"
         )}

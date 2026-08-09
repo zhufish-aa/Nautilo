@@ -350,7 +350,7 @@ export function PermissionPolicyCard(): JSX.Element {
                                   aria-pressed={active}
                                   onClick={() => toggleRuleSource(index, source)}
                                   className={cn(
-                                    "h-7 rounded-lg border px-2.5 text-xs font-medium transition-all duration-150 outline-none",
+                                    "h-7 rounded-lg border px-2.5 text-xs font-medium transition-colors duration-150 outline-none",
                                     "focus-visible:ring-2 focus-visible:ring-accent/70",
                                     active ? "border-accent/50 bg-accent-soft text-accent" : "border-line bg-card text-ink-3 hover:border-line-strong hover:text-ink-2"
                                   )}

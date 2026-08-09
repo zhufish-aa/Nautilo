@@ -89,7 +89,7 @@ export function CommandResultDialog({
                   disabled={option.disabled}
                   onClick={() => toggle(option.id)}
                   className={cn(
-                    "grid w-full grid-cols-[1fr_22px] items-center gap-3 rounded-xl border px-4 py-3 text-left outline-none transition-all focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-45",
+                    "grid w-full grid-cols-[1fr_22px] items-center gap-3 rounded-xl border px-4 py-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-45",
                     checked ? "border-accent/55 bg-accent-soft/55" : "border-line bg-card hover:border-accent/30 hover:bg-card-hover"
                   )}
                 >

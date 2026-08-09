@@ -22,7 +22,7 @@ export function ScoreDots({
         const dot = (
           <span
             className={cn(
-              "h-2.5 w-2.5 rounded-full transition-all duration-150",
+              "h-2.5 w-2.5 rounded-full transition-colors duration-150",
               active ? "bg-gradient-to-br from-accent to-accent-2 shadow-[0_0_8px_-1px_var(--accent)]" : "bg-line-strong",
               !readonly && "group-hover/dot:scale-125"
             )}

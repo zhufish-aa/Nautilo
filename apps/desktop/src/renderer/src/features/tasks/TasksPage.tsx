@@ -169,7 +169,7 @@ function DagCanvas({
                   className={active ? "dag-edge-flow" : undefined}
                   initial={{ pathLength: 0, opacity: 0 }}
                   animate={{ pathLength: 1, opacity: 1 }}
-                  transition={{ duration: 0.6, delay: 0.25 + from.level * 0.14, ease: "easeInOut" }}
+                  transition={{ duration: 0.4, delay: 0.25 + from.level * 0.14, ease: "easeInOut" }}
                 />
               );
             })
@@ -195,7 +195,7 @@ function DagCanvas({
                 }}
                 initial={{ opacity: 0, scale: 0.85, x: pos.x, y: pos.y + 18 }}
                 animate={{ opacity: 1, scale: 1, x: pos.x, y: pos.y }}
-                transition={{ type: "spring", stiffness: 240, damping: 24, delay: 0.35 + pos.level * 0.14 + index * 0.04 }}
+                transition={{ type: "spring", stiffness: 240, damping: 31, delay: 0.35 + pos.level * 0.14 + index * 0.04 }}
               >
                 <foreignObject width={NODE_W} height={NODE_H}>
                   <div
@@ -328,7 +328,7 @@ export function TasksPage(): JSX.Element {
         <motion.section
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ type: "spring", stiffness: 200, damping: 24, delay: 0.06 }}
+          transition={{ type: "spring", stiffness: 200, damping: 28, delay: 0.06 }}
           className="overflow-hidden rounded-2xl border border-line bg-card/60 shadow-card"
         >
           <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
@@ -353,7 +353,7 @@ export function TasksPage(): JSX.Element {
         <motion.aside
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ type: "spring", stiffness: 200, damping: 24, delay: 0.14 }}
+          transition={{ type: "spring", stiffness: 200, damping: 28, delay: 0.14 }}
           className="flex flex-col overflow-hidden rounded-2xl border border-line bg-card/60 shadow-card"
         >
           <header className="flex items-center gap-3 border-b border-line px-4 py-3">
@@ -376,8 +376,8 @@ export function TasksPage(): JSX.Element {
                   onClick={() => openTask(group, task)}
                   initial={{ opacity: 0, x: 12 }}
                   animate={{ opacity: 1, x: 0 }}
-                  transition={{ type: "spring", stiffness: 240, damping: 24, delay: 0.3 + index * 0.05 }}
-                  className="group flex items-center gap-2.5 rounded-xl border border-line bg-card px-3 py-2.5 text-left transition-all hover:border-accent/40 hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45"
+                  transition={{ type: "spring", stiffness: 240, damping: 31, delay: 0.3 + index * 0.05 }}
+                  className="group flex items-center gap-2.5 rounded-xl border border-line bg-card px-3 py-2.5 text-left transition-[background-color,border-color,box-shadow] hover:border-accent/40 hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45"
                 >
                   {statusIcon(task, "h-3.5 w-3.5 shrink-0")}
                   <span className="min-w-0 flex-1">

@@ -376,7 +376,7 @@ export function MemberEditorDialog({
                       aria-pressed={active}
                       onClick={() => toggleTaskType(taskType)}
                       className={cn(
-                        "h-8 rounded-lg border px-3 text-[13px] font-medium transition-all duration-150 outline-none",
+                        "h-8 rounded-lg border px-3 text-[13px] font-medium transition-colors duration-150 outline-none",
                         "focus-visible:ring-2 focus-visible:ring-accent/70",
                         active
                           ? "border-accent/50 bg-accent-soft text-accent"
