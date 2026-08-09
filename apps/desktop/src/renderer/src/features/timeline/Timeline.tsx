@@ -39,6 +39,7 @@ import { openFilePreview } from "../../stores/file-preview";
 import { resolveFileOpenTarget } from "../../lib/file-references";
 import { fileChangeCounts } from "../../lib/changed-files";
 import { useProgressiveRows } from "../../lib/use-progressive-rows";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 const FOLLOW_TAIL_THRESHOLD = 120;
 
@@ -47,15 +48,28 @@ const FOLLOW_TAIL_THRESHOLD = 120;
  * card renderer; this component is the layer that can actually observe and
  * control the scrolling element.
  */
+export interface TimelineRow {
+  key: string;
+  render: () => ReactNode;
+}
+
+/**
+ * Owns the vertical viewport for a timeline. Virtualizes the row list so only
+ * the visible rows (plus a small overscan) are mounted: a long session's DOM
+ * stays bounded regardless of how many turns/answers it holds. Follow-tail
+ * behavior is preserved: scrolling up pauses follow mode, scrolling back into
+ * the tail re-engages it, and any content/row change while following pins the
+ * view to the newest tail.
+ */
 export function TimelineViewport({
-  children,
+  rows,
   sessionKey,
   contentKey,
   forceFollowKey,
   active = true,
   className
 }: {
-  children: ReactNode;
+  rows: TimelineRow[];
   sessionKey: string;
   contentKey?: unknown;
   forceFollowKey?: string;
@@ -63,21 +77,27 @@ export function TimelineViewport({
   className?: string;
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const totalRef = useRef<HTMLDivElement>(null);
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const previousForceFollowKeyRef = useRef(forceFollowKey);
+  const previousContentKeyRef = useRef<unknown>(contentKey);
+  const previousRowCountRef = useRef(rows.length);
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 120,
+    overscan: 4,
+    getItemKey: (index) => rows[index]?.key ?? String(index)
+  });
 
   const scrollToTail = useCallback(() => {
     if (!active || !followTailRef.current) return;
-    const element = scrollRef.current;
-    if (!element) return;
-    // Run after the DOM commit, but do not add another rAF layer: the caller
-    // is already a layout effect or ResizeObserver callback. The extra frame
-    // was the part that could be skipped while a streaming row was changing.
-    element.scrollTop = element.scrollHeight;
-    lastScrollTopRef.current = element.scrollTop;
-  }, [active]);
+    // Run after the DOM commit; the virtualizer schedules its own frame, so
+    // a plain offset scroll keeps the tail pinned without racing the measure.
+    virtualizer.scrollToOffset(virtualizer.getTotalSize(), { align: "end" });
+  }, [active, virtualizer]);
 
   // A newly opened session (or a page becoming visible again) starts at the
   // tail. This runs after the layout has a real height, unlike a one-time
@@ -89,22 +109,34 @@ export function TimelineViewport({
   }, [active, scrollToTail, sessionKey]);
 
   // Event arrays are replaced for both appended events and streaming patches.
-  // The ResizeObserver below covers height changes caused by markdown,
-  // images, and framer-motion after the event array itself has rendered.
+  // The virtualizer re-measures rows, so a growing live turn changes the total
+  // height; while following, pin the view to the new tail.
   useLayoutEffect(() => {
+    if (contentKey === previousContentKeyRef.current) return;
+    previousContentKeyRef.current = contentKey;
     scrollToTail();
-  }, [active, contentKey, scrollToTail]);
+  }, [contentKey, scrollToTail]);
+
+  // Rows are added when new turns start and removed on session switch. Keep
+  // the tail pinned while following even when the row count itself changes.
+  useLayoutEffect(() => {
+    if (rows.length === previousRowCountRef.current) return;
+    previousRowCountRef.current = rows.length;
+    scrollToTail();
+  }, [rows.length, scrollToTail]);
 
   useLayoutEffect(() => {
     if (forceFollowKey === previousForceFollowKeyRef.current) return;
     previousForceFollowKeyRef.current = forceFollowKey;
     if (forceFollowKey === undefined) return;
     followTailRef.current = true;
-    scrollToTail();
-  }, [forceFollowKey, scrollToTail]);
+    virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+  }, [forceFollowKey, rows.length, virtualizer]);
 
+  // Height-only changes (markdown layout, images, framer-motion settling) are
+  // not covered by contentKey; while following, keep the tail pinned.
   useEffect(() => {
-    const content = contentRef.current;
+    const content = totalRef.current;
     if (!active || !content || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => scrollToTail());
     observer.observe(content);
@@ -119,9 +151,7 @@ export function TimelineViewport({
         const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
         if (element.scrollTop < lastScrollTopRef.current - 1) {
           // Any upward scroll (wheel, thumb drag, keys) is explicit user
-          // intent — even inside the re-engage threshold. Previously a small
-          // wheel-up within FOLLOW_TAIL_THRESHOLD re-engaged follow on the
-          // same event and the next stream tick yanked the view back down.
+          // intent ? even inside the re-engage threshold.
           followTailRef.current = false;
         } else if (gap < FOLLOW_TAIL_THRESHOLD && element.scrollTop > lastScrollTopRef.current) {
           // Only scrolling DOWN into the tail re-engages follow mode.
@@ -137,7 +167,24 @@ export function TimelineViewport({
       className={cn("relative h-full overflow-y-auto", className)}
       aria-live="polite"
     >
-      <div ref={contentRef}>{children}</div>
+      <div ref={totalRef} style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+        {virtualizer.getVirtualItems().map((virtualRow) => (
+          <div
+            key={virtualRow.key}
+            ref={virtualizer.measureElement}
+            data-index={virtualRow.index}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              transform: `translateY(${virtualRow.start}px)`
+            }}
+          >
+            {rows[virtualRow.index]?.render()}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

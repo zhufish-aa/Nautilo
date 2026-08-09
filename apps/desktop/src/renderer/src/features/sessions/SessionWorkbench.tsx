@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ClipboardList, ChevronDown, GitFork, FileDiff, Package, SquareTerminal } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
-import { TimelineEventView, TimelineViewport } from "../timeline/Timeline";
+import { TimelineEventView, type TimelineRow, TimelineViewport } from "../timeline/Timeline";
 import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Composer } from "./Composer";
@@ -338,6 +338,62 @@ export function SessionWorkbench({
   const project = projects.find((item) => item.id === session.projectId);
   const targetName = sessionTargetName(session, teams, instances);
   const hasPlan = tasks.length > 0;
+  // Virtualized timeline rows: each turn (plus the fixed head/tail blocks)
+  // is one measured row, so only the visible rows are mounted.
+  const shell = (key: string, node: ReactNode): TimelineRow => ({
+    key,
+    render: () => (
+      <div className={cn("mx-auto flex w-full flex-col px-5 py-4", isWork ? "max-w-3xl gap-8" : "max-w-4xl gap-9")}>
+        {node}
+      </div>
+    )
+  });
+  const timelineRows: TimelineRow[] = [];
+  if (delegatedTask) timelineRows.push(shell("delegated", <DelegatedTaskCard task={delegatedTask} />));
+  turns.forEach((turn, index) => {
+    const live = index === turns.length - 1
+      ? waitingForApproval ? "waiting" : workbenchRunning ? "running" : undefined
+      : undefined;
+    timelineRows.push(
+      shell(turn.key, (
+        <section className="turn-block pl-6 motion-safe:animate-[rise-in_0.28s_ease-out_both]" data-live={live}>
+          {turn.header && (
+            <TimelineEventView
+              event={turn.header}
+              onEditMessage={handleEditMessage}
+              onOpenLocalFile={onOpenLocalFile}
+            />
+          )}
+          {live && turn.items.length === 0 && (
+            <RunActivityIndicator lifecycle={visibleLifecycle} events={events} waitingForDelegates={waitingForDelegates} />
+          )}
+          {turn.items.length > 0 && (
+            <ProcessTurnView
+              items={turn.items}
+              live={Boolean(live)}
+              zh={locale === "zh-CN"}
+              renderItem={(event) => (
+                <TimelineEventView
+                  key={event.id}
+                  event={event}
+                  onViewDiff={handleViewDiff}
+                  onOpenSession={onOpenSession}
+                  onOpenSubagent={setSubagentEventId}
+                  onOpenLocalFile={onOpenLocalFile}
+                />
+              )}
+            />
+          )}
+        </section>
+      ))
+    );
+  });
+  timelineRows.push(shell("interactions", <InteractionCards sessionId={sessionId} />));
+  if (events.length === 0) {
+    timelineRows.push(
+      shell("empty", <p className="py-16 text-center text-sm text-ink-3">{t("sessions.noSelection")}</p>)
+    );
+  }
 
   return (
     <>
@@ -388,58 +444,12 @@ export function SessionWorkbench({
 
       <div className="energy-field relative min-h-0 flex-1" data-run-state={waitingForApproval ? "waiting" : workbenchRunning ? "running" : session.status === "failed" ? "failed" : "idle"}>
       <TimelineViewport
+        rows={timelineRows}
         sessionKey={sessionId}
         contentKey={events}
         forceFollowKey={lastUserMessageId}
         active={active}
-      >
-        <div className={cn("mx-auto flex w-full flex-col px-5 py-7", isWork ? "max-w-3xl gap-8" : "max-w-4xl gap-9")}>
-          {delegatedTask && <DelegatedTaskCard task={delegatedTask} />}
-          {turns.map((turn, index) => {
-            const live = index === turns.length - 1
-              ? waitingForApproval ? "waiting" : workbenchRunning ? "running" : undefined
-              : undefined;
-            return (
-              <section key={turn.key} className="turn-block pl-6 motion-safe:animate-[rise-in_0.28s_ease-out_both]" data-live={live}>
-                {turn.header && (
-                  <TimelineEventView
-                    event={turn.header}
-                    onEditMessage={handleEditMessage}
-                    onOpenLocalFile={onOpenLocalFile}
-                  />
-                )}
-                {/* Live progress sits at the top of the active turn, right
-                    under the user's message. Once events start streaming,
-                    the "已处理" fold row takes over. */}
-                {live && turn.items.length === 0 && (
-                  <RunActivityIndicator lifecycle={visibleLifecycle} events={events} waitingForDelegates={waitingForDelegates} />
-                )}
-                {turn.items.length > 0 && (
-                  <ProcessTurnView
-                    items={turn.items}
-                    live={Boolean(live)}
-                    zh={locale === "zh-CN"}
-                    renderItem={(event) => (
-                      <TimelineEventView
-                        key={event.id}
-                        event={event}
-                        onViewDiff={handleViewDiff}
-                        onOpenSession={onOpenSession}
-                        onOpenSubagent={setSubagentEventId}
-                        onOpenLocalFile={onOpenLocalFile}
-                      />
-                    )}
-                  />
-                )}
-              </section>
-            );
-          })}
-          <InteractionCards sessionId={sessionId} />
-          {events.length === 0 && (
-            <p className="py-16 text-center text-sm text-ink-3">{t("sessions.noSelection")}</p>
-          )}
-        </div>
-      </TimelineViewport>
+      />
       {todoGoal && <TodoGoalCard todos={todoGoal} />}
       </div>
 
