@@ -108,11 +108,12 @@ fn main() {
                 }
             });
 
-            // The window starts hidden (visible: false). The renderer calls
-            // show_main_window once React has painted its first frame, so the
-            // dark background never flashes before the UI is ready.
-            // Safety net: if the renderer never signals (crash or a blank
-            // error overlay), force-show so the app is never stuck invisible.
+            // The window stays hidden until index.html's static splash is in
+            // the DOM — its inline script calls show_main_window right after
+            // the page parses, so the window appears already showing the
+            // loading splash (never a black frame) and long before React or
+            // data finish. Safety net: force-show after 8s if that script is
+            // skipped (e.g. a blank renderer).
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -134,8 +135,9 @@ fn main() {
         });
 }
 
-/// Called by the renderer after React has painted its first frame, so the
-/// window never flashes its dark background before the UI is ready.
+/// Reveals the main window. Called by the static splash in index.html as soon
+/// as the DOM parses, so the window shows the loading splash immediately
+/// without waiting for React or data.
 #[tauri::command]
 fn show_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
     window.show().map_err(|e| e.to_string())?;
