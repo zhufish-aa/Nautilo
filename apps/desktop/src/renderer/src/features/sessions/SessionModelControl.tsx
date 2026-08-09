@@ -209,7 +209,10 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
             transition={{ type: "spring", stiffness: 430, damping: 34, mass: 0.7 }}
             className="absolute right-0 bottom-full z-40 mb-2 overflow-hidden rounded-2xl border border-line/80 bg-card p-1.5 shadow-pop"
           >
-            <AnimatePresence mode="wait" initial={false}>
+            {/* Keep initial (no initial={false}): the inner view switch
+                (summary ⇄ models ⇄ details) must mount at opacity 0 and then
+                animate in, not flash the new view fully visible first. */}
+            <AnimatePresence mode="wait">
               <motion.div
                 key={panelKey}
                 layout="size"

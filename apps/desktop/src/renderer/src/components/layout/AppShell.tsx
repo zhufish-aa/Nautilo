@@ -151,7 +151,14 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
             </div>
           ) : (
             <div className="mx-auto max-w-6xl px-7 py-7">
-              <AnimatePresence mode="wait" initial={false}>
+              {/* NOTE: do NOT pass initial={false} here. With it, framer-motion
+                  mounts the incoming page at its animate values (opacity 1)
+                  for the first frame and only then applies the initial state
+                  and plays the entrance — the page visibly flashes fully
+                  rendered before sliding/fading in. Default (initial=true)
+                  renders the first frame at opacity 0 so the switch is a pure
+                  entrance animation. */}
+              <AnimatePresence mode="wait">
                 <PageTransition key={location.pathname}>{children}</PageTransition>
               </AnimatePresence>
             </div>
