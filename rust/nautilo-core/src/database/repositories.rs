@@ -346,6 +346,46 @@ impl<'a> RunRepository<'a> {
     }
 }
 
+/// A `thinking_delta` is a cumulative streaming snapshot; once a final
+/// `thinking_summary` for the same messageId exists, the intermediate deltas
+/// add nothing but replay bytes (the renderer rebuilds the reasoning row from
+/// the summary). Dropping them keeps long-session replays smaller and faster.
+/// Deltas WITHOUT a matching summary are kept: a reasoning interrupted before
+/// its summary still needs its last delta text.
+fn drop_redundant_thinking_deltas(events: Vec<Value>) -> Vec<Value> {
+    // Small sessions replay quickly anyway; skip the extra scan.
+    if events.len() < 64 {
+        return events;
+    }
+    let summarized: std::collections::HashSet<String> = events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent.thinking_summary"))
+        .filter_map(|event| {
+            event
+                .get("payload")
+                .and_then(|payload| payload.get("messageId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    if summarized.is_empty() {
+        return events;
+    }
+    events
+        .into_iter()
+        .filter(|event| {
+            if event.get("type").and_then(Value::as_str) != Some("agent.thinking_delta") {
+                return true;
+            }
+            let message_id = event
+                .get("payload")
+                .and_then(|payload| payload.get("messageId"))
+                .and_then(Value::as_str);
+            !message_id.map(|id| summarized.contains(id)).unwrap_or(false)
+        })
+        .collect()
+}
+
 pub struct TaskRepository<'a> {
     db: &'a Connection,
 }
@@ -645,7 +685,8 @@ impl<'a> EventRepository<'a> {
                 .collect::<Result<_, _>>()
                 .map_err(db_fail)?
         };
-        Ok(rows.into_iter().map(parse_row).collect())
+        let events: Vec<Value> = rows.into_iter().map(parse_row).collect();
+        Ok(drop_redundant_thinking_deltas(events))
     }
 }
 
