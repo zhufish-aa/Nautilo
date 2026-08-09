@@ -120,12 +120,23 @@ impl Listener {
         {
             use tokio::net::windows::named_pipe::ServerOptions;
             let mut instances = std::collections::VecDeque::new();
+            // Windows named pipes default to a 4KB kernel buffer per direction.
+            // Replaying a large session can return multi-MB JSON over one
+            // response; the 4KB default turns that into thousands of blocking
+            // pipe round-trips (~2MB/s) and multi-second replays. Large
+            // buffers keep big responses flowing at line rate instead.
+            let options = || {
+                let mut options = ServerOptions::new();
+                options.in_buffer_size(1024 * 1024);
+                options.out_buffer_size(4 * 1024 * 1024);
+                options
+            };
             // The first instance establishes the pipe name; the rest are extra
             // instances of the same pipe (up to PIPE_UNLIMITED_INSTANCES).
-            let first = ServerOptions::new().first_pipe_instance(true).create(path)?;
+            let first = options().first_pipe_instance(true).create(path)?;
             instances.push_back(first);
             for _ in 1..PIPE_INSTANCE_POOL {
-                match ServerOptions::new().create(path) {
+                match options().create(path) {
                     Ok(instance) => instances.push_back(instance),
                     Err(_) => break, // pool is best-effort; single instance still works
                 }
@@ -155,7 +166,10 @@ impl Listener {
                 // Refill the pool first so concurrent clients have a ready
                 // instance to connect to.
                 while instances.len() < PIPE_INSTANCE_POOL {
-                    match ServerOptions::new().create(path.as_str()) {
+                    let mut options = ServerOptions::new();
+                    options.in_buffer_size(1024 * 1024);
+                    options.out_buffer_size(4 * 1024 * 1024);
+                    match options.create(path.as_str()) {
                         Ok(instance) => instances.push_back(instance),
                         Err(_) => break,
                     }
