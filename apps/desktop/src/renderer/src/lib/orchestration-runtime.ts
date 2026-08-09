@@ -78,6 +78,41 @@ const projectRunActiveRuns = new Map<string, number>();
 
 const STREAMING_DELTA_TYPES = new Set(["agent.message_delta", "agent.thinking_delta"]);
 
+/** Stream identity for delta upserts: run + kind + message segment. */
+function streamKeyOf(event: RuntimeEvent): string {
+  const messageId = (event.payload as { messageId?: string } | undefined)?.messageId ?? "";
+  return `${event.runId ?? ""}:${event.type}:${messageId}`;
+}
+
+/**
+ * Appends fresh events to a session cache. Streaming deltas are cumulative
+ * snapshots: the daemon coalesces them into one journal row and re-issues
+ * each merge with a NEW eventId and sequence, so appending them would store
+ * every intermediate streaming state and grow the cache quadratically
+ * mid-turn. The cached row for the same stream is replaced instead.
+ */
+function mergeEventCache(current: RuntimeEvent[], fresh: RuntimeEvent[]): RuntimeEvent[] {
+  if (!fresh.some((event) => STREAMING_DELTA_TYPES.has(event.type))) return [...current, ...fresh];
+  const next = [...current];
+  const streamIndex = new Map<string, number>();
+  for (let index = 0; index < current.length; index += 1) {
+    const event = current[index]!;
+    if (STREAMING_DELTA_TYPES.has(event.type)) streamIndex.set(streamKeyOf(event), index);
+  }
+  for (const event of fresh) {
+    if (STREAMING_DELTA_TYPES.has(event.type)) {
+      const existing = streamIndex.get(streamKeyOf(event));
+      if (existing !== undefined) {
+        next[existing] = event;
+        continue;
+      }
+      streamIndex.set(streamKeyOf(event), next.length);
+    }
+    next.push(event);
+  }
+  return next;
+}
+
 /** Reasoning streams are display-only and can run to hundreds of KB. The
  * collapsed preview reads the latest line, so oversized text is capped at the
  * TAIL (newest content) rather than the head. The daemon caps too; this is a
@@ -676,7 +711,7 @@ function mergeStandaloneEvents(sessionId: string, events: RuntimeEvent[]): void 
   const known = new Set(current.map((event) => event.eventId));
   const fresh = events.filter((event) => !known.has(event.eventId));
   if (!fresh.length) return;
-  standaloneEventCache.set(sessionId, [...current, ...fresh]);
+  standaloneEventCache.set(sessionId, mergeEventCache(current, fresh));
   ingestInteractionEvents(fresh);
   ingestFollowUpEvents(sessionId, fresh);
   ingestProviderCommandEvents(sessionId, fresh);
@@ -992,7 +1027,7 @@ async function projectSessionEvents(sessionId: string): Promise<{ events: Runtim
     ingestFollowUpEvents(sessionId, fresh);
     ingestProviderCommandEvents(sessionId, fresh);
   }
-  const events = fresh.length ? [...cached, ...fresh] : cached;
+  const events = fresh.length ? mergeEventCache(cached, fresh) : cached;
   projectSessionEventCache.set(sessionId, events);
   return { events, hasNew: fresh.length > 0 };
 }
