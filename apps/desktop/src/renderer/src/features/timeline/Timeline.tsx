@@ -38,6 +38,7 @@ import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupTextMenu } f
 import { openFilePreview } from "../../stores/file-preview";
 import { resolveFileOpenTarget } from "../../lib/file-references";
 import { fileChangeCounts } from "../../lib/changed-files";
+import { useProgressiveRows } from "../../lib/use-progressive-rows";
 
 const FOLLOW_TAIL_THRESHOLD = 120;
 
@@ -791,6 +792,14 @@ function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
 }): JSX.Element {
   const [open, setOpen] = useState(false);
   const { items, stepCount, callCount, running } = event.data;
+  // A collapsed group renders nothing; expanding a huge group mounts
+  // progressively so hundreds of step cards are not built in one frame.
+  const { limit, sentinelRef, showAll } = useProgressiveRows(
+    open ? items.length : 0,
+    open ? "expanded" : "collapsed",
+    200,
+    400
+  );
   const streamingReasoning = items.some(
     (item) => item.data.kind === "reasoning" && item.data.streaming
   );
@@ -892,7 +901,7 @@ function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
         >
           {/* Workflow rail: steps hang from one quiet hairline. */}
           <div className="relative ml-[21px] space-y-3 border-l border-line py-3 pl-4 pr-3.5">
-            {items.map((item) => {
+            {items.slice(0, limit).map((item) => {
               if (item.data.kind === "reasoning") return <ReasoningCard key={item.id} event={item as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
               if (item.data.kind === "tool_activity") return <ToolActivityCard key={item.id} event={item as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
               if (item.data.kind === "command") return <CommandCard key={item.id} event={item as TimelineEvent & { data: { kind: "command" } }} t={t} locale={locale} />;
@@ -900,6 +909,16 @@ function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
               if (item.data.kind === "verification") return <VerificationCard key={item.id} event={item as TimelineEvent & { data: { kind: "verification" } }} t={t} locale={locale} />;
               return null;
             })}
+            {limit < items.length && (
+              <button
+                type="button"
+                ref={sentinelRef}
+                onClick={showAll}
+                className="mx-3 my-2 w-[calc(100%-24px)] rounded-lg border border-line px-3 py-1.5 text-xs text-ink-3 transition-colors hover:bg-card-hover hover:text-ink-2"
+              >
+                {zh ? `加载更多（共 ${items.length} 步）` : `Load more (${items.length} steps total)`}
+              </button>
+            )}
           </div>
         </motion.div>
       )}

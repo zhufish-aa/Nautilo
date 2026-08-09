@@ -17,6 +17,7 @@ import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
 import { hasRunningDelegatedTask, isActiveLifecycle, visibleSessionStatus } from "../../lib/session-lifecycle";
 import { ensureStandaloneSessionHydrated, registerStandaloneSessionView } from "../../lib/orchestration-runtime";
+import { useProgressiveRows } from "../../lib/use-progressive-rows";
 import { cn } from "../../lib/utils";
 import { collectChangedFiles } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
@@ -59,9 +60,7 @@ function ProcessTurnView({
   return (
     <>
       {process.length > 0 && (
-        <ProcessFold items={process} live={live} zh={zh} endTimestamp={items[items.length - 1]?.timestamp}>
-          {process.map(renderItem)}
-        </ProcessFold>
+        <ProcessFold items={process} live={live} zh={zh} endTimestamp={items[items.length - 1]?.timestamp} renderItem={renderItem} />
       )}
       {answer.length > 0 && (
         <div className="mt-4 flex flex-col gap-4">{answer.map(renderItem)}</div>
@@ -80,7 +79,7 @@ function ProcessFold({
   live,
   zh,
   endTimestamp,
-  children
+  renderItem
 }: {
   items: TimelineEvent[];
   live: boolean;
@@ -88,7 +87,7 @@ function ProcessFold({
   /** End of the whole turn (the final answer may stream long after the last
    * process event) — the folded duration must cover it too. */
   endTimestamp?: string;
-  children: ReactNode;
+  renderItem: (event: TimelineEvent) => ReactNode;
 }): JSX.Element {
   const [open, setOpen] = useState(live);
   const [now, setNow] = useState(() => Date.now());
@@ -113,6 +112,17 @@ function ProcessFold({
       : zh
         ? `${seconds} 秒`
         : `${seconds}s`;
+  // A live turn renders its steps in full so the newest activity stays visible;
+  // a manually expanded finished turn mounts progressively so opening a huge
+  // fold never builds hundreds of cards in one frame.
+  const progressive = open && !live;
+  const { limit, sentinelRef, showAll } = useProgressiveRows(
+    progressive ? items.length : 0,
+    progressive ? "expanded" : "collapsed",
+    200,
+    400
+  );
+  const visible = progressive ? items.slice(0, limit) : items;
   return (
     <div className="process-fold mt-4">
       <button
@@ -124,7 +134,21 @@ function ProcessFold({
         <span className={live ? "process-fold-label-live" : undefined}>{zh ? `已处理 ${duration}` : `Processed ${duration}`}</span>
         <ChevronDown className={cn("h-3.5 w-3.5 transition-transform duration-200", open && "rotate-180")} aria-hidden />
       </button>
-      {open && <div className="mt-3 flex flex-col gap-4">{children}</div>}
+      {open && (
+        <div className="mt-3 flex flex-col gap-4">
+          {visible.map(renderItem)}
+          {progressive && limit < items.length && (
+            <button
+              type="button"
+              ref={sentinelRef}
+              onClick={showAll}
+              className="process-fold-toggle w-full py-1 text-xs text-ink-3 transition-colors hover:text-ink-2"
+            >
+              {zh ? `加载更多（共 ${items.length} 步）` : `Load more (${items.length} steps total)`}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
