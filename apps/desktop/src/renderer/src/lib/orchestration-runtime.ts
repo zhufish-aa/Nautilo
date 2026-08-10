@@ -868,8 +868,14 @@ export function isRunTrimmed(sessionId: string, runId: string): boolean {
 
 /** Loads one archived run's events from the daemon and builds its fold rows. */
 export async function loadRunTimelineEvents(sessionId: string, runId: string): Promise<TimelineEvent[]> {
-  const cached = standaloneRunTimelines.get(sessionId)?.get(runId);
-  if (cached) return cached;
+  const perSessionCached = standaloneRunTimelines.get(sessionId);
+  const cached = perSessionCached?.get(runId);
+  if (cached) {
+    // Refresh recency: a re-opened fold should not be the next eviction victim.
+    perSessionCached!.delete(runId);
+    perSessionCached!.set(runId, cached);
+    return cached;
+  }
   const subscription = await requestCore<{ subscriptionId: string }>("event.subscribe", { sessionId, runId });
   const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", {
     subscriptionId: subscription.subscriptionId,
@@ -890,6 +896,15 @@ export async function loadRunTimelineEvents(sessionId: string, runId: string): P
     standaloneRunTimelines.set(sessionId, perSession);
   }
   perSession.set(runId, built);
+  // Cap the on-demand cache: expanded folds accumulate one timeline per run,
+  // which is itself unbounded without a limit. Keep the few most recently
+  // loaded; reopening an evicted fold just fetches again.
+  const LOADED_RUN_LIMIT = 5;
+  while (perSession.size > LOADED_RUN_LIMIT) {
+    const oldest = perSession.keys().next().value;
+    if (oldest === undefined) break;
+    perSession.delete(oldest);
+  }
   return built;
 }
 
