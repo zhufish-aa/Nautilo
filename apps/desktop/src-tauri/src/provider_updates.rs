@@ -52,15 +52,25 @@ impl ProviderUpdateRegistry {
 
 fn spawn_update(executable: &str, args: &[String]) -> std::io::Result<Child> {
     let mut command = if cfg!(windows) {
-        // Pass one command string to cmd.exe — spawning cmd with an argv array
-        // instead would re-quote and backslash-escape the embedded quotes,
-        // breaking the command.
+        // cmd /s /c strips exactly one outer quote pair; the wrapped line must
+        // reach cmd untouched, so it goes as a raw arg. Passing the line as a
+        // normal arg instead would make Rust re-quote and backslash-escape the
+        // embedded quotes, leaving cmd to execute `"claude"` as a program name.
         let line = std::iter::once(format!("\"{executable}\""))
             .chain(args.iter().map(|arg| format!("\"{}\"", arg.replace('"', ""))))
             .collect::<Vec<_>>()
             .join(" ");
         let mut command = Command::new("cmd");
-        command.arg("/C").arg(line);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.args(["/d", "/s", "/c"]);
+            command.raw_arg(format!("\"{line}\""));
+        }
+        #[cfg(not(windows))]
+        {
+            command.arg("/C").arg(line);
+        }
         command
     } else {
         let mut command = Command::new(executable);
