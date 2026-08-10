@@ -13,6 +13,10 @@ use crate::runtime::event_service::EventService;
 struct SubscriptionEntry {
     project_run_id: Option<String>,
     session_id: Option<String>,
+    /// Optional single-run scope: the renderer uses it to load one archived
+    /// turn's events on demand (timeline windowing) instead of the whole
+    /// session journal.
+    run_id: Option<String>,
     last_used_at: std::time::Instant,
 }
 
@@ -30,8 +34,8 @@ impl EventSubscriptionService {
         Self { events, subscriptions: Mutex::new(HashMap::new()) }
     }
 
-    pub fn subscribe(&self, project_run_id: Option<String>, session_id: Option<String>) -> CoreResult<Value> {
-        if project_run_id.is_none() && session_id.is_none() {
+    pub fn subscribe(&self, project_run_id: Option<String>, session_id: Option<String>, run_id: Option<String>) -> CoreResult<Value> {
+        if project_run_id.is_none() && session_id.is_none() && run_id.is_none() {
             let mut details = Map::new();
             details.insert("field".to_string(), json!("event scope"));
             return Err(CoreError::details(ErrorCode::IpcInvalidRequest, details));
@@ -40,7 +44,7 @@ impl EventSubscriptionService {
         let subscription_id = Uuid::new_v4().to_string();
         self.subscriptions.lock().unwrap().insert(
             subscription_id.clone(),
-            SubscriptionEntry { project_run_id, session_id, last_used_at: std::time::Instant::now() },
+            SubscriptionEntry { project_run_id, session_id, run_id, last_used_at: std::time::Instant::now() },
         );
         Ok(json!({ "subscriptionId": subscription_id }))
     }
@@ -50,7 +54,7 @@ impl EventSubscriptionService {
         let events = self.events.replay(
             entry.session_id.as_deref(),
             entry.project_run_id.as_deref(),
-            None,
+            entry.run_id.as_deref(),
             Some(after_sequence),
         )?;
         let last_sequence = events.last().and_then(|e| e.get("sequence")).and_then(Value::as_i64).unwrap_or(after_sequence);
@@ -62,6 +66,7 @@ impl EventSubscriptionService {
         let entry = self.touch(subscription_id)?;
         let scope_session = entry.session_id.clone();
         let scope_project_run = entry.project_run_id.clone();
+        let scope_run = entry.run_id.clone();
 
         // Anything already stored wins immediately, matching the TS order:
         // subscribe for live events first, then check the backlog.
@@ -84,6 +89,11 @@ impl EventSubscriptionService {
             }
             if let Some(scope) = &scope_project_run {
                 if event.get("projectRunId").and_then(Value::as_str) != Some(scope.as_str()) {
+                    return false;
+                }
+            }
+            if let Some(scope) = &scope_run {
+                if event.get("runId").and_then(Value::as_str) != Some(scope.as_str()) {
                     return false;
                 }
             }
@@ -122,6 +132,7 @@ impl EventSubscriptionService {
         Ok(SubscriptionEntrySnapshot {
             project_run_id: entry.project_run_id.clone(),
             session_id: entry.session_id.clone(),
+            run_id: entry.run_id.clone(),
         })
     }
 
@@ -137,4 +148,5 @@ impl EventSubscriptionService {
 struct SubscriptionEntrySnapshot {
     project_run_id: Option<String>,
     session_id: Option<String>,
+    run_id: Option<String>,
 }

@@ -19,6 +19,8 @@ import { hasRunningDelegatedTask, isActiveLifecycle, visibleSessionStatus } from
 import {
   ensureProjectRunHydrated,
   ensureStandaloneSessionHydrated,
+  isRunTrimmed,
+  loadRunTimelineEvents,
   registerProjectSessionView,
   registerStandaloneSessionView
 } from "../../lib/orchestration-runtime";
@@ -45,13 +47,19 @@ function ProcessTurnView({
   items,
   live,
   zh,
-  renderItem
+  renderItem,
+  onLoadProcess
 }: {
   items: TimelineEvent[];
   live: boolean;
   zh: boolean;
   renderItem: (event: TimelineEvent) => ReactNode;
+  /** Archived turn: its process rows were windowed out of memory; this
+   * fetches them from the daemon on first expand. */
+  onLoadProcess?: () => Promise<TimelineEvent[]>;
 }): JSX.Element {
+  const [lazyItems, setLazyItems] = useState<TimelineEvent[]>();
+  const [loading, setLoading] = useState(false);
   let answerStart = -1;
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const data = items[index]!.data;
@@ -60,12 +68,30 @@ function ProcessTurnView({
       break;
     }
   }
-  const process = answerStart >= 0 ? items.slice(0, answerStart) : items;
+  const process = lazyItems ?? (answerStart >= 0 ? items.slice(0, answerStart) : items);
   const answer = answerStart >= 0 ? items.slice(answerStart) : [];
   return (
     <>
       {process.length > 0 && (
         <ProcessFold items={process} live={live} zh={zh} endTimestamp={items[items.length - 1]?.timestamp} renderItem={renderItem} />
+      )}
+      {process.length === 0 && onLoadProcess && (
+        <button
+          type="button"
+          disabled={loading}
+          onClick={async () => {
+            setLoading(true);
+            try {
+              setLazyItems(await onLoadProcess());
+            } finally {
+              setLoading(false);
+            }
+          }}
+          className="process-fold-toggle mt-1 flex items-center gap-1.5 pb-1 text-xs text-ink-3 transition-colors hover:text-ink-2"
+        >
+          <ChevronDown className="h-3.5 w-3.5" aria-hidden />
+          {loading ? (zh ? "正在加载过程…" : "Loading process…") : zh ? "查看过程记录" : "Show process"}
+        </button>
       )}
       {answer.length > 0 && (
         <div className="mt-4 flex flex-col gap-4">{answer.map(renderItem)}</div>
@@ -366,7 +392,21 @@ export function SessionWorkbench({
   turns.forEach((turn, index) => {
     const live = index === turns.length - 1
       ? waitingForApproval ? "waiting" : workbenchRunning ? "running" : undefined
-      : undefined;
+      : undefined;
+      // An archived turn keeps only prompt + final answer (from the messages
+      // table); its run id lets the fold reload the process on demand.
+      let turnRunId: string | undefined;
+      for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+        const data = turn.items[itemIndex]!.data;
+        if (data.kind === "message" && data.sender === "agent" && data.runId) {
+          turnRunId = data.runId;
+          break;
+        }
+      }
+      const lazyProcess = turnRunId && isRunTrimmed(sessionId, turnRunId)
+        ? () => loadRunTimelineEvents(sessionId, turnRunId)
+        : undefined;
+
     timelineRows.push(
       shell(turn.key, (
         <section className="turn-block pl-6 motion-safe:animate-[rise-in_0.28s_ease-out_both]" data-live={live}>
@@ -380,11 +420,12 @@ export function SessionWorkbench({
           {live && turn.items.length === 0 && (
             <RunActivityIndicator lifecycle={visibleLifecycle} events={events} waitingForDelegates={waitingForDelegates} />
           )}
-          {turn.items.length > 0 && (
+          {(turn.items.length > 0 || lazyProcess) && (
             <ProcessTurnView
               items={turn.items}
               live={Boolean(live)}
               zh={locale === "zh-CN"}
+              onLoadProcess={lazyProcess}
               renderItem={(event) => (
                 <TimelineEventView
                   key={event.id}

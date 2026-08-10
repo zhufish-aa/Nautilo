@@ -120,7 +120,7 @@ export interface IpcRequestMap {
   "audit.list": { input: { limit?: number; resourceId?: string }; output: AuditRecord[] };
   "metrics.get": { input: { projectId?: string }; output: RuntimeMetrics };
   "diagnostics.export": { input: { projectId?: string; projectRunId?: string }; output: DiagnosticExportResult };
-  "event.subscribe": { input: { projectRunId?: string; sessionId?: string; afterSequence?: number }; output: { subscriptionId: string } };
+  "event.subscribe": { input: { projectRunId?: string; sessionId?: string; runId?: string; afterSequence?: number }; output: { subscriptionId: string } };
   "event.replay": { input: { subscriptionId: string; afterSequence: number }; output: { events: RuntimeEvent[]; lastSequence: number } };
   "event.wait": { input: { subscriptionId: string; afterSequence: number; timeoutMs?: number }; output: { events: RuntimeEvent[]; lastSequence: number } };
 }
