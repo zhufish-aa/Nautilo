@@ -38,6 +38,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agenthub-plugin-omp"
+version = "0.1.0"
+dependencies = [
+ "agenthub-plugin-sdk",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "regex",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "agenthub-plugin-opencode"
 version = "0.1.0"
 dependencies = [

@@ -26,7 +26,7 @@ let archivePath = join(releaseRoot, `${releaseName}.zip`);
 const rustTargetDirectory = join(repositoryRoot, "rust", "target", "x86_64-pc-windows-gnu", "release");
 const shellExecutable = join(repositoryRoot, "apps", "desktop", "src-tauri", "target", "release", "nautilo.exe");
 const daemonExecutable = join(rustTargetDirectory, "nautilo-core.exe");
-const pluginNames = ["agenthub-plugin-pi.exe", "agenthub-plugin-trae.exe", "agenthub-plugin-opencode.exe"];
+const pluginNames = ["agenthub-plugin-pi.exe", "agenthub-plugin-trae.exe", "agenthub-plugin-opencode.exe", "agenthub-plugin-omp.exe"];
 
 function assertGeneratedTarget(target) {
   const path = relative(releaseRoot, resolve(target));

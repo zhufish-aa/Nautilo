@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profile = process.argv.includes("--release") ? "release" : "debug";
 const targetDir = join(root, "rust", "target", "x86_64-pc-windows-gnu", profile);
-const plugins = ["opencode", "trae", "pi"];
+const plugins = ["opencode", "trae", "pi", "omp"];
 
 let copied = 0;
 for (const id of plugins) {
