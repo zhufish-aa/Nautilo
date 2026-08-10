@@ -1,6 +1,6 @@
 {
   "name": "nautilo",
-  "version": "0.1.0",
+  "version": "0.2.7",
   "private": true,
   "description": "A local, user-configurable multi-agent coding workspace.",
   "packageManager": "pnpm@10.12.1",

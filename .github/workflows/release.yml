@@ -10,17 +10,8 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: Windows x64, os: windows-latest, platform: win }
-          - { name: macOS arm64, os: macos-latest, platform: mac }
-          - { name: macOS x64, os: macos-15-intel, platform: mac }
-          - { name: Linux x64, os: ubuntu-latest, platform: linux }
-
+    name: Build Windows x64 (Tauri)
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -31,20 +22,26 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Install Rust toolchain and MinGW linker
+        # rust-toolchain.toml pins stable-x86_64-pc-windows-gnu (rust/ and
+        # apps/desktop/src-tauri/); the gnu target needs a gcc linker, which
+        # the runner image ships via MSYS2.
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+
       - name: Install dependencies
         run: pnpm install
 
-      - name: Build desktop app and daemon
+      - name: Build Tauri portable package
         # The renderer bundle (monaco, diff editor, xlsx, pdfjs) exceeds the
         # default 2 GB V8 heap on CI runners.
         env:
           NODE_OPTIONS: --max-old-space-size=4096
-        run: pnpm build:desktop
+        run: node scripts/package-win-tauri.mjs --build
 
-      - name: Prepare packaged resources (daemon deps + Node runtime)
-        run: node scripts/prepare-packaged-resources.mjs build/packaged
-
-      - name: Build and publish packages
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm exec electron-builder --${{ matrix.platform }} --publish always
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/Nautilo-win32-x64*.zip
