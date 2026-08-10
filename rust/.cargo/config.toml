@@ -1,6 +1,10 @@
 [build]
 target = "x86_64-pc-windows-gnu"
 
+# Linker by PATH name, not an absolute path: locally the package scripts put
+# .toolchains/mingw64/bin on PATH, on CI MSYS2's mingw64/bin provides the same
+# toolchain. An absolute path breaks any other machine.
 [target.x86_64-pc-windows-gnu]
-linker = "C:\\Users\\admin\\Documents\\Codex\\2026-07-20\\new-chat\\.toolchains\\mingw64\\bin\\gcc.exe"
-ar = "C:\\Users\\admin\\Documents\\Codex\\2026-07-20\\new-chat\\.toolchains\\mingw64\\bin\\ar.exe"
+linker = "gcc"
+ar = "ar"
+rustflags = ["-C", "link-arg=-static-libgcc", "-C", "link-arg=-static-libstdc++"]
