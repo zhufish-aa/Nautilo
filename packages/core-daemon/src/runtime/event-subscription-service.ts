@@ -3,7 +3,7 @@ import type { RuntimeEvent } from "@agenthub/event-protocol";
 import { CoreError } from "../errors.js";
 import { EventService } from "./event-service.js";
 
-interface SubscriptionScope { projectRunId?: string; sessionId?: string; runId?: string; }
+interface SubscriptionScope { projectRunId?: string; sessionId?: string; }
 interface SubscriptionEntry { scope: SubscriptionScope; lastUsedAt: number; }
 
 // Desktop clients never explicitly unsubscribe, so idle subscriptions would
@@ -14,7 +14,7 @@ export class EventSubscriptionService {
   private readonly subscriptions = new Map<string, SubscriptionEntry>();
   constructor(private readonly events: EventService) {}
   subscribe(scope: SubscriptionScope): { subscriptionId: string } {
-    if (!scope.projectRunId && !scope.sessionId && !scope.runId) throw new CoreError("IPC_INVALID_REQUEST", { field: "event scope" });
+    if (!scope.projectRunId && !scope.sessionId) throw new CoreError("IPC_INVALID_REQUEST", { field: "event scope" });
     this.prune();
     const subscriptionId = randomUUID();
     this.subscriptions.set(subscriptionId, { scope: { ...scope }, lastUsedAt: Date.now() });
@@ -22,7 +22,7 @@ export class EventSubscriptionService {
   }
   replay(subscriptionId: string, afterSequence: number): { events: RuntimeEvent[]; lastSequence: number } {
     const { scope } = this.touch(subscriptionId);
-    const events = this.events.replay({ sessionId: scope.sessionId, projectRunId: scope.projectRunId, runId: scope.runId, afterSequence });
+    const events = this.events.replay({ ...scope, afterSequence });
     return { events, lastSequence: events.at(-1)?.sequence ?? afterSequence };
   }
   async wait(subscriptionId: string, afterSequence: number, timeoutMs = 20_000): Promise<{ events: RuntimeEvent[]; lastSequence: number }> {
@@ -41,8 +41,7 @@ export class EventSubscriptionService {
       const matches = (event: RuntimeEvent): boolean =>
         event.sequence > afterSequence &&
         (!scope.sessionId || event.sessionId === scope.sessionId) &&
-        (!scope.projectRunId || event.projectRunId === scope.projectRunId) &&
-        (!scope.runId || event.runId === scope.runId);
+        (!scope.projectRunId || event.projectRunId === scope.projectRunId);
       const unsubscribe = this.events.onAppend((event) => {
         if (!matches(event)) return;
         queueMicrotask(() => finish(this.replay(subscriptionId, afterSequence)));

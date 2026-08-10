@@ -54,11 +54,6 @@ const standaloneRenderFrames = new Map<string, number>();
 // built up front, everything else on first open — replaying every session's
 // journal at launch pinned all of them in memory for the app's lifetime.
 const standaloneHydrated = new Set<string>();
-// Runs whose events were trimmed out of the in-memory journal (windowing).
-// Their folds load events on demand via loadRunTimelineEvents.
-const standaloneTrimmedRuns = new Map<string, Set<string>>();
-// Loaded-on-demand timelines for trimmed runs, per session.
-const standaloneRunTimelines = new Map<string, Map<string, TimelineEvent[]>>();
 // Most-recently-opened standalone sessions (current first, max 2). The
 // previous session stays cached so switching back is instant; anything older
 // without a live poll is evicted.
@@ -472,8 +467,6 @@ function clearSessionRuntime(sessionId: string): void {
   standaloneArtifactCache.delete(sessionId);
   standaloneHydrated.delete(sessionId);
   standaloneDisplayed.delete(sessionId);
-  standaloneTrimmedRuns.delete(sessionId);
-  standaloneRunTimelines.delete(sessionId);
   const recentIndex = standaloneRecent.indexOf(sessionId);
   if (recentIndex !== -1) standaloneRecent.splice(recentIndex, 1);
   // Cancel a coalesced render still waiting for its timer; letting it
@@ -543,8 +536,6 @@ function evictStandaloneViewCaches(): void {
     standaloneArtifactCache.delete(sessionId);
     standaloneSubscriptions.delete(sessionId);
     standaloneSequences.delete(sessionId);
-    standaloneTrimmedRuns.delete(sessionId);
-    standaloneRunTimelines.delete(sessionId);
     useSessionsStore.getState()._evictSessionView(sessionId);
   }
 }
@@ -824,77 +815,7 @@ function applyStandaloneDeltas(sessionId: string, events: RuntimeEvent[]): boole
   return true;
 }
 
-/**
- * Timeline windowing: the in-memory journal keeps only the newest few runs.
- * A long session otherwise grows its renderer heap by tens of MB per turn
- * forever (measured on the real session: every turn's tool payloads and
- * reasoning text stay resident). Older runs render their prompt + final
- * answer from the messages table, and their folds load events on demand via
- * loadRunTimelineEvents. Session-scoped rows (no runId) are kept regardless
- * of age; the active run is always inside the kept window by construction.
- */
-const TRIM_KEEP_RUNS = 3;
-const TRIM_MIN_EVENTS = 500;
-
-function trimStandaloneEventCache(sessionId: string): void {
-  const events = standaloneEventCache.get(sessionId);
-  if (!events || events.length < TRIM_MIN_EVENTS) return;
-  let started = 0;
-  let cut = 0;
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index]!.type === "run.started") {
-      started += 1;
-      if (started === TRIM_KEEP_RUNS) {
-        cut = index;
-        break;
-      }
-    }
-  }
-  if (cut <= 0) return;
-  const removed = events.slice(0, cut);
-  const trimmed = standaloneTrimmedRuns.get(sessionId) ?? new Set<string>();
-  for (const event of removed) {
-    if (event.type === "run.started" && event.runId) trimmed.add(String(event.runId));
-  }
-  if (trimmed.size) standaloneTrimmedRuns.set(sessionId, trimmed);
-  const carried = removed.filter((event) => !event.runId);
-  standaloneEventCache.set(sessionId, [...carried, ...events.slice(cut)]);
-}
-
-/** True when the run's events were windowed out of memory (fold loads on demand). */
-export function isRunTrimmed(sessionId: string, runId: string): boolean {
-  return standaloneTrimmedRuns.get(sessionId)?.has(runId) ?? false;
-}
-
-/** Loads one archived run's events from the daemon and builds its fold rows. */
-export async function loadRunTimelineEvents(sessionId: string, runId: string): Promise<TimelineEvent[]> {
-  const cached = standaloneRunTimelines.get(sessionId)?.get(runId);
-  if (cached) return cached;
-  const subscription = await requestCore<{ subscriptionId: string }>("event.subscribe", { sessionId, runId });
-  const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", {
-    subscriptionId: subscription.subscriptionId,
-    afterSequence: 0
-  });
-  const artifacts = standaloneArtifactCache.get(sessionId) ?? [];
-  const timeline: TimelineEvent[] = [];
-  const changedFiles = new Map(artifacts.flatMap(parseDiffArtifact).map((file) => [file.path, file]));
-  appendRuntimeEvents(timeline, [], replay.events, (event) =>
-    runtimePayload(event, undefined, [], new Map(), new Map(artifacts.map((artifact) => [artifact.id, artifact])), new Map(), changedFiles)
-  );
-  const built = groupToolTimeline(
-    timeline.sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence)
-  ).map((event, index) => ({ ...event, sequence: index + 1 }));
-  let perSession = standaloneRunTimelines.get(sessionId);
-  if (!perSession) {
-    perSession = new Map();
-    standaloneRunTimelines.set(sessionId, perSession);
-  }
-  perSession.set(runId, built);
-  return built;
-}
-
 function renderStandaloneCache(sessionId: string): void {
-  trimStandaloneEventCache(sessionId);
   const events = standaloneEventCache.get(sessionId) ?? [];
   const messages = standaloneMessageCache.get(sessionId) ?? [];
   const artifacts = standaloneArtifactCache.get(sessionId) ?? [];
@@ -1555,7 +1476,6 @@ function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact
       authorName: message.fromMemberId ? team?.members.find((member) => member.id === message.fromMemberId)?.displayName : undefined,
       text: message.text,
       messageId: message.id,
-      runId: message.runId,
       editedAt: message.editedAt,
       attachments: message.attachmentIds?.flatMap((id) => {
         const artifact = artifactsById.get(id);

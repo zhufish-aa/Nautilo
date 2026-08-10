@@ -139,7 +139,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("audit.list", async (input) => services.audit.list(input));
   gateway.register("metrics.get", async ({ projectId }) => services.metrics.snapshot(projectId));
   gateway.register("diagnostics.export", async (input) => services.diagnostics.export(input));
-  gateway.register("event.subscribe", async ({ projectRunId, sessionId, runId }) => services.subscriptions.subscribe({ projectRunId, sessionId, runId }));
+  gateway.register("event.subscribe", async ({ projectRunId, sessionId }) => services.subscriptions.subscribe({ projectRunId, sessionId }));
   // A full replay re-reads the journal; cancel orphaned interaction requests
   // first so stale pending cards don't resurrect in the renderer.
   const healBeforeFullReplay = (subscriptionId: string, afterSequence: number): void => {

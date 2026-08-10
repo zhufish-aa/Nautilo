@@ -420,7 +420,6 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
                     .subscribe(
                         input.get("projectRunId").and_then(Value::as_str).map(str::to_string),
                         input.get("sessionId").and_then(Value::as_str).map(str::to_string),
-                        input.get("runId").and_then(Value::as_str).map(str::to_string),
                     )
                     .map_err(anyhow::Error::new)
             }
