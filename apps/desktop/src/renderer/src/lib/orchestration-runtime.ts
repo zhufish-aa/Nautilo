@@ -689,11 +689,11 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
   // without membership the re-populated caches below would leak forever.
   standaloneHydrated.add(uiSession.id);
   standaloneMessageCache.set(uiSession.id, detail.messages);
-  // replayStandaloneEvents always replays from sequence 0, so it REPLACES the
-  // cache — appending doubled the journal on every hydrate (which the poll
-  // loop triggers per assistant message) and ballooned the renderer by
-  // hundreds of MB per turn.
-  standaloneEventCache.set(uiSession.id, replay.events);
+  // replayStandaloneEvents is INCREMENTAL (resumes at the last seen
+  // sequence): merge into the existing cache. A bare replace would shrink
+  // the journal to just the newest events and wipe every older turn's fold
+  // content from the timeline.
+  standaloneEventCache.set(uiSession.id, mergeEventCache(standaloneEventCache.get(uiSession.id) ?? [], replay.events));
   standaloneArtifactCache.set(uiSession.id, artifacts);
   ingestInteractionEvents(replay.events);
   ingestFollowUpEvents(uiSession.id, replay.events);
