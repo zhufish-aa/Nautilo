@@ -50,6 +50,8 @@ fn descriptor() -> Value {
         "permissionModes": [
             { "value": "standard", "name": { "zh-CN": "标准", "en-US": "Standard" },
               "description": { "zh-CN": "加载项目级 Pi 资源并沿用 Pi 的工具配置", "en-US": "Load project-local Pi resources and keep Pi's configured tools" } },
+            { "value": "auto", "name": { "zh-CN": "免审批", "en-US": "Auto-approve" },
+              "description": { "zh-CN": "完全免审批：所有工具调用自动放行", "en-US": "No approvals: every tool call runs without prompting" } },
             { "value": "read-only", "name": { "zh-CN": "只读", "en-US": "Read only" },
               "description": { "zh-CN": "仅启用 read、grep、find 和 ls", "en-US": "Only enable read, grep, find, and ls" } },
             { "value": "isolated", "name": { "zh-CN": "忽略项目扩展", "en-US": "Ignore project extensions" },
@@ -1044,7 +1046,7 @@ async fn run_pi(
     let skills = materialize_pi_skills(request.get("skills").and_then(Value::as_array).cloned().unwrap_or_default())?;
     let mut args = base_args(&instance);
     args.extend(["--mode".to_string(), "rpc".to_string(), "--offline".to_string()]);
-    if permission_mode == "isolated" {
+    if permission_mode == "isolated" || permission_mode == "auto" {
         args.push("--no-approve".to_string());
     } else {
         args.push("--approve".to_string());
@@ -1220,6 +1222,7 @@ async fn run_pi(
                         &mut state_received,
                         &handle,
                         &sender,
+                        &channel,
                         &send_thinking_or_verify,
                         &send_verification_or_prompt,
                         &send_prompt,
@@ -1273,6 +1276,7 @@ fn handle_rpc_value(
     state_received: &mut bool,
     handle: &agenthub_plugin_sdk::process::ProcessHandle,
     sender: &mpsc::UnboundedSender<Value>,
+    channel: &Option<Arc<dyn DaemonChannel>>,
     send_thinking_or_verify: &impl Fn(),
     send_verification_or_prompt: &impl Fn(),
     send_prompt: &impl Fn(),
@@ -1360,6 +1364,33 @@ fn handle_rpc_value(
         // ones surface as raw output; interactive ones are cancelled when no
         // interaction channel is available, matching the TS fallback.
         let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+        if method == "confirm" {
+            // Approval gate: surface the prompt in the desktop UI and reply
+            // with the user's decision. Without a channel, deny — fail
+            // closed, matching pi's no-UI behavior.
+            let id = value.get("id").cloned().unwrap_or(Value::Null);
+            let confirmed = match channel {
+                Some(channel) => {
+                    let mut input = json!({
+                        "kind": "approval",
+                        "title": value.get("title").and_then(Value::as_str).unwrap_or("Pi 请求确认"),
+                        "options": [
+                            { "id": "confirm", "label": "允许", "intent": "approve" },
+                            { "id": "cancel", "label": "拒绝", "intent": "reject" }
+                        ]
+                    });
+                    if let Some(detail) = value.get("message") {
+                        input["detail"] = detail.clone();
+                    }
+                    let response = tokio::runtime::Handle::current().block_on(channel.ask("", input));
+                    response.get("outcome").and_then(Value::as_str) == Some("selected")
+                        && response.get("optionId").and_then(Value::as_str) == Some("confirm")
+                }
+                None => false,
+            };
+            handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": confirmed })));
+            return Ok(true);
+        }
         if ["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"].contains(&method) {
             let text = value
                 .get("message")

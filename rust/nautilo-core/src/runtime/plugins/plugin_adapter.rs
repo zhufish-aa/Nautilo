@@ -2,7 +2,7 @@
 //! One long-lived process per plugin; runs multiplex by runId.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -35,7 +35,7 @@ pub async fn launch_plugin(plugin_id: &str, executable: &std::path::Path, dir: &
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
 
-    let client = Arc::new(PluginClientInner::new(&plugin_id.to_string(), stdin));
+    let client = Arc::new(PluginClientInner::new(&plugin_id.to_string(), stdin, child));
     let reader_client = client.clone();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -52,8 +52,34 @@ pub async fn launch_plugin(plugin_id: &str, executable: &std::path::Path, dir: &
             eprintln!("[plugin:{stderr_plugin_id}] {line}");
         }
     });
+    // Reap the child once it exits. The handle stays in PluginClientInner so
+    // stop() can poll/kill it; this task only takes it after try_wait confirms
+    // the process is gone, then flags the exit. (Taking it eagerly would make
+    // stop() believe the process exited and never force-kill it.)
+    let wait_child = client.child.clone();
+    let wait_exited = client.exited.clone();
     tokio::spawn(async move {
-        let _ = child.wait().await;
+        loop {
+            let mut guard = wait_child.lock().await;
+            match guard.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(_)) => {
+                        guard.take(); // reap
+                        break;
+                    }
+                    Ok(None) => {
+                        drop(guard);
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    Err(_) => {
+                        guard.take();
+                        break;
+                    }
+                },
+                None => break, // stop() force-killed and reaped it
+            }
+        }
+        wait_exited.store(true, Ordering::Relaxed);
     });
 
     client.write(&json!({ "type": "handshake", "apiVersion": agenthub_plugin_api_version() })).await;
@@ -74,6 +100,14 @@ struct RunChannel {
 struct PluginClientInner {
     plugin_id: String,
     stdin: tokio::sync::Mutex<ChildStdin>,
+    /// The spawned process. The reap task takes it out only after try_wait
+    /// confirms the process exited; stop() polls it and force-kills when the
+    /// plugin does not terminate on its own. Dropping this handle without
+    /// killing leaks the process, which keeps the exe locked on Windows
+    /// (os error 32/5 on uninstall and reinstall).
+    child: Arc<tokio::sync::Mutex<Option<Child>>>,
+    /// Set once the process has fully exited (reaped).
+    exited: Arc<AtomicBool>,
     next_call_id: AtomicI64,
     pending_calls: Mutex<HashMap<i64, oneshot::Sender<Value>>>,
     runs: Mutex<HashMap<String, RunChannel>>,
@@ -82,16 +116,50 @@ struct PluginClientInner {
 }
 
 impl PluginClientInner {
-    fn new(plugin_id: &str, stdin: ChildStdin) -> Self {
+    fn new(plugin_id: &str, stdin: ChildStdin, child: Child) -> Self {
         let (sender, receiver) = oneshot::channel();
         Self {
             plugin_id: plugin_id.to_string(),
             stdin: tokio::sync::Mutex::new(stdin),
+            child: Arc::new(tokio::sync::Mutex::new(Some(child))),
+            exited: Arc::new(AtomicBool::new(false)),
             next_call_id: AtomicI64::new(1),
             pending_calls: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
             ready_sender: Mutex::new(Some(sender)),
             ready_receiver: Mutex::new(Some(receiver)),
+        }
+    }
+
+    /// Asks the plugin to exit, waits briefly for it to terminate, then
+    /// force-kills it. Must run before touching the plugin's files: a live
+    /// process locks the exe on Windows, so uninstall/overwrite fails with
+    /// os error 32/5.
+    async fn stop(&self) {
+        // Fire-and-forget: the SDK exits on dispose without a response frame,
+        // so a call() would just sit until its timeout.
+        self.write(&json!({ "type": "dispose" })).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if self.exited.load(Ordering::Relaxed) {
+                return;
+            }
+            let mut guard = self.child.lock().await;
+            if let Some(child) = guard.as_mut() {
+                if let Ok(Some(_)) = child.try_wait() {
+                    return;
+                }
+            }
+            drop(guard);
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Force-kill: releases the exe lock on Windows.
+        let mut guard = self.child.lock().await;
+        if let Some(child) = guard.as_mut() {
+            let _ = child.kill().await;
         }
     }
 
@@ -279,7 +347,9 @@ impl AgentCliAdapter for PluginClient {
     }
 
     async fn dispose(&self) {
-        let _ = self.inner.call("dispose", Value::Null).await;
+        // Terminate the process (dispose frame, then force-kill if needed) so
+        // the plugin's files can be removed or replaced.
+        self.inner.stop().await;
     }
 }
 

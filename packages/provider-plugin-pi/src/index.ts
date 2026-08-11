@@ -64,6 +64,11 @@ const descriptor: ProviderDescriptor = {
       description: { "zh-CN": "加载项目级 Pi 资源并沿用 Pi 的工具配置", "en-US": "Load project-local Pi resources and keep Pi's configured tools" }
     },
     {
+      value: "auto",
+      name: { "zh-CN": "免审批", "en-US": "Auto-approve" },
+      description: { "zh-CN": "完全免审批：所有工具调用自动放行", "en-US": "No approvals: every tool call runs without prompting" }
+    },
+    {
       value: "read-only",
       name: { "zh-CN": "只读", "en-US": "Read only" },
       description: { "zh-CN": "仅启用 read、grep、find 和 ls", "en-US": "Only enable read, grep, find, and ls" }
@@ -581,7 +586,7 @@ export function piRunArgs(
 ): string[] {
   const args = [...request.instance.baseArgs, "--mode", "rpc", "--offline"];
   const mode = request.permissionMode ?? "standard";
-  if (mode === "isolated") args.push("--no-approve");
+  if (mode === "isolated" || mode === "auto") args.push("--no-approve");
   else args.push("--approve");
   if (mode === "read-only") args.push("--tools", "read,grep,find,ls");
   // The extension also supplies Windows-native PowerShell compatibility and

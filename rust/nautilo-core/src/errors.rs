@@ -40,6 +40,7 @@ pub enum ErrorCode {
     PluginChecksumMismatch,
     PluginManifestMissing,
     PluginInvalid,
+    PluginRemoveFailed,
 }
 
 impl ErrorCode {
@@ -79,6 +80,7 @@ impl ErrorCode {
             Self::PluginChecksumMismatch => "PLUGIN_CHECKSUM_MISMATCH",
             Self::PluginManifestMissing => "PLUGIN_MANIFEST_MISSING",
             Self::PluginInvalid => "PLUGIN_INVALID",
+            Self::PluginRemoveFailed => "PLUGIN_REMOVE_FAILED",
         }
     }
 
@@ -119,6 +121,7 @@ impl ErrorCode {
             Self::PluginChecksumMismatch => ("插件包校验和不匹配，可能已被篡改。", false, "never", "不要安装该插件，并向 registry 维护者报告。"),
             Self::PluginManifestMissing => ("插件包中缺少 agenthub-plugin.json 清单。", false, "user_action", "确认选择的是有效的插件目录或安装包。"),
             Self::PluginInvalid => ("插件清单或入口无效。", false, "user_action", "检查插件的 agenthub-plugin.json 与入口文件。"),
+            Self::PluginRemoveFailed => ("插件文件删除失败，插件进程可能仍在运行。", true, "backoff", "结束正在使用该插件的会话后重试。"),
         }
     }
 }

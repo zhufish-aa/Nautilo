@@ -86,7 +86,14 @@ impl PluginService {
         let id = manifest.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         let target = self.plugins_dir.join(&id);
         let _ = std::fs::create_dir_all(&self.plugins_dir);
-        let _ = std::fs::remove_dir_all(&target);
+        // Stop a running instance of the same plugin first: overwriting its
+        // exe while the process is alive fails with os error 32 on Windows.
+        if self.loaded.lock().unwrap().contains(&id) {
+            self.unload(&id).await;
+        }
+        remove_dir_all_retry(&target).map_err(|e| {
+            plugin_fail(ErrorCode::PluginRemoveFailed, &target.to_string_lossy(), format!("清理旧插件目录失败：{e}"))
+        })?;
         copy_dir_skip_symlinks(source, &target)
             .map_err(|e| plugin_fail(ErrorCode::PluginInvalid, source_dir, e.to_string()))?;
         self.load_one(&id).await
@@ -213,7 +220,13 @@ impl PluginService {
     pub async fn uninstall(&self, plugin_id: &str) -> CoreResult<Value> {
         self.unload(plugin_id).await;
         self.records.lock().unwrap().remove(plugin_id);
-        let _ = std::fs::remove_dir_all(self.plugins_dir.join(plugin_id));
+        let dir = self.plugins_dir.join(plugin_id);
+        // Do not swallow removal failures: the record is gone but the files
+        // remain (and resurrect on restart), which makes uninstall look like
+        // it "did nothing".
+        remove_dir_all_retry(&dir).map_err(|e| {
+            plugin_fail(ErrorCode::PluginRemoveFailed, &dir.to_string_lossy(), format!("删除插件目录失败：{e}"))
+        })?;
         Ok(json!({ "removed": true }))
     }
 
@@ -251,6 +264,12 @@ impl PluginService {
         // The plugin process exits on dispose; the client adapter is removed
         // from the registry either way.
         self.clients.lock().unwrap().remove(plugin_id);
+        // Terminate the plugin process BEFORE anyone touches its files — a
+        // live process keeps the exe locked on Windows, so uninstall and
+        // reinstall would fail with os error 32.
+        if let Some(adapter) = self.registry.find(plugin_id) {
+            adapter.dispose().await;
+        }
         let previous = self.overridden.lock().unwrap().remove(plugin_id);
         if let Some(_previous) = previous {
             // Built-in adapters cannot be reconstructed from JSON; the
@@ -401,6 +420,48 @@ fn copy_dir_skip_symlinks(source: &Path, target: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Deletes a directory, retrying briefly. Windows releases file handles a
+/// moment after the owning process exits, so a remove right after unload can
+/// still hit a transient lock (os error 32). Read-only files also fail with
+/// access denied (os error 5), so the attribute is cleared first.
+fn remove_dir_all_retry(dir: &Path) -> std::io::Result<()> {
+    clear_readonly_recursive(dir);
+    let mut last_error: Option<std::io::Error> = None;
+    for _ in 0..5 {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if !dir.exists() {
+                    return Ok(()); // already gone (partially removed)
+                }
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "remove_dir_all failed")))
+}
+
+/// Clears the read-only attribute on every file below `dir`. Windows refuses
+/// to delete read-only files (os error 5), and plugin dirs copied from source
+/// trees or archives can carry the attribute.
+fn clear_readonly_recursive(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                clear_readonly_recursive(&path);
+            } else if let Ok(metadata) = std::fs::metadata(&path) {
+                if metadata.permissions().readonly() {
+                    let mut permissions = metadata.permissions();
+                    permissions.set_readonly(false);
+                    let _ = std::fs::set_permissions(&path, permissions);
+                }
+            }
+        }
+    }
 }
 
 /// Tarballs may wrap the plugin in a top-level folder (npm pack's package/).

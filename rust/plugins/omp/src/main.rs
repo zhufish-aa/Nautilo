@@ -58,6 +58,8 @@ fn descriptor() -> Value {
         "permissionModes": [
             { "value": "standard", "name": { "zh-CN": "标准", "en-US": "Standard" },
               "description": { "zh-CN": "加载项目级 omp 资源并沿用 omp 的工具配置", "en-US": "Load project-local omp resources and keep omp's configured tools" } },
+            { "value": "auto", "name": { "zh-CN": "免审批", "en-US": "Auto-approve" },
+              "description": { "zh-CN": "完全免审批：所有工具调用自动放行（omp yolo 模式）", "en-US": "No approvals: every tool call runs without prompting (omp yolo mode)" } },
             { "value": "read-only", "name": { "zh-CN": "只读", "en-US": "Read only" },
               "description": { "zh-CN": "仅启用 read、grep、find 和 ls", "en-US": "Only enable read, grep, find, and ls" } },
             { "value": "isolated", "name": { "zh-CN": "忽略项目扩展", "en-US": "Ignore project extensions" },
@@ -694,6 +696,10 @@ async fn run_omp(
             args.push("--no-skills".to_string());
             args.push("--no-rules".to_string());
         }
+        "auto" => {
+            args.push("--approval-mode".to_string());
+            args.push("yolo".to_string());
+        }
         _ => {
             args.push("--approval-mode".to_string());
             args.push("write".to_string());
@@ -726,7 +732,8 @@ async fn run_omp(
     *handle_slot.lock().unwrap() = Some(handle.clone());
 
     let runtime_tools: Vec<Value> = request.get("runtimeTools").and_then(Value::as_array).cloned().unwrap_or_default();
-    let channel = channel.filter(|_| !runtime_tools.is_empty());
+    // Keep the channel for extension UI interactions (approval prompts); host
+    // tool calls are gated on runtime_tools at the call site below.
 
     let mut state = OmpParseState::default();
     let mut settled = false;
@@ -1003,7 +1010,7 @@ fn handle_rpc_value(
             let id = value.get("id").cloned().unwrap_or(Value::Null);
             let name = value.get("toolName").and_then(Value::as_str).unwrap_or("tool").to_string();
             let arguments = value.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            if let (Some(channel), Some(id_str)) = (channel, id.as_str()) {
+            if let (Some(channel), Some(id_str)) = (channel.as_ref().filter(|_| !runtime_tools.is_empty()), id.as_str()) {
                 let run_id = String::new();
                 let result = tokio::runtime::Handle::current().block_on(channel.call_tool(&run_id, &name, arguments));
                 let success = result.get("success").and_then(Value::as_bool).unwrap_or(false);
@@ -1036,6 +1043,33 @@ fn handle_rpc_value(
         "host_tool_update" => Ok(true),
         "extension_ui_request" => {
             let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+            if method == "confirm" {
+                // omp approval gate (write/always-ask modes): surface the prompt
+                // in the desktop UI and reply with the user's decision. Without
+                // a channel, deny — fail closed, matching omp's no-UI behavior.
+                let id = value.get("id").cloned().unwrap_or(Value::Null);
+                let confirmed = match channel {
+                    Some(channel) => {
+                        let mut input = json!({
+                            "kind": "approval",
+                            "title": value.get("title").and_then(Value::as_str).unwrap_or("omp 请求确认"),
+                            "options": [
+                                { "id": "confirm", "label": "允许", "intent": "approve" },
+                                { "id": "cancel", "label": "拒绝", "intent": "reject" }
+                            ]
+                        });
+                        if let Some(detail) = value.get("message") {
+                            input["detail"] = detail.clone();
+                        }
+                        let response = tokio::runtime::Handle::current().block_on(channel.ask("", input));
+                        response.get("outcome").and_then(Value::as_str) == Some("selected")
+                            && response.get("optionId").and_then(Value::as_str) == Some("confirm")
+                    }
+                    None => false,
+                };
+                handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": confirmed })));
+                return Ok(true);
+            }
             if ["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"].contains(&method) {
                 let text = value
                     .get("message")
