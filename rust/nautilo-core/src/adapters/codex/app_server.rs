@@ -230,7 +230,17 @@ pub fn build_codex_app_server_args(
         args.push("--profile".to_string());
         args.push(profile.to_string());
     }
-    args.extend(["app-server".to_string(), "--stdio".to_string(), "--enable".to_string(), "image_generation".to_string()]);
+    args.extend([
+        "app-server".to_string(),
+        "--stdio".to_string(),
+        "--enable".to_string(),
+        "image_generation".to_string(),
+        // Headless runs never touch Codex desktop apps (the built-in
+        // `codex_apps` MCP); when it fails to start it blocks every turn until
+        // a ~30s timeout fires. Disable the feature outright.
+        "--disable".to_string(),
+        "apps".to_string(),
+    ]);
     if codex_web_search_enabled(instance) {
         args.push("--config".to_string());
         args.push(format!("web_search={}", json!(CODEX_WEB_SEARCH_MODE)));

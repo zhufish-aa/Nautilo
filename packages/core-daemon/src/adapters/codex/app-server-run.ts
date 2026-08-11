@@ -408,6 +408,13 @@ export function buildCodexAppServerArgs(
     "--stdio",
     "--enable",
     "image_generation",
+    // Headless runs never touch Codex desktop apps (browser/calendar/slack/…
+    // plugins served by the built-in `codex_apps` MCP). Worse: when that MCP
+    // fails to start it blocks every turn until a ~30s timeout fires, adding
+    // 40s+ to each message. Nautilo pays per-turn process startup, so disable
+    // the apps feature outright.
+    "--disable",
+    "apps",
     ...(codexWebSearchEnabled(instance)
       ? ["--config", `web_search=${JSON.stringify(CODEX_WEB_SEARCH_MODE)}`]
       : []),

@@ -13,15 +13,14 @@ export class CoreDaemonClient {
 
   async start(userDataPath: string): Promise<void> {
     if (this.process) return;
-    const daemonEntry = this.resolveDaemonEntry();
-    const nodeCommand = this.resolveNodeCommand();
+    const { command, args } = this.resolveDaemonCommand();
     // A development shell and a portable build can run at the same time. Each
     // Electron main process therefore needs its own Windows named pipe.
     const socketPath = process.platform === "win32"
       ? `\\\\.\\pipe\\agenthub-core-${process.pid}`
       : join(userDataPath, "core.sock");
     this.tokenPath = join(userDataPath, "core.token");
-    this.process = spawn(nodeCommand, [daemonEntry, "--serve"], {
+    this.process = spawn(command, args, {
       cwd: userDataPath,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -48,6 +47,31 @@ export class CoreDaemonClient {
     const executable = process.platform === "win32" ? "node.exe" : "node";
     const bundledRuntime = join(process.resourcesPath, "node", executable);
     return existsSync(bundledRuntime) ? bundledRuntime : executable;
+  }
+
+  /** Prefer the Rust daemon (nautilo-core); fall back to the TS daemon under Node. */
+  private resolveDaemonCommand(): { command: string; args: string[] } {
+    const exe = this.resolveDaemonExe();
+    if (exe) return { command: exe, args: ["--serve"] };
+    return { command: this.resolveNodeCommand(), args: [this.resolveDaemonEntry(), "--serve"] };
+  }
+
+  private resolveDaemonExe(): string | undefined {
+    if (process.env.AGENTHUB_CORE_PATH && existsSync(process.env.AGENTHUB_CORE_PATH)) {
+      return process.env.AGENTHUB_CORE_PATH;
+    }
+    const exe = process.platform === "win32" ? "nautilo-core.exe" : "nautilo-core";
+    const candidates = [
+      // Development layout: apps/desktop/out/main -> repository rust workspace.
+      join(__dirname, "../../../../rust/target/x86_64-pc-windows-gnu/debug/nautilo-core.exe"),
+      join(__dirname, "../../../../rust/target/x86_64-pc-windows-gnu/release/nautilo-core.exe"),
+      join(__dirname, "../../../../rust/target/debug/nautilo-core"),
+      join(__dirname, "../../../../rust/target/release/nautilo-core"),
+      // Packaged layout: daemon ships in resources/.
+      join(process.resourcesPath, "core-daemon", exe),
+      join(process.resourcesPath, exe)
+    ];
+    return candidates.find((candidate) => existsSync(candidate));
   }
 
   async request(request: { requestId?: string; method: string; input?: unknown }): Promise<unknown> {

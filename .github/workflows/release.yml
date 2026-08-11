@@ -45,3 +45,44 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/Nautilo-win32-x64*.zip
+
+  build-electron:
+    name: Build Windows x64 (Electron)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust toolchain and MinGW linker
+        # The packaged daemon is nautilo-core (Rust); prepare-packaged-resources
+        # runs cargo release builds of the daemon and provider plugins.
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build Electron installer and portable zip
+        # Same renderer heap issue as the Tauri job; --publish never because
+        # softprops/action-gh-release owns the release upload.
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          pnpm build:desktop
+          node scripts/prepare-packaged-resources.mjs build/packaged
+          npx electron-builder --publish never
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/Nautilo-*-win-x64.exe
+            release/Nautilo-*-win-x64.zip

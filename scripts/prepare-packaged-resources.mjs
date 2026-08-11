@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,12 +7,13 @@ import { fileURLToPath } from "node:url";
  * Prepares the platform-specific resources that electron-builder places under
  * the packaged app's resources/ directory:
  *
- *   <staging>/core-daemon  — isolated runtime dependency tree for the daemon
- *   <staging>/node         — a Node.js runtime matching the current platform
+ *   <staging>/core-daemon/nautilo-core.exe  — Rust core daemon (replaces the
+ *                                             former TS daemon + bundled Node)
+ *   <staging>/plugins/<id>/                 — native provider plugins for
+ *                                             manual "install from local folder"
  *
  * Run this on the TARGET platform (each CI runner runs its own copy), because
- * both the deployed native modules (node-pty) and the Node binary are
- * platform/arch specific.
+ * the executables are platform/arch specific.
  */
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -22,51 +23,50 @@ if (!relative(repositoryRoot, stagingDirectory).startsWith("build")) {
   throw new Error(`Refusing to write outside the build directory: ${stagingDirectory}`);
 }
 
-const nodeVersion = process.versions.node.split(".").map(Number);
-if (nodeVersion[0] < 22 || (nodeVersion[0] === 22 && nodeVersion[1] < 5)) {
-  throw new Error(`Nautilo packaging requires Node.js 22.5 or newer; found ${process.versions.node}`);
-}
-
 rmSync(stagingDirectory, { recursive: true, force: true });
 mkdirSync(stagingDirectory, { recursive: true });
 
-// The daemon runs under the bundled Node runtime, so it needs an isolated
-// runtime dependency tree. `pnpm deploy --legacy` materializes workspace
-// packages as well as transitive third-party dependencies. The hoisted
-// node-linker produces a flat, symlink-free node_modules — required because
-// the packaged app cannot ship pnpm's symlinked virtual store.
+// The Rust toolchain is pinned to x86_64-pc-windows-gnu with the repository's
+// own mingw; make sure cargo can find the linker without relying on the
+// caller's environment.
+const mingwBin = join(repositoryRoot, ".toolchains", "mingw64", "bin");
+const env = { ...process.env, PATH: `${mingwBin};${process.env.PATH ?? ""}` };
+
+function run(command, args, cwd) {
+  const result = process.platform === "win32"
+    ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", command, ...args], { cwd, env, stdio: "inherit", windowsHide: true })
+    : spawnSync(command, args, { cwd, env, stdio: "inherit", windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with exit code ${result.status}`);
+}
+
+// Daemon + first-party provider plugins, all release executables.
+run("cargo", ["build", "--release", "-p", "nautilo-core"], join(repositoryRoot, "rust"));
+run("cargo", ["build", "--release", "-p", "agenthub-plugin-pi", "-p", "agenthub-plugin-trae", "-p", "agenthub-plugin-opencode", "-p", "agenthub-plugin-omp"], join(repositoryRoot, "rust"));
+
+const profileDirectory = join(repositoryRoot, "rust", "target", "x86_64-pc-windows-gnu", "release");
+const daemonExecutable = join(profileDirectory, "nautilo-core.exe");
+if (!existsSync(daemonExecutable)) throw new Error(`Rust daemon build output missing: ${daemonExecutable}`);
+
 const coreDaemonDirectory = join(stagingDirectory, "core-daemon");
-const deployedDaemon = process.platform === "win32"
-  ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", `pnpm.cmd --filter @agenthub/core-daemon --prod deploy --legacy --node-linker=hoisted ${relative(repositoryRoot, coreDaemonDirectory)}`], {
-    cwd: repositoryRoot,
-    stdio: "inherit",
-    windowsHide: true
-  })
-  : spawnSync("pnpm", ["--filter", "@agenthub/core-daemon", "--prod", "deploy", "--legacy", "--node-linker=hoisted", coreDaemonDirectory], {
-    cwd: repositoryRoot,
-    stdio: "inherit",
-    windowsHide: true
-  });
-if (deployedDaemon.error) throw deployedDaemon.error;
-if (deployedDaemon.status !== 0) {
-  throw new Error(`Deploying the Core Daemon runtime failed with exit code ${deployedDaemon.status}`);
-}
+mkdirSync(coreDaemonDirectory, { recursive: true });
+copyFileSync(daemonExecutable, join(coreDaemonDirectory, "nautilo-core.exe"));
 
-// node-pty ships prebuilds for every supported OS/arch (~60 MB); only the
-// one matching this packaging target can ever load.
-const prebuildsDirectory = join(coreDaemonDirectory, "node_modules", "node-pty", "prebuilds");
-const wantedPrebuild = `${process.platform}-${process.arch}`;
-for (const entry of readdirSync(prebuildsDirectory)) {
-  if (entry !== wantedPrebuild) rmSync(join(prebuildsDirectory, entry), { recursive: true, force: true });
+// Bundled for manual "install from local folder": plugins/<id>/ carrying the
+// manifest + native executable, mirroring the Tauri package layout.
+const pluginsDirectory = join(stagingDirectory, "plugins");
+for (const id of ["opencode", "trae", "pi", "omp"]) {
+  const source = join(repositoryRoot, "rust", "plugins", id);
+  const manifest = join(source, "agenthub-plugin.json");
+  const exe = join(profileDirectory, `agenthub-plugin-${id}.exe`);
+  if (!existsSync(manifest) || !existsSync(exe)) {
+    console.warn(`skip plugin ${id}: manifest or executable missing`);
+    continue;
+  }
+  const target = join(pluginsDirectory, id);
+  mkdirSync(target, { recursive: true });
+  copyFileSync(manifest, join(target, "agenthub-plugin.json"));
+  copyFileSync(exe, join(target, `agenthub-plugin-${id}.exe`));
 }
-
-const nodeRuntimeDirectory = join(stagingDirectory, "node");
-mkdirSync(nodeRuntimeDirectory, { recursive: true });
-cpSync(process.execPath, join(nodeRuntimeDirectory, process.platform === "win32" ? "node.exe" : "node"));
-writeFileSync(join(nodeRuntimeDirectory, "README.txt"), [
-  `Bundled Node.js runtime: ${process.version}`,
-  "This runtime is used only by the local Nautilo Core Daemon.",
-  "Before redistributing this package, include the official Node.js license and third-party notices."
-].join("\n"));
 
 console.log(JSON.stringify({ stagingDirectory }, null, 2));

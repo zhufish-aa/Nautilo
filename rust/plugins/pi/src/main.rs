@@ -547,15 +547,25 @@ fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
             }));
             let usage = message.get("usage").cloned().unwrap_or(Value::Null);
             if usage.is_object() && !usage.as_object().is_none_or(|u| u.is_empty()) {
-                events.push(json!({
-                    "kind": "usage",
-                    "inputTokens": usage.get("input").cloned().unwrap_or(Value::Null),
-                    "cachedInputTokens": usage.get("cacheRead").cloned().unwrap_or(Value::Null),
-                    "outputTokens": usage.get("output").cloned().unwrap_or(Value::Null),
-                    "reasoningOutputTokens": usage.get("reasoning").cloned().unwrap_or(Value::Null),
-                    "contextUsed": usage.get("totalTokens").cloned().unwrap_or(Value::Null),
-                    "raw": value
-                }));
+                let num = |key: &str| usage.get(key).and_then(Value::as_i64);
+                // totalTokens = prompt + output of this single request. The
+                // context ring tracks the prompt footprint instead (input +
+                // cacheRead + cacheWrite), consistent with the claude adapter.
+                let prompt_tokens = [num("input"), num("cacheRead"), num("cacheWrite")].into_iter().flatten().sum::<i64>();
+                // Aborted/errored turns (e.g. a stream cut before
+                // finish_reason) come with a zeroed usage block; forwarding
+                // it would collapse the context ring to 0 until the next turn.
+                if prompt_tokens > 0 || num("output").unwrap_or(0) > 0 {
+                    events.push(json!({
+                        "kind": "usage",
+                        "inputTokens": usage.get("input").cloned().unwrap_or(Value::Null),
+                        "cachedInputTokens": usage.get("cacheRead").cloned().unwrap_or(Value::Null),
+                        "outputTokens": usage.get("output").cloned().unwrap_or(Value::Null),
+                        "reasoningOutputTokens": usage.get("reasoning").cloned().unwrap_or(Value::Null),
+                        "contextUsed": if prompt_tokens > 0 { json!(prompt_tokens) } else { usage.get("totalTokens").cloned().unwrap_or(Value::Null) },
+                        "raw": value
+                    }));
+                }
             }
             if state.model_error {
                 events.push(json!({

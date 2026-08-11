@@ -27,17 +27,24 @@ files:
   # 58 MB of renderer source maps — dev artifacts, not needed at runtime.
   - "!**/*.map"
 
-# Prepared by scripts/prepare-packaged-resources.mjs on the target platform.
-# core-daemon is copied by scripts/electron-builder-after-pack.cjs instead:
-# electron-builder silently drops any directory named node_modules from
-# extraResources, and the daemon cannot start without its dependencies.
+# Prepared by scripts/prepare-packaged-resources.mjs on the target platform:
+# the Rust core daemon (nautilo-core.exe) plus native provider plugins for
+# manual install. No node_modules anywhere, so extraResources can carry them
+# directly (the old TS daemon needed an afterPack copy to dodge
+# electron-builder's node_modules filtering).
 extraResources:
-  - from: build/packaged/node
-    to: node
+  - from: build/packaged/core-daemon
+    to: core-daemon
+  - from: build/packaged/plugins
+    to: plugins
 
 afterPack: scripts/electron-builder-after-pack.cjs
 
 asar: true
+
+# Ship only the locales the UI can display (en/zh); the other ~50 Chromium
+# locale paks are ~39 MB of dead weight.
+electronLanguages: ["en-US", "zh-CN"]
 
 # electron-builder drafts releases by default; publish them directly.
 publish:

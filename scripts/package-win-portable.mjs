@@ -99,43 +99,25 @@ const windowIconDirectory = join(desktopAppDirectory, "resources");
 mkdirSync(windowIconDirectory, { recursive: true });
 copyFileSync(windowIconSource, join(windowIconDirectory, "nautilo-icon.png"));
 
-const coreDaemonDirectory = join(resourcesDirectory, "core-daemon");
-mkdirSync(coreDaemonDirectory, { recursive: true });
-// The daemon runs under the bundled Node runtime, so it needs an isolated runtime
-// dependency tree. `pnpm deploy --legacy` materializes workspace packages as well
-// as transitive third-party dependencies; copying selected modules was incomplete.
-const pnpmArguments = ["--filter", "@agenthub/core-daemon", "--prod", "deploy", "--legacy", coreDaemonDirectory];
-const deployedDaemon = process.platform === "win32"
-  ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", `pnpm.cmd --filter @agenthub/core-daemon --prod deploy --legacy ${relative(repositoryRoot, coreDaemonDirectory)}`], {
-    cwd: repositoryRoot,
-    stdio: "inherit",
-    windowsHide: true
-  })
-  : spawnSync("pnpm", pnpmArguments, {
-    cwd: repositoryRoot,
-    stdio: "inherit",
-    windowsHide: true
-  });
-if (deployedDaemon.error) throw deployedDaemon.error;
-if (deployedDaemon.status !== 0) {
-  throw new Error(`Deploying the Core Daemon runtime failed with exit code ${deployedDaemon.status}`);
-}
-
-const nodeRuntimeDirectory = join(resourcesDirectory, "node");
-mkdirSync(nodeRuntimeDirectory, { recursive: true });
-cpSync(process.execPath, join(nodeRuntimeDirectory, "node.exe"));
-writeFileSync(join(nodeRuntimeDirectory, "README.txt"), [
-  `Bundled Node.js runtime: ${process.version}`,
-  "This runtime is used only by the local Nautilo Core Daemon.",
-  "Before redistributing this package, include the official Node.js license and third-party notices."
-].join("\r\n"));
+// The daemon is a single native executable (Rust) now. Stage it together with
+// the bundled provider plugins via prepare-packaged-resources.mjs (runs the
+// cargo release builds), then copy both into resources/.
+const prepare = spawnSync(process.execPath, [join(repositoryRoot, "scripts", "prepare-packaged-resources.mjs"), "build/packaged"], {
+  cwd: repositoryRoot,
+  stdio: "inherit",
+  windowsHide: true
+});
+if (prepare.error) throw prepare.error;
+if (prepare.status !== 0) throw new Error(`Preparing packaged resources failed with exit code ${prepare.status}`);
+copyDirectory(join(repositoryRoot, "build", "packaged", "core-daemon"), join(resourcesDirectory, "core-daemon"));
+copyDirectory(join(repositoryRoot, "build", "packaged", "plugins"), join(resourcesDirectory, "plugins"));
 
 const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
 writeFileSync(join(applicationDirectory, "PACKAGE-INFO.txt"), [
   `${rootPackage.description ?? "Nautilo"}`,
   `Version: ${rootPackage.version}`,
   `Electron: ${desktopRequire("electron/package.json").version}`,
-  `Node runtime: ${process.version}`,
+  "Core daemon: nautilo-core (Rust)",
   "Launch: Nautilo.exe"
 ].join("\r\n"));
 

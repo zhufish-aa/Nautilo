@@ -1245,15 +1245,27 @@ export function parsePiRpcEvent(value: RecordValue, state: PiParseState): Adapte
     events.push({ kind: "message", text: "", phase: "completed", messageId: state.currentMessageId, raw: value });
     const usage = asRecord(message.usage);
     if (Object.keys(usage).length) {
-      events.push({
-        kind: "usage",
-        inputTokens: numberValue(usage.input),
-        cachedInputTokens: numberValue(usage.cacheRead),
-        outputTokens: numberValue(usage.output),
-        reasoningOutputTokens: numberValue(usage.reasoning),
-        contextUsed: numberValue(usage.totalTokens),
-        raw: value
-      });
+      const input = numberValue(usage.input) ?? 0;
+      const cacheRead = numberValue(usage.cacheRead) ?? 0;
+      const cacheWrite = numberValue(usage.cacheWrite) ?? 0;
+      // totalTokens = prompt + output of this single request. The context ring
+      // tracks the prompt footprint instead (input + cacheRead + cacheWrite),
+      // consistent with the claude adapter.
+      const promptTokens = input + cacheRead + cacheWrite;
+      // Aborted/errored turns (e.g. a stream cut before finish_reason) come
+      // with a zeroed usage block; forwarding it would collapse the context
+      // ring to 0 until the next turn.
+      if (promptTokens > 0 || (numberValue(usage.output) ?? 0) > 0) {
+        events.push({
+          kind: "usage",
+          inputTokens: numberValue(usage.input),
+          cachedInputTokens: numberValue(usage.cacheRead),
+          outputTokens: numberValue(usage.output),
+          reasoningOutputTokens: numberValue(usage.reasoning),
+          contextUsed: promptTokens > 0 ? promptTokens : numberValue(usage.totalTokens),
+          raw: value
+        });
+      }
     }
     const errorMessage = stringValue(message.errorMessage);
     if (state.modelError) {

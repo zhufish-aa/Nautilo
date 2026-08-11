@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "nautilo"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "arboard",
  "base64 0.22.1",
