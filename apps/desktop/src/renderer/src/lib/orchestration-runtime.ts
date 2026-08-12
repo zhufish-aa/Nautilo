@@ -1094,9 +1094,10 @@ function schedulePoll(projectRunId: string): void {
   if (existing) clearTimeout(existing);
   let idleStreak = 0;
   const tick = async (): Promise<void> => {
+    let projectRun: ProjectRun | undefined;
     try {
       const activityBefore = projectRunActivity.get(projectRunId) ?? 0;
-      const projectRun = await hydrateProjectRun(projectRunId);
+      projectRun = await hydrateProjectRun(projectRunId);
       if (!shouldPollProjectRun(projectRun) && !hasQueuedFollowUpForProject(projectRunId)) {
         projectPollers.delete(projectRunId);
         projectRunActivity.delete(projectRunId);
@@ -1112,6 +1113,19 @@ function schedulePoll(projectRunId: string): void {
       idleStreak = (projectRunActivity.get(projectRunId) ?? 0) !== activityBefore ? 0 : idleStreak + 1;
     } catch (error) {
       console.error("Failed to synchronize orchestration run", error);
+      // Surface frontend sync failures in the timeline: a silent poll error
+      // looks exactly like "the assistant stopped responding" (no messages,
+      // no state change), so make it visible instead of console-only.
+      const root = projectRun?.mainSessionId ?? useProjectsStore.getState().projects
+        .find((project) => project.id === projectRun?.projectId)?.activeRun?.mainSessionId;
+      if (root) {
+        useSessionsStore.getState()._append(root, {
+          kind: "error",
+          code: "FRONTEND_SYNC_FAILED",
+          message: `前端同步失败: ${error instanceof Error ? error.message : String(error)}`,
+          retryable: true
+        });
+      }
     }
     const interval = idleStreak < POLL_IDLE_THRESHOLD
       ? POLL_BASE_MS
@@ -1160,6 +1174,12 @@ function scheduleStandalonePoll(sessionId: string, runId: string): void {
       } catch (error) {
         if (controller.cancelled) break;
         console.error("Failed to stream standalone Agent run", error);
+        useSessionsStore.getState()._append(sessionId, {
+          kind: "error",
+          code: "FRONTEND_SYNC_FAILED",
+          message: `前端同步失败: ${error instanceof Error ? error.message : String(error)}`,
+          retryable: true
+        });
         standaloneSubscriptions.delete(sessionId);
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
