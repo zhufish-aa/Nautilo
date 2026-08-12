@@ -15,6 +15,7 @@ use crate::adapters::{
     AgentCliAdapter,
 };
 use crate::errors::{CoreError, CoreResult, ErrorCode};
+use crate::runtime::run_log;
 
 /// Spawns a plugin binary and performs the handshake. Returns the adapter
 /// once the plugin's descriptor/capabilities are known.
@@ -37,11 +38,13 @@ pub async fn launch_plugin(plugin_id: &str, executable: &std::path::Path, dir: &
 
     let client = Arc::new(PluginClientInner::new(&plugin_id.to_string(), stdin, child));
     let reader_client = client.clone();
+    let stdout_plugin_id = plugin_id.to_string();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             reader_client.accept_line(&line).await;
         }
+        run_log::log(json!({ "event": "plugin_stdout_eof", "pluginId": stdout_plugin_id }));
         reader_client.shutdown().await;
     });
     // Plugin stderr is diagnostics only.
@@ -58,6 +61,7 @@ pub async fn launch_plugin(plugin_id: &str, executable: &std::path::Path, dir: &
     // stop() believe the process exited and never force-kill it.)
     let wait_child = client.child.clone();
     let wait_exited = client.exited.clone();
+    let wait_plugin_id = plugin_id.to_string();
     tokio::spawn(async move {
         loop {
             let mut guard = wait_child.lock().await;
@@ -80,6 +84,7 @@ pub async fn launch_plugin(plugin_id: &str, executable: &std::path::Path, dir: &
             }
         }
         wait_exited.store(true, Ordering::Relaxed);
+        run_log::log(json!({ "event": "plugin_process_exited", "pluginId": wait_plugin_id }));
     });
 
     client.write(&json!({ "type": "handshake", "apiVersion": agenthub_plugin_api_version() })).await;
@@ -224,6 +229,9 @@ impl PluginClientInner {
             Some("event") => {
                 let run_id = value.get("runId").and_then(Value::as_str).unwrap_or("");
                 let is_exit = value.get("event").and_then(|event| event.get("kind")).and_then(Value::as_str) == Some("exit");
+                if is_exit {
+                    run_log::run_event(run_id, "plugin_exit_frame", json!({}));
+                }
                 let sender = self.runs.lock().unwrap().get(run_id).map(|run| run.events.clone());
                 if let Some(sender) = sender {
                     let _ = sender.send(value.get("event").cloned().unwrap_or(Value::Null));

@@ -25,6 +25,7 @@ use crate::runtime::security::environment_policy::{build_environment, provider_e
 use crate::runtime::security::{ApprovalService, CommandPolicyService, CredentialService, RedactionService};
 use crate::runtime::session_run_queue::SessionRunQueue;
 use crate::runtime::subagent_detection::subagent_meta;
+use crate::runtime::run_log;
 use crate::runtime::RuntimeToolProvider;
 use crate::runtime::observability::AuditService;
 
@@ -131,6 +132,7 @@ impl RunService {
     }
 
     pub async fn cancel(&self, run_id: &str) -> CoreResult<()> {
+        run_log::run_event(run_id, "cancel_request", json!({}));
         let active = self.active.lock().unwrap().remove(run_id);
         let existing = Repositories::new(&self.db.lock().unwrap().raw).runs().get(run_id)?;
         let Some(active) = active else {
@@ -675,6 +677,8 @@ impl RunService {
         let mut messages: Vec<Value> = vec![];
         let provider_command = context.presentation.as_deref() == Some("provider_command");
         let mut saw_exit = false;
+        let consume_run_id = run.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        run_log::run_event(&consume_run_id, "consume_enter", json!({}));
         while let Some(event) = adapter_events.recv().await {
             if matches!(event, AdapterEvent::Exit { .. }) {
                 saw_exit = true;
@@ -716,6 +720,7 @@ impl RunService {
             self.output_tails.lock().unwrap().remove(run_id);
             self.touched_files.lock().unwrap().remove(run_id);
             self.workspace_baselines.lock().unwrap().remove(run_id);
+            run_log::run_event(run_id, "consume_exit", json!({ "status": status, "sawExit": saw_exit, "messages": messages.len() }));
             return RunCompletionSnapshot { run: latest, final_message: last_message_text(&messages) };
         }
         if !saw_exit {
@@ -744,6 +749,7 @@ impl RunService {
             self.output_tails.lock().unwrap().remove(run_id);
             self.touched_files.lock().unwrap().remove(run_id);
             self.workspace_baselines.lock().unwrap().remove(run_id);
+            run_log::run_event(run_id, "consume_exit", json!({ "status": "crashed", "sawExit": saw_exit, "messages": messages.len() }));
             return RunCompletionSnapshot { run: crashed, final_message: last_message_text(&messages) };
         }
         let mut completed = latest.as_object().cloned().unwrap_or_default();
@@ -773,6 +779,7 @@ impl RunService {
         self.output_tails.lock().unwrap().remove(run_id);
         self.touched_files.lock().unwrap().remove(run_id);
         self.workspace_baselines.lock().unwrap().remove(run_id);
+        run_log::run_event(run_id, "consume_exit", json!({ "status": "completed", "sawExit": saw_exit, "messages": messages.len() }));
         RunCompletionSnapshot { run: completed, final_message: last_message_text(&messages) }
     }
 

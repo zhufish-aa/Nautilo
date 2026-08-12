@@ -11,6 +11,7 @@ pub mod plugins;
 pub mod recovery_service;
 pub mod orchestration;
 pub mod run_diff_collector;
+pub mod run_log;
 pub mod run_service;
 pub mod run_workspace_snapshot;
 pub mod runtime_tool_provider;
