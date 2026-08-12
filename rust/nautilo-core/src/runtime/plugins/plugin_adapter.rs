@@ -199,7 +199,7 @@ impl PluginClientInner {
         }
     }
 
-    async fn accept_line(&self, line: &str) {
+    async fn accept_line(self: &Arc<Self>, line: &str) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return;
         };
@@ -237,27 +237,41 @@ impl PluginClientInner {
                 }
             }
             Some("interaction") => {
+                // Never await the user's answer inline: a pending approval
+                // would block the line reader and every later event (from
+                // other runs too) queues behind it until the UI responds —
+                // the "messages stop arriving after Cancel, then all appear
+                // after the next Cancel" hang. Handle it in its own task.
+                let client = self.clone();
                 let id = value.get("id").and_then(Value::as_i64).unwrap_or(0);
                 let run_id = value.get("runId").and_then(Value::as_str).unwrap_or("").to_string();
                 let input = value.get("input").cloned().unwrap_or(Value::Null);
-                let handler = self.runs.lock().unwrap().get(&run_id).and_then(|run| run.interaction.clone());
-                let response = match handler {
-                    Some(handler) => handler(input).await.unwrap_or_else(|_| json!({ "outcome": "cancelled" })),
-                    None => json!({ "outcome": "cancelled" }),
-                };
-                self.write(&json!({ "type": "interaction_response", "id": id, "response": response })).await;
+                tokio::spawn(async move {
+                    let handler = client.runs.lock().unwrap().get(&run_id).and_then(|run| run.interaction.clone());
+                    let response = match handler {
+                        Some(handler) => handler(input).await.unwrap_or_else(|_| json!({ "outcome": "cancelled" })),
+                        None => json!({ "outcome": "cancelled" }),
+                    };
+                    client.write(&json!({ "type": "interaction_response", "id": id, "response": response })).await;
+                });
             }
             Some("tool_call") => {
+                // Same reasoning as interaction: a slow runtime tool call must
+                // not stall the reader for other runs' events.
+                let client = self.clone();
                 let id = value.get("id").and_then(Value::as_i64).unwrap_or(0);
                 let run_id = value.get("runId").and_then(Value::as_str).unwrap_or("").to_string();
-                let executor = self.runs.lock().unwrap().get(&run_id).and_then(|run| run.tool_executor.clone());
-                let result = match executor {
-                    Some(executor) => executor(value.clone()).await.unwrap_or_else(|error| {
-                        json!({ "success": false, "content": error.to_string() })
-                    }),
-                    None => json!({ "success": false, "content": "runtime tools unavailable" }),
-                };
-                self.write(&json!({ "type": "tool_response", "id": id, "result": result })).await;
+                let call = value.clone();
+                tokio::spawn(async move {
+                    let executor = client.runs.lock().unwrap().get(&run_id).and_then(|run| run.tool_executor.clone());
+                    let result = match executor {
+                        Some(executor) => executor(call).await.unwrap_or_else(|error| {
+                            json!({ "success": false, "content": error.to_string() })
+                        }),
+                        None => json!({ "success": false, "content": "runtime tools unavailable" }),
+                    };
+                    client.write(&json!({ "type": "tool_response", "id": id, "result": result })).await;
+                });
             }
             Some("fatal") => {
                 eprintln!("[plugin:{}] fatal: {}", self.plugin_id, value.get("error").and_then(Value::as_str).unwrap_or(""));
@@ -274,7 +288,9 @@ impl PluginClientInner {
         let runs: Vec<RunChannel> = self.runs.lock().unwrap().drain().map(|(_, r)| r).collect();
         for run in runs {
             let _ = run.events.send(json!({ "kind": "error", "message": "plugin process exited" }));
-            let _ = run.events.send(json!({ "kind": "exit", "exitCode": 1 }));
+            // Deliberately NO fake "exit" frame: consume() uses the
+            // presence of a real exit event to distinguish a completed
+            // run from one whose process died mid-run.
         }
     }
 }

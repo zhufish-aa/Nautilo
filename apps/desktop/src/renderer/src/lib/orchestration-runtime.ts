@@ -1285,6 +1285,11 @@ function appendRuntimeEvents(
     if (hiddenInternalRuns.has(runId)) continue;
     if (event.type === "run.completed" && hiddenCompletions.has(runId)) continue;
     if (event.type === "agent.message_delta") {
+      // The model has moved on to final text output: whatever reasoning
+      // row is still streaming for this run is done now (pi/omp emit no
+      // thinking_summary in this path, so without this the row would stay
+      // "thinking…" forever).
+      finishLatestReasoning(runId);
       // Skip exactly the delta segments that already have a persisted
       // message (segments flush in order); anything newer keeps streaming.
       let order = deltaSegments.get(runId);

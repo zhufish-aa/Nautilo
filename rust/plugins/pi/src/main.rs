@@ -657,7 +657,7 @@ fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
 struct PiPlugin {
     tool_server: PiRuntimeToolServer,
     channel: Mutex<Option<Arc<dyn DaemonChannel>>>,
-    runs: Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>,
+    runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
 }
 
 impl PiPlugin {
@@ -665,7 +665,7 @@ impl PiPlugin {
         Self {
             tool_server: PiRuntimeToolServer::new(),
             channel: Mutex::new(None),
-            runs: Mutex::new(HashMap::new()),
+            runs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -760,13 +760,15 @@ impl ProviderPlugin for PiPlugin {
         ))
     }
 
-    async fn start(&self, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+    async fn start(&self, run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
         let channel = self.channel.lock().unwrap().clone();
         let run_handle_slot = Arc::new(Mutex::new(None::<agenthub_plugin_sdk::process::ProcessHandle>));
         let slot = run_handle_slot.clone();
+        let runs = self.runs.clone();
+        let run_id = run_id.to_string();
         tokio::spawn(async move {
-            let result = run_pi(request, resume, sender.clone(), channel, slot).await;
+            let result = run_pi(&run_id, request, resume, sender.clone(), channel, slot, runs).await;
             if let Err(error) = result {
                 let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
@@ -778,6 +780,15 @@ impl ProviderPlugin for PiPlugin {
 
     async fn dispose(&self) {
         self.tool_server.close();
+    }
+
+    async fn cancel(&self, run_id: &str) {
+        // Kill the child process tree: a stale pi keeps the session file
+        // locked, and the next run resumes the same session and stalls.
+        let handle = self.runs.lock().unwrap().remove(run_id);
+        if let Some(handle) = handle {
+            handle.cancel().await;
+        }
     }
 }
 
@@ -994,11 +1005,13 @@ fn assert_pi_selection(state_response: &Value, expected_model: Option<&str>, exp
 const PI_MAX_RPC_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 async fn run_pi(
+    run_id: &str,
     request: Value,
     resume: Option<String>,
     sender: mpsc::UnboundedSender<Value>,
     channel: Option<Arc<dyn DaemonChannel>>,
     handle_slot: Arc<Mutex<Option<agenthub_plugin_sdk::process::ProcessHandle>>>,
+    runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
 ) -> anyhow::Result<()> {
     let instance = request.get("instance").cloned().unwrap_or(Value::Null);
     let mut env = env_of(&request);
@@ -1091,6 +1104,7 @@ async fn run_pi(
     })?;
     let handle = started.handle.clone();
     *handle_slot.lock().unwrap() = Some(handle.clone());
+    runs.lock().unwrap().insert(run_id.to_string(), handle.clone());
 
     let mut state = PiParseState::default();
     let mut settled = false;
@@ -1255,6 +1269,7 @@ async fn run_pi(
                 // that so the failure is not overwritten as completed.
                 let code = if model_failed && exit_code == Some(0) { Some(1) } else { exit_code };
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": code }));
+                runs.lock().unwrap().remove(run_id);
                 skills.cleanup();
                 return Ok(());
             }
@@ -1263,6 +1278,7 @@ async fn run_pi(
     if !state_received && !terminal_status {
         let _ = sender.send(json!({ "kind": "status", "phase": "turn_failed" }));
     }
+    runs.lock().unwrap().remove(run_id);
     skills.cleanup();
     Ok(())
 }
@@ -1366,11 +1382,16 @@ fn handle_rpc_value(
         let method = value.get("method").and_then(Value::as_str).unwrap_or("");
         if method == "confirm" {
             // Approval gate: surface the prompt in the desktop UI and reply
-            // with the user's decision. Without a channel, deny — fail
-            // closed, matching pi's no-UI behavior.
+            // with the user's decision. Runs in its own task — awaiting the
+            // answer inline would stall the pi event loop, and pi emits
+            // nothing while waiting for the response, so the idle timeout
+            // would kill the child and the run would "complete" mid-turn.
+            // The heartbeat (get_state is answered by pi) refreshes the idle
+            // timer so an unanswered approval no longer trips the killer.
             let id = value.get("id").cloned().unwrap_or(Value::Null);
-            let confirmed = match channel {
+            match channel {
                 Some(channel) => {
+                    let channel = channel.clone();
                     let mut input = json!({
                         "kind": "approval",
                         "title": value.get("title").and_then(Value::as_str).unwrap_or("Pi 请求确认"),
@@ -1382,13 +1403,25 @@ fn handle_rpc_value(
                     if let Some(detail) = value.get("message") {
                         input["detail"] = detail.clone();
                     }
-                    let response = tokio::runtime::Handle::current().block_on(channel.ask("", input));
-                    response.get("outcome").and_then(Value::as_str) == Some("selected")
-                        && response.get("optionId").and_then(Value::as_str) == Some("confirm")
+                    let handle = handle.clone();
+                    tokio::spawn(async move {
+                        let response = loop {
+                            tokio::select! {
+                                response = channel.ask("", input.clone()) => break response,
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                                    handle.write(&format!("{}\n", json!({ "id": "agenthub-heartbeat", "type": "get_state" })));
+                                }
+                            }
+                        };
+                        let confirmed = response.get("outcome").and_then(Value::as_str) == Some("selected")
+                            && response.get("optionId").and_then(Value::as_str) == Some("confirm");
+                        handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": confirmed })));
+                    });
                 }
-                None => false,
-            };
-            handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": confirmed })));
+                None => {
+                    handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": false })));
+                }
+            }
             return Ok(true);
         }
         if ["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"].contains(&method) {

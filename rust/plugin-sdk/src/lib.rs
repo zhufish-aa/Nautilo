@@ -162,6 +162,7 @@ pub trait ProviderPlugin: Send + Sync {
     /// Starts (or resumes) a provider turn. Events must end with `exit`.
     async fn start(
         &self,
+        run_id: &str,
         request: Value,
         resume: Option<String>,
     ) -> anyhow::Result<tokio::sync::mpsc::UnboundedReceiver<Value>>;
@@ -169,7 +170,9 @@ pub trait ProviderPlugin: Send + Sync {
     async fn steer(&self, _run_id: &str, _input: &str) -> anyhow::Result<()> {
         anyhow::bail!("steer_unsupported")
     }
-    /// Cancels an in-flight run.
+    /// Cancels an in-flight run. Plugins with subprocesses must kill them
+    /// here; the default leaves the child running (a stale process keeps the
+    /// provider session locked and later runs hang on it).
     async fn cancel(&self, _run_id: &str) {}
     /// Releases long-lived resources before unload.
     async fn dispose(&self) {}

@@ -142,14 +142,14 @@ async fn capture(command: &str, args: &[String]) -> (String, Option<i32>) {
 
 struct OmpPlugin {
     channel: Mutex<Option<Arc<dyn DaemonChannel>>>,
-    runs: Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>,
+    runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
 }
 
 impl OmpPlugin {
     fn new() -> Self {
         Self {
             channel: Mutex::new(None),
-            runs: Mutex::new(HashMap::new()),
+            runs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -224,13 +224,15 @@ impl ProviderPlugin for OmpPlugin {
         Ok(parse_omp_models(&output))
     }
 
-    async fn start(&self, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+    async fn start(&self, run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
         let channel = self.channel.lock().unwrap().clone();
         let run_handle_slot = Arc::new(Mutex::new(None::<agenthub_plugin_sdk::process::ProcessHandle>));
         let slot = run_handle_slot.clone();
+        let runs = self.runs.clone();
+        let run_id = run_id.to_string();
         tokio::spawn(async move {
-            let result = run_omp(request, resume, sender.clone(), channel, slot).await;
+            let result = run_omp(&run_id, request, resume, sender.clone(), channel, slot, runs).await;
             if let Err(error) = result {
                 let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
@@ -241,6 +243,15 @@ impl ProviderPlugin for OmpPlugin {
     }
 
     async fn dispose(&self) {}
+
+    async fn cancel(&self, run_id: &str) {
+        // Kill the child process tree: a stale omp keeps the session locked
+        // and the next run resuming it stalls silently.
+        let handle = self.runs.lock().unwrap().remove(run_id);
+        if let Some(handle) = handle {
+            handle.cancel().await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- model discovery
@@ -662,11 +673,13 @@ const OMP_MAX_RPC_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 #[allow(clippy::too_many_arguments)]
 async fn run_omp(
+    run_id: &str,
     request: Value,
     _resume: Option<String>,
     sender: mpsc::UnboundedSender<Value>,
     channel: Option<Arc<dyn DaemonChannel>>,
     handle_slot: Arc<Mutex<Option<agenthub_plugin_sdk::process::ProcessHandle>>>,
+    runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
 ) -> anyhow::Result<()> {
     let instance = request.get("instance").cloned().unwrap_or(Value::Null);
     let mut env = env_of(&request);
@@ -730,6 +743,7 @@ async fn run_omp(
     })?;
     let handle = started.handle.clone();
     *handle_slot.lock().unwrap() = Some(handle.clone());
+    runs.lock().unwrap().insert(run_id.to_string(), handle.clone());
 
     let runtime_tools: Vec<Value> = request.get("runtimeTools").and_then(Value::as_array).cloned().unwrap_or_default();
     // Keep the channel for extension UI interactions (approval prompts); host
@@ -892,6 +906,7 @@ async fn run_omp(
                 }
                 let code = if model_failed && exit_code == Some(0) { Some(1) } else { exit_code };
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": code }));
+                runs.lock().unwrap().remove(run_id);
                 return Ok(());
             }
         }
@@ -899,6 +914,7 @@ async fn run_omp(
     if !state_received && !terminal_status {
         let _ = sender.send(json!({ "kind": "status", "phase": "turn_failed" }));
     }
+    runs.lock().unwrap().remove(run_id);
     Ok(())
 }
 
@@ -1048,8 +1064,9 @@ fn handle_rpc_value(
                 // in the desktop UI and reply with the user's decision. Without
                 // a channel, deny — fail closed, matching omp's no-UI behavior.
                 let id = value.get("id").cloned().unwrap_or(Value::Null);
-                let confirmed = match channel {
+                match channel {
                     Some(channel) => {
+                        let channel = channel.clone();
                         let mut input = json!({
                             "kind": "approval",
                             "title": value.get("title").and_then(Value::as_str).unwrap_or("omp 请求确认"),
@@ -1061,13 +1078,31 @@ fn handle_rpc_value(
                         if let Some(detail) = value.get("message") {
                             input["detail"] = detail.clone();
                         }
-                        let response = tokio::runtime::Handle::current().block_on(channel.ask("", input));
-                        response.get("outcome").and_then(Value::as_str) == Some("selected")
-                            && response.get("optionId").and_then(Value::as_str) == Some("confirm")
+                        // Await the user's decision in a separate task: waiting
+                        // inline would stall the omp event loop, and omp emits
+                        // nothing while waiting for the response, so the idle
+                        // timeout would kill the child and the run would
+                        // "complete" mid-turn. The heartbeat (get_state is
+                        // answered by omp) refreshes the idle timer.
+                        let handle = handle.clone();
+                        tokio::spawn(async move {
+                            let response = loop {
+                                tokio::select! {
+                                    response = channel.ask("", input.clone()) => break response,
+                                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                                        handle.write(&format!("{}\n", json!({ "id": "agenthub-heartbeat", "type": "get_state" })));
+                                    }
+                                }
+                            };
+                            let confirmed = response.get("outcome").and_then(Value::as_str) == Some("selected")
+                                && response.get("optionId").and_then(Value::as_str) == Some("confirm");
+                            handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": confirmed })));
+                        });
                     }
-                    None => false,
-                };
-                handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": confirmed })));
+                    None => {
+                        handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": false })));
+                    }
+                }
                 return Ok(true);
             }
             if ["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"].contains(&method) {

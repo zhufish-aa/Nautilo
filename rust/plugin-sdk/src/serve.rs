@@ -112,6 +112,7 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
             HostMessage::Call { id, method, input } => {
                 let plugin = plugin.clone();
                 let writer = writer.clone();
+                let active = active.clone();
                 tokio::spawn(async move {
                     let frame = match method.as_str() {
                         "detect" => emit::response(id, plugin.detect(&input).await),
@@ -127,6 +128,13 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                         },
                         "dispose" => {
                             plugin.dispose().await;
+                            // Kill every child process before exiting —
+                            // otherwise they outlive the plugin as orphans
+                            // and keep the provider session locked.
+                            let run_ids: Vec<String> = active.lock().await.keys().cloned().collect();
+                            for run_id in run_ids {
+                                plugin.cancel(&run_id).await;
+                            }
                             emit::response(id, Value::Null)
                         }
                         other => emit::failure(id, &format!("unknown method: {other}")),
@@ -144,7 +152,7 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                 tokio::spawn(async move {
                     let (cancel_sender, mut cancel_receiver) = tokio::sync::oneshot::channel::<()>();
                     active.lock().await.insert(run_id.clone(), ActiveRun { cancel: cancel_sender });
-                    let events = plugin.start(request, resume).await;
+                    let events = plugin.start(&run_id, request, resume).await;
                     match events {
                         Ok(mut events) => {
                             loop {
@@ -221,6 +229,12 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                 }
             }
         }
+    }
+    // stdin EOF: the daemon is gone. Kill every child process so they do
+    // not linger as orphans and keep the provider session locked.
+    let run_ids: Vec<String> = active.lock().await.keys().cloned().collect();
+    for run_id in run_ids {
+        plugin.cancel(&run_id).await;
     }
 }
 

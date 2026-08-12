@@ -154,6 +154,12 @@ impl RunService {
             Repositories::new(&self.db.lock().unwrap().raw).runs().save(&Value::Object(updated))?;
         }
         (active.cancel)().await;
+        // Resolve any pending provider approvals for this run right away.
+        // Otherwise the plugin-side interaction handler stays parked on its
+        // oneshot and the run's own stream never finalizes.
+        if let Some(interactions) = self.interactions.read().unwrap().clone() {
+            interactions.cancel_for_run(run_id);
+        }
         let latest = Repositories::new(&self.db.lock().unwrap().raw).runs().get(run_id)?.or(existing);
         if let Some(latest) = latest {
             let mut updated = latest.as_object().cloned().unwrap_or_default();
@@ -668,7 +674,11 @@ impl RunService {
     ) -> RunCompletionSnapshot {
         let mut messages: Vec<Value> = vec![];
         let provider_command = context.presentation.as_deref() == Some("provider_command");
+        let mut saw_exit = false;
         while let Some(event) = adapter_events.recv().await {
+            if matches!(event, AdapterEvent::Exit { .. }) {
+                saw_exit = true;
+            }
             if let Some(message) = self.persist(run, session, &event, &context) {
                 messages.push(message);
             }
@@ -707,6 +717,34 @@ impl RunService {
             self.touched_files.lock().unwrap().remove(run_id);
             self.workspace_baselines.lock().unwrap().remove(run_id);
             return RunCompletionSnapshot { run: latest, final_message: last_message_text(&messages) };
+        }
+        if !saw_exit {
+            // The stream closed without a real exit event: the provider
+            // process died mid-run (killed, crashed, orphaned). Never report
+            // this as a successful completion — mark it crashed so the UI
+            // does not claim the turn finished while the child is still
+            // running somewhere.
+            let mut crashed = latest.as_object().cloned().unwrap_or_default();
+            crashed.insert("status".to_string(), json!("crashed"));
+            crashed.insert("endedAt".to_string(), json!(now_iso()));
+            crashed.insert("failureCode".to_string(), json!("PLUGIN_PROCESS_LOST"));
+            let crashed = Value::Object(crashed);
+            let _ = Repositories::new(&self.db.lock().unwrap().raw).runs().save(&crashed);
+            if !provider_command {
+                let _ = self.events.append(&crashed, session, "run.failed", json!({
+                    "code": "PLUGIN_PROCESS_LOST",
+                    "message": "Provider process exited mid-run; the turn was interrupted.",
+                    "retryable": true
+                }));
+            }
+            self.update_session_status(
+                session.get("id").and_then(Value::as_str).unwrap_or(""),
+                if provider_command { "idle" } else { "failed" },
+            );
+            self.output_tails.lock().unwrap().remove(run_id);
+            self.touched_files.lock().unwrap().remove(run_id);
+            self.workspace_baselines.lock().unwrap().remove(run_id);
+            return RunCompletionSnapshot { run: crashed, final_message: last_message_text(&messages) };
         }
         let mut completed = latest.as_object().cloned().unwrap_or_default();
         completed.insert("status".to_string(), json!("completed"));

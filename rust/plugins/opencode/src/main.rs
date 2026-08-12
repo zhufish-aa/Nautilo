@@ -688,7 +688,7 @@ impl ProviderPlugin for OpenCodePlugin {
         Ok(parse_opencode_models(&text))
     }
 
-    async fn start(&self, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+    async fn start(&self, _run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let provider_command = request.get("providerCommand").and_then(Value::as_str).map(str::to_string);
         if provider_command.as_deref() == Some("compact") && resume.is_none() {
             anyhow::bail!("OpenCode context compaction requires an existing provider session");

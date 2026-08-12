@@ -145,7 +145,7 @@ impl ProviderPlugin for TraePlugin {
         }
     }
 
-    async fn start(&self, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+    async fn start(&self, _run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
         let interactions = self.interactions.lock().unwrap().clone();
         tokio::spawn(async move {
