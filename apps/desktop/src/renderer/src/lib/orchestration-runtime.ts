@@ -1089,6 +1089,24 @@ const POLL_MAX_MS = 2000;
 // Idle ticks tolerated at the base interval before the backoff starts.
 const POLL_IDLE_THRESHOLD = 4;
 
+// Identical sync failures are surfaced at most once per minute per session —
+// a dead daemon would otherwise flood the timeline with an error row per tick.
+const SYNC_ERROR_THROTTLE_MS = 60_000;
+const lastSyncErrorShown = new Map<string, { at: number; message: string }>();
+
+function appendSyncErrorThrottled(sessionId: string, message: string): void {
+  const last = lastSyncErrorShown.get(sessionId);
+  const now = Date.now();
+  if (last && last.message === message && now - last.at < SYNC_ERROR_THROTTLE_MS) return;
+  lastSyncErrorShown.set(sessionId, { at: now, message });
+  useSessionsStore.getState()._append(sessionId, {
+    kind: "error",
+    code: "FRONTEND_SYNC_FAILED",
+    message,
+    retryable: true
+  });
+}
+
 function schedulePoll(projectRunId: string): void {
   const existing = projectPollers.get(projectRunId);
   if (existing) clearTimeout(existing);
@@ -1116,15 +1134,10 @@ function schedulePoll(projectRunId: string): void {
       // Surface frontend sync failures in the timeline: a silent poll error
       // looks exactly like "the assistant stopped responding" (no messages,
       // no state change), so make it visible instead of console-only.
-      const root = projectRun?.mainSessionId ?? useProjectsStore.getState().projects
-        .find((project) => project.id === projectRun?.projectId)?.activeRun?.mainSessionId;
+      const root = projectRun?.mainSessionId ?? useSessionsStore.getState().sessions
+        .find((session) => session.projectRunId === projectRunId)?.id;
       if (root) {
-        useSessionsStore.getState()._append(root, {
-          kind: "error",
-          code: "FRONTEND_SYNC_FAILED",
-          message: `前端同步失败: ${error instanceof Error ? error.message : String(error)}`,
-          retryable: true
-        });
+        appendSyncErrorThrottled(root, `前端同步失败: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     const interval = idleStreak < POLL_IDLE_THRESHOLD
@@ -1174,12 +1187,7 @@ function scheduleStandalonePoll(sessionId: string, runId: string): void {
       } catch (error) {
         if (controller.cancelled) break;
         console.error("Failed to stream standalone Agent run", error);
-        useSessionsStore.getState()._append(sessionId, {
-          kind: "error",
-          code: "FRONTEND_SYNC_FAILED",
-          message: `前端同步失败: ${error instanceof Error ? error.message : String(error)}`,
-          retryable: true
-        });
+        appendSyncErrorThrottled(sessionId, `前端同步失败: ${error instanceof Error ? error.message : String(error)}`);
         standaloneSubscriptions.delete(sessionId);
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
