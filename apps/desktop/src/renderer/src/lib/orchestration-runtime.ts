@@ -998,10 +998,15 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
       changed = true;
       store._replaceArtifacts(session.id, nextArtifacts);
     }
-    // Runs in one provider session are serialized. A newer terminal run must
-    // supersede any stale historical row that was left marked as running.
-    const latestRun = runs.find((run) => run.sessionId === session.id);
-    const activeRun = latestRun && shouldPollAgentRun(latestRun) ? latestRun : undefined;
+    // Runs in one provider session are serialized. Pick the newest run that
+    // is still active. run.list returns runs ordered by updated_at DESC, and
+    // terminal-state writes (e.g. a cancel persisting after the next run was
+    // created) can push a finished run ahead of the one actually running —
+    // picking "the first run if it is active" would then report the session
+    // as idle while the turn is still executing (stop button gone, "done"
+    // state shown, follow-ups sent as brand-new runs instead of queued).
+    const sessionRuns = runs.filter((run) => run.sessionId === session.id);
+    const activeRun = sessionRuns.find(shouldPollAgentRun);
     if (activeRun) activeRunCount += 1;
     if (!sameLifecycle(store.foreground[session.id], activeRun ? standaloneLifecycle(detail.session, activeRun) : undefined)) {
       changed = true;
