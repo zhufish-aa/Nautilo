@@ -26,6 +26,7 @@ import { resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
 import { toolActivityLabel, toolInputFileDiff } from "../../lib/tool-display";
 import { MarkdownContent } from "./MarkdownContent";
 import { useStreamingText } from "../../lib/streaming-text";
+import { reconcileTimelineKeys, type TimelineKeySequence } from "../../lib/timeline-row-keys";
 import { ToolFileDiffView } from "./ToolFileDiffView";
 import { TimelineImage } from "./TimelineImage";
 import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupTextMenu } from "./media-actions";
@@ -77,6 +78,10 @@ export function TimelineViewport({
   const previousContentKeyRef = useRef<unknown>(contentKey);
   const previousRowCountRef = useRef(rows.length);
 
+  const keySequenceRef = useRef<TimelineKeySequence>();
+  const keySequence = reconcileTimelineKeys(keySequenceRef.current, rows, sessionKey);
+  keySequenceRef.current = keySequence;
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
@@ -87,7 +92,7 @@ export function TimelineViewport({
     // Keep overscan tight: each row renders markdown on mount, and extra
     // off-screen rows would parse long answers before they are visible.
     overscan: 2,
-    getItemKey: (index) => rows[index]?.key ?? String(index)
+    getItemKey: keySequence.getItemKey
   });
 
   const scrollToTail = useCallback(() => {

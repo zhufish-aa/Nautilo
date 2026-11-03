@@ -1,3 +1,6 @@
+import type { HistoryCursor, HistoryProjection, SessionHistoryInput } from "@agenthub/schemas";
+import { readHistoryProjection, readSnapshot } from "./history-projection.js";
+import { CoreError } from "../errors.js";
 import type { Message, Session } from "@agenthub/domain";
 import type { DatabaseSync } from "node:sqlite";
 type Row = Record<string, unknown>;
@@ -46,7 +49,20 @@ export class SessionRepository {
       throw error;
     }
   }
-  saveMessage(message: Message): void { this.db.prepare("INSERT OR REPLACE INTO messages(id, session_id, data, created_at) VALUES(?, ?, ?, ?)").run(message.id, message.sessionId, JSON.stringify(message), message.createdAt); }
+  history(sessionId: string, cursor?: HistoryCursor): HistoryProjection<Message> & { session: Session } {
+    return readSnapshot(this.db, () => {
+      const session = this.get(sessionId);
+      if (!session) throw new CoreError("IPC_NOT_FOUND", { resource: "session", id: sessionId });
+      return { session, ...readHistoryProjection<Message>(this.db, "messages", `messages:session:${sessionId}`, cursor) };
+    });
+  }
+  historyBatch(items: SessionHistoryInput[]): { items: Array<HistoryProjection<Message> & { session: Session }> } {
+    if (!Array.isArray(items) || items.length < 1 || items.length > 64 || items.some((item) => !item || typeof item.sessionId !== "string" || !item.sessionId)) {
+      throw new CoreError("IPC_INVALID_REQUEST", { reason: "session.historyBatch requires 1 to 64 session cursors" });
+    }
+    return readSnapshot(this.db, () => ({ items: items.map((item) => this.history(item.sessionId, item.cursor)) }));
+  }
+  saveMessage(message: Message): void { this.db.prepare("INSERT INTO messages(id, session_id, data, created_at) VALUES(?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, data=excluded.data, created_at=excluded.created_at").run(message.id, message.sessionId, JSON.stringify(message), message.createdAt); }
   messages(sessionId: string): Message[] { return (this.db.prepare("SELECT data FROM messages WHERE session_id = ? ORDER BY created_at").all(sessionId) as Row[]).map((row) => JSON.parse(String(row.data)) as Message); }
   deleteMessage(sessionId: string, messageId: string): void { this.db.prepare("DELETE FROM messages WHERE session_id = ? AND id = ?").run(sessionId, messageId); }
 }

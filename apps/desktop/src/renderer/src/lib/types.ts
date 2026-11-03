@@ -319,7 +319,7 @@ export interface MessageAttachmentView {
 
 export type TimelinePayload =
     | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string; attachments?: MessageAttachmentView[]; editedAt?: string }
-  | { kind: "activity"; phase: "queued" | "starting" | "thinking" | "responding" | "completed"; detail?: string }
+  | { kind: "activity"; phase: "queued" | "provider_queued" | "starting" | "thinking" | "responding" | "completed"; detail?: string }
     | { kind: "reasoning"; text: string; streaming?: boolean; messageId?: string }
   | { kind: "tool_activity"; toolName: string; status: "running" | "done" | "failed"; input?: string; output?: string; fileDiff?: ToolFileDiff; subagent?: { agentType?: string; task?: string; background?: boolean; activities?: TimelinePayload[] } }
   | { kind: "tool_group"; items: TimelineEvent[]; stepCount: number; callCount: number; running: boolean }

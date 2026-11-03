@@ -1,3 +1,4 @@
+import { historyProjectionSchema } from "./history-projection-schema.js";
 import type { DatabaseSync } from "node:sqlite";
 
 export function migrateDatabase(db: DatabaseSync): void {
@@ -39,6 +40,8 @@ export function migrateDatabase(db: DatabaseSync): void {
   ensureColumn(db, "artifacts", "project_run_id", "TEXT");
   ensureColumn(db, "artifacts", "task_id", "TEXT");
   ensureColumn(db, "artifacts", "session_id", "TEXT");
+  // Revisions are persisted in SQLite so mixed TS/Rust writers and raw deletes are observed.
+  db.exec(historyProjectionSchema);
   const version = currentSchemaVersion(db);
   if (version < 5) migrateExecutionDefaultsToTeamMembers(db);
   if (version < 5) setSchemaVersion(db, 5);
@@ -46,6 +49,7 @@ export function migrateDatabase(db: DatabaseSync): void {
   if (version < 6) setSchemaVersion(db, 6);
   // Schema 7 adds per-turn checkpoints (workspace snapshots) and run touched files.
   if (version < 7) setSchemaVersion(db, 7);
+  if (version < 8) setSchemaVersion(db, 8);
 }
 
 function ensureColumn(db: DatabaseSync, table: string, column: string, type: string): void {

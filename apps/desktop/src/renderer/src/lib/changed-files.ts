@@ -50,13 +50,35 @@ export type ChangedFileEntry =
   // every fragment oldest→newest so a per-file revert can unwind them all.
   | { kind: "fileDiff"; path: string; diff: ToolFileDiff; diffs: ToolFileDiff[]; edits: number };
 
-export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[] {
-  const byPath = new Map<string, ChangedFileEntry>();
+type ToolActivity = Extract<TimelineEvent["data"], { kind: "tool_activity" }>;
+const toolDiffCache = new WeakMap<ToolActivity, { input: ToolActivity["input"]; name: string; explicit: ToolFileDiff | undefined; result: ToolFileDiff | undefined }>();
+function activityDiff(data: ToolActivity): ToolFileDiff | undefined {
+  const cached = toolDiffCache.get(data);
+  if (cached && cached.input === data.input && cached.name === data.toolName && cached.explicit === data.fileDiff) return cached.result;
+  const result = data.fileDiff ?? toolInputFileDiff(data.toolName, data.input);
+  toolDiffCache.set(data, { input: data.input, name: data.toolName, explicit: data.fileDiff, result });
+  return result;
+}
+
+// Badge-only reads retain paths, not parsed before/after file bodies.
+const toolPathCache = new WeakMap<ToolActivity, { input: ToolActivity["input"]; name: string; path: string | undefined }>();
+function activityPath(data: ToolActivity): string | undefined {
+  if (data.fileDiff) return data.fileDiff.path;
+  const cached = toolPathCache.get(data);
+  if (cached && cached.input === data.input && cached.name === data.toolName) return cached.path;
+  const path = toolInputFileDiff(data.toolName, data.input)?.path;
+  toolPathCache.set(data, { input: data.input, name: data.toolName, path });
+  return path;
+}
+
+/** Text/reasoning updates cannot change a file projection. Discard them before
+ * scope checks, and apply native replacement semantics equally to counts/diffs. */
+function relevantChanges(events: TimelineEvent[]): TimelineEvent[] {
   const flattened: TimelineEvent[] = [];
   const flatten = (items: TimelineEvent[]): void => {
     for (const event of items) {
       if (event.data.kind === "tool_group") flatten(event.data.items);
-      else flattened.push(event);
+      else if (event.data.kind === "file_change" || event.data.kind === "tool_activity") flattened.push(event);
     }
   };
   flatten(events);
@@ -65,19 +87,44 @@ export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[]
   for (const event of flattened) {
     if (event.data.kind === "file_change" && event.data.source === "provider" && event.data.replace) nativeByRun.set(scope(event), event);
   }
+  if (nativeByRun.size === 0) return flattened;
+  return flattened.filter((event) => {
+    const native = nativeByRun.get(scope(event));
+    return !native || native === event;
+  });
+}
 
+/** Badge projection: no patch parsing, line counting, or revert-fragment arrays. */
+export function countChangedFiles(events: TimelineEvent[]): number {
+  const paths = new Set<string>();
+  for (const event of relevantChanges(events)) {
+    if (event.data.kind === "file_change") {
+      for (const file of event.data.files) paths.add(file.path);
+    } else if (event.data.kind === "tool_activity") {
+      const path = activityPath(event.data);
+      if (path) paths.add(path);
+    }
+  }
+  return paths.size;
+}
+
+// Store timelines are immutable snapshots. Weak keys avoid retaining closed
+// histories while unchanged child sessions reuse their badge projection.
+const countCache = new WeakMap<TimelineEvent[], number>();
+export function cachedChangedFileCount(events: TimelineEvent[]): number {
+  const cached = countCache.get(events);
+  if (cached !== undefined) return cached;
+  const count = countChangedFiles(events);
+  countCache.set(events, count);
+  return count;
+}
+
+export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[] {
+  const byPath = new Map<string, ChangedFileEntry>();
+  const flattened = relevantChanges(events);
   const visit = (items: TimelineEvent[]): void => {
     for (const event of items) {
       const data = event.data;
-      // A provider snapshot replaces this run, including an empty snapshot.
-      // Filter old and late item patches *before* path aggregation so another
-      // run/session's contribution survives a native withdrawal.
-      const native = nativeByRun.get(scope(event));
-      if (native && native !== event && (data.kind === "file_change" || data.kind === "tool_activity")) continue;
-      if (data.kind === "tool_group") {
-        visit(data.items);
-        continue;
-      }
       if (data.kind === "file_change") {
         for (const file of data.files) {
           const existing = byPath.get(file.path);
@@ -97,7 +144,7 @@ export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[]
         continue;
       }
       if (data.kind === "tool_activity") {
-        const fileDiff = data.fileDiff ?? toolInputFileDiff(data.toolName, data.input);
+        const fileDiff = activityDiff(data);
         const path = fileDiff?.path;
         if (!fileDiff || !path) continue;
         const existing = byPath.get(path);
@@ -106,13 +153,15 @@ export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[]
           byPath.set(path, { ...existing, edits: existing.edits + 1 });
           continue;
         }
-        byPath.set(path, {
-          kind: "fileDiff",
-          path,
-          diff: fileDiff,
-          diffs: [...(existing?.kind === "fileDiff" ? existing.diffs : []), fileDiff],
-          edits: (existing?.edits ?? 0) + 1
-        });
+        if (existing?.kind === "fileDiff") {
+          // This array belongs to this projection, not the input/store. Appending
+          // avoids copying 1+2+...+N fragments for repeated edits to one file.
+          existing.diffs.push(fileDiff);
+          existing.diff = fileDiff;
+          existing.edits += 1;
+        } else {
+          byPath.set(path, { kind: "fileDiff", path, diff: fileDiff, diffs: [fileDiff], edits: (existing?.edits ?? 0) + 1 });
+        }
       }
     }
   };

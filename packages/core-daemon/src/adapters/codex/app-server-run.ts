@@ -459,15 +459,19 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
 
   async function* events(): AsyncGenerator<AdapterEvent> {
     try {
+      if (finished) return;
       await rpc.request("initialize", CODEX_APP_SERVER_INITIALIZE_PARAMS);
+      if (finished) return;
       rpc.notify("initialized", {});
       const threadResponse = record(await rpc.request(resume ? "thread/resume" : "thread/start", resume
         ? { threadId: (request as AdapterResumeRequest).providerSessionId, ...threadOptions(request, true) }
         : threadOptions(request, true)));
+      if (finished) return;
       const thread = record(threadResponse.thread);
       threadId = String(thread.id ?? (resume ? (request as AdapterResumeRequest).providerSessionId : ""));
       if (!threadId) throw new Error("Codex app-server did not return a thread id");
       yield { kind: "session", providerSessionId: threadId };
+      if (finished) return;
       const compact = request.providerCommand === "compact";
       if (compact && !resume) throw new Error("Codex thread compaction requires an existing provider session");
       if (compact) {
@@ -487,8 +491,12 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
       }
 
       for await (const event of rpc) {
+        if (finished) return;
         if (event.kind === "notification") {
           const params = record(event.params);
+          const scopedThreadId = text(params.threadId);
+          if (scopedThreadId && scopedThreadId !== threadId && !childThreads.has(scopedThreadId)) continue;
+          if (scopedThreadId === threadId && text(params.turnId) && params.turnId !== turnId) continue;
           if (event.method === "turn/diff/updated" && !isCurrentCodexTurnDiff(params, threadId, turnId)) continue;
           // A child/stale turn must never terminate this main run.
           if (event.method === "turn/completed" && (
@@ -526,6 +534,11 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
             yield { kind: "exit", exitCode: 0 };
             return;
           }
+        } else if (event.kind === "request" && (
+          (text(record(event.params).threadId) && record(event.params).threadId !== threadId && !childThreads.has(String(record(event.params).threadId)))
+          || (record(event.params).threadId === threadId && text(record(event.params).turnId) && record(event.params).turnId !== turnId)
+        )) {
+          rpc.respondError(event.id, -32600, "Request does not belong to the active Codex turn");
         } else if (event.kind === "request" && event.method === "item/tool/call") {
           for (const emitted of await handleDynamicToolCall(rpc, request, event)) yield emitted;
         } else if (event.kind === "request" && event.method === "item/tool/requestUserInput") {
@@ -542,6 +555,11 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
     } catch (error) {
       yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
       if (!finished) await process.cancel().catch(() => undefined);
+    } finally {
+      // Consumers can close an iterator before turn/completed (cancel, navigation
+      // or a wrapper error). The per-run fallback must not leave its CLI alive.
+      finished = true;
+      await process.cancel().catch(() => undefined);
     }
   }
 
@@ -559,7 +577,12 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
       turnId = String(response.turnId ?? turnId);
     },
     cancel: async () => {
-      if (threadId && turnId) rpc.notify("turn/interrupt", { threadId, turnId });
+      if (threadId && turnId && !finished) {
+        // The protocol defines interrupt as a request. Do not wait on a broken
+        // server before terminating this per-run (not shared) child process.
+        void rpc.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
+      }
+      finished = true;
       await process.cancel();
     }
   };

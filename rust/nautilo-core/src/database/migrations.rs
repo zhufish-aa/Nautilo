@@ -50,6 +50,7 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
     ensure_column(db, "artifacts", "project_run_id", "TEXT")?;
     ensure_column(db, "artifacts", "task_id", "TEXT")?;
     ensure_column(db, "artifacts", "session_id", "TEXT")?;
+    db.execute_batch(include_str!("history_projection.sql")).map_err(db_fail)?;
     let version = current_schema_version(db)?;
     if version < 5 {
         migrate_execution_defaults_to_team_members(db)?;
@@ -64,6 +65,9 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
     // Schema 7 adds per-turn checkpoints (workspace snapshots) and run touched files.
     if version < 7 {
         set_schema_version(db, 7)?;
+    }
+    if version < 8 {
+        set_schema_version(db, 8)?;
     }
     Ok(())
 }

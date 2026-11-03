@@ -39,13 +39,24 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
   projects: [],
 
   hydrate: async (inspect = true) => {
+    const initial = new Map(get().projects.map((project) => [project.id, project]));
     const projects = await requestCore<Project[]>("project.list");
-    // Seed only missing rows. A list response may predate a saved setting.
-    set((state) => ({ projects: [
-      ...state.projects,
-      ...projects.filter((project) => !state.projects.some((item) => item.id === project.id))
-        .map((project) => toUiProject(project))
-    ] }));
+    set((state) => {
+      const current = new Map(state.projects.map((project) => [project.id, project]));
+      const remoteIds = new Set(projects.map((project) => project.id));
+      // Preserve changes made while the request was pending, but let a fresh
+      // listing remove unchanged rows deleted elsewhere. Map lookups keep
+      // repeated hydration linear rather than scanning the whole list per row.
+      const concurrentLocal = state.projects.filter((project) =>
+        !remoteIds.has(project.id) && (!initial.has(project.id) || initial.get(project.id) !== project)
+      );
+      return { projects: [...concurrentLocal, ...projects.flatMap((project) => {
+        const existing = current.get(project.id);
+        if (initial.has(project.id) && !existing) return []; // Locally deleted while loading.
+        if (existing && initial.get(project.id) !== existing) return [existing];
+        return [toUiProject(project, undefined, existing)];
+      })] };
+    });
     if (inspect) await Promise.all(projects.map((project) => get().rescanProject(project.id).catch(() => {})));
   },
 

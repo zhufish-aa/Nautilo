@@ -7,6 +7,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use crate::database::connection::db_fail;
+use crate::database::history_projection::{read_projection, read_snapshot};
 use crate::errors::{CoreError, CoreResult, ErrorCode};
 
 fn now_iso() -> String {
@@ -266,9 +267,32 @@ impl<'a> SessionRepository<'a> {
         }
     }
 
+    pub fn history(&self, session_id: &str, cursor: Option<&Value>) -> CoreResult<Value> {
+        read_snapshot(self.db, || {
+            let session = self.get(session_id)?.ok_or_else(|| CoreError::reason(ErrorCode::IpcNotFound, "session not found"))?;
+            let mut projection = read_projection(self.db, "messages", &format!("messages:session:{session_id}"), cursor)?;
+            projection["session"] = session;
+            Ok(projection)
+        })
+    }
+
+    pub fn history_batch(&self, input: &Value) -> CoreResult<Value> {
+        let items = input.get("items").and_then(Value::as_array).filter(|items| {
+            !items.is_empty() && items.len() <= 64 && items.iter().all(|item| {
+                item.get("sessionId").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+            })
+        }).ok_or_else(|| CoreError::reason(ErrorCode::IpcInvalidRequest, "session.historyBatch requires 1 to 64 session cursors"))?;
+        read_snapshot(self.db, || {
+            let histories = items.iter().map(|item| self.history(
+                item.get("sessionId").and_then(Value::as_str).unwrap_or(""), item.get("cursor"),
+            )).collect::<CoreResult<Vec<_>>>()?;
+            Ok(json!({ "items": histories }))
+        })
+    }
+
     pub fn save_message(&self, message: &Value) -> CoreResult<()> {
         self.db
-            .prepare("INSERT OR REPLACE INTO messages(id, session_id, data, created_at) VALUES(?1, ?2, ?3, ?4)")
+            .prepare("INSERT INTO messages(id, session_id, data, created_at) VALUES(?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, data=excluded.data, created_at=excluded.created_at")
             .map_err(db_fail)?
             .execute(params![
                 id_of(message)?,
@@ -695,12 +719,23 @@ pub struct ArtifactRepository<'a> {
 }
 
 impl<'a> ArtifactRepository<'a> {
+    pub fn changes(&self, input: &Value) -> CoreResult<Value> {
+        let session_id = str_field(input, "sessionId").filter(|id| !id.is_empty());
+        let project_run_id = str_field(input, "projectRunId").filter(|id| !id.is_empty());
+        let scope = match (session_id, project_run_id) {
+            (Some(id), None) => format!("artifacts:session:{id}"),
+            (None, Some(id)) => format!("artifacts:projectRun:{id}"),
+            _ => return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "artifact.changes requires exactly one sessionId or projectRunId")),
+        };
+        read_snapshot(self.db, || read_projection(self.db, "artifacts", &scope, input.get("cursor")))
+    }
+
     pub fn save(&self, artifact: &Value, created_at: Option<&str>, size_bytes: i64) -> CoreResult<()> {
         let created = created_at.map(str::to_string).unwrap_or_else(now_iso);
         self.db
             .prepare(
-                "INSERT OR REPLACE INTO artifacts(id, kind, project_run_id, task_id, session_id, data, created_at, size_bytes) \
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO artifacts(id, kind, project_run_id, task_id, session_id, data, created_at, size_bytes) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, project_run_id=excluded.project_run_id, task_id=excluded.task_id, session_id=excluded.session_id, data=excluded.data, created_at=excluded.created_at, size_bytes=excluded.size_bytes",
             )
             .map_err(db_fail)?
             .execute(params![

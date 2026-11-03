@@ -2,11 +2,13 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
+import { markdownEntitiesPlugin } from "../../markdown-worker.vite";
 
 /** Independent QA entry; production builds never import this configuration or fixture. */
 export default defineConfig({
   root: __dirname,
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), markdownEntitiesPlugin()],
+  worker: { plugins: () => [markdownEntitiesPlugin()] },
   resolve: { alias: [
     { find: /^.*\/lib\/bridge(?:\.ts)?$/, replacement: resolve(__dirname, "visual-bridge.ts") },
     { find: "@", replacement: resolve(__dirname, "../../src/renderer/src") }

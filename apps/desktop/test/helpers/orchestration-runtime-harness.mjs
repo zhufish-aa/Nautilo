@@ -50,15 +50,44 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
     "artifact.list": [], "event.subscribe": { subscriptionId: "sub" },
     "event.replay": { events: [], lastSequence: 0 }, "session.followUp.list": { items: [] }
   };
+  // Model durable per-scope revisions for the real renderer projection path.
+  const projectionStates = new Map();
+  const projectRows = (scope, values, cursor) => {
+    const previous = projectionStates.get(scope);
+    const serialized = JSON.stringify(values);
+    const revision = (previous?.revision ?? 0) + (previous?.serialized === serialized ? 0 : 1);
+    const items = values.map((value, ordinal) => ({ value: cloneForIpc(value), order: { createdAt: value.createdAt ?? "2026-11-03T00:00:00Z", ordinal } }));
+    const reset = !cursor || cursor.scope !== scope || cursor.epoch !== "fixture" || cursor.revision > revision
+      || (previous && previous.items.some((item) => !values.some((value) => value.id === item.value.id)));
+    const changes = reset ? items : cursor.revision === revision ? [] : items.filter((item) =>
+      JSON.stringify(item) !== JSON.stringify(previous?.items.find((old) => old.value.id === item.value.id)));
+    projectionStates.set(scope, { revision, serialized, items });
+    return { cursor: { epoch: "fixture", scope, revision }, reset: Boolean(reset), items: changes };
+  };
+  const cloneForIpc = (value) => JSON.parse(JSON.stringify(value));
+  replies["session.history"] = (params) => {
+    const detail = typeof replies["session.get"] === "function" ? replies["session.get"](params) : replies["session.get"];
+    return { session: cloneForIpc(detail.session), ...projectRows(`messages:session:${params.sessionId}`, detail.messages, params.cursor) };
+  };
+  replies["session.historyBatch"] = ({ items }) => ({ items: items.map((item) => replies["session.history"](item)) });
+  replies["artifact.changes"] = (params) => {
+    const values = typeof replies["artifact.list"] === "function" ? replies["artifact.list"](params) : replies["artifact.list"];
+    return projectRows(params.sessionId ? `artifacts:session:${params.sessionId}` : `artifacts:projectRun:${params.projectRunId}`, values, params.cursor);
+  };
+  const bridge = {};
   const requestCore = (method, params) => {
     calls.push({ method, params, at: now });
     if (method === "event.wait") return new Promise(() => {});
-    return new Promise((resolve, reject) => setTimeout(() => method === failMethod ? reject(new Error("simulated IPC failure")) : resolve(typeof replies[method] === "function" ? replies[method](params) : replies[method] ?? params), ipcDelay));
+    return new Promise((resolve, reject) => setTimeout(() => {
+      if (method === failMethod) { reject(new Error("simulated IPC failure")); return; }
+      try { resolve(typeof replies[method] === "function" ? replies[method](params) : replies[method] ?? params); }
+      catch (error) { reject(error); }
+    }, ipcDelay));
   };
   const projectState = { projects: [{ id: "p" }], setActiveRun: (id, run) => { const p = projectState.projects.find((p) => p.id === id); if (p) p.activeRun = run; } };
   const modules = {
     ...helperModules,
-    "./bridge": { getBridge: () => bridgeAvailable ? ({}) : undefined, requestCore },
+    "./bridge": { getBridge: () => bridgeAvailable ? bridge : undefined, requestCore },
     "./core-mappers": Object.fromEntries(["toDomainProject", "toDomainAgent", "toDomainTeam", "toStandaloneUiSession"].map((name) => [name, (value) => value])),
     "../stores/sessions": { useSessionsStore: { getState: () => state } },
     "../stores/agents": { useAgentsStore: { getState: () => ({ instances }) } },
@@ -69,7 +98,7 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
   const exports = {};
   const optionalExports = (source.includes("function isAwaitingFirstOutput(") ? ", isAwaitingFirstOutput, projectRunAwaitingOutput" : "")
     + (source.includes("function needsStandalonePersistenceSync(") ? ", needsStandalonePersistenceSync" : "");
-  const extraExports = `\nexport { toUiArtifact, sameArtifacts, syncProjectAndAgents, mergeStandaloneEvents, standaloneHydrated, standaloneMessageCache, standaloneEventCache, standaloneLastRebuildAt, scheduleStandaloneRender, clearSessionRuntime, schedulePoll, buildStandaloneTimeline, hydrateProjectRun, projectSessionBuilt, mergeEventCache${optionalExports} };\nexport function setTestProjectHydrator(fn) { hydrateProjectRun = fn; }`;
+  const extraExports = `\nexport { toUiArtifact, sameArtifacts, syncProjectAndAgents, mergeStandaloneEvents, standaloneHydrated, standaloneMessageCache, standaloneEventCache, standaloneLastRebuildAt, scheduleStandaloneRender, clearSessionRuntime, schedulePoll, buildStandaloneTimeline, hydrateProjectRun, projectSessionBuilt, mergeEventCache, readSessionHistory, readArtifactHistory, persistedHistory, resetHistoryCapabilities, hydrateStandaloneSession, refreshStandaloneSessionState, readSessionHistoryBatch, standaloneSequences, projectSessionSequences, projectSessionEventCache, projectSessionDetails${optionalExports} };\nexport function setTestProjectHydrator(fn) { hydrateProjectRun = fn; }`;
   class FakeDate extends Date { static now() { return now; } }
   vm.runInNewContext(compile(source + extraExports), { exports, require: (name) => {
     if (!(name in modules)) throw new Error(`Unexpected import: ${name}`);

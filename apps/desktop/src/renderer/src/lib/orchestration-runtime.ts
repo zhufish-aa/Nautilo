@@ -12,7 +12,7 @@ import type {
   VerificationResult
 } from "@agenthub/domain";
 import type { RuntimeEvent } from "@agenthub/event-protocol";
-import type { SessionUpsertInput } from "@agenthub/schemas";
+import type { HistoryCursor, HistoryItem, HistoryProjection, SessionHistory, SessionUpsertInput } from "@agenthub/schemas";
 import { getBridge, requestCore } from "./bridge";
 import { parseProviderDiff } from "./provider-diff";
 import { toDomainAgent, toDomainProject, toDomainTeam, toStandaloneUiSession } from "./core-mappers";
@@ -28,11 +28,21 @@ import { useProjectsStore } from "../stores/projects";
 import { useSessionsStore } from "../stores/sessions";
 import { useTeamsStore } from "../stores/teams";
 
+// Deletion/eviction fences all asynchronous consumers, not just the projection
+// cache. Keeping a lightweight generation tombstone also protects reused ids.
+const sessionRuntimeGenerations = new Map<string, number>();
+const standaloneStateReadVersions = new Map<string, number>();
+const projectRunReadVersions = new Map<string, number>();
+function sessionGeneration(sessionId: string): number { return sessionRuntimeGenerations.get(sessionId) ?? 0; }
+function currentSessionGeneration(sessionId: string, generation: number): boolean { return sessionGeneration(sessionId) === generation; }
+
 const projectPollers = new Map<string, ReturnType<typeof setTimeout>>();
 const projectSessionSubscriptions = new Map<string, string>();
 const projectSessionSequences = new Map<string, number>();
 const projectSessionEventCache = new Map<string, RuntimeEvent[]>();
 const projectSessionBuilt = new Set<string>();
+const projectSessionRenderedEvents = new Map<string, RuntimeEvent[]>();
+const projectRunRenderedArtifacts = new Map<string, Artifact[]>();
 const projectSessionDetails = new Map<string, { session: DomainSession; messages: Message[] }>();
 // Project-run view caches mirror the standalone LRU: a run keeps its
 // materialized event journal while it is displayed, recently opened, or still
@@ -133,6 +143,7 @@ function capReasoningText(text: string, limit = 20_000): string {
 }
 
 export async function resumeWorkbenchRuns(): Promise<void> {
+  resetHistoryCapabilities();
   if (!getBridge()) return;
   // A terminal-looking project run can still own live child sessions (the
   // daemon finalizes delegation waves independently), so resume polling for any
@@ -166,6 +177,9 @@ export async function resumeWorkbenchRuns(): Promise<void> {
 
 /** Loads persisted sessions/messages/runs into the three-pane workbench. */
 export async function hydrateWorkbenchSessions({ hydrateActiveProjectRuns = true }: { hydrateActiveProjectRuns?: boolean } = {}): Promise<void> {
+  resetHistoryCapabilities();
+  const generations = new Map(sessionRuntimeGenerations);
+  const isCurrent = (id: string) => currentSessionGeneration(id, generations.get(id) ?? 0);
   if (!getBridge()) return;
   const projects = useProjectsStore.getState().projects;
   const teams = useTeamsStore.getState().teams;
@@ -212,13 +226,13 @@ export async function hydrateWorkbenchSessions({ hydrateActiveProjectRuns = true
     }
   }
 
-  useSessionsStore.getState()._replaceSessions(uiSessions);
+  useSessionsStore.getState()._replaceSessions(uiSessions.filter((session) => isCurrent(session.id)));
   // Lazy hydration: one run.list finds the sessions with a live run; only
   // those get the full event replay at startup (polling needs it). Every
   // other session hydrates on first open via ensureStandaloneSessionHydrated.
   const allRuns = await requestCore<AgentRun[]>("run.list", {}).catch(() => [] as AgentRun[]);
   const liveRunBySession = new Map(allRuns.filter(shouldPollAgentRun).map((run) => [run.sessionId, run]));
-  for (const session of uiSessions.filter((item) => !item.projectRunId)) {
+  for (const session of uiSessions.filter((item) => !item.projectRunId && isCurrent(item.id))) {
     const liveRun = liveRunBySession.get(session.id);
     if (!liveRun) continue;
     const run = await hydrateStandaloneSession(session, liveRun.id);
@@ -358,11 +372,12 @@ function ingestFollowUpEvents(sessionId: string, events: RuntimeEvent[]): void {
 
 /** Fetches the authoritative queue once per session; events keep it in sync after. */
 async function syncQueuedFollowUps(sessionId: string): Promise<void> {
+  const generation = sessionGeneration(sessionId);
   if (followUpListSynced.has(sessionId)) return;
   followUpListSynced.add(sessionId);
   try {
     const { items } = await requestCore<{ items: QueuedFollowUp[] }>("session.followUp.list", { sessionId });
-    useSessionsStore.getState()._replaceQueuedFollowUps(sessionId, items);
+    if (currentSessionGeneration(sessionId, generation)) useSessionsStore.getState()._replaceQueuedFollowUps(sessionId, items);
   } catch (error) {
     console.warn(`Failed to load queued follow-ups for session ${sessionId}`, error);
   }
@@ -519,6 +534,7 @@ export async function switchWorkbenchSessionInstance(sessionId: string, instance
 }
 
 function clearSessionRuntime(sessionId: string): void {
+  forgetSessionHistory(sessionId);
   const stream = standaloneStreams.get(sessionId);
   if (stream) stream.cancelled = true;
   standaloneStreams.delete(sessionId);
@@ -540,6 +556,7 @@ function clearSessionRuntime(sessionId: string): void {
   projectSessionSequences.delete(sessionId);
   projectSessionEventCache.delete(sessionId);
   projectSessionBuilt.delete(sessionId);
+  projectSessionRenderedEvents.delete(sessionId);
   projectSessionDetails.delete(sessionId);
   followUpListSynced.delete(sessionId);
   useInteractionsStore.getState()._removeSessions([sessionId]);
@@ -552,6 +569,7 @@ function clearSessionRuntime(sessionId: string): void {
  * streaming into its timeline.
  */
 export async function ensureStandaloneSessionHydrated(sessionId: string): Promise<void> {
+  const generation = sessionGeneration(sessionId);
   if (!getBridge()) return;
   touchStandaloneRecent(sessionId);
   if (!standaloneHydrated.has(sessionId)) {
@@ -560,8 +578,9 @@ export async function ensureStandaloneSessionHydrated(sessionId: string): Promis
       standaloneHydrated.add(sessionId);
       try {
         const run = await hydrateStandaloneSession(session);
-        if (run && shouldPollAgentRun(run)) scheduleStandalonePoll(session.id, run.id);
+        if (currentSessionGeneration(sessionId, generation) && run && shouldPollAgentRun(run)) scheduleStandalonePoll(session.id, run.id);
       } catch (error) {
+        if (!currentSessionGeneration(sessionId, generation)) return;
         standaloneHydrated.delete(sessionId);
         console.error(`Failed to hydrate session ${sessionId}`, error);
       }
@@ -594,6 +613,7 @@ function evictStandaloneViewCaches(): void {
     if (standaloneDisplayed.has(sessionId)) continue;
     if (standaloneStreams.has(sessionId)) continue;
     standaloneHydrated.delete(sessionId);
+    forgetSessionHistory(sessionId);
     standaloneEventCache.delete(sessionId);
     standaloneMessageCache.delete(sessionId);
     standaloneArtifactCache.delete(sessionId);
@@ -654,12 +674,17 @@ function evictProjectRunViewCaches(): void {
     const sessions = sessionsOfProjectRun(runId);
     if (sessions.some((session) => standaloneDisplayed.has(session.id))) continue;
     projectRunHydrated.delete(runId);
+    projectRunReadVersions.set(runId, (projectRunReadVersions.get(runId) ?? 0) + 1);
+    projectRunRenderedArtifacts.delete(runId);
+    forgetPersistedHistory(`artifacts:projectRun:${runId}`);
     projectRunAwaitingOutput.delete(runId);
     for (const session of sessions) {
+      forgetSessionHistory(session.id);
       projectSessionEventCache.delete(session.id);
       projectSessionSequences.delete(session.id);
       projectSessionSubscriptions.delete(session.id);
       projectSessionBuilt.delete(session.id);
+      projectSessionRenderedEvents.delete(session.id);
       projectSessionDetails.delete(session.id);
       followUpListSynced.delete(session.id);
       useSessionsStore.getState()._evictSessionView(session.id);
@@ -746,40 +771,201 @@ function toDomainSession(session: UiSession, _team?: UiTeam): SessionUpsertInput
   };
 }
 
+// Persistence cursors never share state with the event replay cursor. A failed
+// sibling request can therefore be retried without acknowledging unseen rows.
+type PersistedValue = Message | Artifact;
+type PersistedSnapshot = { cursor?: HistoryCursor; rows: Map<string, HistoryItem<PersistedValue>>; values: PersistedValue[] };
+const persistedHistory = new Map<string, PersistedSnapshot>();
+const persistedReads = new Map<string, Promise<unknown>>();
+const unsupportedHistoryMethods = new Set<string>();
+let historyBridge = getBridge();
+
+function resetHistoryCapabilities(): void { unsupportedHistoryMethods.clear(); }
+function forgetPersistedHistory(scope: string): void {
+  persistedHistory.delete(scope);
+  persistedReads.delete(scope);
+}
+function forgetSessionHistory(sessionId: string): void {
+  sessionRuntimeGenerations.set(sessionId, sessionGeneration(sessionId) + 1);
+  forgetPersistedHistory(`messages:session:${sessionId}`);
+  forgetPersistedHistory(`artifacts:session:${sessionId}`);
+}
+function unsupportedHistoryMethod(error: unknown): boolean {
+  // Old shell bridges flatten structured daemon errors into message strings.
+  const message = error instanceof Error ? error.message : String(error);
+  return /IPC_NOT_FOUND|unknown method|method not found|请求的资源不存在/i.test(message);
+}
+
+async function readPersistedHistory<T extends PersistedValue, R>(
+  scope: string, method: string, input: object,
+  legacy: () => Promise<{ values: T[]; extra: R }>,
+  extra: (response: HistoryProjection<T> & R) => R,
+  fetchProjection?: (cursor?: HistoryCursor) => Promise<HistoryProjection<T> & R>
+): Promise<{ values: T[]; extra: R; changed: boolean }> {
+  const bridge = getBridge();
+  if (historyBridge !== bridge) { historyBridge = bridge; resetHistoryCapabilities(); }
+  const running = persistedReads.get(scope);
+  if (running) {
+    // A newer persistence event may arrive while an older snapshot is in
+    // flight. Serialize and read again, rather than treating the old response
+    // as proof the new durable message was observed.
+    await running.catch(() => {});
+    return readPersistedHistory(scope, method, input, legacy, extra, fetchProjection);
+  }
+  let pending!: Promise<{ values: T[]; extra: R; changed: boolean }>;
+  pending = (async () => {
+    const previous = persistedHistory.get(scope);
+    if (!unsupportedHistoryMethods.has(method)) {
+      try {
+        const response = await (fetchProjection ? fetchProjection(previous?.cursor)
+          : requestCore<HistoryProjection<T> & R>(method, { ...input, cursor: previous?.cursor }));
+        if (response.cursor.scope !== scope) throw new Error(`Invalid history scope for ${method}`);
+        // A server epoch change or malformed continuation must never merge two
+        // unrelated databases. Reject before committing any cursor or rows.
+        if (!response.reset && (!previous?.cursor || response.cursor.epoch !== previous.cursor.epoch
+          || response.cursor.revision < previous.cursor.revision)) throw new Error(`Invalid history continuation for ${method}`);
+        const changed = response.reset || response.items.length > 0;
+        const rows = response.reset ? new Map<string, HistoryItem<PersistedValue>>()
+          : response.items.length ? new Map(previous!.rows) : previous!.rows;
+        for (const item of response.items) rows.set(item.value.id, item);
+        const values = changed ? [...rows.values()].sort((a, b) =>
+          (a.order.createdAt < b.order.createdAt ? -1 : a.order.createdAt > b.order.createdAt ? 1 : 0) || a.order.ordinal - b.order.ordinal
+        ).map((item) => item.value) : previous!.values;
+        if (persistedReads.get(scope) === pending) persistedHistory.set(scope, { cursor: response.cursor, rows, values });
+        return { values: values as T[], extra: extra(response), changed };
+      } catch (error) {
+        if (!unsupportedHistoryMethod(error)) throw error;
+        // Only a successful legacy read proves this is an unsupported method,
+        // rather than a deleted/missing session. Transient errors still surface.
+      }
+    }
+    const result = await legacy();
+    unsupportedHistoryMethods.add(method);
+    const changed = !previous || JSON.stringify(previous.values) !== JSON.stringify(result.values);
+    const values = changed ? result.values : previous!.values as T[];
+    if (persistedReads.get(scope) === pending) persistedHistory.set(scope, { rows: new Map(), values });
+    return { values, extra: result.extra, changed };
+  })();
+  persistedReads.set(scope, pending);
+  try { return await pending; }
+  finally { if (persistedReads.get(scope) === pending) persistedReads.delete(scope); }
+}
+
+async function readSessionHistory(sessionId: string, fetchProjection?: (cursor?: HistoryCursor) => Promise<SessionHistory>): Promise<{ session: DomainSession; messages: Message[]; changed: boolean }> {
+  const result = await readPersistedHistory<Message, { session: DomainSession }>(
+    `messages:session:${sessionId}`, "session.history", { sessionId },
+    async () => {
+      const detail = await requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId });
+      return { values: detail.messages, extra: { session: detail.session } };
+    }, (response) => ({ session: response.session }), fetchProjection
+  );
+  return { ...result.extra, messages: result.values, changed: result.changed };
+}
+
+/** Coalesce a project's visible histories into bounded IPC reads. Per-session
+ * cursors/cache commits remain independent; event replay is not reordered. */
+function readSessionHistoryBatch(sessionIds: string[]): Map<string, ReturnType<typeof readSessionHistory>> {
+  const histories = new Map<string, ReturnType<typeof readSessionHistory>>();
+  for (let offset = 0; offset < sessionIds.length; offset += 64) {
+    const requests: Array<{ sessionId: string; cursor?: HistoryCursor; resolve: (value: SessionHistory) => void; reject: (error: unknown) => void }> = [];
+    for (const sessionId of sessionIds.slice(offset, offset + 64)) {
+      const pending = persistedReads.has(`messages:session:${sessionId}`)
+        ? readSessionHistory(sessionId)
+        : readSessionHistory(sessionId, (cursor) => new Promise((resolve, reject) => requests.push({ sessionId, cursor, resolve, reject })));
+      // A later session can fail before the serial event loop reaches it.
+      // Observe now, then preserve the rejection for its actual consumer.
+      void pending.catch(() => {});
+      histories.set(sessionId, pending);
+    }
+    if (!requests.length) continue;
+    void (async () => {
+      const individually = async (): Promise<boolean> => {
+        const outcomes = await Promise.all(requests.map(async (request) => {
+          try {
+            const item = await requestCore<SessionHistory>("session.history", { sessionId: request.sessionId, cursor: request.cursor });
+            if (item.session.id !== request.sessionId) throw new Error("Invalid session.history response");
+            request.resolve(item);
+            return true;
+          } catch (error) { request.reject(error); return false; }
+        }));
+        return outcomes.every(Boolean);
+      };
+      try {
+        if (unsupportedHistoryMethods.has("session.historyBatch")) { await individually(); return; }
+        let items: SessionHistory[];
+        try {
+          ({ items } = await requestCore<{ items: SessionHistory[] }>("session.historyBatch", { items: requests.map(({ sessionId, cursor }) => ({ sessionId, cursor })) }));
+        } catch (error) {
+          if (!unsupportedHistoryMethod(error)) throw error;
+          // One deleted session can fail a snapshot batch. Resolve each fallback
+          // independently, so it never disables projections for healthy peers.
+          if (await individually()) unsupportedHistoryMethods.add("session.historyBatch");
+          return;
+        }
+        if (items.length !== requests.length || items.some((item, index) => item.session.id !== requests[index]!.sessionId)) {
+          throw new Error("Invalid session.historyBatch response");
+        }
+        for (let index = 0; index < requests.length; index += 1) requests[index]!.resolve(items[index]!);
+      } catch (error) {
+        for (const request of requests) request.reject(error);
+      }
+    })();
+  }
+  return histories;
+}
+
+async function readArtifactHistory(input: { sessionId: string } | { projectRunId: string }): Promise<{ artifacts: Artifact[]; changed: boolean }> {
+  const scope = "sessionId" in input ? `artifacts:session:${input.sessionId}` : `artifacts:projectRun:${input.projectRunId}`;
+  const result = await readPersistedHistory<Artifact, object>(scope, "artifact.changes", input,
+    async () => ({ values: await requestCore<Artifact[]>("artifact.list", input), extra: {} }), () => ({}));
+  return { artifacts: result.values, changed: result.changed };
+}
+
 async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: string): Promise<AgentRun | undefined> {
+  const generation = sessionGeneration(uiSession.id);
+  const readVersion = (standaloneStateReadVersions.get(uiSession.id) ?? 0) + 1;
+  standaloneStateReadVersions.set(uiSession.id, readVersion);
+  const isCurrent = () => currentSessionGeneration(uiSession.id, generation) && standaloneStateReadVersions.get(uiSession.id) === readVersion;
   const reads = [
-    requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: uiSession.id }),
+    readSessionHistory(uiSession.id),
     replayStandaloneEvents(uiSession.id).then((replay) => {
       // Commit the replay alongside its cursor even if another metadata read
       // fails. A retry must not skip already acknowledged historical events.
-      standaloneEventCache.set(uiSession.id, mergeEventCache(standaloneEventCache.get(uiSession.id) ?? [], replay.events));
+      if (!currentSessionGeneration(uiSession.id, generation)) return;
+      const cached = standaloneEventCache.get(uiSession.id) ?? [];
+      const knownIds = new Set(cached.map((event) => event.eventId));
+      standaloneEventCache.set(uiSession.id, mergeEventCache(cached, replay.events.filter((event) => !knownIds.has(event.eventId))));
       ingestInteractionEvents(replay.events);
       ingestFollowUpEvents(uiSession.id, replay.events);
     }),
     requestCore<AgentRun[]>("run.list", { sessionId: uiSession.id }),
-    requestCore<Artifact[]>("artifact.list", { sessionId: uiSession.id })
+    readArtifactHistory({ sessionId: uiSession.id })
   ] as const;
-  const [detail, , runs, artifacts] = await Promise.all(reads).catch(async (error: unknown) => {
+  const result = await Promise.all(reads).catch(async (error: unknown) => {
     // Do not overlap recovery with an earlier replay still committing its
     // cursor/cache. All reads are finite metadata/replay requests, not waits.
     await Promise.allSettled(reads);
+    if (!isCurrent()) return undefined;
     throw error;
   });
+  if (!result || !isCurrent()) return undefined;
+  const [detail, , runs, artifactHistory] = result;
+  if (!isCurrent()) return undefined;
+  await syncQueuedFollowUps(uiSession.id);
+  if (!isCurrent()) return undefined;
   const knownRun = knownRunId ? runs.find((item) => item.id === knownRunId) : undefined;
   const activeRun = runs.find(shouldPollAgentRun);
   const run = knownRun && shouldPollAgentRun(knownRun) ? knownRun : activeRun ?? knownRun ?? runs[0];
   const store = useSessionsStore.getState();
-  // Mark membership at completion, not just at start: a rapid switch may have
-  // evicted (and de-registered) this session while the hydrate was in flight —
-  // without membership the re-populated caches below would leak forever.
+  // Generation checks above prevent deleted/evicted reads from repopulating
+  // either store membership or any of the materialized history caches.
   standaloneHydrated.add(uiSession.id);
   standaloneMessageCache.set(uiSession.id, detail.messages);
   // replayStandaloneEvents is INCREMENTAL (resumes at the last seen
   // sequence): merge into the existing cache. A bare replace would shrink
   // the journal to just the newest events and wipe every older turn's fold
   // content from the timeline.
-  standaloneArtifactCache.set(uiSession.id, artifacts);
-  await syncQueuedFollowUps(uiSession.id);
+  standaloneArtifactCache.set(uiSession.id, artifactHistory.artifacts);
   store._upsertExternalSession(toStandaloneUiSession(detail.session));
   renderStandaloneCache(uiSession.id);
   store._setRunning(uiSession.id, standaloneLifecycle(detail.session, run));
@@ -798,18 +984,26 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
  * state and re-renders from the existing event cache.
  */
 async function refreshStandaloneSessionState(uiSession: UiSession, knownRunId?: string): Promise<AgentRun | undefined> {
-  const [detail, runs, artifacts] = await Promise.all([
-    requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: uiSession.id }),
+  const generation = sessionGeneration(uiSession.id);
+  const readVersion = (standaloneStateReadVersions.get(uiSession.id) ?? 0) + 1;
+  standaloneStateReadVersions.set(uiSession.id, readVersion);
+  const isCurrent = () => currentSessionGeneration(uiSession.id, generation) && standaloneStateReadVersions.get(uiSession.id) === readVersion;
+  const result = await Promise.all([
+    readSessionHistory(uiSession.id),
     requestCore<AgentRun[]>("run.list", { sessionId: uiSession.id }),
-    requestCore<Artifact[]>("artifact.list", { sessionId: uiSession.id })
-  ]);
+    readArtifactHistory({ sessionId: uiSession.id })
+  ]).catch((error: unknown) => { if (!isCurrent()) return undefined; throw error; });
+  if (!result || !isCurrent()) return undefined;
+  const [detail, runs, artifactHistory] = result;
+  if (!isCurrent()) return undefined;
+  await syncQueuedFollowUps(uiSession.id);
+  if (!isCurrent()) return undefined;
   const knownRun = knownRunId ? runs.find((item) => item.id === knownRunId) : undefined;
   const activeRun = runs.find(shouldPollAgentRun);
   const run = knownRun && shouldPollAgentRun(knownRun) ? knownRun : activeRun ?? knownRun ?? runs[0];
   const store = useSessionsStore.getState();
   standaloneMessageCache.set(uiSession.id, detail.messages);
-  standaloneArtifactCache.set(uiSession.id, artifacts);
-  await syncQueuedFollowUps(uiSession.id);
+  standaloneArtifactCache.set(uiSession.id, artifactHistory.artifacts);
   store._upsertExternalSession(toStandaloneUiSession(detail.session));
   if (standaloneHydrated.has(uiSession.id)) renderStandaloneCache(uiSession.id);
   store._setRunning(uiSession.id, standaloneLifecycle(detail.session, run));
@@ -863,10 +1057,12 @@ const STANDALONE_REBUILD_MIN_INTERVAL_MS = 200;
 const standaloneLastRebuildAt = new Map<string, number>();
 
 function scheduleStandaloneRender(sessionId: string): void {
+  const generation = sessionGeneration(sessionId);
   if (standaloneRenderFrames.has(sessionId)) return;
   const elapsed = Date.now() - (standaloneLastRebuildAt.get(sessionId) ?? 0);
   const delay = Math.max(0, STANDALONE_REBUILD_MIN_INTERVAL_MS - elapsed);
   const frame = window.setTimeout(() => {
+    if (!currentSessionGeneration(sessionId, generation)) return;
     standaloneRenderFrames.delete(sessionId);
     standaloneLastRebuildAt.set(sessionId, Date.now());
     // The session may have been evicted while the frame was pending; rendering
@@ -923,25 +1119,32 @@ function renderStandaloneCache(sessionId: string): void {
 }
 
 async function replayStandaloneEvents(sessionId: string): Promise<{ events: RuntimeEvent[]; lastSequence: number }> {
+  const generation = sessionGeneration(sessionId);
+  const stale = () => !currentSessionGeneration(sessionId, generation);
+  const empty = { events: [] as RuntimeEvent[], lastSequence: 0 };
   let subscriptionId = standaloneSubscriptions.get(sessionId);
   if (!subscriptionId) {
     const subscription = await requestCore<{ subscriptionId: string }>("event.subscribe", { sessionId });
+    if (stale()) return empty;
     subscriptionId = subscription.subscriptionId;
     standaloneSubscriptions.set(sessionId, subscriptionId);
   }
-  // Incremental: resume from the last sequence we already hold so reopening a
-  // session does not re-download the whole journal (multi-MB for long chats).
   const afterSequence = standaloneSequences.get(sessionId) ?? 0;
   try {
     const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId, afterSequence });
-    standaloneSequences.set(sessionId, replay.lastSequence);
+    if (stale()) return empty;
+    standaloneSequences.set(sessionId, Math.max(standaloneSequences.get(sessionId) ?? 0, replay.lastSequence));
     return replay;
   } catch {
+    if (stale()) return empty;
+    resetHistoryCapabilities();
     standaloneSubscriptions.delete(sessionId);
     const subscription = await requestCore<{ subscriptionId: string }>("event.subscribe", { sessionId });
+    if (stale()) return empty;
     standaloneSubscriptions.set(sessionId, subscription.subscriptionId);
     const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId: subscription.subscriptionId, afterSequence });
-    standaloneSequences.set(sessionId, replay.lastSequence);
+    if (stale()) return empty;
+    standaloneSequences.set(sessionId, Math.max(standaloneSequences.get(sessionId) ?? 0, replay.lastSequence));
     return replay;
   }
 }
@@ -1004,8 +1207,14 @@ function sameUiSession(current: UiSession, next: UiSession): boolean {
 }
 
 async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
+  const readVersion = (projectRunReadVersions.get(projectRunId) ?? 0) + 1;
+  projectRunReadVersions.set(projectRunId, readVersion);
+  const generations = new Map(sessionRuntimeGenerations);
+  const isLatest = () => projectRunReadVersions.get(projectRunId) === readVersion;
+  const isCurrent = (id: string) => isLatest() && currentSessionGeneration(id, generations.get(id) ?? 0);
   projectRunHydrated.add(projectRunId);
   const { projectRun } = await requestCore<{ projectRun: ProjectRun; mainSession: DomainSession }>("projectRun.get", { projectRunId });
+  if (!isLatest()) return projectRun;
   const team = requireUiTeam(String(projectRun.teamId));
   const legacyMain = team.members.find((member) => member.id === projectRun.mainMemberId);
   const mainAgent = useAgentsStore.getState().instances.find((instance) => instance.id === (projectRun.mainAgentInstanceId ?? legacyMain?.agentInstanceId));
@@ -1026,14 +1235,17 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     changed = true;
     projectsState.setActiveRun(projectRun.projectId, nextActiveRun);
   }
-  const [allSessions, tasks, artifacts, verifications, runs] = await Promise.all([
+  const [allSessions, tasks, artifactHistory, verifications, runs] = await Promise.all([
     requestCore<DomainSession[]>("session.list", { projectId: projectRun.projectId }),
     requestCore<Task[]>("task.list", { projectRunId }),
-    requestCore<Artifact[]>("artifact.list", { projectRunId }),
+    readArtifactHistory({ projectRunId }),
     requestCore<VerificationResult[]>("verification.list", { projectRunId }),
     requestCore<AgentRun[]>("run.list", { projectRunId })
   ]);
-  const sessions = allSessions.filter((session) => session.projectRunId === projectRunId);
+  if (!isLatest()) return projectRun;
+  const artifacts = artifactHistory.artifacts;
+  const artifactsChanged = projectRunRenderedArtifacts.get(projectRunId) !== artifacts;
+  const sessions = allSessions.filter((session) => session.projectRunId === projectRunId && isCurrent(session.id));
   const store = useSessionsStore.getState();
   let activeRunCount = 0;
   let awaitingOutput = false;
@@ -1060,24 +1272,20 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     if (projectSessionDisplayed.has(session.id)) expandNeeded(session.id);
   }
 
+  const histories = readSessionHistoryBatch([...neededSessionIds]);
   for (const session of sessions) {
+    if (!isCurrent(session.id)) continue;
     const needed = neededSessionIds.has(session.id);
     const cached = projectSessionDetails.get(session.id);
-    const activeSessionRun = runs.find((run) => run.sessionId === session.id && shouldPollAgentRun(run));
-    // Preserve the existing parallel read latency for live visible turns.
-    // Hidden sessions only need session.list metadata; idle history is read
-    // again on any event/revision change, explicit refresh, or first display.
-    const live = activeSessionRun && ["created", "starting", "running", "cancelling"].includes(activeSessionRun.status);
-    const prefetch = needed && (live || !cached || !session.updatedAt
-      || cached.session.updatedAt !== session.updatedAt || !projectSessionBuilt.has(session.id));
-    const readDetail = (): Promise<{ session: DomainSession; messages: Message[] }> =>
-      requestCore("session.get", { sessionId: session.id });
-    const [feed, , prefetched] = await Promise.all([
+    // Fetch a small revision projection even for idle displayed histories:
+    // edits/deletes can share timestamps and do not always emit an event.
+    // Event replay remains parallel, preserving the first-token path.
+    const [feed, , refreshed] = await Promise.all([
       projectSessionEvents(session.id),
       syncQueuedFollowUps(session.id),
-      prefetch ? readDetail() : Promise.resolve(undefined)
+      histories.get(session.id) ?? Promise.resolve(undefined)
     ]);
-    const refreshed = prefetched ?? (needed && (feed.hasNew || !projectSessionBuilt.has(session.id)) ? await readDetail() : undefined);
+    if (!isCurrent(session.id)) continue;
     if (refreshed) projectSessionDetails.set(session.id, refreshed);
     const detail = refreshed ?? (needed ? cached : undefined) ?? { session, messages: [] };
     // Metadata comes from this tick even when its unchanged message history
@@ -1094,14 +1302,14 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     // Rebuilding the timeline walks the full event history; skip it entirely
     // on poll ticks that delivered no new events, and for sessions no
     // workbench is showing (their timeline materializes on first open).
-    const messageRevisionChanged = refreshed && (!cached || !refreshed.session.updatedAt
-      || refreshed.session.updatedAt !== cached.session.updatedAt);
-    const timelineDirty = needed && (feed.hasNew || messageRevisionChanged || !projectSessionBuilt.has(session.id));
+    const messageRevisionChanged = refreshed && (!cached || refreshed.messages !== cached.messages);
+    const timelineDirty = needed && (feed.hasNew || projectSessionRenderedEvents.get(session.id) !== feed.events || messageRevisionChanged || artifactsChanged || !projectSessionBuilt.has(session.id));
     if (timelineDirty) {
       store._replaceEvents(session.id, buildTimeline(detail.messages, feed.events, projectRun, team, tasks, sessionArtifacts, verifications, session.id === projectRun.mainSessionId));
       store._replaceContextUsage(session.id, latestContextUsage(feed.events));
       store._replaceRawLog(session.id, buildRawLog(feed.events, sessionArtifacts));
       projectSessionBuilt.add(session.id);
+      projectSessionRenderedEvents.set(session.id, feed.events);
     }
     // Poll ticks rarely change tasks/artifacts/foreground; writing identical
     // data would still notify every Zustand subscriber, so skip no-op writes.
@@ -1130,19 +1338,21 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
       changed = true;
       store._setForeground(session.id, activeRun ? standaloneLifecycle(domainSession, activeRun) : undefined);
     }
-    if (store.activeAgentRunIds[session.id] !== activeRun?.id) {
+    const previousRunId = store.activeAgentRunIds[session.id];
+    if (previousRunId !== activeRun?.id) {
       changed = true;
       store._setActiveAgentRun(session.id, activeRun?.id);
     }
     // A transition to a different run id means the oldest queued follow-up
     // started its turn; previousRunId undefined is first hydrate (no shift).
-    const previousRunId = store.activeAgentRunIds[session.id];
     if (activeRun && previousRunId && activeRun.id !== previousRunId) store._shiftQueuedFollowUp(session.id);
   }
+  if (!isLatest()) return projectRun;
+  projectRunRenderedArtifacts.set(projectRunId, artifacts);
   const root = projectRun.mainSessionId;
   projectRunActiveRuns.set(projectRunId, activeRunCount);
   projectRunAwaitingOutput.set(projectRunId, awaitingOutput);
-  if (root) {
+  if (root && isCurrent(root)) {
     const nextRunning = projectLifecycle(projectRun);
     if (!sameLifecycle(store.running[root], nextRunning)) {
       changed = true;
@@ -1154,24 +1364,33 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
 }
 
 async function replayProjectSessionEvents(sessionId: string): Promise<{ events: RuntimeEvent[]; lastSequence: number }> {
+  const generation = sessionGeneration(sessionId);
+  const stale = () => !currentSessionGeneration(sessionId, generation);
+  const empty = { events: [] as RuntimeEvent[], lastSequence: 0 };
   let subscriptionId = projectSessionSubscriptions.get(sessionId);
   if (!subscriptionId) {
     const subscription = await requestCore<{ subscriptionId: string }>("event.subscribe", { sessionId });
+    if (stale()) return empty;
     subscriptionId = subscription.subscriptionId;
     projectSessionSubscriptions.set(sessionId, subscriptionId);
   }
   try {
-    return await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId, afterSequence: projectSessionSequences.get(sessionId) ?? 0 });
+    const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId, afterSequence: projectSessionSequences.get(sessionId) ?? 0 });
+    return stale() ? empty : replay;
   } catch {
+    if (stale()) return empty;
+    resetHistoryCapabilities();
     projectSessionSubscriptions.delete(sessionId);
-    // A fresh subscription may have lost events; restart from the beginning.
     projectSessionSequences.delete(sessionId);
     projectSessionEventCache.delete(sessionId);
     projectSessionBuilt.delete(sessionId);
+    projectSessionRenderedEvents.delete(sessionId);
     projectSessionDetails.delete(sessionId);
     const subscription = await requestCore<{ subscriptionId: string }>("event.subscribe", { sessionId });
+    if (stale()) return empty;
     projectSessionSubscriptions.set(sessionId, subscription.subscriptionId);
-    return requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId: subscription.subscriptionId, afterSequence: 0 });
+    const replay = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId: subscription.subscriptionId, afterSequence: 0 });
+    return stale() ? empty : replay;
   }
 }
 
@@ -1181,10 +1400,15 @@ async function replayProjectSessionEvents(sessionId: string): Promise<{ events: 
  * rebuilds stay possible without re-transferring everything every poll tick.
  */
 async function projectSessionEvents(sessionId: string): Promise<{ events: RuntimeEvent[]; hasNew: boolean }> {
+  const generation = sessionGeneration(sessionId);
   const replay = await replayProjectSessionEvents(sessionId);
-  projectSessionSequences.set(sessionId, replay.lastSequence);
+  if (!currentSessionGeneration(sessionId, generation)) return { events: [], hasNew: false };
+  projectSessionSequences.set(sessionId, Math.max(projectSessionSequences.get(sessionId) ?? 0, replay.lastSequence));
   const cached = projectSessionEventCache.get(sessionId) ?? [];
-  if (!replay.events.length) return { events: cached, hasNew: false };
+  if (!replay.events.length) {
+    projectSessionEventCache.set(sessionId, cached);
+    return { events: cached, hasNew: false };
+  }
   const known = new Set(cached.map((event) => event.eventId));
   const fresh = replay.events.filter((event) => !known.has(event.eventId));
   if (fresh.length) {
@@ -1307,7 +1531,11 @@ function scheduleStandalonePoll(sessionId: string, runId: string, hydrateBeforeW
           if ((!run || !shouldPollAgentRun(run)) && !(useSessionsStore.getState().queuedFollowUps[sessionId]?.length)) break;
           if (controller.cancelled) break;
         }
-        if (!standaloneSubscriptions.has(sessionId)) await replayStandaloneEvents(sessionId);
+        if (!standaloneSubscriptions.has(sessionId)) {
+          const run = await hydrateStandaloneSession(session, runId);
+          if (controller.cancelled) break;
+          if ((!run || !shouldPollAgentRun(run)) && !(useSessionsStore.getState().queuedFollowUps[sessionId]?.length)) break;
+        }
         const subscriptionId = standaloneSubscriptions.get(sessionId);
         if (!subscriptionId) break;
         const update = await requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.wait", {
@@ -1335,6 +1563,7 @@ function scheduleStandalonePoll(sessionId: string, runId: string, hydrateBeforeW
         }
       } catch (error) {
         if (controller.cancelled) break;
+        resetHistoryCapabilities();
         console.error("Failed to stream standalone Agent run", error);
         appendSyncErrorThrottled(sessionId, `前端同步失败: ${error instanceof Error ? error.message : String(error)}`);
         standaloneSubscriptions.delete(sessionId);
@@ -1699,6 +1928,8 @@ function runtimePayload(
   if (event.type === "agent.message_delta" || event.type === "agent.thinking_delta" || event.type === "agent.thinking_summary") return undefined;
   if (event.type === "run.started") return undefined;
   if (event.type === "agent.status") {
+    if (event.payload.phase === "provider_queued") return { kind: "activity", phase: "provider_queued" };
+    if (event.payload.phase === "provider_starting") return { kind: "activity", phase: "starting" };
     if (event.payload.phase === "turn_started") return { kind: "activity", phase: "thinking" };
     if (event.payload.phase === "turn_completed") return undefined;
     return { kind: "activity", phase: "completed", detail: "turn_failed" };

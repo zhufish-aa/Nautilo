@@ -75,7 +75,7 @@ export interface RuntimeEventPayloadMap {
     providerSessionId?: string;
   };
   "agent.status": {
-    phase: "turn_started" | "turn_completed" | "turn_failed";
+    phase: "provider_queued" | "provider_starting" | "turn_started" | "turn_completed" | "turn_failed";
   };
   "agent.message_delta": {
     messageId: string;

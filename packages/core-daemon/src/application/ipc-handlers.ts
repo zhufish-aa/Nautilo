@@ -101,6 +101,8 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("orchestration.recover", async ({ projectRunId, memberId, mode }) => services.orchestration.recover(projectRunId, memberId, mode));
   gateway.register("orchestration.cancel", async ({ projectRunId }) => services.orchestration.cancel(projectRunId));
   gateway.register("session.list", async (input) => services.sessions.list(input));
+  gateway.register("session.historyBatch", async ({ items }) => services.database.sessions.historyBatch(items));
+  gateway.register("session.history", async ({ sessionId, cursor }) => services.database.sessions.history(sessionId, cursor));
   gateway.register("session.get", async ({ sessionId }) => services.sessions.get(sessionId));
   gateway.register("session.create", async (input) => services.sessions.create(input));
   gateway.register("session.upsert", async (input) => services.sessions.upsert(input));
@@ -117,6 +119,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
     (!sessionId || run.sessionId === sessionId) && (!projectRunId || run.projectRunId === projectRunId)
   ));
   gateway.register("task.list", async ({ projectRunId }) => services.database.tasks.list(projectRunId));
+  gateway.register("artifact.changes", async (input) => services.database.artifacts.changes(input));
   gateway.register("artifact.list", async (input) => services.database.artifacts.list(input));
   gateway.register("artifact.read", async (input) => readWorkspaceArtifact(services.database, input));
   gateway.register("verification.list", async ({ projectRunId, taskId }) => services.database.verifications.list(projectRunId, taskId));

@@ -15,9 +15,13 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const active = lifecycle?.status === "running" || lifecycle?.status === "waiting_approval";
   const latest = useMemo(
-    () => [...events].reverse().find((event) =>
-      isProgressEvent(event) && (!lifecycle?.startedAt || event.timestamp >= lifecycle.startedAt)
-    ),
+    () => {
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (isProgressEvent(event) && (!lifecycle?.startedAt || event.timestamp >= lifecycle.startedAt)) return event;
+      }
+      return undefined;
+    },
     [events, lifecycle?.startedAt]
   );
 
@@ -53,9 +57,9 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
 
   return (
     <div role="status" className="flex items-center gap-2 py-1 text-sm text-ink-3">
-      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+      <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden />
       <span className="min-w-0 truncate">{label}</span>
-      <span className="ml-auto shrink-0 text-xs tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+      <span aria-hidden="true" className="ml-auto shrink-0 text-xs tabular-nums">{formatElapsed(elapsedSeconds)}</span>
     </div>
   );
 }
@@ -79,8 +83,8 @@ function progressLabel(event: TimelineEvent | undefined, zh: boolean): string {
   if (data.kind === "approval") return zh ? "等待你的批准" : "Waiting for your approval";
   if (data.kind === "activity") {
     const labels = zh
-      ? { queued: "请求已发送，等待 Agent…", starting: "等待 Agent 响应…", thinking: "正在思考…", responding: "正在回复…", completed: "已完成" }
-      : { queued: "Request sent · waiting for agent…", starting: "Waiting for agent…", thinking: "Thinking…", responding: "Responding…", completed: "Completed" };
+      ? { queued: "请求已发送，等待 Agent…", provider_queued: "Agent 正忙，排队中…", starting: "等待 Agent 响应…", thinking: "正在思考…", responding: "正在回复…", completed: "已完成" }
+      : { queued: "Request sent · waiting for agent…", provider_queued: "Agent busy · queued…", starting: "Waiting for agent…", thinking: "Thinking…", responding: "Responding…", completed: "Completed" };
     return labels[data.phase];
   }
   return zh ? "Agent 正在处理…" : "Agent is working…";

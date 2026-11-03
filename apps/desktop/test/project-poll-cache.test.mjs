@@ -4,6 +4,8 @@ import { createHarness, delta } from "./helpers/orchestration-runtime-harness.mj
 
 import { projectFixture, settle } from "./helpers/project-poll-harness.mjs";
 
+const historyRequests = (calls) => calls.flatMap((c) => c.method === "session.historyBatch" ? c.params.items : c.method === "session.history" ? [c.params] : []);
+
 test("startup indexes use at most four projects per batch and retain original session order", async () => {
   const h = createHarness();
   h.projectState.projects = Array.from({ length: 20 }, (_, i) => ({ id: `p${i}` }));
@@ -20,7 +22,7 @@ test("startup indexes use at most four projects per batch and retain original se
   assert.deepEqual(Array.from(h.state.sessions, (s) => s.id), h.projectState.projects.map((p) => `s-${p.id}`));
 });
 
-test("21-session idle project poll fetches one live history, not all 20 completed histories", async () => {
+test("21-session idle project poll fetches revision projections without retransferring histories", async () => {
   const h = projectFixture();
   h.runtime.registerProjectSessionView("s", "pr");
   await h.hydrate();
@@ -28,9 +30,10 @@ test("21-session idle project poll fetches one live history, not all 20 complete
   const start = h.now();
   await h.hydrate();
   const tick = h.calls.slice(before);
-  assert.equal(tick.filter((c) => c.method === "session.get").length, 1);
-  assert.equal(tick.length, 28); // six run indexes, 21 replay reads, one live history
+  assert.equal(tick.filter((c) => c.method === "session.historyBatch").length, 1);
+  assert.equal(tick.length, 28); // six run indexes, 21 replay reads, one batched history check
   assert.equal(h.now() - start, 920); // same serial replay schedule, no extra live RTT
+  assert.ok(historyRequests(tick).every((params) => params.cursor), "warm histories use cursors");
   assert.equal(h.renders.length, renders);
   assert.equal(h.state.foreground.s.status, "running");
   assert.equal(h.state.sessions.find((s) => s.id === "s").permissionMode, "default");
@@ -39,10 +42,10 @@ test("21-session idle project poll fetches one live history, not all 20 complete
 test("hidden project reads metadata without histories; first display still restores messages", async () => {
   const h = projectFixture(2);
   await h.hydrate();
-  assert.equal(h.calls.filter((c) => c.method === "session.get").length, 0);
+  assert.equal(historyRequests(h.calls).length, 0);
   h.runtime.registerProjectSessionView("s", "pr");
   await h.hydrate();
-  assert.equal(h.calls.filter((c) => c.method === "session.get").length, 2);
+  assert.equal(historyRequests(h.calls).length, 2);
   assert.ok(h.state.events.child1.some((e) => e.data.kind === "message" && e.data.text === "History"));
 });
 
@@ -55,7 +58,7 @@ test("new events invalidate idle history even when updatedAt collides, including
     h.feeds.get("child1").push(delta(index + 1, "", { type, sessionId: "child1", runId: "r-child1", payload: { messageId: "q", text: "changed", checkpointId: "checkpoint" } }));
     const count = h.calls.length;
     await h.hydrate();
-    assert.equal(h.calls.slice(count).filter((c) => c.method === "session.get" && c.params.sessionId === "child1").length, 1);
+    assert.equal(historyRequests(h.calls.slice(count)).filter((params) => params.sessionId === "child1").length, 1);
     assert.ok(h.state.events.child1.some((e) => e.data.kind === "message" && e.data.text === `Changed ${index}`));
   }
 });
@@ -71,14 +74,14 @@ test("revision/missing timestamp/manual refresh invalidate histories, while foll
   delete h.sessions[1].updatedAt;
   const before = h.calls.length;
   await h.hydrate(); await h.hydrate();
-  assert.equal(h.calls.slice(before).filter((c) => c.method === "session.get" && c.params.sessionId === "child1").length, 2);
+  assert.equal(historyRequests(h.calls.slice(before)).filter((params) => params.sessionId === "child1").length, 2);
   h.sessions[1].updatedAt = h.sessions[0].updatedAt;
   h.runs.unshift({ id: "next", sessionId: "child1", status: "running" });
   await h.hydrate();
   assert.equal(h.state.activeAgentRunIds.child1, "next");
   const beforeRefresh = h.calls.length;
   await settle(h, () => h.runtime.ensureProjectRunHydrated("pr"));
-  assert.equal(h.calls.slice(beforeRefresh).filter((c) => c.method === "session.get").length, 2);
+  assert.equal(historyRequests(h.calls.slice(beforeRefresh)).length, 2);
 });
 
 test("manual session hydration retains live project hydration by default; startup can defer it", async () => {

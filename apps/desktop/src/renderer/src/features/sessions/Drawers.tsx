@@ -120,6 +120,10 @@ function DiffView({ content }: { content: string }): JSX.Element {
   );
 }
 
+const CLOSED_DRAWER_ITEMS: never[] = [];
+const EMPTY_EVENT_MAP: ReturnType<typeof useSessionsStore.getState>["events"] = {};
+const EMPTY_ARTIFACT_MAP: ReturnType<typeof useSessionsStore.getState>["artifacts"] = {};
+
 export function ArtifactsDrawer({
   open,
   onClose,
@@ -133,14 +137,14 @@ export function ArtifactsDrawer({
   focusPath?: string | null;
 }): JSX.Element {
   const { t, locale } = useI18n();
-  const artifacts = useSessionsStore((state) => (sessionId ? (state.artifacts[sessionId] ?? SESSION_EMPTY.artifacts) : SESSION_EMPTY.artifacts));
-  const events = useSessionsStore((state) => (sessionId ? (state.events[sessionId] ?? SESSION_EMPTY.events) : SESSION_EMPTY.events));
-  const sessions = useSessionsStore((state) => state.sessions);
-  const allEvents = useSessionsStore((state) => state.events);
-  const allArtifacts = useSessionsStore((state) => state.artifacts);
-  const teams = useTeamsStore((state) => state.teams);
-  const instances = useAgentsStore((state) => state.instances);
-  const projects = useProjectsStore((state) => state.projects);
+  const artifacts = useSessionsStore((state) => (open && sessionId ? (state.artifacts[sessionId] ?? SESSION_EMPTY.artifacts) : SESSION_EMPTY.artifacts));
+  const events = useSessionsStore((state) => (open && sessionId ? (state.events[sessionId] ?? SESSION_EMPTY.events) : SESSION_EMPTY.events));
+  const sessions = useSessionsStore((state) => open ? state.sessions : CLOSED_DRAWER_ITEMS);
+  const allEvents = useSessionsStore((state) => open ? state.events : EMPTY_EVENT_MAP);
+  const allArtifacts = useSessionsStore((state) => open ? state.artifacts : EMPTY_ARTIFACT_MAP);
+  const teams = useTeamsStore((state) => open ? state.teams : CLOSED_DRAWER_ITEMS);
+  const instances = useAgentsStore((state) => open ? state.instances : CLOSED_DRAWER_ITEMS);
+  const projects = useProjectsStore((state) => open ? state.projects : CLOSED_DRAWER_ITEMS);
   const session = sessions.find((item) => item.id === sessionId);
   const projectRoot = projects.find((item) => item.id === session?.projectId)?.rootPath;
 
@@ -148,6 +152,7 @@ export function ArtifactsDrawer({
   // timeline. kimi sessions surface edits via tool fileDiff, codex via
   // file_change events — collectChangedFiles covers both.
   const changeGroups = useMemo(() => {
+    if (!open) return [];
     const groups: { label?: string; entries: ChangedFileEntry[] }[] = [
       { entries: collectChangedFiles(events) }
     ];
@@ -156,7 +161,7 @@ export function ArtifactsDrawer({
       if (entries.length > 0) groups.push({ label: sessionTargetName(sub, teams, instances), entries });
     }
     return groups;
-  }, [events, sessions, sessionId, allEvents, teams, instances]);
+  }, [open, events, sessions, sessionId, allEvents, teams, instances]);
 
   const changedFiles = useMemo(() => changeGroups.flatMap((group) => group.entries), [changeGroups]);
 
@@ -354,15 +359,18 @@ export function ArtifactsDrawer({
 
   // Opening via a "view diff" entry jumps straight to the referenced file;
   // timeline refreshes keep the user's selection whenever it is still valid.
+  useEffect(() => { if (open && focusPath) setTab("diff"); }, [open, focusPath]);
+  useEffect(() => { setTab("diff"); setSelectedFile(0); }, [sessionId]);
   useEffect(() => {
     if (!open) return;
-    setTab("diff");
     setSelectedFile((current) => {
       const index = focusPath ? changedFiles.findIndex((file) => file.path === focusPath) : -1;
       if (index >= 0) return index;
       return current < changedFiles.length ? current : 0;
     });
   }, [open, focusPath, changedFiles]);
+
+  if (!open) return <></>;
 
   const filtered = artifacts.filter((artifact) => artifact.kind === tab);
   const comparisonArtifacts = [
@@ -376,7 +384,6 @@ export function ArtifactsDrawer({
     || sessions.some((item) => item.parentSessionId === sessionId
       && allArtifacts[item.id]?.some((artifact) => artifact.comparisonUnavailable));
 
-  if (!open) return <></>;
   return (
     <Drawer open={open} onClose={onClose} title={t("sessions.drawers.artifacts")} defaultWidth={1200}>
       <div className="flex h-full flex-col">

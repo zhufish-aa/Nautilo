@@ -212,3 +212,35 @@ test("startup metadata hydration avoids every historical project's scan", async 
   assert.deepEqual(calls.map(c => c.method), ['project.list']);
   assert(store.getState().projects.every(p => !p.scan && p.nonGitDiffMode === 'full'));
 });
+
+test("metadata hydration drops externally removed rows without resurrecting a local deletion", async () => {
+  let release;
+  const { store } = harness(async (method) => {
+    if (method === 'project.list') return new Promise(resolve => { release = resolve; });
+    throw Error(method);
+  });
+  const pending = store.getState().hydrate(false);
+  store.setState({ projects: [] });
+  release([{ ...project }]);
+  await pending;
+  assert.equal(store.getState().projects.length, 0);
+  store.setState({ projects: [mappers.toUiProject(project)] });
+  const next = store.getState().hydrate(false);
+  release([]);
+  await next;
+  assert.equal(store.getState().projects.length, 0);
+});
+
+test("metadata hydration adopts remote edits but preserves concurrently created projects", async () => {
+  let release;
+  const { store } = harness(async (method) => {
+    if (method === 'project.list') return new Promise(resolve => { release = resolve; });
+    throw Error(method);
+  });
+  const pending = store.getState().hydrate(false);
+  store.setState(state => ({ projects: [mappers.toUiProject({ ...project, id: 'new', name: 'New' }), ...state.projects] }));
+  release([{ ...project, name: 'Renamed remotely' }]);
+  await pending;
+  assert.equal(store.getState().projects.find(p => p.id === 'p').name, 'Renamed remotely');
+  assert.equal(store.getState().projects.find(p => p.id === 'new').name, 'New');
+});

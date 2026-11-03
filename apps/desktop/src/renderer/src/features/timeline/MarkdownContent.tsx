@@ -1,10 +1,10 @@
 import { Children, Fragment, memo, useMemo, useState, cloneElement, isValidElement, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { classifyLocalHref, isImagePath, isExternalOpenPath, normalizeMarkdownLocalLinks, parseFileReference, splitTextByFileReferences } from "../../lib/file-references";
+import ReactMarkdown, { type Components } from "react-markdown";
+import { classifyLocalHref, isImagePath, isExternalOpenPath, parseFileReference, splitTextByFileReferences } from "../../lib/file-references";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
+import { useMarkdownFragments } from "../../lib/use-markdown-fragments";
 import { openFilePreview } from "../../stores/file-preview";
 import { openLightbox } from "../../stores/lightbox";
 import { FileRefChip } from "./FileRefChip";
@@ -62,9 +62,26 @@ export const MarkdownContent = memo(function MarkdownContent({
   onOpenLocalFile?: OpenLocalFile;
 }): JSX.Element {
   const { t } = useI18n();
-  // Cache only this mounted message. Global JSX caches retain obsolete file
-  // handlers and every partial streaming source, leaking large conversations.
-  return useMemo(() => renderMarkdown(normalizeMarkdownLocalLinks(source), inverted, onOpenLocalFile, t), [source, inverted, onOpenLocalFile, t]);
+  const components = useMemo(() => createMarkdownComponents(inverted, onOpenLocalFile, t), [inverted, onOpenLocalFile, t]);
+  const { fragments, pending, unformatted } = useMarkdownFragments(source);
+  return (
+    <div aria-busy={pending || undefined} className={cn("min-w-0 break-words text-[15px] leading-7", inverted ? "text-on-accent" : "text-ink")}>
+      {fragments?.map((serialized, index) => <MarkdownFragment key={index} serialized={serialized} components={components} />)}
+      {/* Immediately expose ALL new text, including final/cancelled output,
+          while formatting catches up. Retain completed interactive DOM. */}
+      {unformatted && <div className="whitespace-pre-wrap">{unformatted}</div>}
+    </div>
+  );
+});
+
+/** Exact parsed-content equality lets React skip completed fragments. These
+ * are AST fragments, not independently parsed Markdown: cross-fragment links,
+ * footnotes and unfinished syntax have already been resolved globally. */
+const MarkdownFragment = memo(function MarkdownFragment({ serialized, components }: { serialized: string; components: Components }): JSX.Element {
+  const rehypePlugins = useMemo(() => [() => () => JSON.parse(serialized)], [serialized]);
+  // Keep react-markdown's default HTML escaping and URL sanitization. Never
+  // convert the worker result into innerHTML or enable rehype-raw.
+  return <ReactMarkdown rehypePlugins={rehypePlugins} components={components}>{""}</ReactMarkdown>;
 });
 
 function CodeBlock({ children }: { children?: ReactNode }): JSX.Element {
@@ -92,7 +109,7 @@ function CodeBlock({ children }: { children?: ReactNode }): JSX.Element {
   );
 }
 
-function renderMarkdown(source: string, inverted: boolean, onOpenLocalFile: OpenLocalFile | undefined, t: Translate): JSX.Element {
+function createMarkdownComponents(inverted: boolean, onOpenLocalFile: OpenLocalFile | undefined, t: Translate): Components {
   const linkProps = (href: string | undefined): Record<string, unknown> => {
     const classification = classifyLocalHref(href);
     if (classification.kind === "local") {
@@ -118,11 +135,7 @@ function renderMarkdown(source: string, inverted: boolean, onOpenLocalFile: Open
     }
     return { href, target: "_blank", rel: "noreferrer noopener" };
   };
-  return (
-    <div className={cn("min-w-0 break-words text-[15px] leading-7", inverted ? "text-on-accent" : "text-ink")}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
+  return {
         p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{renderWithFileRefs(children, inverted, onOpenLocalFile)}</p>,
         h1: ({ children }) => <h1 className="mb-2 mt-4 text-lg font-semibold first:mt-0">{children}</h1>,
         h2: ({ children }) => <h2 className="mb-2 mt-4 text-base font-semibold first:mt-0">{children}</h2>,
@@ -154,10 +167,5 @@ function renderMarkdown(source: string, inverted: boolean, onOpenLocalFile: Open
           }
           return <TimelineImage src={src} alt={alt ?? ""} className="my-2 max-h-72 max-w-full rounded-xl border border-line object-contain" />;
         }
-        }}
-      >
-        {source}
-      </ReactMarkdown>
-    </div>
-  );
+  };
 }

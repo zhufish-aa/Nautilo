@@ -109,6 +109,14 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             )
             .map(Value::Array)
     });
+    reg(router, daemon, "session.historyBatch", |d, input| {
+        Repositories::new(&d.db.lock().unwrap().raw).sessions().history_batch(&input)
+    });
+    reg(router, daemon, "session.history", |d, input| {
+        Repositories::new(&d.db.lock().unwrap().raw).sessions().history(
+            input.get("sessionId").and_then(Value::as_str).unwrap_or(""), input.get("cursor"),
+        )
+    });
     reg_str(router, daemon, "session.get", "sessionId", |d, id| d.sessions.get(id));
     reg(router, daemon, "session.create", |d, input| d.sessions.create(&input));
     reg(router, daemon, "session.upsert", |d, input| d.sessions.upsert(&input));
@@ -185,6 +193,9 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             }
         });
     }
+    reg(router, daemon, "artifact.changes", |d, input| {
+        Repositories::new(&d.db.lock().unwrap().raw).artifacts().changes(&input)
+    });
     reg(router, daemon, "artifact.list", |d, input| {
         Repositories::new(&d.db.lock().unwrap().raw)
             .artifacts()

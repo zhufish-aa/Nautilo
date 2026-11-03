@@ -124,8 +124,12 @@ test("schema 5 migrates execution defaults from AgentInstance to TeamMember and 
       assert.equal(session?.serviceTier, "priority");
     }
     const version = migrated.connection.raw.prepare("SELECT value FROM schema_meta WHERE key = 'schema'").get();
-    // Schema 7 (checkpoints tables) is the current version; the schema 5 data migration still ran.
-    assert.equal(version.value, "7");
+    // Schema 8 adds revision projections; the schema 5 data migration still ran.
+    assert.equal(version.value, "8");
+    const history = migrated.sessions.history(standaloneSession.id);
+    assert.equal(history.reset, true);
+    assert.equal(history.cursor.scope, `messages:session:${standaloneSession.id}`);
+    assert.deepEqual(migrated.sessions.history(standaloneSession.id, history.cursor).items, []);
     migrated.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });

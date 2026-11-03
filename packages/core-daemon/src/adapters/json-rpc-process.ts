@@ -21,6 +21,7 @@ export class JsonRpcProcessClient implements AsyncIterable<JsonRpcProcessEvent> 
   private readonly queue = new AsyncQueue<JsonRpcProcessEvent>();
   private readonly pending = new Map<string | number, PendingRequest>();
   private nextId = 1;
+  private closedError: Error | undefined;
 
   constructor(readonly process: ProcessHandle) {
     void this.pump();
@@ -32,8 +33,19 @@ export class JsonRpcProcessClient implements AsyncIterable<JsonRpcProcessEvent> 
 
   requestWithId(method: string, params?: unknown): { id: number; promise: Promise<unknown> } {
     const id = this.nextId++;
-    const promise = new Promise<unknown>((resolve, reject) => this.pending.set(id, { resolve, reject }));
-    this.send({ jsonrpc: "2.0", id, method, params });
+    const promise = new Promise<unknown>((resolve, reject) => {
+      if (this.closedError) {
+        reject(this.closedError);
+        return;
+      }
+      this.pending.set(id, { resolve, reject });
+      try {
+        this.send({ jsonrpc: "2.0", id, method, params });
+      } catch (error) {
+        this.pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
     return { id, promise };
   }
 
@@ -73,6 +85,7 @@ export class JsonRpcProcessClient implements AsyncIterable<JsonRpcProcessEvent> 
       if (stdout.trim()) this.acceptLine(stdout);
     } finally {
       const error = new Error("JSON-RPC process closed before the request completed");
+      this.closedError = error;
       for (const request of this.pending.values()) request.reject(error);
       this.pending.clear();
       this.queue.close();

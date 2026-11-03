@@ -55,6 +55,14 @@ import type {
   DiscoveredMcpSource
 } from "./capability-import.js";
 
+/** Independent of event replay: bound to one database and history scope. */
+export interface HistoryCursor { epoch: string; scope: string; revision: number }
+export interface HistoryItem<T> { value: T; order: { createdAt: string; ordinal: number } }
+export interface HistoryProjection<T> { cursor: HistoryCursor; reset: boolean; items: HistoryItem<T>[] }
+export interface SessionHistoryInput { sessionId: string; cursor?: HistoryCursor }
+export type SessionHistory = HistoryProjection<Message> & { session: Session };
+export type ArtifactChangesInput = ({ sessionId: string; projectRunId?: never } | { projectRunId: string; sessionId?: never }) & { cursor?: HistoryCursor };
+
 export interface IpcRequestMap {
   "health.get": { input: undefined; output: { status: "ok"; version: string } };
   "project.list": { input: undefined; output: Project[] };
@@ -91,6 +99,8 @@ export interface IpcRequestMap {
   "orchestration.recover": { input: { projectRunId: string; memberId: string; mode: "resume" | "replace" }; output: ProjectRun };
   "orchestration.cancel": { input: { projectRunId: string }; output: ProjectRun };
   "session.list": { input: { projectId: string; memberId?: string }; output: Session[] };
+  "session.history": { input: SessionHistoryInput; output: SessionHistory };
+  "session.historyBatch": { input: { items: SessionHistoryInput[] }; output: { items: SessionHistory[] } };
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
   "session.create": { input: { projectId: string; memberId: string; title?: string }; output: Session };
   "session.upsert": { input: SessionUpsertInput; output: Session };
@@ -105,6 +115,7 @@ export interface IpcRequestMap {
   "run.cancel": { input: { runId: string }; output: { cancelled: true } };
   "run.list": { input: { sessionId?: string; projectRunId?: string }; output: AgentRun[] };
   "task.list": { input: { projectRunId: string }; output: Task[] };
+  "artifact.changes": { input: ArtifactChangesInput; output: HistoryProjection<Artifact> };
   "artifact.list": { input: { projectRunId?: string; taskId?: string; sessionId?: string }; output: Artifact[] };
   "artifact.read": { input: { projectId: string; path: string }; output: { base64: string; mimeType: string; size: number; modifiedAt: string } };
   "verification.list": { input: { projectRunId: string; taskId?: string }; output: VerificationResult[] };

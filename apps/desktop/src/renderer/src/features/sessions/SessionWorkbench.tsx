@@ -9,7 +9,7 @@ import { QueuedFollowUpBar } from "./QueuedFollowUpBar";
 import { ArtifactsDrawer, DagDrawer, SubagentDrawer, TerminalDrawer } from "./Drawers";
 import { RunActivityIndicator } from "./RunActivityIndicator";
 import { sessionTargetName } from "./SessionListPanel";
-import { useSessionsStore } from "../../stores/sessions";
+import { useSessionsStore, SESSION_EMPTY } from "../../stores/sessions";
 import { InteractionCards } from "./InteractionCards";
 import { useFilePreviewStore } from "../../stores/file-preview";
 import { useProjectsStore } from "../../stores/projects";
@@ -23,7 +23,7 @@ import {
   registerStandaloneSessionView
 } from "../../lib/orchestration-runtime";
 import { conversationTimeline } from "../../lib/conversation-timeline";
-import { collectChangedFiles } from "../../lib/changed-files";
+import { cachedChangedFileCount } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
 import { TodoGoalCard } from "./TodoGoalCard";
@@ -159,26 +159,13 @@ export function SessionWorkbench({
   const [showTodos, setShowTodos] = useState(false);
   useEffect(() => { setShowTodos(false); setSubagentEventId(undefined); }, [sessionId]);
 
-  // Changed-file count for the header badge: this session plus all delegated
-  // sub-sessions (kimi edits surface via tool fileDiff, codex via file_change).
-  // Subscribing to the whole events map would re-render this page on every
-  // token of *any* session; a compact stamp (child id + event count) keeps the
-  // subscription cheap while still tracking child activity.
-  const childActivityStamp = useSessionsStore((state) =>
-    state.sessions
-      .filter((item) => item.parentSessionId === sessionId)
-      .map((item) => `${item.id}:${state.events[item.id]?.length ?? 0}`)
-      .join("|")
+  // Only the numeric badge is subscribed. Streaming text in another session
+  // cannot invalidate this page; immutable child timelines reuse their count.
+  const changedFileCount = useSessionsStore((state) =>
+    cachedChangedFileCount(state.events[sessionId] ?? SESSION_EMPTY.events)
+      + state.sessions.filter((item) => item.parentSessionId === sessionId)
+        .reduce((count, sub) => count + cachedChangedFileCount(state.events[sub.id] ?? SESSION_EMPTY.events), 0)
   );
-  const changedFileCount = useMemo(() => {
-    const { sessions: allSessions, events: eventsById } = useSessionsStore.getState();
-    return (
-      collectChangedFiles(events).length +
-      allSessions
-        .filter((item) => item.parentSessionId === sessionId)
-        .reduce((count, sub) => count + collectChangedFiles(eventsById[sub.id] ?? []).length, 0)
-    );
-  }, [events, childActivityStamp, sessionId]);
 
   // Latest TodoList/TodoWrite/update_plan call drives the floating goal card.
   const todoGoal = useMemo(() => latestTodoGoal(events), [events]);

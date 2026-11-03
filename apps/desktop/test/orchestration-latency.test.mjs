@@ -156,7 +156,7 @@ test("missing session/bridge reject; accepted turn survives hydrate failure with
   await assert.rejects(missing.runtime.sendWorkbenchMessage("missing", "Hello"), /missing/);
   const offline = createHarness({ bridgeAvailable: false });
   await assert.rejects(offline.runtime.sendWorkbenchMessage("s", "Hello"), /unavailable/);
-  const h = createHarness({ failMethod: "session.get" });
+  const h = createHarness({ failMethod: "session.history" });
   const history = delta(1, "Already streamed");
   h.replies["event.replay"] = { events: [history], lastSequence: 1 };
   const sent = h.runtime.sendWorkbenchMessage("s", "Hello");
