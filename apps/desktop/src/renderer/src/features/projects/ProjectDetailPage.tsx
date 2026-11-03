@@ -27,6 +27,7 @@ import { useProjectsStore } from "../../stores/projects";
 import { toast } from "../../stores/toast";
 import { VerificationTemplatesCard } from "./VerificationTemplatesCard";
 import { WorkspaceModeCard } from "./WorkspaceModeCard";
+import { NonGitDiffModeCard } from "./NonGitDiffModeCard";
 
 function InfoRow({
   icon: Icon,
@@ -71,6 +72,18 @@ export function ProjectDetailPage(): JSX.Element {
   useEffect(() => {
     if (projectId) touchProject(projectId);
   }, [projectId, touchProject]);
+  const inspectedProject = useRef<string>();
+  useEffect(() => {
+    const current = useProjectsStore.getState().projects.find((item) => item.id === projectId);
+    if (!current || current.scan || current.scanning || inspectedProject.current === projectId) return;
+    inspectedProject.current = projectId;
+    let cancelled = false;
+    void rescanProject(current.id).catch((cause) => {
+      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => { cancelled = true; };
+  }, [projectId, project?.id, rescanProject]);
+
   useEffect(() => {
     setError("");
     setRemoveError("");
@@ -326,6 +339,9 @@ export function ProjectDetailPage(): JSX.Element {
           </div>
         )
       )}
+      <div className="mt-8">
+        <NonGitDiffModeCard key={project.id} project={project} />
+      </div>
       <div className="mt-10 border-t border-line pt-5">
         <Button
           variant="ghost"

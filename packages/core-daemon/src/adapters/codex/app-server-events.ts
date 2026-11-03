@@ -11,8 +11,17 @@ function printable(value: unknown): string | undefined {
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
+export function isCurrentCodexTurnDiff(paramsValue: unknown, threadId?: string, turnId?: string): boolean {
+  const params = record(paramsValue);
+  return Boolean(threadId && turnId) && params.threadId === threadId && params.turnId === turnId;
+}
+
 export function parseCodexAppServerNotification(method: string, paramsValue: unknown): AdapterEvent[] {
   const params = record(paramsValue);
+  if (method === "turn/diff/updated") {
+    if (typeof params.diff !== "string" || typeof params.threadId !== "string" || typeof params.turnId !== "string") return [];
+    return [{ kind: "turn_diff", diff: params.diff, threadId: params.threadId, turnId: params.turnId, raw: paramsValue }];
+  }
   if (method === "item/agentMessage/delta") {
     return [{ kind: "message", phase: "delta", messageId: text(params.itemId), text: text(params.delta) ?? "", raw: paramsValue }];
   }

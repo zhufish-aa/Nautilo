@@ -6,6 +6,7 @@ import { configureWorkbenchSession } from "../../lib/orchestration-runtime";
 import { useProvidersStore } from "../../stores/providers";
 import { permissionModesFor } from "../../lib/provider-catalog";
 import { useAgentsStore } from "../../stores/agents";
+import { toast } from "../../stores/toast";
 import { useSessionsStore } from "../../stores/sessions";
 
 const PLAN_MODE = "plan";
@@ -29,7 +30,7 @@ export function PlanModeToggle({ sessionId, disabled }: { sessionId?: string; di
     // Turning plan off normally just drops the session override, but an instance
     // that itself defaults to plan needs an explicit non-plan override instead.
     const next = active ? (instancePermissionMode === PLAN_MODE ? "default" : undefined) : PLAN_MODE;
-    void configureWorkbenchSession(sessionId, { permissionMode: next });
+    void configureWorkbenchSession(sessionId, { permissionMode: next }).catch((error) => toast.error(error instanceof Error ? error.message : String(error)));
   };
 
   return (

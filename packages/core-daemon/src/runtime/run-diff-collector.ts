@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, lstat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { GitChangedFile } from "@agenthub/domain";
 import { GitCommandRunner } from "./git/index.js";
@@ -18,6 +18,12 @@ export class RunDiffCollector {
   async isGitWorkspace(cwd: string): Promise<boolean> {
     const result = await this.git.run(cwd, ["rev-parse", "--is-inside-work-tree"], { allowFailure: true });
     return result.exitCode === 0 && result.stdout.trim() === "true";
+  }
+
+  /** A failed Git command alone is not proof this is a non-Git workspace. */
+  async isNonGitWorkspace(cwd: string): Promise<boolean> {
+    const result = await this.git.run(cwd, ["rev-parse", "--is-inside-work-tree"], { allowFailure: true });
+    return result.exitCode !== 0 && /not a git repository/i.test(result.stderr);
   }
 
   async collect(cwd: string, touched: TouchedFile[], baseline?: WorkspaceSnapshot): Promise<GitChangedFile[]> {
@@ -57,15 +63,27 @@ export class RunDiffCollector {
   }
 
   private async collectSnapshotDiff(cwd: string, touched: TouchedFile[], baseline?: WorkspaceSnapshot): Promise<GitChangedFile[]> {
+    // No baseline means unknown, never an empty pre-run workspace. Provider
+    // patches remain available through file.changed events.
+    if (!baseline) return [];
     const files: GitChangedFile[] = [];
     for (const item of uniqueTouchedFiles(resolve(cwd), cwd, touched)) {
       const absolutePath = resolve(cwd, item.path);
-      const info = await stat(absolutePath).catch(() => undefined);
-      const before = baseline?.files.get(item.path);
+      const before = baseline.files.get(item.path);
+      const beforeUnknown = before === undefined && (
+        baseline.traversalComplete !== true || baseline.unavailablePaths.has(item.path)
+        || item.path.split("/").slice(0, -1).some((_, index, parts) => baseline.unavailablePaths.has(parts.slice(0, index + 1).join("/") + "/"))
+      );
+      const info = await lstat(absolutePath).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? null : undefined);
       const after = info?.isFile() && info.size <= MAX_FALLBACK_TEXT_BYTES
         ? await readFile(absolutePath, "utf8").catch(() => undefined)
         : undefined;
-      if (after?.includes("\0")) continue;
+      const afterUnknown = info !== null && (after === undefined || after.includes("\0"));
+      if (beforeUnknown || afterUnknown) {
+        files.push({ path: item.path, changeType: item.changeType, additions: 0, deletions: 0, diff: "",
+          comparisonUnavailable: true, reason: beforeUnknown ? "baseline_file_unavailable" : "current_file_unavailable" });
+        continue;
+      }
       if (before === undefined && after === undefined) continue;
       if (before === after) continue;
       const changeType: GitChangedFile["changeType"] = before === undefined ? "added" : after === undefined ? "deleted" : item.changeType;

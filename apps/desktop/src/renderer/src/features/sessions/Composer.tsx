@@ -8,7 +8,7 @@ import { sendWorkbenchFollowUp, sendWorkbenchMessage, stopWorkbenchRun } from ".
 import { getBridge } from "../../lib/bridge";
 import { artifactUrlForPath } from "../timeline/media-actions";
 import type { DesktopAttachment } from "../../types/bridge";
-import { EMPTY_COMPOSER_DRAFT, useComposerDraftsStore } from "../../stores/composer-drafts";
+import { deliverComposerSubmission, EMPTY_COMPOSER_DRAFT, useComposerDraftsStore, type ComposerSubmission } from "../../stores/composer-drafts";
 import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
 import { useIconOverrides } from "../../lib/use-icon-overrides";
@@ -54,7 +54,8 @@ export function Composer({
   const attachments = draft.attachments;
   const updateText = useComposerDraftsStore((state) => state.setText);
   const updateAttachments = useComposerDraftsStore((state) => state.setAttachments);
-  const clearDraft = useComposerDraftsStore((state) => state.clear);
+  const submitting = useComposerDraftsStore((state) => !!state.pending[draftKey]);
+  const failedSubmissions = useComposerDraftsStore((state) => state.failed[draftKey]);
   const setValue = (text: string): void => updateText(draftKey, text);
   const setAttachments = (next: DesktopAttachment[] | ((current: DesktopAttachment[]) => DesktopAttachment[])): void => updateAttachments(draftKey, next);
   const [importing, setImporting] = useState(false);
@@ -122,8 +123,8 @@ export function Composer({
   // Queued follow-ups live in the sessions store (daemon queue + events).
 
   const canCompose = !!sessionId || !!onCreateSession;
-  const canSend = canCompose && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled;
-  const canFollowUp = !!sessionId && running && !importing && !disabled && !editingMessage && attachments.length === 0 && value.trim().length > 0;
+  const canSend = canCompose && !submitting && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled;
+  const canFollowUp = !!sessionId && !submitting && running && !importing && !disabled && !editingMessage && attachments.length === 0 && value.trim().length > 0;
 
   const appendAttachments = (next: DesktopAttachment[]): void => {
     setAttachments((current) => {
@@ -136,10 +137,13 @@ export function Composer({
   const pickFiles = async (): Promise<void> => {
     const bridge = getBridge();
     if (!bridge) return;
+    setImporting(true);
     try {
       appendAttachments(await bridge.dialog.pickFiles());
     } catch (error) {
       setAttachmentError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImporting(false);
     }
   };
   const importClipboardFiles = async (files: File[]): Promise<void> => {
@@ -184,29 +188,40 @@ export function Composer({
     }
     return false;
   };
+  const dispatchSubmission = (kind: ComposerSubmission["kind"], retryToken?: number): void => {
+    const store = useComposerDraftsStore.getState();
+    let submission = store.begin(draftKey, kind, editingMessage?.messageId, retryToken);
+    if (!submission) return; // Atomic across double-clicks and mounted composers.
+    if (retryToken !== undefined && submission.kind !== "message" && !running) submission = { ...submission, kind: "message" };
+    try {
+      const destinationId = sessionId ?? onCreateSession?.(submission.draft.text.trim());
+      if (!destinationId) throw new Error(locale === "zh-CN" ? "未能创建会话，内容已保留" : "Could not create the conversation. Your draft is retained.");
+      submission = store.move(submission, destinationId);
+      const sent = submission;
+      void deliverComposerSubmission(sent, async () => {
+        const text = sent.draft.text.trim() || t("sessions.composer.attachmentPrompt");
+        if (sent.kind === "message") {
+          await sendWorkbenchMessage(destinationId, text, sent.draft.attachments, sent.editMessageId);
+          // Do not cancel a different edit the user began while awaiting IPC.
+          const currentEdit = useSessionsStore.getState().editingMessage;
+          if (sent.editMessageId && currentEdit?.sessionId === destinationId && currentEdit.messageId === sent.editMessageId && useComposerDraftsStore.getState().drafts[destinationId] === sent.draft) cancelEditingMessage();
+        } else {
+          const appliedMode = await sendWorkbenchFollowUp(destinationId, text, sent.kind);
+          if (!appliedMode) throw new Error(locale === "zh-CN" ? "追加消息未被接受，内容已保留" : "Follow-up was not accepted. Your draft is retained.");
+          if (sent.kind === "steer" && appliedMode === "queue") toast.info(t("sessions.composer.steerDowngraded"));
+        }
+      });
+    } catch (error) {
+      store.finish(submission, error instanceof Error ? error.message : String(error));
+    }
+  };
   const submit = (): void => {
+    if (submitting) return;
     if (sessionId && tryRunSlashCommand()) return;
-    if (!canSend) return;
-    const destinationId = sessionId ?? onCreateSession?.(value.trim());
-    if (!destinationId) return;
-    const text = value.trim() || t("sessions.composer.attachmentPrompt");
-    const edit = editingMessage;
-    clearDraft(draftKey);
-    if (edit) cancelEditingMessage();
-    void sendWorkbenchMessage(destinationId, text, attachments, edit?.messageId)
-      .catch((error) => setAttachmentError(error instanceof Error ? error.message : String(error)));
+    if (canSend) dispatchSubmission("message");
   };
   const submitFollowUp = (mode: "steer" | "queue"): void => {
-    if (!sessionId || !canFollowUp) return;
-    const targetSessionId = sessionId;
-    const text = value.trim();
-    setValue("");
-    void sendWorkbenchFollowUp(targetSessionId, text, mode)
-      .then((appliedMode) => {
-        // Steer may have been downgraded to queue by the daemon (non-Codex CLIs).
-        if (mode === "steer" && appliedMode === "queue") toast.info(t("sessions.composer.steerDowngraded"));
-      })
-      .catch((error) => setAttachmentError(error instanceof Error ? error.message : String(error)));
+    if (sessionId && canFollowUp) dispatchSubmission(mode);
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     // Enter confirms IME composition before it may submit a message.
@@ -364,6 +379,10 @@ export function Composer({
           aria-label={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
           className="block max-h-48 min-h-[76px] w-full resize-none rounded-t-2xl bg-transparent px-4 pb-2 pt-4 text-[14px] leading-6 text-ink outline-none placeholder:text-ink-3/70 disabled:opacity-50"
         />
+        {failedSubmissions?.map((failedSubmission) => <div key={failedSubmission.submission.token} role="alert" className="flex flex-wrap items-center gap-2 px-4 pb-2 text-xs text-danger">
+          <span className="min-w-0 flex-1" title={failedSubmission.submission.draft.text}>{failedSubmission.error} · {failedSubmission.submission.draft.text.slice(0, 48) || (locale === "zh-CN" ? "附件" : "Attachments")}</span>
+          <button type="button" disabled={submitting || disabled || (failedSubmission.submission.kind === "message" && running)} onClick={() => dispatchSubmission(failedSubmission.submission.kind, failedSubmission.submission.token)} className="rounded px-2 py-1 text-ink-2 underline disabled:opacity-40">{failedSubmission.submission.kind !== "message" && !running ? (locale === "zh-CN" ? "作为新消息重试" : "Retry as new message") : (locale === "zh-CN" ? "重试未发送内容" : "Retry unsent content")}</button>
+        </div>)}
         {attachmentError && <p className="px-4 pb-1 text-[11px] text-danger">{attachmentError}</p>}
         <div className="flex min-h-11 flex-wrap items-center gap-1.5 px-2.5 pb-2.5">
           <button type="button" onClick={() => void pickFiles()} disabled={!canCompose || disabled || importing || running} className="composer-attach flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
@@ -431,7 +450,7 @@ export function Composer({
               title={t("sessions.composer.send")}
               className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:bg-ink-2 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
             >
-              <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden />
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden />}
             </button>
           )}
         </div>

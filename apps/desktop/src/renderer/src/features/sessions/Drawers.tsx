@@ -137,6 +137,7 @@ export function ArtifactsDrawer({
   const events = useSessionsStore((state) => (sessionId ? (state.events[sessionId] ?? SESSION_EMPTY.events) : SESSION_EMPTY.events));
   const sessions = useSessionsStore((state) => state.sessions);
   const allEvents = useSessionsStore((state) => state.events);
+  const allArtifacts = useSessionsStore((state) => state.artifacts);
   const teams = useTeamsStore((state) => state.teams);
   const instances = useAgentsStore((state) => state.instances);
   const projects = useProjectsStore((state) => state.projects);
@@ -193,6 +194,10 @@ export function ArtifactsDrawer({
   const revertChange = async (entry: ChangedFileEntry): Promise<void> => {
     const bridge = window.agenthub;
     if (!bridge) return;
+    if (entry.kind === "patch" && entry.comparisonUnavailable) {
+      toast.error(t("sessions.drawers.noDiffDetail"));
+      return;
+    }
     const basePaths = projectRoot ? [projectRoot] : [];
     setReverting(true);
     try {
@@ -202,6 +207,10 @@ export function ArtifactsDrawer({
           return;
         }
         const read = await bridge.files.readText({ path: entry.path, basePaths });
+        if (read.ok && read.truncated) {
+          toast.error(t("sessions.drawers.revertTruncated"));
+          return;
+        }
         if (!read.ok) {
           toast.error(t("sessions.drawers.revertFailed"));
           return;
@@ -236,6 +245,10 @@ export function ArtifactsDrawer({
       if (!entry.diff) return;
       if (entry.changeType === "added") {
         const read = await bridge.files.readText({ path: entry.path, basePaths });
+        if (read.ok && read.truncated) {
+          toast.error(t("sessions.drawers.revertTruncated"));
+          return;
+        }
         if (!read.ok || !sameContent(read.content, patchFileImages(entry.diff).after)) {
           toast.error(t("sessions.drawers.revertFailed"));
           return;
@@ -249,25 +262,18 @@ export function ArtifactsDrawer({
         return;
       }
       if (entry.changeType === "deleted") {
-        // The file is gone, so resolve the path without readText and restore it.
-        const absolute = /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(entry.path)
-          ? entry.path
-          : projectRoot
-            ? `${projectRoot.replace(/[\\/]+$/, "")}/${entry.path}`
-            : "";
-        if (!absolute) {
-          toast.error(t("sessions.drawers.revertFailed"));
-          return;
-        }
-        const write = await bridge.files.writeText({ path: absolute, content: patchFileImages(entry.diff).before });
-        if (!write.ok) {
-          toast.error(write.message ?? t("sessions.drawers.revertFailed"));
-          return;
-        }
-        toast.success(t("sessions.drawers.revertDone"));
+        // The bridge has no atomic create-if-absent operation. A stale deletion
+        // patch must never overwrite a file recreated by the user or another run.
+        toast.error(locale === "zh-CN"
+          ? "请手动恢复已删除文件，避免覆盖后来创建的内容。"
+          : "Restore deleted files manually to avoid overwriting newer content.");
         return;
       }
       const read = await bridge.files.readText({ path: entry.path, basePaths });
+      if (read.ok && read.truncated) {
+        toast.error(t("sessions.drawers.revertTruncated"));
+        return;
+      }
       if (!read.ok) {
         toast.error(t("sessions.drawers.revertFailed"));
         return;
@@ -359,6 +365,16 @@ export function ArtifactsDrawer({
   }, [open, focusPath, changedFiles]);
 
   const filtered = artifacts.filter((artifact) => artifact.kind === tab);
+  const comparisonArtifacts = [
+    ...artifacts,
+    ...sessions.filter((item) => item.parentSessionId === sessionId)
+      .flatMap((item) => allArtifacts[item.id] ?? [])
+  ].filter((artifact) => artifact.kind === "diff" && artifact.content);
+  const filesystemComparisons = comparisonArtifacts.filter((artifact) => artifact.diffSource === "filesystem");
+  const providerComparisons = comparisonArtifacts.filter((artifact) => artifact.diffSource === "provider");
+  const comparisonUnavailable = artifacts.some((artifact) => artifact.comparisonUnavailable)
+    || sessions.some((item) => item.parentSessionId === sessionId
+      && allArtifacts[item.id]?.some((artifact) => artifact.comparisonUnavailable));
 
   if (!open) return <></>;
   return (
@@ -368,9 +384,24 @@ export function ArtifactsDrawer({
           <TabBar aria-label={t("sessions.drawers.artifacts")} value={tab} onValueChange={setTab} items={tabs} />
         </div>
 
+        {tab === "diff" && filesystemComparisons.length > 0 && (
+          <ComparisonSourcePanel artifacts={filesystemComparisons} locale={locale} />
+        )}
+        {tab === "diff" && providerComparisons.length > 0 && (
+          <ComparisonSourcePanel artifacts={providerComparisons} locale={locale} source="provider" />
+        )}
+        {tab === "diff" && comparisonUnavailable && (
+          <p role="status" className="border-b border-line px-5 py-3 text-sm leading-relaxed text-ink-2">
+            {locale === "zh-CN"
+              ? "部分文件未采集基线或无法读取，不能确认其自动对比结果。工具提供的差异仍可查看。"
+              : "Some files lack a captured baseline or cannot be read, so their automatic comparison is unavailable. Tool-provided diffs remain available."}
+          </p>
+        )}
         {tab === "diff" ? (
           changedFiles.length === 0 ? (
-            <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{t("sessions.drawers.noChanges")}</p>
+            <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{comparisonUnavailable
+              ? (locale === "zh-CN" ? "没有可查看的差异详情" : "No diff details available")
+              : t("sessions.drawers.noChanges")}</p>
           ) : (
             <div className="flex min-h-0 flex-1">
               <ul className="w-40 shrink-0 space-y-1 overflow-y-auto border-r border-line p-3">
@@ -405,10 +436,10 @@ export function ArtifactsDrawer({
                             >
                               {entry.path.split(/[\\/]/).pop()}
                               {entry.edits > 1 && <span className="ml-1 text-[10px] text-ink-3">×{entry.edits}</span>}
-                              <span className="ml-1.5 font-mono text-[10px]">
+                              {!(entry.kind === "patch" && entry.comparisonUnavailable) && <span className="ml-1.5 font-mono text-[10px]">
                                 <span className="text-ok">+{stats.added}</span>{" "}
                                 <span className="text-danger">-{stats.removed}</span>
-                              </span>
+                              </span>}
                             </button>
                           </li>
                         );
@@ -421,10 +452,14 @@ export function ArtifactsDrawer({
                 {(() => {
                   const selected = changedFiles[selectedFile];
                   if (!selected) {
-                    return <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noChanges")}</p>;
+                    return <p className="px-5 py-10 text-sm text-ink-3">{comparisonUnavailable
+              ? (locale === "zh-CN" ? "没有可查看的差异详情" : "No diff details available")
+              : t("sessions.drawers.noChanges")}</p>;
                   }
                   const diffContent = selected.kind === "patch" ? (
-                    selected.diff ? (
+                    selected.comparisonUnavailable ? (
+                      <p role="status" className="px-5 py-6 text-sm text-ink-2">{locale === "zh-CN" ? "此文件未采集或无法读取，对比结果未知。" : "This file was not captured or could not be read. Its comparison is unavailable."}</p>
+                    ) : selected.diff ? (
                       <DiffView content={selected.diff} />
                     ) : (
                       <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noDiffDetail")}</p>
@@ -491,7 +526,8 @@ export function ArtifactsDrawer({
                         </span>
                         <button
                           type="button"
-                          disabled={reverting}
+                          disabled={reverting || (selected.kind === "patch" && (selected.comparisonUnavailable || selected.changeType === "deleted"))}
+                          title={selected.kind === "patch" && selected.changeType === "deleted" ? (locale === "zh-CN" ? "请手动恢复已删除文件，避免覆盖新内容" : "Restore manually to avoid overwriting newer content") : undefined}
                           onClick={() => {
                             if (!revertArmed) {
                               setRevertArmed(true);
@@ -797,5 +833,39 @@ export function SubagentDrawer({
         )}
       </div>
     </Drawer>
+  );
+}
+
+/** Mount potentially large comparison text only when explicitly opened. */
+function ComparisonSourcePanel({ artifacts, locale, source = "filesystem" }: {
+  artifacts: { id: string; name: string; content: string }[];
+  locale: string;
+  source?: "filesystem" | "provider";
+}): JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const [selectedId, setSelectedId] = useState<string>();
+  const selected = artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts.at(-1);
+  return (
+    <section className="shrink-0 border-b border-line">
+      <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}
+        className="flex w-full items-center justify-between px-5 py-3 text-left text-sm text-ink-2 hover:bg-card-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+        <span>{source === "provider"
+          ? (locale === "zh-CN" ? "Agent 差异原文" : "Agent diff source")
+          : (locale === "zh-CN" ? "文件系统对比（采集范围内）" : "Filesystem comparison (captured scope)")}</span>
+        <span aria-hidden="true">{expanded ? "−" : "+"}</span>
+      </button>
+      {expanded && selected && (
+        <div className="border-t border-line">
+          {artifacts.length > 1 && (
+            <select aria-label={locale === "zh-CN" ? "选择对比记录" : "Choose comparison record"}
+              value={selected.id} onChange={(event) => setSelectedId(event.target.value)}
+              className="m-3 max-w-[calc(100%-1.5rem)] rounded-md border border-line bg-card px-2 py-1 text-sm text-ink">
+              {artifacts.map((artifact) => <option key={artifact.id} value={artifact.id}>{artifact.name}</option>)}
+            </select>
+          )}
+          <div className="h-64 overflow-hidden"><DiffView content={selected.content} /></div>
+        </div>
+      )}
+    </section>
   );
 }

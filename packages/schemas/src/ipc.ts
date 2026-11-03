@@ -24,6 +24,9 @@ import type {
   VerificationResult
 } from "@agenthub/domain";
 
+/** Missing permissionMode preserves the stored override; null explicitly resets inheritance. */
+export type SessionUpsertInput = Omit<Session, "permissionMode"> & { permissionMode?: string | null };
+
 export interface MessageAttachmentInput {
   path: string;
   name: string;
@@ -90,7 +93,7 @@ export interface IpcRequestMap {
   "session.list": { input: { projectId: string; memberId?: string }; output: Session[] };
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
   "session.create": { input: { projectId: string; memberId: string; title?: string }; output: Session };
-  "session.upsert": { input: Session; output: Session };
+  "session.upsert": { input: SessionUpsertInput; output: Session };
   "session.delete": { input: { sessionId: string }; output: { removed: true; sessionIds: string[] } };
   "session.followUp": { input: { sessionId: string; text: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };
   "session.followUp.list": { input: { sessionId: string }; output: { items: Array<{ messageId: string; text: string; queuedAt: string }> } };

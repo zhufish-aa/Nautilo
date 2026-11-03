@@ -17,13 +17,15 @@ export function initializeCoreState(): Promise<void> {
     // catalog entry (built-ins + plugins).
     await useProvidersStore.getState().hydrate();
     await Promise.all([
-      useProjectsStore.getState().hydrate(),
+      // Startup needs project metadata, not Git/stack scans of every saved folder.
+      // Project details inspect on demand; explicit rescans remain available.
+      useProjectsStore.getState().hydrate(false),
       useAgentsStore.getState().hydrate(),
       useTeamsStore.getState().hydrate()
     ]);
     // capability.list lazily seeds the built-in office skill pack daemon-side.
     await useProviderToolsStore.getState().load();
-    await hydrateWorkbenchSessions();
+    await hydrateWorkbenchSessions({ hydrateActiveProjectRuns: false });
     await resumeWorkbenchRuns();
     startNotificationWatcher();
   })();

@@ -126,7 +126,7 @@ export class AgentService {
           };
         }
       }
-      return await this.adapters.listModels(instance, context);
+      return await this.adapters.listModels(instance, context, true);
     } catch (error) {
       return {
         providerId,

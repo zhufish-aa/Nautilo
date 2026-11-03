@@ -19,6 +19,7 @@ pub mod codex;
 pub mod json_rpc_process;
 pub mod kimi;
 pub mod model_config;
+mod model_catalog_cache;
 pub mod normalize;
 pub mod plan_interaction;
 pub mod process_adapter;
@@ -56,6 +57,7 @@ pub enum AdapterEvent {
         subagent_dispatch_id: Option<String>,
         raw: Option<Value>,
     },
+    TurnDiff { diff: String, thread_id: String, turn_id: String, raw: Option<Value> },
     File { path: String, change_type: Option<String>, additions: Option<i64>, deletions: Option<i64>, diff: Option<String>, raw: Option<Value> },
     Session { provider_session_id: String, raw: Option<Value> },
     Status { phase: String, raw: Option<Value> },
@@ -283,6 +285,11 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
             output: opt_str("output"),
             subagent_dispatch_id: opt_str("subagentDispatchId"),
             raw,
+        },
+        "turn_diff" => AdapterEvent::TurnDiff {
+            diff: opt_str("diff").unwrap_or_default(),
+            thread_id: opt_str("threadId").unwrap_or_default(),
+            turn_id: opt_str("turnId").unwrap_or_default(), raw,
         },
         "file" => AdapterEvent::File {
             path: opt_str("path").unwrap_or_default(),

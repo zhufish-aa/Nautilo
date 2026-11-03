@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { PROVIDER_API_VERSION, type AgentCliAdapter, type ProviderPluginFactory, type ProviderPluginManifest, type ProviderRegistryEntry } from "@agenthub/provider-sdk";
@@ -144,21 +144,32 @@ export class PluginService {
   }
 
   async uninstall(pluginId: string): Promise<{ removed: true }> {
+    validatePluginId(pluginId);
+    const target = join(this.pluginsDir, pluginId);
+    await validatePluginTarget(this.pluginsDir, target);
     await this.unload(pluginId);
+    // Unload is asynchronous; revalidate before the destructive operation.
+    if (await validatePluginTarget(this.pluginsDir, target)) await rm(target, { recursive: true, force: true });
     this.records.delete(pluginId);
-    await rm(join(this.pluginsDir, pluginId), { recursive: true, force: true });
     return { removed: true };
   }
 
   async setEnabled(pluginId: string, enabled: boolean): Promise<ProviderPluginRecord> {
+    validatePluginId(pluginId);
     const dir = join(this.pluginsDir, pluginId);
+    await validatePluginTarget(this.pluginsDir, dir);
     const manifest = await this.readManifest(dir).catch(() => undefined);
     if (!manifest) throw new CoreError("IPC_NOT_FOUND", { resource: "plugin", id: pluginId });
+    this.validateManifest(manifest, dir);
+    if (manifest.id !== pluginId) throw new CoreError("PLUGIN_INVALID", { reason: "Plugin id does not match its directory" });
+    await validatePluginTarget(this.pluginsDir, dir);
     if (enabled) {
       await rm(join(dir, DISABLED_MARKER), { force: true });
       return this.loadOne(pluginId);
     }
-    await writeFile(join(dir, DISABLED_MARKER), new Date().toISOString(), "utf8");
+    // Marker existence is sufficient. Never truncate an existing file/link.
+    await writeFile(join(dir, DISABLED_MARKER), new Date().toISOString(), { encoding: "utf8", flag: "wx" })
+      .catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
     await this.unload(pluginId);
     const record: ProviderPluginRecord = { id: pluginId, enabled: false, status: "disabled", dir, manifest };
     this.records.set(pluginId, record);
@@ -202,9 +213,13 @@ export class PluginService {
   private async loadOne(pluginId: string): Promise<ProviderPluginRecord> {
     const dir = join(this.pluginsDir, pluginId);
     try {
+      validatePluginId(pluginId);
+      await validatePluginTarget(this.pluginsDir, dir);
       const manifest = await this.readManifest(dir);
       this.validateManifest(manifest, dir);
+      if (manifest.id !== pluginId) throw new CoreError("PLUGIN_INVALID", { reason: "Plugin id does not match its directory" });
       await this.unload(pluginId);
+      await validatePluginTarget(this.pluginsDir, dir);
       // Cache-buster so reinstalling the same plugin path picks up new code.
       const entryUrl = `${pathToFileURL(join(dir, manifest.main)).href}?v=${Date.now()}`;
       const module = await import(entryUrl) as { default?: ProviderPluginFactory };
@@ -272,6 +287,24 @@ export class PluginService {
     // uninstalled (see unload()).
     void dir;
   }
+}
+
+function validatePluginId(pluginId: string): void {
+  if (typeof pluginId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(pluginId)) {
+    throw new CoreError("PLUGIN_INVALID", { reason: "Invalid plugin id" });
+  }
+}
+
+async function validatePluginTarget(rootDir: string, target: string): Promise<boolean> {
+  const info = await lstat(target).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!info) return false;
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new CoreError("PLUGIN_INVALID", { reason: "Plugin directory must not be a symlink" });
+  const [root, actual] = await Promise.all([realpath(rootDir), realpath(target)]);
+  if (dirname(actual) !== root) throw new CoreError("PLUGIN_INVALID", { reason: "Plugin directory escapes plugins root" });
+  return true;
 }
 
 async function exists(path: string): Promise<boolean> {

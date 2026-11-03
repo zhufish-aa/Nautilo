@@ -7,6 +7,7 @@ import { configureWorkbenchSession, switchWorkbenchSessionInstance } from "../..
 import { permissionModesFor } from "../../lib/provider-catalog";
 import { useProvidersStore } from "../../stores/providers";
 import { useAgentsStore } from "../../stores/agents";
+import { toast } from "../../stores/toast";
 import { useSessionsStore } from "../../stores/sessions";
 import { Input } from "../../components/ui/Input";
 
@@ -125,7 +126,7 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
 
   if ((!sessionId && !draft) || !instance) return null;
   const configure = (patch: ComposerConfiguration): void => {
-    if (sessionId) void configureWorkbenchSession(sessionId, patch);
+    if (sessionId) void configureWorkbenchSession(sessionId, patch).catch((error) => toast.error(error instanceof Error ? error.message : String(error)));
     else draft?.onChange(patch);
   };
 

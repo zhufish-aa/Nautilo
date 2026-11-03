@@ -2,6 +2,7 @@ import type {
   AgentStatus,
   DelegationPolicy,
   InstanceModelConfig,
+  Project,
   RunMode,
   SessionStatus,
   TaskStatus,
@@ -124,6 +125,13 @@ export interface UiProject {
   rootPath: string;
   repositoryType: "git" | "none";
   workspaceMode: WorkspaceMode;
+  nonGitDiffMode?: Project["nonGitDiffMode"];
+  /** Persisted settings must survive edits made without a fresh inspection. */
+  defaultBranch?: string;
+  frontendPaths?: string[];
+  backendPaths?: string[];
+  ignoredPaths?: string[];
+  policyId?: string;
   scan?: ProjectScanResult;
   scanning: boolean;
   activeRun?: ActiveRunSummary;
@@ -249,6 +257,8 @@ export interface UiSession {
 }
 
 export type ChangedFile = {
+  comparisonUnavailable?: boolean;
+  reason?: string;
   path: string;
   changeType: "added" | "modified" | "deleted";
   additions: number;
@@ -328,7 +338,7 @@ export type TimelinePayload =
       attempts?: number;
       needsApproval?: boolean;
     }
-  | { kind: "file_change"; files: ChangedFile[] }
+  | { kind: "file_change"; files: ChangedFile[]; source?: "provider"; replace?: boolean }
   | {
       kind: "verification";
       command: string;
@@ -353,6 +363,8 @@ export type TimelinePayload =
   | { kind: "run_status"; run: RunLifecycle };
 
 export interface TimelineEvent {
+  /** Provider/run identity for authoritative cumulative diff replacement. */
+  runId?: string;
   id: string;
   sessionId: string;
   sequence: number;
@@ -361,6 +373,9 @@ export interface TimelineEvent {
 }
 
 export interface SessionArtifact {
+  diffSource?: "provider" | "filesystem";
+  /** A run had no non-Git baseline; absence of a patch is not absence of edits. */
+  comparisonUnavailable?: boolean;
   id: string;
   kind: "diff" | "api_contract" | "test_report" | "commit" | "image" | "file";
   name: string;

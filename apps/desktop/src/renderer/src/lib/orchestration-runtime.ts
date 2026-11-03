@@ -12,7 +12,9 @@ import type {
   VerificationResult
 } from "@agenthub/domain";
 import type { RuntimeEvent } from "@agenthub/event-protocol";
+import type { SessionUpsertInput } from "@agenthub/schemas";
 import { getBridge, requestCore } from "./bridge";
+import { parseProviderDiff } from "./provider-diff";
 import { toDomainAgent, toDomainProject, toDomainTeam, toStandaloneUiSession } from "./core-mappers";
 import type { DesktopAttachment } from "../types/bridge";
 import type { ApprovalScope, QueuedFollowUp, RunLifecycle, SessionArtifact, SessionTask, SessionTarget, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
@@ -31,6 +33,7 @@ const projectSessionSubscriptions = new Map<string, string>();
 const projectSessionSequences = new Map<string, number>();
 const projectSessionEventCache = new Map<string, RuntimeEvent[]>();
 const projectSessionBuilt = new Set<string>();
+const projectSessionDetails = new Map<string, { session: DomainSession; messages: Message[] }>();
 // Project-run view caches mirror the standalone LRU: a run keeps its
 // materialized event journal while it is displayed, recently opened, or still
 // being polled (live). Completed runs the user navigated away from are evicted
@@ -75,13 +78,15 @@ const projectRunUpdatedAt = new Map<string, string>();
 // after it finalizes the project run, so liveness must come from the sessions,
 // not the project run status alone.
 const projectRunActiveRuns = new Map<string, number>();
+const projectRunAwaitingOutput = new Map<string, boolean>();
 
 const STREAMING_DELTA_TYPES = new Set(["agent.message_delta", "agent.thinking_delta"]);
+const SNAPSHOT_EVENT_TYPES = new Set([...STREAMING_DELTA_TYPES, "run.diff_updated"]);
 
 /** Stream identity for delta upserts: run + kind + message segment. */
 function streamKeyOf(event: RuntimeEvent): string {
   const messageId = (event.payload as { messageId?: string } | undefined)?.messageId ?? "";
-  return `${event.runId ?? ""}:${event.type}:${messageId}`;
+  return JSON.stringify([event.sessionId, event.runId ?? "", event.type, messageId]);
 }
 
 /**
@@ -92,21 +97,24 @@ function streamKeyOf(event: RuntimeEvent): string {
  * mid-turn. The cached row for the same stream is replaced instead — keeping
  * the FIRST eventId/timestamp, because timeline rows are keyed by eventId and
  * a changing key remounts the card on every rebuild (visible as flicker).
+ * Provider diffs also replace by run, but retain the latest timestamp so
+ * cross-run file aggregation respects the snapshot update order.
  */
 function mergeEventCache(current: RuntimeEvent[], fresh: RuntimeEvent[]): RuntimeEvent[] {
-  if (!fresh.some((event) => STREAMING_DELTA_TYPES.has(event.type))) return [...current, ...fresh];
+  if (!fresh.some((event) => SNAPSHOT_EVENT_TYPES.has(event.type))) return [...current, ...fresh];
   const next = [...current];
   const streamIndex = new Map<string, number>();
   for (let index = 0; index < current.length; index += 1) {
     const event = current[index]!;
-    if (STREAMING_DELTA_TYPES.has(event.type)) streamIndex.set(streamKeyOf(event), index);
+    if (SNAPSHOT_EVENT_TYPES.has(event.type)) streamIndex.set(streamKeyOf(event), index);
   }
   for (const event of fresh) {
-    if (STREAMING_DELTA_TYPES.has(event.type)) {
+    if (SNAPSHOT_EVENT_TYPES.has(event.type)) {
       const existing = streamIndex.get(streamKeyOf(event));
       if (existing !== undefined) {
         const previous = next[existing]!;
-        next[existing] = { ...event, eventId: previous.eventId, timestamp: previous.timestamp };
+        if (event.type === "run.diff_updated" && previous.sequence > event.sequence) continue;
+        next[existing] = { ...event, eventId: previous.eventId, timestamp: event.type === "run.diff_updated" ? event.timestamp : previous.timestamp };
         continue;
       }
       streamIndex.set(streamKeyOf(event), next.length);
@@ -131,21 +139,33 @@ export async function resumeWorkbenchRuns(): Promise<void> {
   // run with an active AgentRun, not just non-terminal statuses.
   const agentRuns = await requestCore<AgentRun[]>("run.list", {}).catch(() => [] as AgentRun[]);
   const activeProjectRunIds = new Set(agentRuns.filter(shouldPollAgentRun).map((run) => run.projectRunId).filter(Boolean));
-  for (const project of useProjectsStore.getState().projects) {
-    try {
-      const runs = await requestCore<ProjectRun[]>("projectRun.list", { projectId: project.id });
-      for (const projectRun of runs.filter((run) => !["completed", "failed", "cancelled"].includes(run.status) || activeProjectRunIds.has(run.id))) {
-        const hydrated = await hydrateProjectRun(projectRun.id);
-        if (shouldPollProjectRun(hydrated)) schedulePoll(projectRun.id);
+  const projects = useProjectsStore.getState().projects;
+  for (let offset = 0; offset < projects.length; offset += 4) {
+    // Fresh indexes, not the earlier startup snapshot: a new run may have
+    // appeared while standalone sessions were restoring. Only reads overlap.
+    const indexes = await Promise.all(projects.slice(offset, offset + 4).map(async (project) => {
+      try {
+        return { project, runs: await requestCore<ProjectRun[]>("projectRun.list", { projectId: project.id }) };
+      } catch (error) {
+        console.error(`Failed to restore runs for project ${project.id}`, error);
+        return { project, runs: [] as ProjectRun[] };
       }
-    } catch (error) {
-      console.error(`Failed to restore runs for project ${project.id}`, error);
+    }));
+    for (const { project, runs } of indexes) {
+      try {
+        for (const projectRun of runs.filter((run) => !["completed", "failed", "cancelled"].includes(run.status) || activeProjectRunIds.has(run.id))) {
+          const hydrated = await hydrateProjectRun(projectRun.id);
+          if (shouldPollProjectRun(hydrated)) schedulePoll(projectRun.id);
+        }
+      } catch (error) {
+        console.error(`Failed to restore runs for project ${project.id}`, error);
+      }
     }
   }
 }
 
 /** Loads persisted sessions/messages/runs into the three-pane workbench. */
-export async function hydrateWorkbenchSessions(): Promise<void> {
+export async function hydrateWorkbenchSessions({ hydrateActiveProjectRuns = true }: { hydrateActiveProjectRuns?: boolean } = {}): Promise<void> {
   if (!getBridge()) return;
   const projects = useProjectsStore.getState().projects;
   const teams = useTeamsStore.getState().teams;
@@ -154,11 +174,19 @@ export async function hydrateWorkbenchSessions(): Promise<void> {
   const runIds = new Set<string>();
   const terminalRunIds = new Set<string>();
 
-  for (const project of projects) {
-    const [domainSessions, projectRuns] = await Promise.all([
-      requestCore<DomainSession[]>("session.list", { projectId: project.id }),
-      requestCore<ProjectRun[]>("projectRun.list", { projectId: project.id })
-    ]);
+  // Read independent project indexes in bounded batches, then commit them
+  // in project order. No session replay/hydration or writes are parallelized.
+  const indexes: Array<{ project: (typeof projects)[number]; domainSessions: DomainSession[]; projectRuns: ProjectRun[] }> = [];
+  for (let offset = 0; offset < projects.length; offset += 4) {
+    indexes.push(...await Promise.all(projects.slice(offset, offset + 4).map(async (project) => {
+      const [domainSessions, projectRuns] = await Promise.all([
+        requestCore<DomainSession[]>("session.list", { projectId: project.id }),
+        requestCore<ProjectRun[]>("projectRun.list", { projectId: project.id })
+      ]);
+      return { project, domainSessions, projectRuns };
+    })));
+  }
+  for (const { project, domainSessions, projectRuns } of indexes) {
     const runs = new Map(projectRuns.map((run) => [run.id, run]));
     const active = projectRuns.find((run) => !["completed", "failed", "cancelled"].includes(run.status));
     const activeTeam = active?.teamId ? teams.find((team) => team.id === active.teamId) : undefined;
@@ -201,7 +229,7 @@ export async function hydrateWorkbenchSessions(): Promise<void> {
   // for the app's lifetime. resumeWorkbenchRuns() right after this handles
   // the live runs (non-terminal or with active child AgentRuns).
   const activeProjectRunIds = new Set(allRuns.filter(shouldPollAgentRun).map((run) => run.projectRunId).filter(Boolean));
-  for (const projectRunId of runIds) {
+  for (const projectRunId of hydrateActiveProjectRuns ? runIds : []) {
     if (!terminalRunIds.has(projectRunId) || activeProjectRunIds.has(projectRunId)) {
       await hydrateProjectRun(projectRunId);
     }
@@ -209,12 +237,13 @@ export async function hydrateWorkbenchSessions(): Promise<void> {
 }
 
 export async function sendWorkbenchMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], editMessageId?: string): Promise<void> {
+  await sessionConfigWrites.get(sessionId);
   const state = useSessionsStore.getState();
   const session = state.sessions.find((item) => item.id === sessionId);
-  if (!session) return;
+  if (!session) throw new Error(`Session ${sessionId} is missing`);
   if (!getBridge()) {
     state._append(sessionId, { kind: "error", code: "CORE_UNAVAILABLE", message: "Core Daemon 仅在 Electron 桌面端可用。", retryable: false });
-    return;
+    throw new Error("Core Daemon is unavailable");
   }
   const attachmentViews = attachments.map((attachment) => ({ ...attachment }));
   if (editMessageId) state._patchEvent(sessionId, `message-${editMessageId}`, { text, attachments: attachmentViews, editedAt: new Date().toISOString() });
@@ -222,6 +251,8 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
   state._append(sessionId, { kind: "activity", phase: "queued" });
   state._setForeground(sessionId, { status: "running" });
 
+  let acceptedRunId: string | undefined;
+  let acceptedProjectRunId: string | undefined;
   try {
     await syncProjectAndAgents(session);
     if (session.target.type === "agent" && session.target.teamId) {
@@ -231,6 +262,8 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
         const domainSession = toDomainSession(session);
         await requestCore<DomainSession>("session.upsert", domainSession);
         const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text, attachments, editMessageId });
+        acceptedRunId = result.runId;
+        acceptedProjectRunId = session.projectRunId;
         state._setActiveAgentRun(sessionId, result.runId);
         await hydrateProjectRun(session.projectRunId);
         schedulePoll(session.projectRunId);
@@ -248,6 +281,7 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
         sessionId: session.id,
         attachments
       });
+      acceptedProjectRunId = result.projectRun.id;
       state._upsertExternalSession(toUiSession(result.mainSession, result.projectRun, team));
       state._setRunning(sessionId, { status: "running" });
       await hydrateProjectRun(result.projectRun.id);
@@ -258,12 +292,22 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
     const domainSession = toDomainSession(session);
     await requestCore<DomainSession>("session.upsert", domainSession);
     const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text, attachments, editMessageId });
+    acceptedRunId = result.runId;
     state._setActiveAgentRun(sessionId, result.runId);
     await hydrateStandaloneSession(session, result.runId);
     scheduleStandalonePoll(sessionId, result.runId);
   } catch (error) {
+    // Acceptance and view synchronization are different outcomes. A failed
+    // hydrate must not invite the composer to resend an already accepted turn.
+    if (acceptedRunId || acceptedProjectRunId) {
+      appendSyncErrorThrottled(sessionId, `前端同步失败: ${error instanceof Error ? error.message : String(error)}`);
+      if (acceptedProjectRunId) schedulePoll(acceptedProjectRunId);
+      else if (acceptedRunId) scheduleStandalonePoll(sessionId, acceptedRunId, true);
+      return;
+    }
     state._append(sessionId, { kind: "error", code: "IPC_INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error), retryable: true });
     state._setForeground(sessionId, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
+    throw error;
   }
 }
 
@@ -421,13 +465,31 @@ export async function deleteWorkbenchSession(sessionId: string): Promise<void> {
   store.removeSessions([...deleted]);
 }
 
+const sessionConfigWrites = new Map<string, Promise<void>>();
+
 export async function configureWorkbenchSession(
   sessionId: string,
   patch: { model?: string; reasoningEffort?: string; serviceTier?: string; permissionMode?: string }
 ): Promise<void> {
-  const updated = useSessionsStore.getState()._configureSession(sessionId, patch);
-  if (!updated || !getBridge()) return;
-  await requestCore<DomainSession>("session.upsert", toDomainSession(updated));
+  const previous = sessionConfigWrites.get(sessionId) ?? Promise.resolve();
+  const write = previous.catch(() => {}).then(async () => {
+    const state = useSessionsStore.getState();
+    const session = state.sessions.find((item) => item.id === sessionId);
+    if (!session) throw new Error(`Session ${sessionId} is missing`);
+    if (!getBridge()) throw new Error("Core Daemon is unavailable");
+    try {
+      // Serialize edits and only publish a configuration the daemon saved.
+      // Failed permission changes leave the previous visible value intact.
+      await requestCore<DomainSession>("session.upsert", toDomainSession({ ...session, ...patch }));
+      state._configureSession(sessionId, patch);
+    } catch (error) {
+      state._append(sessionId, { kind: "error", code: "SESSION_CONFIG_FAILED", message: error instanceof Error ? error.message : String(error), retryable: true });
+      throw error;
+    }
+  });
+  sessionConfigWrites.set(sessionId, write);
+  try { await write; }
+  finally { if (sessionConfigWrites.get(sessionId) === write) sessionConfigWrites.delete(sessionId); }
 }
 
 /**
@@ -478,6 +540,7 @@ function clearSessionRuntime(sessionId: string): void {
   projectSessionSequences.delete(sessionId);
   projectSessionEventCache.delete(sessionId);
   projectSessionBuilt.delete(sessionId);
+  projectSessionDetails.delete(sessionId);
   followUpListSynced.delete(sessionId);
   useInteractionsStore.getState()._removeSessions([sessionId]);
 }
@@ -591,11 +654,13 @@ function evictProjectRunViewCaches(): void {
     const sessions = sessionsOfProjectRun(runId);
     if (sessions.some((session) => standaloneDisplayed.has(session.id))) continue;
     projectRunHydrated.delete(runId);
+    projectRunAwaitingOutput.delete(runId);
     for (const session of sessions) {
       projectSessionEventCache.delete(session.id);
       projectSessionSequences.delete(session.id);
       projectSessionSubscriptions.delete(session.id);
       projectSessionBuilt.delete(session.id);
+      projectSessionDetails.delete(session.id);
       followUpListSynced.delete(session.id);
       useSessionsStore.getState()._evictSessionView(session.id);
     }
@@ -609,6 +674,9 @@ function evictProjectRunViewCaches(): void {
  */
 export async function ensureProjectRunHydrated(projectRunId: string): Promise<void> {
   if (!getBridge()) return;
+  // Explicit open/refresh must observe edits even when legacy metadata has
+  // no reliable revision timestamp (or two updates share a millisecond).
+  for (const session of sessionsOfProjectRun(projectRunId)) projectSessionDetails.delete(session.id);
   touchProjectRunRecent(projectRunId);
   projectRunHydrated.add(projectRunId);
   try {
@@ -627,8 +695,6 @@ async function syncProjectAndAgents(session: UiSession): Promise<void> {
   const project = useProjectsStore.getState().projects.find((item) => item.id === session.projectId);
   if (!project) throw new Error(`Project ${session.projectId} is missing`);
   const domainProject = toDomainProject(project);
-  await requestCore<Project>("project.upsert", domainProject);
-
   const agents = useAgentsStore.getState();
   const target = session.target;
   let requiredIds: string[];
@@ -638,15 +704,22 @@ async function syncProjectAndAgents(session: UiSession): Promise<void> {
     ...(target.teamId ? requireUiTeam(target.teamId).members.filter((member) => member.enabled).map((member) => member.agentInstanceId) : [])
   ];
   else requiredIds = [requireUiTeam(target.teamId).members.find((member) => member.id === target.memberId)?.agentInstanceId ?? ""];
-  for (const instanceId of new Set(requiredIds.filter(Boolean))) {
+  const domainAgents = [...new Set(requiredIds.filter(Boolean))].map((instanceId) => {
     const instance = agents.instances.find((item) => item.id === instanceId);
     if (!instance) throw new Error(`Agent instance ${instanceId} is missing`);
     if (!instance.executable) throw new Error(`${instance.displayName}: CLI executable has not been configured`);
-    await requestCore<AgentInstance>("agent.upsert", toDomainAgent(instance));
-  }
+    return toDomainAgent(instance);
+  });
+  // Independent prerequisites: do not add one IPC round trip per agent to
+  // every turn. Validate the complete set before writing, and still await all
+  // writes before session.upsert/send (which depend on these entities).
+  await Promise.all([
+    requestCore<Project>("project.upsert", domainProject),
+    ...domainAgents.map((agent) => requestCore<AgentInstance>("agent.upsert", agent))
+  ]);
 }
 
-function toDomainSession(session: UiSession, _team?: UiTeam): DomainSession {
+function toDomainSession(session: UiSession, _team?: UiTeam): SessionUpsertInput {
   const memberId = session.target.type === "member"
     ? session.target.memberId
     : session.target.type === "agent" ? session.target.instanceId : "legacy-team-main";
@@ -662,7 +735,7 @@ function toDomainSession(session: UiSession, _team?: UiTeam): DomainSession {
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     serviceTier: session.serviceTier,
-    permissionMode: session.permissionMode?.trim() || undefined,
+    permissionMode: session.permissionMode?.trim() || null,
     mode: session.mode,
     title: session.title,
     status: session.status,
@@ -674,12 +747,24 @@ function toDomainSession(session: UiSession, _team?: UiTeam): DomainSession {
 }
 
 async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: string): Promise<AgentRun | undefined> {
-  const [detail, replay, runs, artifacts] = await Promise.all([
+  const reads = [
     requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: uiSession.id }),
-    replayStandaloneEvents(uiSession.id),
+    replayStandaloneEvents(uiSession.id).then((replay) => {
+      // Commit the replay alongside its cursor even if another metadata read
+      // fails. A retry must not skip already acknowledged historical events.
+      standaloneEventCache.set(uiSession.id, mergeEventCache(standaloneEventCache.get(uiSession.id) ?? [], replay.events));
+      ingestInteractionEvents(replay.events);
+      ingestFollowUpEvents(uiSession.id, replay.events);
+    }),
     requestCore<AgentRun[]>("run.list", { sessionId: uiSession.id }),
     requestCore<Artifact[]>("artifact.list", { sessionId: uiSession.id })
-  ]);
+  ] as const;
+  const [detail, , runs, artifacts] = await Promise.all(reads).catch(async (error: unknown) => {
+    // Do not overlap recovery with an earlier replay still committing its
+    // cursor/cache. All reads are finite metadata/replay requests, not waits.
+    await Promise.allSettled(reads);
+    throw error;
+  });
   const knownRun = knownRunId ? runs.find((item) => item.id === knownRunId) : undefined;
   const activeRun = runs.find(shouldPollAgentRun);
   const run = knownRun && shouldPollAgentRun(knownRun) ? knownRun : activeRun ?? knownRun ?? runs[0];
@@ -693,10 +778,7 @@ async function hydrateStandaloneSession(uiSession: UiSession, knownRunId?: strin
   // sequence): merge into the existing cache. A bare replace would shrink
   // the journal to just the newest events and wipe every older turn's fold
   // content from the timeline.
-  standaloneEventCache.set(uiSession.id, mergeEventCache(standaloneEventCache.get(uiSession.id) ?? [], replay.events));
   standaloneArtifactCache.set(uiSession.id, artifacts);
-  ingestInteractionEvents(replay.events);
-  ingestFollowUpEvents(uiSession.id, replay.events);
   await syncQueuedFollowUps(uiSession.id);
   store._upsertExternalSession(toStandaloneUiSession(detail.session));
   renderStandaloneCache(uiSession.id);
@@ -753,6 +835,20 @@ function mergeStandaloneEvents(sessionId: string, events: RuntimeEvent[]): void 
   // makes nested reasoning updates invisible to a last-row scroll trigger.
   // Structural bursts still use the coalesced full rebuild below.
   if (fresh.every((event) => STREAMING_DELTA_TYPES.has(event.type)) && applyStandaloneDeltas(sessionId, fresh)) return;
+  // The first text/reasoning row cannot use the patch path. Do not leave
+  // that first visible output behind an already queued structural rebuild.
+  // Limit this exception to the first stream of each kind per run, not every
+  // segment/tool transition; sustained structural traffic remains throttled.
+  const firstOutput = fresh.some((event) => STREAMING_DELTA_TYPES.has(event.type)
+    && !current.some((previous) => previous.runId === event.runId && previous.type === event.type));
+  if (firstOutput && standaloneHydrated.has(sessionId)) {
+    const frame = standaloneRenderFrames.get(sessionId);
+    if (frame !== undefined) clearTimeout(frame);
+    standaloneRenderFrames.delete(sessionId);
+    standaloneLastRebuildAt.set(sessionId, Date.now());
+    renderStandaloneCache(sessionId);
+    return;
+  }
   scheduleStandaloneRender(sessionId);
 }
 
@@ -874,7 +970,8 @@ function sameTasks(current: SessionTask[] | undefined, next: SessionTask[]): boo
 function sameArtifacts(current: SessionArtifact[] | undefined, next: SessionArtifact[]): boolean {
   return !!current && current.length === next.length && current.every((artifact, index) => {
     const other = next[index];
-    return artifact.id === other.id && artifact.kind === other.kind && artifact.name === other.name && artifact.content === other.content;
+    return artifact.id === other.id && artifact.kind === other.kind && artifact.name === other.name && artifact.content === other.content
+      && artifact.comparisonUnavailable === other.comparisonUnavailable && artifact.diffSource === other.diffSource;
   });
 }
 
@@ -939,6 +1036,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   const sessions = allSessions.filter((session) => session.projectRunId === projectRunId);
   const store = useSessionsStore.getState();
   let activeRunCount = 0;
+  let awaitingOutput = false;
 
   // Only sessions a workbench is showing (plus their descendants) need a
   // materialized timeline. Everything else still streams its raw event
@@ -963,12 +1061,29 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   }
 
   for (const session of sessions) {
-    const [detail, feed] = await Promise.all([
-      requestCore<{ session: DomainSession; messages: Message[] }>("session.get", { sessionId: session.id }),
+    const needed = neededSessionIds.has(session.id);
+    const cached = projectSessionDetails.get(session.id);
+    const activeSessionRun = runs.find((run) => run.sessionId === session.id && shouldPollAgentRun(run));
+    // Preserve the existing parallel read latency for live visible turns.
+    // Hidden sessions only need session.list metadata; idle history is read
+    // again on any event/revision change, explicit refresh, or first display.
+    const live = activeSessionRun && ["created", "starting", "running", "cancelling"].includes(activeSessionRun.status);
+    const prefetch = needed && (live || !cached || !session.updatedAt
+      || cached.session.updatedAt !== session.updatedAt || !projectSessionBuilt.has(session.id));
+    const readDetail = (): Promise<{ session: DomainSession; messages: Message[] }> =>
+      requestCore("session.get", { sessionId: session.id });
+    const [feed, , prefetched] = await Promise.all([
       projectSessionEvents(session.id),
-      syncQueuedFollowUps(session.id)
+      syncQueuedFollowUps(session.id),
+      prefetch ? readDetail() : Promise.resolve(undefined)
     ]);
-    const uiSession = toUiSession(detail.session, projectRun, team);
+    const refreshed = prefetched ?? (needed && (feed.hasNew || !projectSessionBuilt.has(session.id)) ? await readDetail() : undefined);
+    if (refreshed) projectSessionDetails.set(session.id, refreshed);
+    const detail = refreshed ?? (needed ? cached : undefined) ?? { session, messages: [] };
+    // Metadata comes from this tick even when its unchanged message history
+    // can be reused. Waiting/terminal/cancel/permission state never goes stale.
+    const domainSession = refreshed?.session ?? session;
+    const uiSession = toUiSession(domainSession, projectRun, team);
     const sessionArtifacts = artifacts.filter((artifact) => artifact.sessionId === session.id);
     const currentSession = store.sessions.find((item) => item.id === session.id);
     if (!currentSession || !sameUiSession(currentSession, uiSession)) {
@@ -979,7 +1094,9 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     // Rebuilding the timeline walks the full event history; skip it entirely
     // on poll ticks that delivered no new events, and for sessions no
     // workbench is showing (their timeline materializes on first open).
-    const timelineDirty = neededSessionIds.has(session.id) && (feed.hasNew || !projectSessionBuilt.has(session.id));
+    const messageRevisionChanged = refreshed && (!cached || !refreshed.session.updatedAt
+      || refreshed.session.updatedAt !== cached.session.updatedAt);
+    const timelineDirty = needed && (feed.hasNew || messageRevisionChanged || !projectSessionBuilt.has(session.id));
     if (timelineDirty) {
       store._replaceEvents(session.id, buildTimeline(detail.messages, feed.events, projectRun, team, tasks, sessionArtifacts, verifications, session.id === projectRun.mainSessionId));
       store._replaceContextUsage(session.id, latestContextUsage(feed.events));
@@ -1008,9 +1125,10 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     const sessionRuns = runs.filter((run) => run.sessionId === session.id);
     const activeRun = sessionRuns.find(shouldPollAgentRun);
     if (activeRun) activeRunCount += 1;
-    if (!sameLifecycle(store.foreground[session.id], activeRun ? standaloneLifecycle(detail.session, activeRun) : undefined)) {
+    if (neededSessionIds.has(session.id) && isAwaitingFirstOutput(activeRun, feed.events)) awaitingOutput = true;
+    if (!sameLifecycle(store.foreground[session.id], activeRun ? standaloneLifecycle(domainSession, activeRun) : undefined)) {
       changed = true;
-      store._setForeground(session.id, activeRun ? standaloneLifecycle(detail.session, activeRun) : undefined);
+      store._setForeground(session.id, activeRun ? standaloneLifecycle(domainSession, activeRun) : undefined);
     }
     if (store.activeAgentRunIds[session.id] !== activeRun?.id) {
       changed = true;
@@ -1023,6 +1141,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   }
   const root = projectRun.mainSessionId;
   projectRunActiveRuns.set(projectRunId, activeRunCount);
+  projectRunAwaitingOutput.set(projectRunId, awaitingOutput);
   if (root) {
     const nextRunning = projectLifecycle(projectRun);
     if (!sameLifecycle(store.running[root], nextRunning)) {
@@ -1049,6 +1168,7 @@ async function replayProjectSessionEvents(sessionId: string): Promise<{ events: 
     projectSessionSequences.delete(sessionId);
     projectSessionEventCache.delete(sessionId);
     projectSessionBuilt.delete(sessionId);
+    projectSessionDetails.delete(sessionId);
     const subscription = await requestCore<{ subscriptionId: string }>("event.subscribe", { sessionId });
     projectSessionSubscriptions.set(sessionId, subscription.subscriptionId);
     return requestCore<{ events: RuntimeEvent[]; lastSequence: number }>("event.replay", { subscriptionId: subscription.subscriptionId, afterSequence: 0 });
@@ -1107,6 +1227,18 @@ function appendSyncErrorThrottled(sessionId: string, message: string): void {
   });
 }
 
+/** Keep visible starting turns responsive without accelerating idle/approval
+ * waits or background sessions. Match by run id so an older turn's output
+ * cannot hide the next queued turn's first-token wait. */
+function isAwaitingFirstOutput(run: AgentRun | undefined, events: RuntimeEvent[]): boolean {
+  if (!run || !["created", "starting", "running"].includes(run.status)) return false;
+  return !events.some((event) => event.runId === run.id && (
+    STREAMING_DELTA_TYPES.has(event.type) || event.type === "agent.message"
+    || event.type === "agent.thinking_summary" || event.type === "tool.started"
+    || event.type === "command.started" || event.type === "run.diff_updated"
+  ));
+}
+
 function schedulePoll(projectRunId: string): void {
   const existing = projectPollers.get(projectRunId);
   if (existing) clearTimeout(existing);
@@ -1121,6 +1253,7 @@ function schedulePoll(projectRunId: string): void {
         projectRunActivity.delete(projectRunId);
         projectRunUpdatedAt.delete(projectRunId);
         projectRunActiveRuns.delete(projectRunId);
+        projectRunAwaitingOutput.delete(projectRunId);
         // A run that just went terminal no longer re-materializes itself on
         // poll ticks; drop its caches now unless it is displayed or recent.
         evictProjectRunViewCaches();
@@ -1128,7 +1261,8 @@ function schedulePoll(projectRunId: string): void {
       }
       // Any change observed by the tick resets the streak; otherwise back off
       // gradually (500ms → 1s → 2s cap) so idle runs stop hammering the daemon.
-      idleStreak = (projectRunActivity.get(projectRunId) ?? 0) !== activityBefore ? 0 : idleStreak + 1;
+      idleStreak = (projectRunActivity.get(projectRunId) ?? 0) !== activityBefore
+        || projectRunAwaitingOutput.get(projectRunId) ? 0 : idleStreak + 1;
     } catch (error) {
       console.error("Failed to synchronize orchestration run", error);
       // Surface frontend sync failures in the timeline: a silent poll error
@@ -1148,7 +1282,16 @@ function schedulePoll(projectRunId: string): void {
   projectPollers.set(projectRunId, setTimeout(() => void tick(), POLL_FIRST_TICK_MS));
 }
 
-function scheduleStandalonePoll(sessionId: string, runId: string): void {
+function needsStandalonePersistenceSync(events: RuntimeEvent[]): boolean {
+  // Native diff snapshots already contain the live view. Re-fetching all
+  // messages/artifacts for each snapshot defeats structural render batching.
+  // Message/terminal syncs still load the final raw diff artifact.
+  return events.some((event) => event.type === "agent.message"
+    || (event.type === "artifact.created" && event.payload.kind !== "diff")
+    || event.type === "run.completed" || event.type === "run.failed");
+}
+
+function scheduleStandalonePoll(sessionId: string, runId: string, hydrateBeforeWait = false): void {
   const existing = standaloneStreams.get(sessionId);
   if (existing) existing.cancelled = true;
   const controller = { cancelled: false };
@@ -1158,6 +1301,12 @@ function scheduleStandalonePoll(sessionId: string, runId: string): void {
       try {
         const session = useSessionsStore.getState().sessions.find((item) => item.id === sessionId);
         if (!session) break;
+        if (hydrateBeforeWait) {
+          const run = await hydrateStandaloneSession(session, runId);
+          hydrateBeforeWait = false;
+          if ((!run || !shouldPollAgentRun(run)) && !(useSessionsStore.getState().queuedFollowUps[sessionId]?.length)) break;
+          if (controller.cancelled) break;
+        }
         if (!standaloneSubscriptions.has(sessionId)) await replayStandaloneEvents(sessionId);
         const subscriptionId = standaloneSubscriptions.get(sessionId);
         if (!subscriptionId) break;
@@ -1170,7 +1319,7 @@ function scheduleStandalonePoll(sessionId: string, runId: string): void {
         standaloneSequences.set(sessionId, update.lastSequence);
         if (!update.events.length) continue;
         mergeStandaloneEvents(sessionId, update.events);
-        const needsPersistenceSync = update.events.some((event) => event.type === "agent.message" || event.type === "artifact.created" || event.type === "run.completed" || event.type === "run.failed");
+        const needsPersistenceSync = needsStandalonePersistenceSync(update.events);
         if (needsPersistenceSync) {
           // Light refresh: the event cache is already fed incrementally by
           // this very poll loop, so a full replay here would only re-transfer
@@ -1205,7 +1354,7 @@ function hasQueuedFollowUpForProject(projectRunId: string): boolean {
 
 function buildStandaloneTimeline(messages: Message[], events: RuntimeEvent[], artifacts: Artifact[]): TimelineEvent[] {
   const timeline = messageTimeline(messages, undefined, artifacts);
-  const changedFiles = new Map(artifacts.flatMap(parseDiffArtifact).map((file) => [file.path, file]));
+  const changedFiles = diffArtifactsByScope(artifacts);
   appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, undefined, [], new Map(), new Map(artifacts.map((artifact) => [artifact.id, artifact])), new Map(), changedFiles));
   return groupToolTimeline(timeline
     .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence))
@@ -1233,7 +1382,7 @@ function buildTimeline(
   const resolvedApprovals = new Map(events.filter((event) => event.type === "approval.resolved").map((event) => [event.payload.approvalId, event.payload.decision]));
   const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
   const verificationsById = new Map(verifications.map((verification) => [verification.id, verification]));
-  const changedFiles = new Map(artifacts.flatMap(parseDiffArtifact).map((file) => [file.path, file]));
+  const changedFiles = diffArtifactsByScope(artifacts);
   const timeline = messageTimeline(messages, team, artifacts);
   appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, team, tasks, resolvedApprovals, artifactsById, verificationsById, changedFiles));
   if (isMain) {
@@ -1288,12 +1437,16 @@ function appendRuntimeEvents(
   const streamingMessageRows = new Map<number, string>();
 
   const push = (event: RuntimeEvent, data: TimelinePayload): number => {
-    timeline.push({ id: event.eventId, sessionId: String(event.sessionId), sequence: event.sequence, timestamp: event.timestamp, data });
+    timeline.push({ id: event.eventId, sessionId: String(event.sessionId), runId: event.runId, sequence: event.sequence, timestamp: event.timestamp, data });
     return timeline.length - 1;
   };
 
   // Provider-native sub-agent activity is attached to its dispatch card
   // instead of appearing as top-level rows.
+  const nativeDiffs = new Map<string, RuntimeEvent>();
+  for (const event of events) {
+    if (event.type === "run.diff_updated") nativeDiffs.set(JSON.stringify([event.sessionId, event.runId]), event);
+  }
   const subagentActivities = collectSubagentActivities(events);
   const withActivities = (subagent: Extract<TimelinePayload, { kind: "tool_activity" }>["subagent"], callId?: string): typeof subagent => {
     if (!subagent) return subagent;
@@ -1314,6 +1467,8 @@ function appendRuntimeEvents(
 
   for (const event of events) {
     const runId = String(event.runId ?? "session");
+    const nativeDiff = nativeDiffs.get(JSON.stringify([event.sessionId, event.runId]));
+    if (nativeDiff && (event.type === "file.changed" || (event.type === "run.diff_updated" && nativeDiff !== event))) continue;
     if (subagentDispatchIdOf(event)) continue;
     if (hiddenInternalRuns.has(runId)) continue;
     if (event.type === "run.completed" && hiddenCompletions.has(runId)) continue;
@@ -1506,6 +1661,7 @@ function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact
   return messages.filter(isVisibleTimelineMessage).map((message, index) => ({
     id: `message-${message.id}`,
     sessionId: message.sessionId,
+    runId: message.runId,
     sequence: index + 1,
     timestamp: message.createdAt,
     data: {
@@ -1568,6 +1724,7 @@ function runtimePayload(
   // every update in the timeline produces a stream of meaningless token rows.
   if (event.type === "usage.updated" || event.type === "provider.commands_updated") return undefined;
   if (event.type === "artifact.created") {
+    if (event.payload.kind === "diff") return undefined;
     const artifact = artifacts.get(event.payload.artifactId);
     return {
       kind: "artifact",
@@ -1621,8 +1778,11 @@ function runtimePayload(
     exitCode: event.payload.exitCode,
     output: event.payload.outputSummary ?? ""
   };
+  if (event.type === "run.diff_updated") return {
+    kind: "file_change", source: "provider", replace: true, files: parseProviderDiff(event.payload.diff)
+  };
   if (event.type === "file.changed") {
-    const file = changedFiles.get(event.payload.path);
+    const file = changedFiles.get(JSON.stringify([event.sessionId, event.runId, event.payload.path]));
     return {
       kind: "file_change",
       files: [file
@@ -1747,6 +1907,20 @@ function toActiveRunStatus(projectRun: ProjectRun): "planning" | "executing" | "
   return "executing";
 }
 
+function diffArtifactsByScope(artifacts: Artifact[]): Map<string, GitChangedFile> {
+  return new Map(artifacts.flatMap((artifact) => parseDiffArtifact(artifact).map((file) => [
+    JSON.stringify([artifact.sessionId, artifact.metadata?.runId, file.path]), file
+  ] as const)));
+}
+
+function diffArtifactText(artifact: Artifact): string {
+  try {
+    const parsed = JSON.parse(artifact.content ?? "") as { diff?: unknown };
+    if (typeof parsed.diff === "string") return parsed.diff;
+  } catch { /* Legacy artifacts may only carry their per-file patches. */ }
+  return parseDiffArtifact(artifact).map((file) => file.diff).join("\n");
+}
+
 function parseDiffArtifact(artifact: Artifact): GitChangedFile[] {
   if (artifact.kind !== "diff" || !artifact.content) return [];
   try {
@@ -1760,9 +1934,11 @@ function parseDiffArtifact(artifact: Artifact): GitChangedFile[] {
 function toUiArtifact(artifact: Artifact): SessionArtifact[] {
   if (!["diff", "api_contract", "test_report", "commit", "image", "file"].includes(artifact.kind)) return [];
   const content = artifact.kind === "diff"
-    ? parseDiffArtifact(artifact).map((file) => file.diff).join("\n")
+    ? diffArtifactText(artifact)
     : artifact.content ?? "";
-  return [{ id: artifact.id, kind: artifact.kind as SessionArtifact["kind"], name: artifact.name, content }];
+  return [{ id: artifact.id, kind: artifact.kind as SessionArtifact["kind"], name: artifact.name, content,
+    diffSource: artifact.kind === "diff" && (artifact.metadata?.source === "provider" || artifact.metadata?.source === "filesystem") ? artifact.metadata.source : undefined,
+    comparisonUnavailable: artifact.kind === "diff" && (artifact.metadata?.comparisonUnavailable === true || parseDiffArtifact(artifact).some((file) => file.comparisonUnavailable)) || undefined }];
 }
 
 function buildRawLog(events: RuntimeEvent[], artifacts: Artifact[]): string[] {

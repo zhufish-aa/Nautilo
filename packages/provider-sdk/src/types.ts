@@ -41,6 +41,7 @@ export type AdapterEvent =
   | { kind: "thinking"; text: string; phase?: "delta" | "completed"; messageId?: string; subagentDispatchId?: string; raw?: unknown }
   | { kind: "tool"; callId?: string; name: string; phase?: "started" | "completed"; input?: unknown; output?: unknown; success?: boolean; fileDiff?: AdapterFileDiff; subagentDispatchId?: string; raw?: unknown }
   | { kind: "command"; callId?: string; command: string; phase?: "started" | "completed"; exitCode?: number; output?: string; subagentDispatchId?: string; raw?: unknown }
+  | { kind: "turn_diff"; diff: string; threadId: string; turnId: string; raw?: unknown }
   | { kind: "file"; path: string; changeType?: string; additions?: number; deletions?: number; diff?: string; raw?: unknown }
   | { kind: "session"; providerSessionId: string; raw?: unknown }
   | { kind: "status"; phase: "turn_started" | "turn_completed" | "turn_failed"; raw?: unknown }

@@ -10,6 +10,7 @@ import type {
 
 export type RuntimeEventType =
   | "run.started"
+  | "run.diff_updated"
   | "agent.status"
   | "agent.message_delta"
   | "agent.message"
@@ -63,6 +64,12 @@ export interface SubagentDispatch {
 }
 
 export interface RuntimeEventPayloadMap {
+  "run.diff_updated": {
+    diff: string;
+    providerThreadId: string;
+    providerTurnId: string;
+    source: "provider";
+  };
   "run.started": {
     runId: AgentRunId;
     providerSessionId?: string;
@@ -226,7 +233,7 @@ export interface RuntimeEventPayloadMap {
   };
   "artifact.created": {
     artifactId: ArtifactId;
-    kind: "image" | "file";
+    kind: "image" | "file" | "diff";
     name: string;
     mimeType?: string;
     path?: string;

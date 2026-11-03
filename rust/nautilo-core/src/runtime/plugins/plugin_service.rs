@@ -3,6 +3,7 @@
 //! their adapters. One broken plugin never blocks the daemon.
 
 use std::path::{Path, PathBuf};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
@@ -218,20 +219,26 @@ impl PluginService {
     }
 
     pub async fn uninstall(&self, plugin_id: &str) -> CoreResult<Value> {
-        self.unload(plugin_id).await;
-        self.records.lock().unwrap().remove(plugin_id);
+        validate_plugin_id(plugin_id)?;
         let dir = self.plugins_dir.join(plugin_id);
+        validate_plugin_target(&self.plugins_dir, &dir)?;
+        self.unload(plugin_id).await;
+        // Unload awaits process shutdown: recheck before touching disk.
+        validate_plugin_target(&self.plugins_dir, &dir)?;
         // Do not swallow removal failures: the record is gone but the files
         // remain (and resurrect on restart), which makes uninstall look like
         // it "did nothing".
         remove_dir_all_retry(&dir).map_err(|e| {
             plugin_fail(ErrorCode::PluginRemoveFailed, &dir.to_string_lossy(), format!("删除插件目录失败：{e}"))
         })?;
+        self.records.lock().unwrap().remove(plugin_id);
         Ok(json!({ "removed": true }))
     }
 
     pub async fn set_enabled(&self, plugin_id: &str, enabled: bool) -> CoreResult<Value> {
+        validate_plugin_id(plugin_id)?;
         let dir = self.plugins_dir.join(plugin_id);
+        validate_plugin_target(&self.plugins_dir, &dir)?;
         let manifest = self.read_manifest(&dir).ok();
         let Some(manifest) = manifest else {
             let mut details = Map::new();
@@ -239,11 +246,27 @@ impl PluginService {
             details.insert("id".to_string(), json!(plugin_id));
             return Err(CoreError::details(ErrorCode::IpcNotFound, details));
         };
+        validate_manifest(&manifest, &dir.to_string_lossy())?;
+        if manifest.get("id").and_then(Value::as_str) != Some(plugin_id) {
+            return Err(plugin_fail(ErrorCode::PluginInvalid, &dir.to_string_lossy(), "Plugin id does not match its directory"));
+        }
+        validate_plugin_target(&self.plugins_dir, &dir)?;
         if enabled {
-            let _ = std::fs::remove_file(dir.join(DISABLED_MARKER));
+            match std::fs::remove_file(dir.join(DISABLED_MARKER)) {
+                Ok(()) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(plugin_fail(ErrorCode::PluginInvalid, &dir.to_string_lossy(), error.to_string())),
+            }
             return self.load_one(plugin_id).await;
         }
-        let _ = std::fs::write(dir.join(DISABLED_MARKER), crate::errors::now_iso());
+        // Marker existence is sufficient. create_new never truncates an
+        // existing file or follows a .disabled link outside this directory.
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(DISABLED_MARKER)) {
+            Ok(mut file) => file.write_all(crate::errors::now_iso().as_bytes())
+                .map_err(|error| plugin_fail(ErrorCode::PluginInvalid, &dir.to_string_lossy(), error.to_string()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(error) => return Err(plugin_fail(ErrorCode::PluginInvalid, &dir.to_string_lossy(), error.to_string())),
+        }
         self.unload(plugin_id).await;
         let record = record(plugin_id, false, "disabled", None, &dir, Some(&manifest));
         self.records.lock().unwrap().insert(plugin_id.to_string(), record.clone());
@@ -281,14 +304,20 @@ impl PluginService {
     }
 
     async fn load_one(&self, plugin_id: &str) -> CoreResult<Value> {
+        validate_plugin_id(plugin_id)?;
         let dir = self.plugins_dir.join(plugin_id);
+        validate_plugin_target(&self.plugins_dir, &dir)?;
         let manifest = self.read_manifest(&dir)?;
         if let Err(error) = validate_manifest(&manifest, &dir.to_string_lossy()) {
             let record = record(plugin_id, true, "error", Some(error.to_string()), &dir, None);
             self.records.lock().unwrap().insert(plugin_id.to_string(), record.clone());
             return Ok(record);
         }
+        if manifest.get("id").and_then(Value::as_str) != Some(plugin_id) {
+            return Err(plugin_fail(ErrorCode::PluginInvalid, &dir.to_string_lossy(), "Plugin id does not match its directory"));
+        }
         self.unload(plugin_id).await;
+        validate_plugin_target(&self.plugins_dir, &dir)?;
         let main = manifest.get("main").and_then(Value::as_str).unwrap_or("");
         let executable = resolve_executable(&dir, main);
         match launch_plugin(plugin_id, &executable, &dir).await {
@@ -444,16 +473,57 @@ fn remove_dir_all_retry(dir: &Path) -> std::io::Result<()> {
     Err(last_error.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "remove_dir_all failed")))
 }
 
+fn validate_plugin_id(plugin_id: &str) -> CoreResult<()> {
+    if plugin_id.is_empty() || !plugin_id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || !plugin_id.as_bytes()[0].is_ascii_alphanumeric()
+    {
+        return Err(plugin_fail(ErrorCode::PluginInvalid, plugin_id, "Invalid plugin id"));
+    }
+    Ok(())
+}
+
+fn validate_plugin_target(root: &Path, target: &Path) -> CoreResult<()> {
+    let fail = || plugin_fail(ErrorCode::PluginInvalid, &target.to_string_lossy(), "Plugin directory escapes plugins root or is a symlink");
+    let metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(fail()),
+    };
+    if is_link_metadata(&metadata) || !metadata.is_dir() { return Err(fail()); }
+    let root = std::fs::canonicalize(root).map_err(|_| fail())?;
+    let actual = std::fs::canonicalize(target).map_err(|_| fail())?;
+    if actual.parent() != Some(root.as_path()) { return Err(fail()); }
+    Ok(())
+}
+
+fn is_link_metadata(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() { return true; }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Includes directory junctions and other reparse points.
+        if metadata.file_attributes() & 0x400 != 0 { return true; }
+    }
+    false
+}
+
 /// Clears the read-only attribute on every file below `dir`. Windows refuses
 /// to delete read-only files (os error 5), and plugin dirs copied from source
 /// trees or archives can carry the attribute.
 fn clear_readonly_recursive(dir: &Path) {
+    // Unix can unlink read-only files without chmod. Avoid broadening their
+    // permission bits there, and never traverse links/junctions on Windows.
+    if !cfg!(windows) { return; }
+    let Ok(metadata) = std::fs::symlink_metadata(dir) else { return; };
+    if is_link_metadata(&metadata) || !metadata.is_dir() { return; }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue; };
+            if is_link_metadata(&metadata) { continue; }
+            if metadata.is_dir() {
                 clear_readonly_recursive(&path);
-            } else if let Ok(metadata) = std::fs::metadata(&path) {
+            } else {
                 if metadata.permissions().readonly() {
                     let mut permissions = metadata.permissions();
                     permissions.set_readonly(false);
@@ -476,4 +546,101 @@ fn find_plugin_root(dir: &Path) -> CoreResult<PathBuf> {
         }
     }
     Err(plugin_fail(ErrorCode::PluginManifestMissing, &dir.to_string_lossy(), "插件包中缺少 agenthub-plugin.json"))
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("nautilo-plugin-boundary-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(path.join("data/plugins")).unwrap();
+            std::fs::create_dir_all(path.join("outside")).unwrap();
+            std::fs::write(path.join("outside/keep.txt"), b"keep").unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[tokio::test]
+    async fn uninstall_rejects_unsafe_ids_and_preserves_siblings() {
+        let fixture = Fixture::new();
+        let service = PluginService::new(&fixture.0.join("data"), AdapterRegistry::default());
+        for id in ["", ".", "..", "../../outside", "..\\..\\outside", "/tmp/outside", "C:\\outside", "valid/../outside"] {
+            assert!(service.uninstall(id).await.is_err(), "accepted {id}");
+            assert!(fixture.0.join("outside/keep.txt").exists());
+        }
+        let target = fixture.0.join("data/plugins/valid-provider-2");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("plugin.txt"), b"fixture").unwrap();
+        assert!(service.uninstall("valid-provider-2").await.is_ok());
+        assert!(!target.exists());
+        assert!(service.uninstall("valid-provider-2").await.is_ok());
+        assert!(fixture.0.join("outside/keep.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninstall_does_not_follow_root_or_nested_symlinks() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let service = PluginService::new(&fixture.0.join("data"), AdapterRegistry::default());
+        let outside = fixture.0.join("outside");
+        symlink(&outside, fixture.0.join("data/plugins/linked")).unwrap();
+        assert!(service.uninstall("linked").await.is_err());
+        let target = fixture.0.join("data/plugins/valid");
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&outside, target.join("nested")).unwrap();
+        assert!(service.uninstall("valid").await.is_ok());
+        assert!(outside.join("keep.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn set_enabled_rejects_invalid_ids_and_preserves_legal_disable() {
+        let fixture = Fixture::new();
+        let service = PluginService::new(&fixture.0.join("data"), AdapterRegistry::default());
+        for enabled in [true, false] {
+            for id in ["", ".", "..", "../../outside", "..\\..\\outside", "/tmp/outside", "C:\\outside"] {
+                assert!(service.set_enabled(id, enabled).await.is_err(), "accepted {id}");
+            }
+        }
+        let target = fixture.0.join("data/plugins/valid");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(MANIFEST_FILE), json!({
+            "id": "valid", "apiVersion": 1, "main": "missing",
+            "descriptor": { "providerId": "valid", "name": "Fixture", "vendor": "Tests", "capabilities": [] }
+        }).to_string()).unwrap();
+        assert!(service.set_enabled("valid", false).await.is_ok());
+        assert!(target.join(DISABLED_MARKER).exists());
+        assert!(service.set_enabled("valid", false).await.is_ok());
+        assert!(fixture.0.join("outside/keep.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn set_enabled_never_follows_plugin_or_marker_links() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let service = PluginService::new(&fixture.0.join("data"), AdapterRegistry::default());
+        symlink(fixture.0.join("outside"), fixture.0.join("data/plugins/linked")).unwrap();
+        for enabled in [true, false] { assert!(service.set_enabled("linked", enabled).await.is_err()); }
+        let target = fixture.0.join("data/plugins/valid");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(MANIFEST_FILE), json!({
+            "id": "valid", "apiVersion": 1, "main": "missing",
+            "descriptor": { "providerId": "valid", "name": "Fixture", "vendor": "Tests", "capabilities": [] }
+        }).to_string()).unwrap();
+        symlink(fixture.0.join("outside/keep.txt"), target.join(DISABLED_MARKER)).unwrap();
+        assert!(service.set_enabled("valid", false).await.is_ok());
+        assert_eq!(std::fs::read(fixture.0.join("outside/keep.txt")).unwrap(), b"keep");
+        // Missing executable is recorded as a load error after removing only
+        // the marker symlink; the external target remains untouched.
+        assert!(service.set_enabled("valid", true).await.is_ok());
+        assert_eq!(std::fs::read(fixture.0.join("outside/keep.txt")).unwrap(), b"keep");
+        assert!(std::fs::symlink_metadata(target.join(DISABLED_MARKER)).is_err());
+    }
 }

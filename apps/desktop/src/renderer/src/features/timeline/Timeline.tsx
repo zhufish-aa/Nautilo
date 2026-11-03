@@ -25,6 +25,7 @@ import { Button } from "../../components/ui/Button";
 import { resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
 import { toolActivityLabel, toolInputFileDiff } from "../../lib/tool-display";
 import { MarkdownContent } from "./MarkdownContent";
+import { useStreamingText } from "../../lib/streaming-text";
 import { ToolFileDiffView } from "./ToolFileDiffView";
 import { TimelineImage } from "./TimelineImage";
 import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupTextMenu } from "./media-actions";
@@ -242,27 +243,6 @@ function CardShell({
   );
 }
 
-function useStreamingText(text: string, streaming: boolean): string {
-  const [visible, setVisible] = useState(text);
-  const latest = useRef(text);
-  const timer = useRef<ReturnType<typeof setTimeout>>();
-  latest.current = text;
-  useEffect(() => {
-    if (!streaming) {
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = undefined;
-      setVisible(text);
-    } else if (!timer.current) {
-      timer.current = setTimeout(() => {
-        timer.current = undefined;
-        setVisible(latest.current);
-      }, 50);
-    }
-  }, [text, streaming]);
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-  return streaming ? visible : text;
-}
-
 function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
   event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> };
   locale: "zh-CN" | "en-US";
@@ -274,7 +254,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
   const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
   const isSystem = sender === "system";
-  const visibleText = useStreamingText(text, Boolean(streaming));
+  const visibleText = useStreamingText(text, Boolean(streaming), `${event.sessionId}:${event.id}`);
   // Historical messages render statically on remounts (mode switches reopen the
   // whole timeline); only fresh live-conversation rows pay for the spring-in.
   const animateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
@@ -400,7 +380,7 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
   const [open, setOpen] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const reasoningScrollRef = useRef<HTMLDivElement>(null);
-  const visibleText = useStreamingText(event.data.text, Boolean(event.data.streaming));
+  const visibleText = useStreamingText(event.data.text, Boolean(event.data.streaming), `${event.sessionId}:${event.id}`);
   const followReasoningRef = useRef(true);
   const zh = locale === "zh-CN";
   const scrollToLatest = useCallback(() => {
@@ -768,6 +748,11 @@ function FileChangeCard({
   const { files } = event.data;
   return (
     <ul className="overflow-hidden rounded-xl border border-line bg-card">
+      {event.data.source === "provider" && (
+        <li className="border-b border-line px-3.5 py-2 text-xs text-ink-3">
+          {locale === "zh-CN" ? `本轮原生差异 · ${files.length} 个文件` : `Provider turn diff · ${files.length} files`}
+        </li>
+      )}
       {files.map((file) => {
         const counts = fileChangeCounts(file);
         const open = (): void => {
@@ -780,7 +765,9 @@ function FileChangeCard({
               className="flex w-full items-center gap-2.5 px-3.5 py-3 text-left text-[13px] outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/50">
               <FileCode2 className="h-4 w-4 shrink-0 text-ink-3" aria-hidden />
               <span className="min-w-0 flex-1 truncate text-ink-2">{file.path}</span>
-              <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>
+              {file.comparisonUnavailable
+                ? <span className="shrink-0 text-xs text-ink-3" title={file.reason}>{locale === "zh-CN" ? "无法比较" : "Unavailable"}</span>
+                : <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
               <ChevronDown className="h-3.5 w-3.5 -rotate-90 text-ink-3" aria-hidden />
             </button>
           </li>

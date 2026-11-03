@@ -210,7 +210,7 @@ impl AgentService {
                 Err(error) => Ok(unavailable(error.to_string())),
             };
         }
-        match self.adapters.list_models(&instance, Some(&context)).await {
+        match self.adapters.list_models_with_refresh(&instance, Some(&context), true).await {
             Ok(catalog) => Ok(catalog),
             // The TS registry merges the instance's manually configured models
             // into every catalog, including discovery failures — otherwise

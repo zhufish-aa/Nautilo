@@ -20,6 +20,15 @@ pub async fn is_git_workspace(cwd: &str) -> bool {
     matches!(result, Ok(output) if output.exit_code == 0 && output.stdout.trim() == "true")
 }
 
+/// Only an explicit Git diagnostic confirms a non-Git workspace; execution
+/// errors and unrelated Git failures must not be reported as non-Git.
+pub async fn is_non_git_workspace(cwd: &str) -> bool {
+    match run_git(cwd, &["rev-parse", "--is-inside-work-tree"], true).await {
+        Ok(result) => result.exit_code != 0 && result.stderr.to_lowercase().contains("not a git repository"),
+        Err(_) => false,
+    }
+}
+
 /// Collects displayable diffs for files reported by a provider during one run.
 pub async fn collect(cwd: &str, touched: &[TouchedFile], baseline: Option<&WorkspaceSnapshot>) -> Vec<Value> {
     if touched.is_empty() {
@@ -84,17 +93,28 @@ async fn collect_git_diffs(root: &str, cwd: &str, touched: &[TouchedFile]) -> Ve
 }
 
 async fn collect_snapshot_diff(cwd: &str, touched: &[TouchedFile], baseline: Option<&WorkspaceSnapshot>) -> Vec<Value> {
+    // Missing baseline is unknown, not evidence that every file was added.
+    // Provider-supplied patches still survive in file.changed events.
+    if baseline.is_none() {
+        return vec![];
+    }
     let mut files = vec![];
     for item in unique_touched_files(cwd, cwd, touched) {
         let absolute = Path::new(cwd).join(&item.path);
-        let info = std::fs::metadata(&absolute).ok();
-        let before = baseline.and_then(|snapshot| snapshot.files.get(&item.path).cloned());
-        let after = match &info {
-            Some(info) if info.is_file() && info.len() <= MAX_FALLBACK_TEXT_BYTES => {
-                std::fs::read_to_string(&absolute).ok().filter(|content| !content.contains('\0'))
-            }
-            _ => None,
-        };
+        let snapshot = baseline.unwrap();
+        let before = snapshot.files.get(&item.path).cloned();
+        let before_unknown = before.is_none() && (!snapshot.traversal_complete || snapshot.unavailable_paths.contains(&item.path)
+            || item.path.match_indices('/').any(|(index, _)| snapshot.unavailable_paths.contains(&item.path[..=index])));
+        let metadata = std::fs::symlink_metadata(&absolute);
+        let missing = metadata.as_ref().err().is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let after = metadata.ok().filter(|info| info.is_file() && info.len() <= MAX_FALLBACK_TEXT_BYTES)
+            .and_then(|_| std::fs::read_to_string(&absolute).ok()).filter(|content| !content.contains('\0'));
+        let after_unknown = !missing && after.is_none();
+        if before_unknown || after_unknown {
+            files.push(json!({ "path": item.path, "changeType": item.change_type, "additions": 0, "deletions": 0, "diff": "",
+                "comparisonUnavailable": true, "reason": if before_unknown { "baseline_file_unavailable" } else { "current_file_unavailable" } }));
+            continue;
+        }
         if before.is_none() && after.is_none() {
             continue;
         }

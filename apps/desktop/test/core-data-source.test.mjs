@@ -170,7 +170,7 @@ test("chat timeline preserves every grouped tool in chronological, independently
 
 test("file change cards accept provider diffs and hydrated run diff artifacts", () => {
   const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
-  assert.match(runtime, /artifacts\.flatMap\(parseDiffArtifact\)/);
+  assert.match(runtime, /diffArtifactsByScope\(artifacts\)/);
   assert.match(runtime, /additions: event\.payload\.additions \?\? 0/);
   assert.match(runtime, /deletions: event\.payload\.deletions \?\? 0/);
   assert.match(runtime, /diff: event\.payload\.diff/);
@@ -234,8 +234,10 @@ test("generated images use a restricted streaming protocol instead of base64 IPC
   const main = join(import.meta.dirname, "../src/main");
   const protocol = readFileSync(join(main, "artifact-protocol.ts"), "utf8");
   assert.match(protocol, /\.codex", "generated_images/);
-  assert.match(protocol, /isWithin\(root, candidate\)/);
-  assert.match(protocol, /net\.fetch\(pathToFileURL\(candidate\)\.toString\(\)\)/);
+  assert.match(protocol, /isWithin\(root, actual\)/);
+  assert.match(protocol, /handle\.createReadStream/);
+  assert.match(protocol, /realpath\(candidate\)/);
+  assert.doesNotMatch(protocol, /net\.fetch/);
   assert.match(protocol, /getWorkspaceRoots/);
   assert.doesNotMatch(protocol, /readFileSync/);
 });

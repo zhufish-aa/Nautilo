@@ -284,6 +284,18 @@ impl RunService {
         prompt: &str,
         mut context: RunContext,
     ) -> CoreResult<(String, watch::Receiver<bool>)> {
+        // Re-read after reaching the head of the queue. Its predecessor may
+        // have learned a native thread id or saved newer settings meanwhile.
+        let latest_session = Repositories::new(&self.db.lock().unwrap().raw)
+            .sessions()
+            .get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
+            .unwrap_or_else(|| session.clone());
+        if latest_session.get("projectId") != session.get("projectId")
+            || latest_session.get("agentInstanceId") != session.get("agentInstanceId")
+        {
+            return Err(invalid_field("sessionId", "The session target changed while this turn was queued. Send the message again."));
+        }
+        let session = &latest_session;
         // An explicit per-model context window from the instance editor wins;
         // live discovery only runs when nothing is configured.
         let session_model = session.get("model").and_then(Value::as_str).unwrap_or("");
@@ -316,7 +328,7 @@ impl RunService {
                 .map(|adapter| adapter.descriptor().get("contextWindowDiscovery").and_then(Value::as_bool) == Some(true))
                 .unwrap_or(false);
             if discovery {
-                let catalog = self.adapters.list_models(agent, None).await.ok();
+                let catalog = self.adapters.list_models_for_run(agent).await;
                 let model_id = if session_model.is_empty() {
                     catalog.as_ref().and_then(|c| c.get("defaultModel")).and_then(Value::as_str).map(str::to_string)
                 } else {
@@ -384,10 +396,16 @@ impl RunService {
                     "sessionId": session.get("id").cloned().unwrap_or(Value::Null),
                     "requestedBy": member_id.clone()
                 }))?;
-                let mut waiting = session.as_object().cloned().unwrap_or_default();
-                waiting.insert("status".to_string(), json!("waiting_approval"));
-                waiting.insert("updatedAt".to_string(), json!(now_iso()));
-                Repositories::new(&self.db.lock().unwrap().raw).sessions().save(&Value::Object(waiting))?;
+                {
+                    let db = self.db.lock().unwrap();
+                    let sessions = Repositories::new(&db.raw).sessions();
+                    let current = sessions.get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
+                        .unwrap_or_else(|| session.clone());
+                    let mut waiting = current.as_object().cloned().unwrap_or_default();
+                    waiting.insert("status".to_string(), json!("waiting_approval"));
+                    waiting.insert("updatedAt".to_string(), json!(now_iso()));
+                    sessions.save(&Value::Object(waiting))?;
+                }
                 let _ = self.events.append_for_session(
                     session,
                     &json!({ "projectRunId": context.project_run_id, "taskId": context.task_id }),
@@ -438,10 +456,16 @@ impl RunService {
         audit_record.insert("resourceId".to_string(), json!(run_id));
         audit_record.insert("outcome".to_string(), json!("success"));
         self.audit.record(audit_record);
-        let mut running = session.as_object().cloned().unwrap_or_default();
-        running.insert("status".to_string(), json!("running"));
-        running.insert("updatedAt".to_string(), json!(started_at));
-        Repositories::new(&self.db.lock().unwrap().raw).sessions().save(&Value::Object(running))?;
+        {
+            let db = self.db.lock().unwrap();
+            let sessions = Repositories::new(&db.raw).sessions();
+            let current = sessions.get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
+                .unwrap_or_else(|| session.clone());
+            let mut running = current.as_object().cloned().unwrap_or_default();
+            running.insert("status".to_string(), json!("running"));
+            running.insert("updatedAt".to_string(), json!(started_at));
+            sessions.save(&Value::Object(running))?;
+        }
         if context.presentation.as_deref() != Some("provider_command") {
             let _ = self.events.append(&run, session, "run.started", json!({ "runId": run_id }));
         }
@@ -503,7 +527,7 @@ impl RunService {
 
         if !provider_command {
             let is_git = diff_collector::is_git_workspace(&request.cwd).await;
-            if !is_git {
+            if !is_git && project.as_ref().and_then(|p| p.get("nonGitDiffMode")).and_then(Value::as_str) != Some("off") {
                 if let Ok(snapshot) = capture_workspace_snapshot(&request.cwd) {
                     self.workspace_baselines.lock().unwrap().insert(run_id.clone(), snapshot);
                 }
@@ -1057,6 +1081,28 @@ impl RunService {
                 }
                 None
             }
+            AdapterEvent::TurnDiff { diff, thread_id, turn_id, .. } => {
+                let diff = self.redaction.text(diff);
+                let metadata = json!({ "runId": run_id, "source": "provider", "threadId": thread_id, "turnId": turn_id });
+                let name = "run.native.diff.json";
+                let input = artifact_input("diff", name, context.project_run_id.as_deref(), context.task_id.as_deref(),
+                    session.get("id").and_then(Value::as_str), Some(metadata.clone()));
+                let content = json!({ "files": [], "diff": diff, "source": "provider", "runId": run_id, "threadId": thread_id, "turnId": turn_id });
+                let content = content.to_string();
+                let artifact_id = format!("native-diff:{run_id}");
+                let unchanged = Repositories::new(&self.db.lock().unwrap().raw).artifacts().get(&artifact_id).ok().flatten()
+                    .and_then(|artifact| artifact.get("content").and_then(Value::as_str).map(|old| old == content)).unwrap_or(false);
+                if unchanged { return None; }
+                if let Ok(artifact) = self.artifacts.save_with_id(&input, &content, &artifact_id) {
+                    let _ = self.events.append(run, session, "run.diff_updated", json!({
+                        "diff": diff, "providerThreadId": thread_id, "providerTurnId": turn_id, "source": "provider"
+                    }));
+                    let _ = self.events.append(run, session, "artifact.created", json!({
+                        "artifactId": artifact.get("id"), "kind": "diff", "name": name
+                    }));
+                }
+                None
+            }
             AdapterEvent::File { path, change_type, additions, deletions, diff, .. } => {
                 let change_type = normalize_change_type(change_type.as_deref());
                 self.touched_files
@@ -1178,26 +1224,52 @@ impl RunService {
             .or_else(|| project.as_ref().and_then(|p| p.get("rootPath")).and_then(Value::as_str).map(str::to_string));
         let Some(cwd) = cwd else { return };
         let baseline = self.workspace_baselines.lock().unwrap().remove(run_id);
-        let files = diff_collector::collect(&cwd, &touched, baseline.as_ref()).await;
-        if files.is_empty() {
+        let native_diff = Repositories::new(&self.db.lock().unwrap().raw).artifacts()
+            .get(&format!("native-diff:{run_id}")).ok().flatten();
+        if native_diff.is_some() && project.as_ref().and_then(|p| p.get("nonGitDiffMode")).and_then(Value::as_str) == Some("off")
+            && diff_collector::is_non_git_workspace(&cwd).await {
+            return;
+        }
+        let comparison_unavailable = baseline.is_none() && diff_collector::is_non_git_workspace(&cwd).await;
+        let files = if comparison_unavailable { vec![] } else { diff_collector::collect(&cwd, &touched, baseline.as_ref()).await };
+        if files.is_empty() && !comparison_unavailable {
             return;
         }
         let title = session.get("title").and_then(Value::as_str).unwrap_or("");
         let title = if title.is_empty() { "run".to_string() } else { title.chars().take(80).collect::<String>() };
         let name = format!("{title}.diff.json");
+        let paths: Vec<Value> = if comparison_unavailable {
+            touched.iter().map(|file| json!(file.path)).collect()
+        } else {
+            files.iter().filter_map(|file| file.get("path").cloned()).collect()
+        };
+        let mut content = json!({ "files": files, "source": "filesystem" });
+        let mut metadata = json!({ "runId": run_id, "source": "filesystem", "paths": paths, "fileCount": files.len() });
+        if comparison_unavailable {
+            for target in [&mut content, &mut metadata] {
+                target["comparisonUnavailable"] = json!(true);
+                target["reason"] = json!("non_git_baseline_unavailable");
+                target["paths"] = json!(paths);
+            }
+        }
+        let unavailable_paths: Vec<Value> = files.iter().filter(|file| file.get("comparisonUnavailable").and_then(Value::as_bool) == Some(true))
+            .filter_map(|file| file.get("path").cloned()).collect();
+        if !unavailable_paths.is_empty() {
+            for target in [&mut content, &mut metadata] {
+                target["comparisonUnavailable"] = json!(true);
+                target["reason"] = json!("file_versions_unavailable");
+                target["unavailablePaths"] = json!(unavailable_paths);
+            }
+        }
         let input = artifact_input(
             "diff",
             &name,
             context.project_run_id.as_deref(),
             context.task_id.as_deref(),
             session.get("id").and_then(Value::as_str),
-            Some(json!({
-                "runId": run_id,
-                "paths": files.iter().filter_map(|f| f.get("path").cloned()).collect::<Vec<_>>(),
-                "fileCount": files.len()
-            })),
+            Some(metadata),
         );
-        if let Ok(artifact) = self.artifacts.save(&input, &json!({ "files": files }).to_string()) {
+        if let Ok(artifact) = self.artifacts.save(&input, &content.to_string()) {
             let _ = self.events.append(run, session, "git.diff_collected", json!({
                 "artifactId": artifact.get("id").cloned().unwrap_or(Value::Null),
                 "taskId": context.task_id.clone().map(Value::String).unwrap_or(Value::Null),

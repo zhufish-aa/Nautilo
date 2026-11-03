@@ -170,6 +170,16 @@ export class RunService {
     prompt: string,
     context: RunContext
   ): Promise<RunHandle> {
+    // A queued turn may wait while its predecessor learns the native thread
+    // id, context window, or newer session settings. Never write the snapshot
+    // captured at enqueue time back over those persisted updates.
+    const latestSession = this.database.sessions.get(session.id);
+    if (latestSession) {
+      if (latestSession.projectId !== session.projectId || latestSession.agentInstanceId !== session.agentInstanceId) {
+        throw new CoreError("IPC_INVALID_REQUEST", { field: "sessionId", reason: "The session target changed while this turn was queued. Send the message again." });
+      }
+      session = latestSession;
+    }
     // An explicit per-model context window from the instance editor always wins;
     // live discovery (kimi/claude) only runs when nothing is configured.
     const configuredContextWindow = agent.models?.find((entry) => entry.id === session.model)?.contextWindow
@@ -182,7 +192,7 @@ export class RunService {
       ? session.providerContextWindow
       : configuredContextWindow;
     if (!contextWindow && this.adapters.find(agent.providerId)?.descriptor?.contextWindowDiscovery) {
-      const catalog = await this.adapters.listModels(agent).catch(() => undefined);
+      const catalog = await this.adapters.listModelsForRun(agent);
       const modelId = session.model || catalog?.defaultModel;
       const discoveredContextWindow = catalog?.models.find((model) => model.id === modelId)?.contextWindow;
       if (discoveredContextWindow) contextWindow = discoveredContextWindow;
@@ -208,7 +218,7 @@ export class RunService {
         sessionId: session.id,
         requestedBy: context.memberId ?? session.memberId
       });
-      this.database.sessions.save({ ...session, status: "waiting_approval", updatedAt: new Date().toISOString() });
+      this.database.sessions.save({ ...(this.database.sessions.get(session.id) ?? session), status: "waiting_approval", updatedAt: new Date().toISOString() });
       if (approval) {
         this.events.appendForSession(session, { projectRunId: context.projectRunId, taskId: context.taskId }, "approval.requested", {
           approvalId: approval.id,
@@ -235,7 +245,7 @@ export class RunService {
     };
     this.database.runs.save(run);
     this.audit?.record({ actorType: "agent", actorId: context.memberId ?? session.memberId, action: "run.started", resourceType: "run", resourceId: run.id, outcome: "success", details: { agentInstanceId: agent.id, sessionId: session.id, projectRunId: context.projectRunId, taskId: context.taskId } });
-    this.database.sessions.save({ ...session, status: "running", updatedAt: startedAt });
+    this.database.sessions.save({ ...(this.database.sessions.get(session.id) ?? session), status: "running", updatedAt: startedAt });
     if (context.presentation !== "provider_command") this.events.append(session, run, "run.started", { runId });
 
     const additions = {
@@ -270,7 +280,7 @@ export class RunService {
     try {
       if (context.presentation !== "provider_command") {
         const isGitWorkspace = await this.diffCollector.isGitWorkspace(request.cwd).catch(() => false);
-        if (!isGitWorkspace) {
+        if (!isGitWorkspace && project?.nonGitDiffMode !== "off") {
           const snapshot = await captureWorkspaceSnapshot(request.cwd).catch(() => undefined);
           if (snapshot) this.workspaceBaselines.set(runId, snapshot);
         }
@@ -541,6 +551,22 @@ export class RunService {
       subagentDispatchId: event.subagentDispatchId
     });
     else if (event.kind === "command") this.events.append(session, run, "command.started", { callId: event.callId, command: event.command, cwd: context.workingDirectory ?? this.database.projects.get(session.projectId)?.rootPath ?? process.cwd(), subagentDispatchId: event.subagentDispatchId });
+    else if (event.kind === "turn_diff") {
+      const diff = this.redaction.text(event.diff);
+      const metadata = { runId: run.id, source: "provider", threadId: event.threadId, turnId: event.turnId };
+      const content = JSON.stringify({ files: [], diff, ...metadata });
+      const artifactId = `native-diff:${run.id}`;
+      if (this.database.artifacts.get(artifactId)?.content === content) return undefined;
+      const artifact = this.artifactService.save({
+        kind: "diff", name: `${session.title.slice(0, 80) || "run"}.native.diff.json`,
+        content,
+        projectRunId: context.projectRunId, taskId: context.taskId, sessionId: session.id, metadata
+      }, artifactId);
+      this.events.append(session, run, "run.diff_updated", {
+        diff, providerThreadId: event.threadId, providerTurnId: event.turnId, source: "provider"
+      });
+      this.events.append(session, run, "artifact.created", { artifactId: artifact.id, kind: "diff", name: artifact.name });
+    }
     else if (event.kind === "file") {
       const changeType = normalizeChangeType(event.changeType);
       const touched = this.touchedFiles.get(run.id) ?? new Map();
@@ -624,16 +650,28 @@ export class RunService {
     const project = this.database.projects.get(session.projectId);
     const cwd = context.workingDirectory ?? project?.rootPath;
     if (!cwd) return;
-    const files = await this.diffCollector.collect(cwd, touched, this.workspaceBaselines.get(run.id)).catch(() => []);
-    if (!files.length) return;
+    const baseline = this.workspaceBaselines.get(run.id);
+    // Native cumulative diffs are authoritative even when empty. Non-Git
+    // off mode needs no synthetic missing-baseline artifact. Git remains unchanged.
+    const nativeDiff = this.database.artifacts.get(`native-diff:${run.id}`);
+    if (nativeDiff && project?.nonGitDiffMode === "off" && await this.diffCollector.isNonGitWorkspace(cwd).catch(() => false)) return;
+    const comparisonUnavailable = !baseline && await this.diffCollector.isNonGitWorkspace(cwd).catch(() => false);
+    const files = comparisonUnavailable ? [] : await this.diffCollector.collect(cwd, touched, baseline).catch(() => []);
+    if (!files.length && !comparisonUnavailable) return;
+    const paths = comparisonUnavailable ? touched.map((file) => file.path) : files.map((file) => file.path);
+    const unavailable: Record<string, string | number | boolean | string[]> = comparisonUnavailable
+      ? { comparisonUnavailable: true, reason: "non_git_baseline_unavailable", paths }
+      : {};
+    const unavailableFiles = files.filter((file) => file.comparisonUnavailable).map((file) => file.path);
+    if (unavailableFiles.length) Object.assign(unavailable, { comparisonUnavailable: true, reason: "file_versions_unavailable", unavailablePaths: unavailableFiles });
     const artifact = this.artifactService.save({
       kind: "diff",
       name: `${session.title.slice(0, 80) || "run"}.diff.json`,
-      content: JSON.stringify({ files }),
+      content: JSON.stringify({ files, source: "filesystem", ...unavailable }),
       projectRunId: context.projectRunId,
       taskId: context.taskId,
       sessionId: session.id,
-      metadata: { runId: run.id, paths: files.map((file) => file.path), fileCount: files.length }
+      metadata: { runId: run.id, source: "filesystem", paths, fileCount: files.length, ...unavailable }
     });
     this.events.append(session, run, "git.diff_collected", {
       artifactId: artifact.id,

@@ -313,6 +313,92 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "nautilo-management-"));
     assert(text().includes("工作区保存失败"));
     assert.equal(qa.projects.getState().projects[0].workspaceMode, "direct");
   });
+  await check(
+    "legacy project comparison defaults to full with keyboard-accessible scope help",
+    async () => {
+      const group = d.querySelector('[role="group"][aria-label="非 Git 文件对比"]');
+      assert(group);
+      assert.equal(find("扫描并对比", group).getAttribute("aria-pressed"), "true");
+      assert.equal(find("仅工具差异", group).getAttribute("aria-pressed"), "false");
+      const help = d.querySelector('button[aria-label^="仅影响非 Git 目录"]');
+      assert(help);
+      help.focus();
+      await sleep(300);
+      assert(
+        d.querySelector('[role="tooltip"]').textContent.includes("Git diff 不受影响")
+        && d.querySelector('[role="tooltip"]').textContent.includes("新项目默认仅工具差异")
+        && d.querySelector('[role="tooltip"]').textContent.includes("外部改动可能没有差异记录")
+      );
+      help.blur();
+    }
+  );
+  await check(
+    "non-Git comparison pending blocks repeated clicks and errors keep the saved mode",
+    async () => {
+      let calls = 0,
+        reject;
+      qa.projects.setState({
+        setNonGitDiffMode: () => {
+          calls++;
+          return new Promise((_, fail) => {
+            reject = fail;
+          });
+        }
+      });
+      await sleep(50);
+      const off = find("仅工具差异");
+      off.click();
+      off.click();
+      await sleep(50);
+      assert.equal(calls, 1);
+      assert(off.disabled);
+      assert.equal(find("扫描并对比").getAttribute("aria-pressed"), "true");
+      reject(new Error("文件对比策略保存失败"));
+      await sleep(100);
+      assert(text().includes("文件对比策略保存失败"));
+      assert(!find("仅工具差异").disabled);
+      assert.equal(find("扫描并对比").getAttribute("aria-pressed"), "true");
+    }
+  );
+  await check(
+    "comparison save retries and switching back updates the persisted selected option",
+    async () => {
+      qa.projects.setState({
+        setNonGitDiffMode: async (id, nonGitDiffMode) => {
+          qa.projects.setState({
+            projects: qa.projects
+              .getState()
+              .projects.map((item) => (item.id === id ? { ...item, nonGitDiffMode } : item))
+          });
+        }
+      });
+      await sleep(50);
+      await click("仅工具差异");
+      assert.equal(find("仅工具差异").getAttribute("aria-pressed"), "true");
+      assert.equal(qa.projects.getState().projects[0].nonGitDiffMode, "off");
+      assert(!text().includes("文件对比策略保存失败"));
+      await route("/projects");
+      await route("/projects/p");
+      assert.equal(find("仅工具差异").getAttribute("aria-pressed"), "true");
+      await click("扫描并对比");
+      assert.equal(qa.projects.getState().projects[0].nonGitDiffMode, "full");
+    }
+  );
+  await check(
+    "comparison remains configurable before a successful non-Git project scan",
+    async () => {
+      qa.projects.setState({
+        projects: [{ ...project, repositoryType: "none", scan: undefined, nonGitDiffMode: "off" }]
+      });
+      await sleep(60);
+      assert.equal(find("仅工具差异").getAttribute("aria-pressed"), "true");
+      assert(text().includes("跳过目录扫描，仅显示工具提供的差异"));
+      await click("扫描并对比");
+      assert.equal(qa.projects.getState().projects[0].nonGitDiffMode, "full");
+      qa.projects.setState({ projects: [project] });
+      await sleep(60);
+    }
+  );
   await check("verification template creation is explicit and supports edit/cancel", async () => {
     qa.projects.setState({
       setVerificationTemplates: async (id, verificationTemplates) =>

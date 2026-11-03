@@ -125,8 +125,10 @@ impl SessionService {
         let repos = Repositories::new(&db.raw);
         let current = repos.sessions().get(id)?;
         let Some(current) = current else {
-            repos.sessions().save(input)?;
-            return Ok(input.clone());
+            let mut normalized = input.clone();
+            normalize_session_permission(&mut normalized);
+            repos.sessions().save(&normalized)?;
+            return Ok(normalized);
         };
         let same_provider_binding = current.get("projectId") == input.get("projectId")
             && current.get("agentInstanceId") == input.get("agentInstanceId");
@@ -187,7 +189,8 @@ impl SessionService {
                 merged.remove("runtimeToolVersion");
             }
         }
-        let updated = Value::Object(merged);
+        let mut updated = Value::Object(merged);
+        normalize_session_permission(&mut updated);
         repos.sessions().save(&updated)?;
         Ok(updated)
     }
@@ -678,4 +681,40 @@ pub fn follow_up_message(session: &Value, text: &str) -> Value {
     message.insert("text".to_string(), json!(text));
     message.insert("createdAt".to_string(), json!(now_iso()));
     Value::Object(message)
+}
+
+/// null resets a session override; absent fields remain absent/preserve merged state.
+fn normalize_session_permission(session: &mut Value) {
+    let Some(object) = session.as_object_mut() else { return; };
+    let Some(value) = object.get("permissionMode") else { return; };
+    match value.as_str().map(str::trim).filter(|mode| !mode.is_empty()) {
+        Some(mode) => { let mode = mode.to_string(); object.insert("permissionMode".into(), Value::String(mode)); }
+        None => { object.remove("permissionMode"); }
+    }
+}
+
+#[cfg(test)]
+mod permission_reset_tests {
+    use super::*;
+    #[test]
+    fn null_reset_clears_old_override_after_json_merge() {
+        let mut stored = json!({ "permissionMode": "full-access", "providerSessionId": "thread" });
+        let request: Value = serde_json::from_str(r#"{"permissionMode":null}"#).unwrap();
+        stored.as_object_mut().unwrap().extend(request.as_object().unwrap().clone());
+        normalize_session_permission(&mut stored);
+        assert!(stored.get("permissionMode").is_none());
+        assert_eq!(stored["providerSessionId"], "thread");
+    }
+    #[test]
+    fn omitted_preserves_and_explicit_modes_are_normalized() {
+        let mut stored = json!({ "permissionMode": "full-access" });
+        normalize_session_permission(&mut stored);
+        assert_eq!(stored["permissionMode"], "full-access");
+        stored["permissionMode"] = json!(" plan ");
+        normalize_session_permission(&mut stored);
+        assert_eq!(stored["permissionMode"], "plan");
+        stored["permissionMode"] = Value::Null;
+        normalize_session_permission(&mut stored);
+        assert!(stored.get("permissionMode").is_none());
+    }
 }

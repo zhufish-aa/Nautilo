@@ -189,32 +189,38 @@ export class SessionService {
    * would start a new provider thread and lose conversational context.
    */
   upsert(input: IpcRequestMap["session.upsert"]["input"]): Session {
-    const current = this.database.sessions.get(input.id);
+    const { permissionMode, ...metadata } = input;
+    const normalized: Session = {
+      ...metadata,
+      ...(Object.prototype.hasOwnProperty.call(input, "permissionMode")
+        ? { permissionMode: permissionMode?.trim() || undefined } : {})
+    };
+    const current = this.database.sessions.get(normalized.id);
     if (!current) {
-      this.database.sessions.save(input);
-      return input;
+      this.database.sessions.save(normalized);
+      return normalized;
     }
 
     // The orchestrator temporarily rebinds `memberId` from the renderer's
     // agent-instance id to the selected team-member id. That is presentation /
     // routing metadata, not a provider-thread boundary. Reset the native
     // provider session only when the project or actual CLI instance changes.
-    const sameProviderBinding = current.projectId === input.projectId
-      && current.agentInstanceId === input.agentInstanceId;
+    const sameProviderBinding = current.projectId === normalized.projectId
+      && current.agentInstanceId === normalized.agentInstanceId;
     const updated: Session = {
       ...current,
-      ...input,
+      ...normalized,
       createdAt: current.createdAt,
-      projectRunId: input.projectRunId ?? current.projectRunId,
-      parentSessionId: input.parentSessionId ?? current.parentSessionId,
-      taskId: input.taskId ?? current.taskId,
+      projectRunId: normalized.projectRunId ?? current.projectRunId,
+      parentSessionId: normalized.parentSessionId ?? current.parentSessionId,
+      taskId: normalized.taskId ?? current.taskId,
       providerSessionId: sameProviderBinding
-        ? current.providerSessionId ?? input.providerSessionId
-        : input.providerSessionId,
+        ? current.providerSessionId ?? normalized.providerSessionId
+        : normalized.providerSessionId,
       providerContextSyncedAt: sameProviderBinding ? current.providerContextSyncedAt : undefined,
       runtimeToolVersion: sameProviderBinding
-        ? current.runtimeToolVersion ?? input.runtimeToolVersion
-        : input.runtimeToolVersion
+        ? current.runtimeToolVersion ?? normalized.runtimeToolVersion
+        : normalized.runtimeToolVersion
     };
     this.database.sessions.save(updated);
     return updated;

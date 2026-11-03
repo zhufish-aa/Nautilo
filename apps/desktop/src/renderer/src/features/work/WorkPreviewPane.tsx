@@ -77,17 +77,9 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
 
   // Newest deliverable last in the event stream → show first.
   const deliverables = useMemo(() => {
-    const seen = new Set<string>();
-    const files: string[] = [];
-    for (const entry of [...(events ?? [])].reverse()) {
-      for (const file of collectChangedFiles([entry])) {
-        if (!seen.has(file.path)) {
-          seen.add(file.path);
-          files.push(file.path);
-        }
-      }
-    }
-    return files;
+    // Resolve cumulative provider snapshots across the whole timeline before
+    // listing paths; per-row aggregation resurrects withdrawn native files.
+    return collectChangedFiles(events ?? []).map((file) => file.path).reverse();
   }, [events]);
 
   const [selection, setSelection] = useState<{ sessionId: string; path: string }>();

@@ -55,14 +55,23 @@ test("sub-agent events are bucketed by dispatch id and merged per call", async (
   assert.equal(buckets.get("toolu-2").length, 1);
 });
 
-test("message deltas accumulate into one streaming message", async () => {
+test("cumulative daemon message updates replace one streaming message", async () => {
   const { collectSubagentActivities } = await loadModule();
   const events = [
     runtimeEvent("agent.message_delta", { messageId: "m-1", text: "你好", subagentDispatchId: "d-1" }),
-    runtimeEvent("agent.message_delta", { messageId: "m-1", text: "，世界", subagentDispatchId: "d-1" })
+    runtimeEvent("agent.message_delta", { messageId: "m-1", text: "你好，世界", subagentDispatchId: "d-1" })
   ];
   const bucket = collectSubagentActivities(events).get("d-1");
   assert.equal(bucket.length, 1);
   assert.equal(bucket[0].text, "你好，世界");
   assert.equal(bucket[0].streaming, true);
+});
+
+
+test("replayed cumulative updates never duplicate message content", async () => {
+  const { collectSubagentActivities } = await loadModule();
+  const update = runtimeEvent("agent.message_delta", { messageId: "m-1", text: "你好，世界", subagentDispatchId: "d-1" });
+  const bucket = collectSubagentActivities([update, update]).get("d-1");
+  assert.equal(bucket.length, 1);
+  assert.equal(bucket[0].text, "你好，世界");
 });

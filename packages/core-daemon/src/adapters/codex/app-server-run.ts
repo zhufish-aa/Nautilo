@@ -7,7 +7,7 @@ import { ProcessRuntime, type ProcessEvent } from "../../process-runtime.js";
 import { JsonRpcProcessClient } from "../json-rpc-process.js";
 import type { AdapterEvent, AdapterMcpServer, AdapterResumeRequest, AdapterRun, AdapterStartRequest } from "../types.js";
 import type { RuntimeToolSpec } from "../runtime-tools.js";
-import { parseCodexAppServerNotification, withSubagentDispatch } from "./app-server-events.js";
+import { isCurrentCodexTurnDiff, parseCodexAppServerNotification, withSubagentDispatch } from "./app-server-events.js";
 import { codexPermissionConfig } from "./commands.js";
 import { resolveCodexInvocation } from "./executable.js";
 import { buildCodexMcpConfigArgs } from "./mcp-config.js";
@@ -489,6 +489,13 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
       for await (const event of rpc) {
         if (event.kind === "notification") {
           const params = record(event.params);
+          if (event.method === "turn/diff/updated" && !isCurrentCodexTurnDiff(params, threadId, turnId)) continue;
+          // A child/stale turn must never terminate this main run.
+          if (event.method === "turn/completed" && (
+            (text(params.threadId) && params.threadId !== threadId) ||
+            (text(params.turnId) && params.turnId !== turnId) ||
+            (text(record(params.turn).id) && record(params.turn).id !== turnId)
+          )) continue;
           const item = record(params.item);
           if ((event.method === "item/started" || event.method === "item/completed") && item.type === "collabAgentToolCall") {
             // A collab spawn names its child threads; subscribe so their items

@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::adapters::codex::events::{parse_codex_app_server_notification, with_subagent_dispatch};
+use crate::adapters::codex::events::{is_current_codex_turn_diff, parse_codex_app_server_notification, with_subagent_dispatch};
 use crate::adapters::codex::image_gen::{
     codex_image_generation_tool, execute_codex_image_generation, is_codex_image_generation_configured,
     CODEX_IMAGE_GENERATION_TOOL_NAME,
@@ -586,6 +586,15 @@ async fn run_turn(
         };
         match event {
             JsonRpcProcessEvent::Notification { method, params } => {
+                let current_turn_id = state.lock().unwrap().turn_id.clone();
+                if method == "turn/diff/updated" && !is_current_codex_turn_diff(&params, &thread_id, current_turn_id.as_deref()) {
+                    continue;
+                }
+                if method == "turn/completed" && (
+                    params.get("threadId").and_then(Value::as_str).is_some_and(|id| id != thread_id)
+                    || params.get("turnId").and_then(Value::as_str).is_some_and(|id| Some(id) != current_turn_id.as_deref())
+                    || params.pointer("/turn/id").and_then(Value::as_str).is_some_and(|id| Some(id) != current_turn_id.as_deref())
+                ) { continue; }
                 let item = params.get("item").cloned().unwrap_or(Value::Null);
                 if (method == "item/started" || method == "item/completed")
                     && item.get("type").and_then(Value::as_str) == Some("collabAgentToolCall")

@@ -264,10 +264,10 @@ pub fn parse_kimi_model_list(text: &str, default_model: Option<&str>) -> CoreRes
         .map_err(|_| CoreError::reason(ErrorCode::IpcInternalError, "Kimi 返回了无法解析的模型配置。"))?;
     let configured_default = root
         .get("defaultModel")
-        .and_then(Value::as_str)
-        .or_else(|| root.get("default_model").and_then(Value::as_str))
+        .and_then(Value::as_str).map(str::trim).filter(|model| !model.is_empty())
+        .or_else(|| root.get("default_model").and_then(Value::as_str).map(str::trim).filter(|model| !model.is_empty()))
         .map(str::to_string)
-        .or_else(|| default_model.map(str::to_string));
+        .or_else(|| default_model.map(str::trim).filter(|model| !model.is_empty()).map(str::to_string));
     let models: Vec<Value> = root
         .get("models")
         .and_then(Value::as_object)
@@ -354,6 +354,11 @@ async fn discover_kimi_models(instance: &Value, env: Option<&HashMap<String, Str
                 json_text.trim().to_string()
             },
         ));
+    }
+    // JSON-provided selection avoids a second CLI process on modern Kimi.
+    let configured = parse_kimi_model_list(&json_text, None)?;
+    if configured.get("defaultModel").and_then(Value::as_str).is_some_and(|model| !model.trim().is_empty()) {
+        return Ok(configured);
     }
     let mut default_model = None;
     if let Ok((text, code)) = capture(vec!["provider".to_string(), "list".to_string()]).await {

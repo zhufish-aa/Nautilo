@@ -157,8 +157,24 @@ fn printable(value: &Value) -> Option<String> {
     }
 }
 
+pub fn is_current_codex_turn_diff(params: &Value, thread_id: &str, turn_id: Option<&str>) -> bool {
+    !thread_id.is_empty() && turn_id.is_some_and(|id| !id.is_empty())
+        && params.get("threadId").and_then(Value::as_str) == Some(thread_id)
+        && params.get("turnId").and_then(Value::as_str) == turn_id
+}
+
 pub fn parse_codex_app_server_notification(method: &str, params: &Value) -> Vec<AdapterEvent> {
     match method {
+        "turn/diff/updated" => match (
+            params.get("diff").and_then(Value::as_str),
+            params.get("threadId").and_then(Value::as_str),
+            params.get("turnId").and_then(Value::as_str),
+        ) {
+            (Some(diff), Some(thread_id), Some(turn_id)) => vec![AdapterEvent::TurnDiff {
+                diff: diff.to_string(), thread_id: thread_id.to_string(), turn_id: turn_id.to_string(), raw: Some(params.clone()),
+            }],
+            _ => vec![],
+        },
         "item/agentMessage/delta" => vec![AdapterEvent::Message {
             text: params.get("delta").and_then(text_of).unwrap_or_default(),
             phase: Some("delta".to_string()),
@@ -431,4 +447,24 @@ pub fn with_subagent_dispatch(events: Vec<AdapterEvent>, dispatch_id: &str) -> V
             other => other,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod native_diff_tests {
+    use super::*;
+
+    #[test]
+    fn native_diff_empty_is_a_valid_replacement() {
+        let events = parse_codex_app_server_notification("turn/diff/updated", &json!({ "threadId": "t", "turnId": "u", "diff": "" }));
+        assert!(matches!(events.as_slice(), [AdapterEvent::TurnDiff { diff, .. }] if diff.is_empty()));
+        assert!(parse_codex_app_server_notification("turn/diff/updated", &json!({ "threadId": "t", "turnId": "u", "diff": null })).is_empty());
+    }
+
+    #[test]
+    fn native_diff_requires_exact_main_thread_and_current_turn() {
+        assert!(is_current_codex_turn_diff(&json!({ "threadId": "t", "turnId": "u" }), "t", Some("u")));
+        assert!(!is_current_codex_turn_diff(&json!({ "threadId": "child", "turnId": "u" }), "t", Some("u")));
+        assert!(!is_current_codex_turn_diff(&json!({ "threadId": "t", "turnId": "old" }), "t", Some("u")));
+        assert!(!is_current_codex_turn_diff(&json!({ "threadId": "t", "turnId": "u" }), "t", None));
+    }
 }

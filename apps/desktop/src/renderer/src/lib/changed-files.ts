@@ -37,6 +37,8 @@ export function fileChangeCounts(file: Pick<ChangedFile, "additions" | "deletion
 export type ChangedFileEntry =
   | {
       kind: "patch";
+      comparisonUnavailable?: boolean;
+      reason?: string;
       path: string;
       changeType: ChangedFile["changeType"];
       additions: number;
@@ -50,10 +52,28 @@ export type ChangedFileEntry =
 
 export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[] {
   const byPath = new Map<string, ChangedFileEntry>();
+  const flattened: TimelineEvent[] = [];
+  const flatten = (items: TimelineEvent[]): void => {
+    for (const event of items) {
+      if (event.data.kind === "tool_group") flatten(event.data.items);
+      else flattened.push(event);
+    }
+  };
+  flatten(events);
+  const scope = (event: TimelineEvent): string => JSON.stringify([event.sessionId, event.runId ?? ""]);
+  const nativeByRun = new Map<string, TimelineEvent>();
+  for (const event of flattened) {
+    if (event.data.kind === "file_change" && event.data.source === "provider" && event.data.replace) nativeByRun.set(scope(event), event);
+  }
 
   const visit = (items: TimelineEvent[]): void => {
     for (const event of items) {
       const data = event.data;
+      // A provider snapshot replaces this run, including an empty snapshot.
+      // Filter old and late item patches *before* path aggregation so another
+      // run/session's contribution survives a native withdrawal.
+      const native = nativeByRun.get(scope(event));
+      if (native && native !== event && (data.kind === "file_change" || data.kind === "tool_activity")) continue;
       if (data.kind === "tool_group") {
         visit(data.items);
         continue;
@@ -66,9 +86,11 @@ export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[]
             kind: "patch",
             path: file.path,
             changeType: file.changeType,
+            comparisonUnavailable: file.comparisonUnavailable,
+            reason: file.reason,
             additions: counts.additions,
             deletions: counts.deletions,
-            diff: file.diff ?? (existing?.kind === "patch" ? existing.diff : undefined),
+            diff: file.comparisonUnavailable ? undefined : file.diff ?? (existing?.kind === "patch" ? existing.diff : undefined),
             edits: (existing?.edits ?? 0) + 1
           });
         }
@@ -80,7 +102,7 @@ export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[]
         if (!fileDiff || !path) continue;
         const existing = byPath.get(path);
         // A textual patch is the richer representation; only bump its counter.
-        if (existing?.kind === "patch" && existing.diff) {
+        if (existing?.kind === "patch" && (existing.diff || existing.comparisonUnavailable)) {
           byPath.set(path, { ...existing, edits: existing.edits + 1 });
           continue;
         }
@@ -95,6 +117,6 @@ export function collectChangedFiles(events: TimelineEvent[]): ChangedFileEntry[]
     }
   };
 
-  visit(events);
+  visit(flattened);
   return [...byPath.values()];
 }

@@ -276,6 +276,8 @@ export interface Project {
   repositoryType: RepositoryType;
   /** How new Agent runs edit this project. Defaults to direct for legacy records. */
   workspaceMode?: WorkspaceMode;
+  /** Non-Git run baselines. Missing means full; off keeps only provider-supplied diffs. */
+  nonGitDiffMode?: "full" | "off";
   defaultBranch?: string;
   frontendPaths: string[];
   backendPaths: string[];
@@ -489,6 +491,9 @@ export interface Artifact {
 }
 
 export interface GitChangedFile {
+  /** No fabricated patch/counts when either file version was not observable. */
+  comparisonUnavailable?: boolean;
+  reason?: string;
   path: string;
   changeType: "added" | "modified" | "deleted" | "renamed";
   additions: number;
