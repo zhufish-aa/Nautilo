@@ -79,7 +79,6 @@ export class SessionService {
       messages: existingMessages,
       artifacts,
       recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt,
-      workMode: session.mode === "work",
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
     const message = followUpMessage(session, text);
@@ -247,7 +246,6 @@ export class SessionService {
       artifacts,
       currentAttachments,
       recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration,
-      workMode: session.mode === "work",
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
     const message: Message = editedMessage

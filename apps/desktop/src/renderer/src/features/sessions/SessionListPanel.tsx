@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronDown, CornerDownRight, MessageSquarePlus, Trash2 } from "lucide-react";
+import { ChevronDown, CornerDownRight, FileText, Folder, Plus, MessageSquarePlus, Trash2 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn, formatRelativeTime } from "../../lib/utils";
 import type { UiSession } from "../../lib/types";
@@ -11,6 +11,7 @@ import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
+import { groupSidebarEntries, UNGROUPED_PROJECT, visibleSidebarEntries } from "../../lib/sidebar-navigation";
 import { visibleSessionStatus } from "../../lib/session-lifecycle";
 
 export function sessionTargetName(
@@ -36,13 +37,6 @@ const STATUS_DOT: Partial<Record<VisibleStatus, string>> = {
   waiting_input: "bg-warn",
   waiting_approval: "bg-warn",
   failed: "bg-danger"
-};
-
-const STATUS_TEXT: Partial<Record<VisibleStatus, string>> = {
-  running: "text-accent",
-  waiting_input: "text-warn",
-  waiting_approval: "text-warn",
-  failed: "text-danger"
 };
 
 function StatusDot({ status }: { status: VisibleStatus }): JSX.Element | null {
@@ -84,7 +78,6 @@ function SessionItem({
   const statusLabel = STATUS_DOT[status] ? t(`sessions.status.${status}` as MessageKey) : null;
   const isChild = depth > 0;
   const targetName = sessionTargetName(session, teams, instances);
-  const showTargetName = targetName !== session.title;
   const timestamp = session.lastMessageAt ?? session.updatedAt;
   const visualDepth = Math.min(depth, 4);
 
@@ -95,9 +88,8 @@ function SessionItem({
       exit={{ opacity: 0, height: 0, marginTop: 0, overflow: "hidden" }}
       transition={{ duration: 0.16, ease: "easeOut" }}
       className="group relative min-w-0"
-      role="treeitem"
-      aria-level={depth + 1}
-      style={{ paddingInlineStart: `${visualDepth * 12}px` }}
+      data-session-id={session.id}
+      style={{ paddingInlineStart: `${24 + visualDepth * 12}px` }}
     >
       {isChild && (
         <span
@@ -113,7 +105,7 @@ function SessionItem({
           "relative flex w-full min-w-0 items-start gap-2 overflow-hidden rounded-lg py-2 pr-8 pl-2 text-left transition-[background-color,box-shadow] duration-150 outline-none",
           "focus-visible:ring-2 focus-visible:ring-accent/70",
           active
-            ? "bg-accent-soft/80 shadow-[inset_2px_0_0_var(--color-accent)]"
+            ? "bg-card-hover"
             : "hover:bg-card-hover",
           isChild && "py-1.5"
         )}
@@ -125,14 +117,14 @@ function SessionItem({
               aria-label={t("sessions.panel.subSessions")}
             />
           ) : (
-            <StatusDot status={status} />
+            STATUS_DOT[status] ? <StatusDot status={status} /> : <FileText className="h-3.5 w-3.5 text-ink-3" aria-hidden />
           )}
         </span>
 
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-1.5">
             <span
-              title={session.title}
+              title={[session.title, targetName, statusLabel, formatRelativeTime(timestamp, locale)].filter(Boolean).join(" · ")}
               className={cn(
                 "block min-w-0 flex-1 truncate text-[13px] leading-5 text-ink",
                 (active || session.unreadCount > 0 || hasChildren) && "font-medium"
@@ -147,18 +139,8 @@ function SessionItem({
             )}
           </span>
 
-          <span className="flex min-w-0 items-center gap-1.5 text-[11px] leading-4 text-ink-3">
-            <span className="min-w-0 flex-1 truncate">
-              {showTargetName ? targetName : null}
-              {showTargetName && statusLabel ? " · " : null}
-              {statusLabel ? (
-                <span className={cn("font-medium", STATUS_TEXT[status])}>{statusLabel}</span>
-              ) : null}
-            </span>
-            <time className="shrink-0 tabular-nums opacity-80 transition-opacity group-hover:opacity-0">
-              {formatRelativeTime(timestamp, locale)}
-            </time>
-          </span>
+          {statusLabel && <span className="sr-only">{statusLabel}</span>}
+
         </span>
       </button>
       <button
@@ -179,16 +161,20 @@ export function SessionListPanel({
   onSelect,
   onNew,
   onDelete,
-  mode
+  mode,
+  embedded = false
 }: {
   activeSessionId?: string;
   onSelect: (id: string) => void;
-  onNew: () => void;
+  onNew: (projectId?: string) => void;
   onDelete: (session: UiSession) => void;
   /** When set, only sessions of this mode are listed (undefined means "code"). */
   mode?: "code" | "work";
+  /** Share the app sidebar rather than drawing a second navigation column. */
+  embedded?: boolean;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const [limits, setLimits] = useState<Record<string, number>>({});
   const allSessions = useSessionsStore((state) => state.sessions);
   const projects = useProjectsStore((state) => state.projects);
   const collapsedProjects = useSettingsStore((state) => state.collapsedProjects);
@@ -198,15 +184,7 @@ export function SessionListPanel({
     [allSessions, mode]
   );
 
-  const grouped = useMemo(() => {
-    const map = new Map<string, SessionTreeEntry[]>();
-    for (const entry of flattenSessionForest(sessions)) {
-      const list = map.get(entry.session.projectId) ?? [];
-      list.push(entry);
-      map.set(entry.session.projectId, list);
-    }
-    return [...map.entries()];
-  }, [sessions]);
+  const grouped = useMemo(() => groupSidebarEntries(flattenSessionForest(sessions), projects), [sessions, projects]);
 
   // Auto-expand the group holding the active session exactly once per
   // selection change (covers first load / persisted-state restore and jumps
@@ -218,45 +196,45 @@ export function SessionListPanel({
     const session = sessions.find((item) => item.id === activeSessionId);
     if (!session) return; // sessions not hydrated yet; retry on the next update
     autoExpandedForRef.current = activeSessionId;
-    if (collapsedProjects.includes(session.projectId)) toggleProjectCollapsed(session.projectId);
-  }, [activeSessionId, sessions, collapsedProjects, toggleProjectCollapsed]);
+    const groupId = projects.some((project) => project.id === session.projectId) ? session.projectId : UNGROUPED_PROJECT;
+    if (collapsedProjects.includes(groupId)) toggleProjectCollapsed(groupId);
+  }, [activeSessionId, sessions, projects, collapsedProjects, toggleProjectCollapsed]);
 
   return (
     <aside
       aria-label={t("sessions.title")}
-      className="session-list-panel flex w-64 shrink-0 flex-col overflow-hidden border-r border-line/80 bg-card/95 backdrop-blur-xl"
+      className={cn("session-list-panel flex min-h-0 flex-col overflow-hidden", embedded ? "w-full flex-1" : "w-64 shrink-0 border-r border-line bg-panel")}
     >
-      <div className="p-2.5 pb-1.5">
-        <Button variant="outline" size="sm" className="w-full" data-tour="sessions-new" onClick={onNew}>
+      {!embedded && <div className="p-2.5 pb-1.5">
+        <Button variant="outline" size="sm" className="w-full" data-tour="sessions-new" onClick={() => onNew()}>
           <MessageSquarePlus className="h-4 w-4" aria-hidden />
           {t("sessions.new")}
         </Button>
-      </div>
-      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-2 pt-1 pb-3">
+      </div>}
+      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-3">
         {grouped.map(([projectId, projectEntries]) => {
           const project = projects.find((item) => item.id === projectId);
           const containsActive = projectEntries.some((entry) => entry.session.id === activeSessionId);
           const expanded = !collapsedProjects.includes(projectId);
+          const limit = limits[projectId] ?? 60;
+          const visibleEntries = visibleSidebarEntries(projectEntries, limit, activeSessionId);
           return (
             <section key={projectId} className="min-w-0 overflow-hidden mt-3.5 first:mt-1">
-              <button
-                type="button"
-                onClick={() => toggleProjectCollapsed(projectId)}
-                aria-expanded={expanded}
-                title={t(expanded ? "sessions.panel.collapseGroup" : "sessions.panel.expandGroup")}
-                className="mb-1 flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] font-medium tracking-wide text-ink-3 transition-colors outline-none hover:bg-card-hover hover:text-ink-2 focus-visible:ring-2 focus-visible:ring-accent/70"
-              >
-                <ChevronDown
-                  className={cn("h-3 w-3 shrink-0 transition-transform duration-200", !expanded && "-rotate-90")}
-                  aria-hidden
-                />
-                <span className="min-w-0 flex-1 truncate">{project?.name ?? projectId}</span>
-                {!expanded && containsActive && (
-                  // The active session lives inside this collapsed group.
-                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
-                )}
-                <span className="shrink-0 tabular-nums opacity-70">{projectEntries.length}</span>
-              </button>
+              <div className="mb-1 flex min-w-0 items-center gap-1">
+                <button type="button" onClick={() => toggleProjectCollapsed(projectId)} aria-expanded={expanded}
+                  className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-[13px] text-ink hover:bg-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                  title={project?.rootPath ?? (locale === "zh-CN" ? "未分组" : "Ungrouped")}>
+                  <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform duration-150", !expanded && "-rotate-90")} aria-hidden />
+                  {project && <Folder className="h-4 w-4 shrink-0 text-ink-2" aria-hidden />}
+                  <span className="min-w-0 flex-1 truncate">{project?.name ?? (locale === "zh-CN" ? "未分组" : "Ungrouped")}</span>
+                  {!expanded && containsActive && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-hidden />}
+                </button>
+                {project && <button type="button" onClick={() => onNew(project.id)}
+                  className="rounded-md p-1.5 text-ink-3 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                  aria-label={locale === "zh-CN" ? `在 ${project.name} 中新建会话` : `New chat in ${project.name}`} title={locale === "zh-CN" ? "新会话" : "New chat"}>
+                  <Plus className="h-3.5 w-3.5" aria-hidden />
+                </button>}
+              </div>
               <AnimatePresence initial={false}>
                 {expanded && (
                   <motion.ul
@@ -266,10 +244,9 @@ export function SessionListPanel({
                     exit={{ height: 0, opacity: 0 }}
                     transition={{ duration: 0.18, ease: "easeOut" }}
                     className="min-w-0 space-y-0.5 overflow-hidden"
-                    role="tree"
                   >
                     <AnimatePresence initial={false}>
-                      {projectEntries.map((entry) => (
+                      {visibleEntries.map((entry) => (
                         <SessionItem
                           key={entry.session.id}
                           entry={entry}
@@ -279,6 +256,7 @@ export function SessionListPanel({
                         />
                       ))}
                     </AnimatePresence>
+                    {visibleEntries.length < projectEntries.length && <li><button type="button" onClick={() => setLimits((current) => ({ ...current, [projectId]: limit + 60 }))} className="w-full rounded-lg px-4 py-2 text-left text-xs text-ink-3 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">{locale === "zh-CN" ? "显示更多对话" : "Show more chats"}</button></li>}
                   </motion.ul>
                 )}
               </AnimatePresence>

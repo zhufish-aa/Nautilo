@@ -300,7 +300,6 @@ impl SessionService {
             recover_provider_context: session.get("providerSessionId").is_none()
                 || session.get("providerContextSyncedAt").is_none()
                 || needs_runtime_tool_migration,
-            work_mode: session.get("mode").and_then(Value::as_str) == Some("work"),
             workspace_root: project_root.as_deref(),
         });
         let attachment_ids: Vec<Value> = attachments.iter().filter_map(|a| a.get("id").cloned()).collect();
@@ -413,7 +412,6 @@ impl SessionService {
             current_attachments: &[],
             recover_provider_context: session.get("providerSessionId").is_none()
                 || session.get("providerContextSyncedAt").is_none(),
-            work_mode: session.get("mode").and_then(Value::as_str) == Some("work"),
             workspace_root: project_root.as_deref(),
         });
         let message = follow_up_message(&session, &text);

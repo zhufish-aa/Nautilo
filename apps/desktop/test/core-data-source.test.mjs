@@ -61,7 +61,9 @@ test("session model control keeps compact effort slider and advanced details mut
   assert.match(source, /setAdvancedDetails\(true\)/);
   assert.match(source, /setAdvancedDetails\(false\)/);
   assert.match(source, /sessions\.composer\.speed/);
-  assert.match(source, /configureWorkbenchSession\(sessionId, \{ serviceTier:/);
+  assert.match(source, /configure\(\{ serviceTier:/);
+  assert.match(source, /configureWorkbenchSession\(sessionId, patch\)/);
+  assert.match(source, /draft\?\.onChange\(patch\)/);
 });
 
 test("CLI instances own connectivity while team members own delegated model defaults", () => {
@@ -100,7 +102,10 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(timeline, /function ToolActivityCard/);
   assert.match(timeline, /<ToolFileDiffView/);
   assert.match(timeline, /toolInputFileDiff\(toolName, input\)/);
-  assert.match(timeline, /agenthub-artifact:\/\/local\/\?path=/);
+  assert.match(timeline, /artifactUrlForPath\(attachment\.path\)/);
+  const mediaActions = readFileSync(join(renderer, "features/timeline/media-actions.ts"), "utf8");
+  assert.match(mediaActions, /agenthub-artifact:\/\/local\//);
+  assert.match(mediaActions, /encodeURIComponent\(path\)/);
   assert.match(timeline, /推理中/);
   assert.match(timeline, /推理完成/);
   assert.doesNotMatch(runtime, /event\.type === ["']run\.started["']\) return \{ kind: ["']activity["']/);
@@ -110,8 +115,8 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(runtime, /event\.type === "tool\.started"\) reasoningGeneration\.set/);
   assert.match(runtime, /runningReasoningRows/);
   assert.match(runtime, /finishLatestReasoning\(runId\)/);
-  assert.match(runtime, /if \(!event\.payload\.text\.trim\(\)\) continue/);
-  assert.match(runtime, /data: \{ \.\.\.current, text: current\.text \|\| event\.payload\.text, streaming: false \}/);
+  assert.match(runtime, /const text = capReasoningText\(event\.payload\.text\);\s*if \(!text\.trim\(\)\) continue/);
+  assert.match(runtime, /data: \{ \.\.\.current, text: capReasoningText\(current\.text \|\| event\.payload\.text\), streaming: false \}/);
   assert.match(runtime, /retryableCommands/);
   assert.match(runtime, /normalizeCommandForRetry/);
   assert.match(runtime, /event\.type === "run\.failed" \? "failed"/);
@@ -127,54 +132,40 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(composer, /<SessionModelControl/);
   assert.match(composer, /<ContextUsageIndicator/);
   assert.match(composer, /<ArrowUp/);
-  assert.match(composer, /shrink-0 border-t/);
+  assert.match(composer, /composer shrink-0/);
 
   const sessionsPage = readFileSync(join(renderer, "features/sessions/SessionsPage.tsx"), "utf8");
   const workbench = readFileSync(join(renderer, "features/sessions/SessionWorkbench.tsx"), "utf8");
   assert.match(sessionsPage, /h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden/);
-  assert.match(workbench, /relative flex shrink-0 items-center/);
+  assert.match(workbench, /<header className="[^"]*relative flex[^"]*shrink-0[^"]*items-center/);
 
   assert.equal(existsSync(join(renderer, "features/sessions/RunActivityIndicator.tsx")), true);
   const activityIndicator = readFileSync(join(renderer, "features/sessions/RunActivityIndicator.tsx"), "utf8");
   assert.match(activityIndicator, /latest && latest\.data\.kind !== "activity"/);
 });
 
-test("chat timeline groups consecutive tool work while preserving full details", () => {
+test("chat timeline preserves every grouped tool in chronological, independently expandable rows", () => {
   const grouping = readFileSync(join(renderer, "lib/tool-timeline-groups.ts"), "utf8");
   const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
   const timeline = readFileSync(join(renderer, "features/timeline/Timeline.tsx"), "utf8");
-  const styles = readFileSync(join(renderer, "styles/global.css"), "utf8");
-
+  const conversation = readFileSync(join(renderer, "lib/conversation-timeline.ts"), "utf8");
+  const workbench = readFileSync(join(renderer, "features/sessions/SessionWorkbench.tsx"), "utf8");
   assert.match(grouping, /GROUPABLE_KINDS.*reasoning.*tool_activity.*command.*file_change.*verification/s);
-  assert.match(grouping, /stepCount < 2/);
-  assert.match(grouping, /stepCount,/);
   assert.match(grouping, /items: pending/);
-  assert.match(grouping, /running: pending\.some\(isRunningStep\)/);
-  assert.match(grouping, /event\.data\.kind === "reasoning"[\s\S]*event\.data\.streaming/);
   assert.match(runtime, /groupToolTimeline/);
-  assert.match(timeline, /function ToolGroupCard/);
-  assert.match(timeline, /const \[open, setOpen\] = useState\(false\)/);
-  assert.match(timeline, /const preview = items\.at\(-1\)/);
-  assert.match(timeline, /latestReasoningSummary\(preview\.data\.text\)/);
-  assert.match(timeline, /function LatestActivityLabel/);
-  assert.match(timeline, /element\.scrollLeft = followTail \? element\.scrollWidth : 0/);
-  assert.match(timeline, /followTail=\{preview\.data\.kind === "reasoning"\}/);
-  assert.match(timeline, /hasSupportingSteps/);
-  assert.match(timeline, /处理了 \$\{stepCount\} 个步骤/);
-  assert.match(timeline, /运行了/);
-  assert.match(timeline, /items\.map/);
-  assert.match(timeline, /item\.data\.kind === "file_change"/);
-  assert.match(timeline, /item\.data\.kind === "verification"/);
-  assert.match(styles, /@keyframes beam-slide[\s\S]*from[\s\S]*translate3d\(-130%, 0, 0\)[\s\S]*to[\s\S]*translate3d\(340%, 0, 0\)/);
-  assert.match(styles, /animation: beam-slide 2\.8s linear infinite/);
-  assert.doesNotMatch(styles, /@keyframes beam-slide[\s\S]*60%,[\s\S]*100%/);
-  assert.match(timeline, /"run-border-active border-accent\/30/);
-  assert.match(timeline, /cn\("run-beam", flowRunning && "run-beam-active"\)/);
-  assert.match(timeline, /const streamingReasoning = items\.some/);
-  assert.match(timeline, /const flowRunning = running \|\| streamingReasoning/);
-  assert.match(styles, /\.run-border\.run-border-active::before[\s\S]*opacity: 0\.82/);
-  assert.match(styles, /\.run-beam::after[\s\S]*animation-delay: -1\.4s/);
-  assert.match(styles, /var\(--accent\) 0deg[\s\S]*var\(--info\) 90deg[\s\S]*var\(--accent-2\) 180deg[\s\S]*var\(--accent\) 360deg/);
+  assert.match(conversation, /data\.kind === "tool_group"\) visit\(data\.items\)/);
+  assert.match(workbench, /conversationTimeline\(events\)/);
+  assert.match(workbench, /timelineEvents\.forEach/);
+  assert.match(workbench, /shell\(event\.id/);
+  assert.doesNotMatch(workbench, /ProcessFold/);
+  assert.match(timeline, /function ToolActivityCard[\s\S]*const \[open, setOpen\] = useState\(false\)/);
+  assert.match(timeline, /function CommandCard[\s\S]*const \[open, setOpen\] = useState\(false\)/);
+  assert.match(timeline, /case "tool_group":[\s\S]*data\.items\.map/);
+  assert.match(timeline, /case "file_change":[\s\S]*<FileChangeCard/);
+  assert.match(timeline, /case "verification":[\s\S]*<VerificationCard/);
+  assert.match(timeline, /status === "running" && <Loader2/);
+  assert.match(timeline, /useStreamingText/);
+  assert.match(timeline, /prev\.event === next\.event/);
 });
 
 test("file change cards accept provider diffs and hydrated run diff artifacts", () => {
@@ -208,7 +199,7 @@ test("delegated child work keeps the orchestration visibly running until stopped
   assert.doesNotMatch(page, /workbenchRunning = foregroundRunning \|\| orchestrationRunning/);
   assert.match(page, /running=\{workbenchRunning\}/);
   assert.match(page, /RunActivityIndicator lifecycle=\{visibleLifecycle\}/);
-  assert.match(indicator, /子 Agent 正在运行，完成后会通知主 Agent/);
+  assert.match(indicator, /等待协作任务/);
   assert.match(sessionList, /visibleSessionStatus\(session\.status, orchestrationLifecycle\)/);
   assert.match(agentPanel, /visibleSessionStatus\(session\.status, orchestrationLifecycle\)/);
   assert.match(lifecycle, /orchestration\?\.status === "running"/);
@@ -221,8 +212,8 @@ test("delegated child work keeps the orchestration visibly running until stopped
   assert.match(runtime, /status: session\.status/);
   assert.match(runtime, /"session\.send"/);
   assert.match(runtime, /_setForeground\(session\.id, activeRun/);
-  assert.match(runtime, /const latestRun = runs\.find\(\(run\) => run\.sessionId === session\.id\)/);
-  assert.match(runtime, /latestRun && shouldPollAgentRun\(latestRun\)/);
+  assert.match(runtime, /const activeRun = sessionRuns\.find\(shouldPollAgentRun\)/);
+  assert.match(runtime, /allRuns\.filter\(shouldPollAgentRun\)/);
   assert.match(store, /foreground: Record<string, RunLifecycle \| undefined>/);
   const runningSetter = store.slice(store.indexOf("_setRunning:"), store.indexOf("_setForeground:"));
   assert.doesNotMatch(runningSetter, /sessions:/);

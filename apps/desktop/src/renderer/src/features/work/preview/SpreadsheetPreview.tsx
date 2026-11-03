@@ -137,7 +137,7 @@ export function SpreadsheetPreview({ bytes, zoom, onNav, onReady, onError }: Off
   const scale = zoom === "fit-width" ? 1 : zoom / 100;
 
   if (!sheet) {
-    return <div className="h-full bg-card/40" aria-busy />;
+    return <div className="h-full bg-canvas" aria-busy />;
   }
 
   const selectSheet = (index: number): void => {
@@ -148,7 +148,7 @@ export function SpreadsheetPreview({ bytes, zoom, onNav, onReady, onError }: Off
   return (
     <div className="flex h-full min-h-0 flex-col">
       {workbook && workbook.SheetNames.length > 1 && (
-        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line/70 px-2 py-1">
+        <div className="order-last flex shrink-0 items-center gap-1 overflow-x-auto border-t border-line px-3 py-2">
           {workbook.SheetNames.map((name, index) => (
             <button
               key={name}
@@ -156,8 +156,8 @@ export function SpreadsheetPreview({ bytes, zoom, onNav, onReady, onError }: Off
               onClick={() => selectSheet(index)}
               title={name}
               className={cn(
-                "h-6 shrink-0 rounded-md px-2 text-[11px] font-medium transition-colors",
-                index === sheetIndex ? "bg-accent-soft text-accent" : "text-ink-3 hover:bg-card-hover hover:text-ink"
+                "h-8 shrink-0 rounded-md px-3 text-sm font-medium transition-colors",
+                index === sheetIndex ? "bg-card-hover text-ink" : "text-ink-3 hover:bg-card-hover hover:text-ink"
               )}
             >
               <span className="max-w-28 truncate">{name}</span>
@@ -166,21 +166,21 @@ export function SpreadsheetPreview({ bytes, zoom, onNav, onReady, onError }: Off
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto bg-card/40">
+      <div className="min-h-0 flex-1 overflow-auto bg-canvas">
         {sheet.rows.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-ink-3">
             {t("work.preview.sheetEmpty")}
           </div>
         ) : (
           <div className="inline-block p-3" style={{ zoom: scale }}>
-            <table className="border-collapse bg-panel text-[12px] text-ink-2">
+            <table className="border-collapse bg-panel text-[13px] text-ink-2">
               <thead className="sticky top-0 z-20">
                 <tr>
-                  <th className="sticky left-0 z-30 border border-line bg-card-hover px-2 py-1 text-[10px] font-normal text-ink-3" />
+                  <th className="sticky left-0 z-30 border border-line bg-card-hover px-2 py-1 text-xs font-normal text-ink-3" />
                   {Array.from({ length: sheet.columnCount }, (_, column) => (
                     <th
                       key={column}
-                      className="min-w-16 border border-line bg-card-hover px-2 py-1 text-[10px] font-medium text-ink-3"
+                      className="min-w-16 border border-line bg-card-hover px-2 py-1 text-xs font-medium text-ink-3"
                     >
                       {columnLabel(column)}
                     </th>
@@ -192,7 +192,7 @@ export function SpreadsheetPreview({ bytes, zoom, onNav, onReady, onError }: Off
                   const rowIndex = range.start + offset;
                   return (
                     <tr key={rowIndex}>
-                      <th className="sticky left-0 z-10 border border-line bg-card-hover px-2 py-0.5 text-right text-[10px] font-normal text-ink-3">
+                      <th className="sticky left-0 z-10 border border-line bg-card-hover px-2 py-0.5 text-right text-xs font-normal text-ink-3">
                         {rowIndex + 1}
                       </th>
                       {Array.from({ length: sheet.columnCount }, (_, column) => {

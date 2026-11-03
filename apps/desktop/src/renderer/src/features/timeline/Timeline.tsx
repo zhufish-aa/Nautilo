@@ -1,10 +1,9 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
   ArrowRightLeft,
   Bot,
-  BrainCircuit,
   Check,
   ChevronDown,
   ClipboardList,
@@ -16,11 +15,6 @@ import {
   ImageIcon,
   Loader2,
   Pencil,
-  RotateCcw,
-  Sparkles,
-  SquareTerminal,
-  User,
-  Wrench,
   X
 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
@@ -30,7 +24,6 @@ import { StatusChip, Tag } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
 import { toolActivityLabel, toolInputFileDiff } from "../../lib/tool-display";
-import { latestReasoningSummary } from "../../lib/tool-group-preview";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolFileDiffView } from "./ToolFileDiffView";
 import { TimelineImage } from "./TimelineImage";
@@ -38,7 +31,7 @@ import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupTextMenu } f
 import { openFilePreview } from "../../stores/file-preview";
 import { resolveFileOpenTarget } from "../../lib/file-references";
 import { fileChangeCounts } from "../../lib/changed-files";
-import { useProgressiveRows } from "../../lib/use-progressive-rows";
+import { diffLines } from "../../lib/line-diff";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 const FOLLOW_TAIL_THRESHOLD = 120;
@@ -226,35 +219,6 @@ function openTimelineFile(
   else openFilePreview({ path });
 }
 
-function LatestActivityLabel({
-  label,
-  followTail
-}: {
-  label: string;
-  followTail: boolean;
-}): JSX.Element {
-  const labelRef = useRef<HTMLSpanElement>(null);
-
-  useLayoutEffect(() => {
-    const element = labelRef.current;
-    if (!element) return;
-    element.scrollLeft = followTail ? element.scrollWidth : 0;
-  }, [followTail, label]);
-
-  return (
-    <span
-      ref={labelRef}
-      className={cn(
-        "min-w-0 flex-1 whitespace-nowrap font-mono",
-        followTail ? "overflow-hidden" : "truncate"
-      )}
-      title={label}
-    >
-      {label}
-    </span>
-  );
-}
-
 function CardShell({
   icon: Icon,
   tone = "accent",
@@ -270,38 +234,33 @@ function CardShell({
   children?: React.ReactNode;
   className?: string;
 }): JSX.Element {
-  const toneClasses: Record<string, string> = {
-    accent: "border-accent/25 bg-gradient-to-br from-accent/20 via-accent-soft to-info/10 text-accent shadow-[0_3px_10px_-3px_var(--accent-soft)]",
-    ok: "border-ok/20 bg-ok/10 text-ok",
-    warn: "border-warn/20 bg-warn/10 text-warn",
-    danger: "border-danger/20 bg-danger/10 text-danger",
-    info: "border-info/20 bg-info/10 text-info",
-    muted: "border-line bg-card-hover text-ink-3"
-  };
   return (
-    <motion.article
-      initial={{ opacity: 0, y: 10, scale: 0.99 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 500, damping: 45 }}
-      className={cn("flex gap-3", className)}
-    >
-      <span
-        aria-hidden
-        className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border", toneClasses[tone])}
-      >
-        <Icon className="h-4 w-4" />
-      </span>
-      <div className="min-w-0 flex-1">
-        {(title || time) && (
-          <div className="mb-1.5 flex items-baseline justify-between gap-3">
-            <div className="min-w-0 text-[13px] font-medium text-ink-2">{title}</div>
-            {time && <time className="shrink-0 text-[11px] text-ink-3">{time}</time>}
-          </div>
-        )}
-        {children}
-      </div>
-    </motion.article>
+    <article className={cn("min-w-0 py-1", className)} data-tone={tone}>
+      {(title || time) && <div className="mb-2 flex min-w-0 items-center gap-2 text-sm text-ink-3" title={time}><Icon className="h-4 w-4 shrink-0" aria-hidden /><div className="min-w-0 flex-1">{title}</div></div>}
+      {children}
+    </article>
   );
+}
+
+function useStreamingText(text: string, streaming: boolean): string {
+  const [visible, setVisible] = useState(text);
+  const latest = useRef(text);
+  const timer = useRef<ReturnType<typeof setTimeout>>();
+  latest.current = text;
+  useEffect(() => {
+    if (!streaming) {
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = undefined;
+      setVisible(text);
+    } else if (!timer.current) {
+      timer.current = setTimeout(() => {
+        timer.current = undefined;
+        setVisible(latest.current);
+      }, 50);
+    }
+  }, [text, streaming]);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  return streaming ? visible : text;
 }
 
 function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
@@ -315,6 +274,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
   const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
   const isSystem = sender === "system";
+  const visibleText = useStreamingText(text, Boolean(streaming));
   // Historical messages render statically on remounts (mode switches reopen the
   // whole timeline); only fresh live-conversation rows pay for the spring-in.
   const animateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
@@ -334,27 +294,21 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
       initial={animateIn ? { opacity: 0, y: 10 } : false}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: "spring", stiffness: 500, damping: 45 }}
-      className="group flex"
+      className="group relative flex w-full"
     >
       <div className={cn("min-w-0 flex-1", isUser && "flex flex-col items-end")}>
-        <div className={cn("flex items-baseline gap-2 text-ink-3", isUser && "flex-row-reverse")}>
-          <span className={cn("text-[11px] font-medium tracking-wide", isUser && "text-accent")}>
-            {isUser ? (locale === "zh-CN" ? "你" : "You") : authorName ?? "Agent"}
-          </span>
-          <time className="text-[10px] tabular-nums opacity-70">{formatDateTime(event.timestamp, locale)}</time>
-          {editedAt && <span className="text-[10px] opacity-70">{locale === "zh-CN" ? "已编辑" : "Edited"}</span>}
-        </div>
+        <span className="sr-only">{isUser ? (locale === "zh-CN" ? "你" : "You") : authorName ?? "Nautilo"}</span>
         <div
           className={cn(
-            "mt-1.5 text-[15px] leading-7 text-ink",
-            isUser && "chat-bubble-user max-w-[85%] rounded-2xl rounded-tr-md border border-accent/20 bg-accent-soft/60 px-4 py-2.5"
+            "text-[15px] leading-7 text-ink",
+            isUser && "chat-bubble-user max-w-[88%] rounded-2xl bg-card-hover px-4 py-3"
           )}
           onContextMenu={(event) => {
             event.preventDefault();
             void popupTextMenu(window.getSelection()?.toString() ?? "", t);
           }}
         >
-          <MarkdownContent source={text} inverted={false} onOpenLocalFile={onOpenLocalFile} />
+          <MarkdownContent source={visibleText} inverted={false} onOpenLocalFile={onOpenLocalFile} />
           {attachments && attachments.length > 0 && (
             <div className={cn("mt-2.5 grid gap-2", attachments.length > 1 && "sm:grid-cols-2")}>
               {attachments.map((attachment) => attachment.kind === "image" && attachment.path ? (
@@ -396,7 +350,8 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
           {streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-label={locale === "zh-CN" ? "正在流式生成" : "Streaming"} />}
         </div>
         {!streaming && (
-          <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          <div className="absolute right-0 top-full z-10 flex items-center gap-1 rounded-lg bg-card opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100" title={formatDateTime(event.timestamp, locale)}>
+            {editedAt && <span className="text-xs text-ink-3">{locale === "zh-CN" ? "已编辑" : "Edited"}</span>}
             <button
               type="button"
               onClick={() => {
@@ -430,24 +385,14 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
 }
 
 function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind: "activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element | null {
-  const zh = locale === "zh-CN";
-  const labels = zh
-    ? { queued: "请求已发送", starting: "正在启动 Agent", thinking: "正在思考", responding: "正在整理回复", completed: "本轮已完成" }
-    : { queued: "Request sent", starting: "Starting agent", thinking: "Thinking", responding: "Preparing response", completed: "Turn completed" };
-  const time = formatDateTime(event.timestamp, locale);
-  // Turn-completion dividers are hidden: the fold row already marks the end.
-  if (event.data.phase === "completed") {
-    return null;
-  }
+  if (event.data.phase !== "starting") return null;
   return (
-    <motion.div initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} className="log-line flex items-center gap-2 py-0.5 text-ink-3">
-      <span className="relative mx-1 flex h-1.5 w-1.5" aria-hidden>
-        <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" />
-        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-br from-accent to-info" />
-      </span>
-      <span className="shimmer-text">{labels[event.data.phase]}</span>
-      <time className="text-[10px] tabular-nums opacity-70">{time}</time>
-    </motion.div>
+    <details className="text-[13px] text-ink-3">
+      <summary className="w-fit cursor-pointer rounded-md py-1 outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
+        {locale === "zh-CN" ? "会话已初始化" : "Initialized session"}
+      </summary>
+      <time className="mt-1 block text-xs">{formatDateTime(event.timestamp, locale)}</time>
+    </details>
   );
 }
 
@@ -455,6 +400,7 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
   const [open, setOpen] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const reasoningScrollRef = useRef<HTMLDivElement>(null);
+  const visibleText = useStreamingText(event.data.text, Boolean(event.data.streaming));
   const followReasoningRef = useRef(true);
   const zh = locale === "zh-CN";
   const scrollToLatest = useCallback(() => {
@@ -477,7 +423,7 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
   // upward scroll opts out until they return to the bottom.
   useLayoutEffect(() => {
     if (open && event.data.streaming && followReasoningRef.current) scrollToLatest();
-  }, [event.data.streaming, event.data.text, open, scrollToLatest]);
+  }, [event.data.streaming, visibleText, open, scrollToLatest]);
 
   const handleReasoningScroll = (): void => {
     const element = reasoningScrollRef.current;
@@ -488,19 +434,18 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
   };
 
   return (
-    <motion.article initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="reasoning-card rounded-xl border border-line bg-card/70">
+    <motion.article initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="reasoning-card">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[13px] text-ink-2 outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/45"
+        className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-[13px] text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50"
       >
-        <BrainCircuit className="h-4 w-4 shrink-0 text-accent" aria-hidden />
-        <span className={cn("font-medium", event.data.streaming && "shimmer-text")}>
+        <span className="font-normal">
           {event.data.streaming ? (zh ? "推理中" : "Reasoning") : (zh ? "推理完成" : "Reasoning complete")}
         </span>
         {event.data.streaming && <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden />}
-        <ChevronDown className={cn("ml-auto h-3.5 w-3.5 text-ink-3 transition-transform duration-200", open && "rotate-180")} aria-hidden />
+        <ChevronDown className={cn("h-3.5 w-3.5 text-ink-3 transition-transform duration-200", !open && "-rotate-90")} aria-hidden />
       </button>
       {open && (
         <motion.div
@@ -513,9 +458,9 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
             <div
               ref={reasoningScrollRef}
               onScroll={handleReasoningScroll}
-              className="max-h-96 overscroll-contain overflow-y-auto border-t border-line px-3.5 py-3 pr-2 text-[13px] leading-relaxed text-ink-2"
+              className="mt-2 max-h-96 overscroll-contain overflow-y-auto rounded-xl border border-line px-3.5 py-3 text-[13px] leading-relaxed text-ink-2"
             >
-              <MarkdownContent source={event.data.text} />
+              <MarkdownContent source={visibleText} />
               {event.data.streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-hidden />}
             </div>
             <AnimatePresence>
@@ -545,52 +490,44 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
 function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { kind: "tool_activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
   const [open, setOpen] = useState(false);
   const { toolName, status, input, output, fileDiff } = event.data;
-  const resolvedFileDiff = fileDiff ?? toolInputFileDiff(toolName, input);
+  const resolvedFileDiff = useMemo(() => fileDiff ?? toolInputFileDiff(toolName, input), [fileDiff, toolName, input]);
+  const counts = useMemo(() => {
+    if (!resolvedFileDiff) return undefined;
+    const rows = diffLines(resolvedFileDiff.before, resolvedFileDiff.after);
+    return { additions: rows.filter((row) => row.type === "added").length, deletions: rows.filter((row) => row.type === "removed").length };
+  }, [resolvedFileDiff]);
   const details = Boolean(resolvedFileDiff || input || output);
   const zh = locale === "zh-CN";
   const label = toolActivityLabel(toolName, status, input, locale);
   return (
-    <motion.article initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} className="flex gap-2.5 text-[13px]">
-      <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-info/10 text-info">
-        {status === "running" ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Wrench className="h-3.5 w-3.5" aria-hidden />}
-      </span>
-      <div className="min-w-0 flex-1">
-        <button
-          type="button"
-          disabled={!details}
-          onClick={() => setOpen((value) => !value)}
-          className="flex w-full items-center gap-2 py-1 text-left text-ink-2 disabled:cursor-default"
-        >
-          <span className="truncate font-medium" title={label}>{label}</span>
-          {details && <ChevronDown className={cn("ml-auto h-3.5 w-3.5 text-ink-3 transition-transform", open && "rotate-180")} aria-hidden />}
-        </button>
-        {details && open && (
-          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} className="mt-1 overflow-hidden rounded-lg border border-line bg-card-hover">
-            {resolvedFileDiff && <ToolFileDiffView diff={resolvedFileDiff} locale={locale} />}
-            {input && !resolvedFileDiff && (
-              <div className="px-3 py-2">
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{zh ? "输入" : "Input"}</div>
-                <pre className="max-h-40 overflow-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-2">{input}</pre>
-              </div>
-            )}
-            {input && resolvedFileDiff && (
-              <details className="border-t border-line">
-                <summary className="cursor-pointer px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
-                  {zh ? "原始输入" : "Raw input"}
-                </summary>
-                <pre className="max-h-40 overflow-auto border-t border-line px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-2">{input}</pre>
-              </details>
-            )}
-            {output && (
-              <div className={cn("px-3 py-2", (input || resolvedFileDiff) && "border-t border-line")}>
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{zh ? "结果" : "Result"}</div>
-                <pre className="max-h-56 overflow-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-2">{output}</pre>
-              </div>
-            )}
-          </motion.div>
-        )}
-      </div>
-    </motion.article>
+    <article className="text-[13px]">
+      <button
+        type="button"
+        disabled={!details}
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={details ? open : undefined}
+        className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50 disabled:cursor-default"
+      >
+        {status === "running" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />}
+        {status === "failed" && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
+        <span className="truncate" title={label}>{label}</span>
+        {counts && <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
+        {details && <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !open && "-rotate-90")} aria-hidden />}
+      </button>
+      {details && open && (
+        <div className="mt-2 overflow-hidden rounded-xl border border-line bg-card">
+          {resolvedFileDiff && <ToolFileDiffView diff={resolvedFileDiff} locale={locale} />}
+          {input && !resolvedFileDiff && <pre className="max-h-40 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2">{input}</pre>}
+          {input && resolvedFileDiff && (
+            <details className="border-t border-line">
+              <summary className="cursor-pointer px-3 py-2 text-xs text-ink-3">{zh ? "原始输入" : "Raw input"}</summary>
+              <pre className="max-h-40 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap text-ink-2">{input}</pre>
+            </details>
+          )}
+          {output && <pre className={cn("max-h-56 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2", (input || resolvedFileDiff) && "border-t border-line")}>{output}</pre>}
+        </div>
+      )}
+    </article>
   );
 }
 
@@ -790,205 +727,28 @@ function commandPresentation(command: string): { summary: string; full: string }
 }
 
 function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "command" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
-  // F-028: commands default to collapsed, expand to see output.
   const [open, setOpen] = useState(false);
   const { command, status, exitCode, output, attempts = 1 } = event.data;
   const presented = commandPresentation(command);
   const zh = locale === "zh-CN";
   return (
-    <CardShell
-      icon={SquareTerminal}
-      tone={status === "failed" ? "danger" : status === "running" ? "accent" : "muted"}
-      title={
-        <span className="flex w-full min-w-0 items-center gap-2 overflow-hidden">
-          <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink-2" title={presented.full}>{presented.summary}</code>
-          {attempts > 1 && <Tag label={zh ? `${attempts} 次尝试` : `${attempts} attempts`} className="h-5 shrink-0" />}
-          {status === "running" ? (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" aria-label={t("sessions.cards.running")} />
-          ) : (
-            exitCode !== undefined && (
-              <StatusChip
-                tone={exitCode === 0 ? "ok" : "danger"}
-                label={t("sessions.cards.exitCode", { code: exitCode })}
-              />
-            )
-          )}
-        </span>
-      }
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      {(command || output) && (
-        <div className="rounded-xl border border-line bg-card">
-          <button
-            type="button"
-            onClick={() => setOpen((prev) => !prev)}
-            aria-expanded={open}
-            className="flex w-full items-center justify-between gap-2 px-3.5 py-2 text-xs text-ink-3 transition-colors hover:text-ink-2 focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none"
-          >
-            <span>{zh ? "详情" : "Details"}</span>
-            <ChevronDown className={cn("h-3.5 w-3.5 transition-transform duration-200", open && "rotate-180")} aria-hidden />
-          </button>
-          {open && (
-            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} className="max-h-72 overflow-auto border-t border-line">
-              <div className="px-3.5 py-2.5">
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{zh ? "命令" : "Command"}</div>
-                <pre className="overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap break-all text-ink-2">{presented.full}</pre>
-              </div>
-              {output && (
-                <div className="border-t border-line px-3.5 py-2.5">
-                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{t("sessions.cards.output")}</div>
-                  <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-ink-2">{output}</pre>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </div>
-      )}
-    </CardShell>
-  );
-}
-
-function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
-  event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> };
-  t: (k: MessageKey, v?: Record<string, string | number>) => string;
-  locale: "zh-CN" | "en-US";
-  onViewDiff?: (path?: string) => void;
-  onOpenLocalFile?: (path: string) => void;
-}): JSX.Element {
-  const [open, setOpen] = useState(false);
-  const { items, stepCount, callCount, running } = event.data;
-  // A collapsed group renders nothing; expanding a huge group mounts
-  // progressively so hundreds of step cards are not built in one frame.
-  const { limit, sentinelRef, showAll } = useProgressiveRows(
-    open ? items.length : 0,
-    open ? "expanded" : "collapsed",
-    200,
-    400
-  );
-  const streamingReasoning = items.some(
-    (item) => item.data.kind === "reasoning" && item.data.streaming
-  );
-  const flowRunning = running || streamingReasoning;
-  const calls = items.filter((item) => item.data.kind === "tool_activity" || item.data.kind === "command");
-  // The compact row represents the newest activity. Tool calls and validation
-  // may replace a reasoning preview; when reasoning is newest, its growing text
-  // is summarized again on every render.
-  const preview = items.at(-1);
-  const onlyCommands = calls.every((item) => item.data.kind === "command");
-  const hasSupportingSteps = items.some((item) => item.data.kind !== "tool_activity" && item.data.kind !== "command");
-  const zh = locale === "zh-CN";
-  const title = hasSupportingSteps
-    ? flowRunning
-      ? zh ? `正在处理 ${stepCount} 个步骤` : `Working through ${stepCount} steps`
-      : zh ? `处理了 ${stepCount} 个步骤` : `Completed ${stepCount} steps`
-    : flowRunning
-      ? zh ? `正在运行 ${callCount} 个${onlyCommands ? "命令" : "工具/命令"}` : `Running ${callCount} ${onlyCommands ? "commands" : "tools/commands"}`
-      : zh ? `运行了 ${callCount} 个${onlyCommands ? "命令" : "工具/命令"}` : `Ran ${callCount} ${onlyCommands ? "commands" : "tools/commands"}`;
-  const previewStatus = flowRunning
-    ? "running"
-    : preview?.data.kind === "command" || preview?.data.kind === "tool_activity"
-      ? preview.data.status
-      : preview?.data.kind === "reasoning"
-        ? preview.data.streaming ? "running" : "done"
-        : preview?.data.kind === "verification"
-          ? preview.data.status === "running" ? "running" : preview.data.status === "failed" ? "failed" : "done"
-          : "done";
-  const previewLabel = preview?.data.kind === "command"
-    ? commandPresentation(preview.data.command).summary
-    : preview?.data.kind === "tool_activity"
-      ? preview.data.toolName
-      : preview?.data.kind === "reasoning"
-        ? latestReasoningSummary(preview.data.text)
-        : preview?.data.kind === "file_change"
-          ? zh
-            ? `修改了 ${preview.data.files.length} 个文件 · ${preview.data.files.at(-1)?.path ?? ""}`
-            : `Changed ${preview.data.files.length} files · ${preview.data.files.at(-1)?.path ?? ""}`
-          : preview?.data.kind === "verification"
-            ? preview.data.command
-            : "";
-
-  return (
-    <motion.article
-      initial={{ opacity: 0, y: 10, scale: 0.99 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 500, damping: 45 }}
-      className={cn(
-        "run-border relative overflow-hidden rounded-xl border bg-card/70 transition-[border-color,box-shadow] duration-250",
-        flowRunning
-          ? "run-border-active border-accent/30 shadow-[0_14px_44px_-18px_var(--accent)]"
-          : "border-line"
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="w-full px-3.5 py-2 text-left outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/45"
-      >
-        <span className="flex items-center gap-2.5 text-[13px] font-medium text-ink-2">
-          {/* Status node: the only glowing element while the track is alive. */}
-          {flowRunning ? (
-            <span className="relative mx-1 flex h-2 w-2 shrink-0" aria-hidden>
-              <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-accent shadow-[0_0_8px_var(--accent)]" />
-            </span>
-          ) : (
-            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-line text-ok" aria-hidden>
-              <Check className="h-2.5 w-2.5" />
-            </span>
-          )}
-          <span className={flowRunning ? "shimmer-text" : undefined}>{title}</span>
-          {flowRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden />}
-          <ChevronDown className={cn("ml-auto h-3.5 w-3.5 text-ink-3 transition-transform duration-200", open && "rotate-180")} aria-hidden />
-        </span>
-        {preview && (
-          <span className="mt-1.5 flex min-w-0 items-center gap-2 pl-7 font-mono text-[11px] text-ink-3">
-            {previewStatus === "running"
-              ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-accent" aria-hidden />
-              : previewStatus === "failed"
-                ? <X className="h-3 w-3 shrink-0 text-danger" aria-hidden />
-                : <Check className="h-3 w-3 shrink-0 text-ok" aria-hidden />}
-            <LatestActivityLabel
-              label={previewLabel}
-              followTail={preview.data.kind === "reasoning"}
-            />
-            {preview.data.kind === "command" && preview.data.exitCode !== undefined && (
-              <span className="ml-auto shrink-0">exit {preview.data.exitCode}</span>
-            )}
-          </span>
-        )}
+    <article>
+      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}
+        className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-[13px] text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50">
+        {status === "running" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-label={t("sessions.cards.running")} />}
+        {status === "failed" && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
+        <span className="truncate" title={presented.full}>{zh ? "运行" : "Ran"} {presented.summary}</span>
+        {attempts > 1 && <span className="shrink-0 text-xs">{zh ? `${attempts} 次` : `${attempts} attempts`}</span>}
+        <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !open && "-rotate-90")} aria-hidden />
       </button>
       {open && (
-        <motion.div
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          className="overflow-hidden border-t border-line"
-        >
-          {/* Workflow rail: steps hang from one quiet hairline. */}
-          <div className="relative ml-[21px] space-y-3 border-l border-line py-3 pl-4 pr-3.5">
-            {items.slice(0, limit).map((item) => {
-              if (item.data.kind === "reasoning") return <ReasoningCard key={item.id} event={item as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
-              if (item.data.kind === "tool_activity") return <ToolActivityCard key={item.id} event={item as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
-              if (item.data.kind === "command") return <CommandCard key={item.id} event={item as TimelineEvent & { data: { kind: "command" } }} t={t} locale={locale} />;
-              if (item.data.kind === "file_change") return <FileChangeCard key={item.id} event={item as TimelineEvent & { data: { kind: "file_change" } }} t={t} locale={locale} onViewDiff={onViewDiff} onOpenLocalFile={onOpenLocalFile} />;
-              if (item.data.kind === "verification") return <VerificationCard key={item.id} event={item as TimelineEvent & { data: { kind: "verification" } }} t={t} locale={locale} />;
-              return null;
-            })}
-            {limit < items.length && (
-              <button
-                type="button"
-                ref={sentinelRef}
-                onClick={showAll}
-                className="mx-3 my-2 w-[calc(100%-24px)] rounded-lg border border-line px-3 py-1.5 text-xs text-ink-3 transition-colors hover:bg-card-hover hover:text-ink-2"
-              >
-                {zh ? `加载更多（共 ${items.length} 步）` : `Load more (${items.length} steps total)`}
-              </button>
-            )}
-          </div>
-        </motion.div>
+        <div className="mt-2 max-h-72 overflow-auto rounded-xl border border-line bg-card">
+          <pre className="px-3.5 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all text-ink-2">{presented.full}</pre>
+          {output && <pre className="border-t border-line px-3.5 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-ink-2">{output}</pre>}
+          {exitCode !== undefined && <p className={cn("border-t border-line px-3.5 py-2 text-xs", exitCode === 0 ? "text-ink-3" : "text-danger")}>{t("sessions.cards.exitCode", { code: exitCode })}</p>}
+        </div>
       )}
-      <span className={cn("run-beam", flowRunning && "run-beam-active")} aria-hidden />
-    </motion.article>
+    </article>
   );
 }
 
@@ -1007,52 +767,26 @@ function FileChangeCard({
 }): JSX.Element {
   const { files } = event.data;
   return (
-    <CardShell
-      icon={FileCode2}
-      tone="info"
-      title={
-        <span className="inline-flex items-center gap-2">
-          {t("sessions.cards.files", { count: files.length })}
-          {onViewDiff && (
-            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => onViewDiff(files[0]?.path)}>
-              {t("sessions.cards.viewDiff")}
-            </Button>
-          )}
-        </span>
-      }
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      <ul className="overflow-hidden rounded-xl border border-line bg-card">
-        {files.map((file) => (
-          <li
-            key={file.path}
-            role="button"
-            tabIndex={0}
-            title={file.path}
-            onClick={() => openTimelineFile(file.path, t, onOpenLocalFile, "drawer")}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
-            }}
-            className="flex cursor-pointer items-center gap-2.5 border-b border-line px-3.5 py-2 transition-colors last:border-0 hover:bg-card-hover"
-          >
-            <span
-              className={cn(
-                "w-1.5 h-1.5 rounded-full shrink-0",
-                file.changeType === "added" ? "bg-ok" : file.changeType === "deleted" ? "bg-danger" : "bg-info"
-              )}
-              aria-label={file.changeType}
-            />
-            <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink-2" title={file.path}>
-              {file.path}
-            </code>
-            <span className="shrink-0 font-mono text-[11px]">
-              <span className="text-ok">+{fileChangeCounts(file).additions}</span>{" "}
-              <span className="text-danger">-{fileChangeCounts(file).deletions}</span>
-            </span>
+    <ul className="overflow-hidden rounded-xl border border-line bg-card">
+      {files.map((file) => {
+        const counts = fileChangeCounts(file);
+        const open = (): void => {
+          if (onViewDiff && (file.diff || !onOpenLocalFile)) onViewDiff(file.path);
+          else openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
+        };
+        return (
+          <li key={file.path} className="border-b border-line last:border-0">
+            <button type="button" title={file.path} onClick={open}
+              className="flex w-full items-center gap-2.5 px-3.5 py-3 text-left text-[13px] outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/50">
+              <FileCode2 className="h-4 w-4 shrink-0 text-ink-3" aria-hidden />
+              <span className="min-w-0 flex-1 truncate text-ink-2">{file.path}</span>
+              <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>
+              <ChevronDown className="h-3.5 w-3.5 -rotate-90 text-ink-3" aria-hidden />
+            </button>
           </li>
-        ))}
-      </ul>
-    </CardShell>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -1161,7 +895,7 @@ function ApprovalCard({ event, t, locale }: { event: TimelineEvent & { data: { k
       }
       time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
     >
-      <div className="rounded-xl border border-warn/25 bg-warn/5 px-4 py-3">
+      <div className="rounded-xl border border-line bg-panel px-5 py-4">
         <p className="text-sm font-medium text-ink">{approval.title}</p>
         <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{approval.description}</p>
         {pending && (
@@ -1273,10 +1007,6 @@ function TimelineEventViewImpl({
     case "message":
       return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} />;
     case "activity":
-      // Transient per-turn phases (queued/starting/thinking/responding) are already
-      // surfaced by the live run indicator; keep only the completed milestone so
-      // history isn't littered with repeated "thinking" lines.
-      if (data.phase !== "completed") return null;
       return <ActivityLine event={event as TimelineEvent & { data: { kind: "activity" } }} locale={locale} />;
     case "reasoning":
       return <ReasoningCard event={event as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
@@ -1284,7 +1014,7 @@ function TimelineEventViewImpl({
       if (data.subagent) return <SubagentCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} onOpenSubagent={onOpenSubagent} />;
       return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
     case "tool_group":
-      return <ToolGroupCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> }} t={t} locale={locale} onViewDiff={onViewDiff} onOpenLocalFile={onOpenLocalFile} />;
+      return <div className="space-y-3">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onViewDiff={onViewDiff} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenLocalFile={onOpenLocalFile} />)}</div>;
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
     case "artifact":
@@ -1342,4 +1072,9 @@ function TimelineEventViewImpl({
 export const TimelineEventView = memo(
   TimelineEventViewImpl,
   (prev, next) => prev.event === next.event
+    && prev.onViewDiff === next.onViewDiff
+    && prev.onOpenSession === next.onOpenSession
+    && prev.onEditMessage === next.onEditMessage
+    && prev.onOpenSubagent === next.onOpenSubagent
+    && prev.onOpenLocalFile === next.onOpenLocalFile
 );

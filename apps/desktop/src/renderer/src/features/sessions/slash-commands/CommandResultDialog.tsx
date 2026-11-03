@@ -97,7 +97,7 @@ export function CommandResultDialog({
                     <span className="block truncate text-sm font-medium text-ink">{option.label}</span>
                     {option.description && <span className="mt-0.5 block line-clamp-2 text-xs leading-4 text-ink-3">{option.description}</span>}
                   </span>
-                  <span className={cn("grid h-5 w-5 place-items-center border", selection.mode === "single" ? "rounded-full" : "rounded-md", checked ? "border-accent bg-accent text-white" : "border-line-strong") }>
+                  <span className={cn("grid h-5 w-5 place-items-center border", selection.mode === "single" ? "rounded-full" : "rounded-md", checked ? "border-accent bg-accent text-on-accent" : "border-line-strong") }>
                     {checked && <Check className="h-3.5 w-3.5" aria-hidden />}
                   </span>
                 </button>

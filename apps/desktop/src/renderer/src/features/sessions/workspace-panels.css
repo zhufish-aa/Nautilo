@@ -1,0 +1,5 @@
+.conversation-workspace { container: conversation / inline-size; }
+.workspace-panel-right { position: absolute; inset: 0 0 0 auto; box-shadow: -8px 0 24px rgb(0 0 0 / .04); }
+@container conversation (min-width: 850px) {
+  .workspace-panel-right { position: relative; inset: auto; max-width: 48%; box-shadow: none; }
+}

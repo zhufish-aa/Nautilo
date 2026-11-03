@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import type { SlashCommandDefinition } from "@agenthub/domain";
-import { ArrowUp, FileText, ListPlus, Loader2, Paperclip, SendHorizontal, Square, X } from "lucide-react";
+import { ArrowUp, FileText, ListPlus, Loader2, Plus, SendHorizontal, Square, X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { sendWorkbenchFollowUp, sendWorkbenchMessage, stopWorkbenchRun } from "../../lib/orchestration-runtime";
 import { getBridge } from "../../lib/bridge";
 import { artifactUrlForPath } from "../timeline/media-actions";
 import type { DesktopAttachment } from "../../types/bridge";
+import { EMPTY_COMPOSER_DRAFT, useComposerDraftsStore } from "../../stores/composer-drafts";
 import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
 import { useIconOverrides } from "../../lib/use-icon-overrides";
@@ -22,26 +23,40 @@ import { SnippetMenu } from "./slash-commands/SnippetMenu";
 import { filterSlashCommands, parseSlashCommand, slashCommandQuery } from "./slash-commands/slash-command-utils";
 import { useSlashCommands } from "./slash-commands/useSlashCommands";
 
-const EMPTY_LIST: never[] = [];
 
 /** Chat composer plus per-session model/effort controls, matching the Codex interaction model. */
 export function Composer({
   sessionId,
   targetName,
   running,
-  disabled
+  disabled,
+  onCreateSession,
+  starterControls,
+  draftId
 }: {
   sessionId?: string;
   targetName?: string;
   running: boolean;
   disabled?: boolean;
+  /** The landing creates a real session only when its first message is sent. */
+  onCreateSession?: (text: string) => string | undefined;
+  starterControls?: ReactNode;
+  /** Distinguishes independent new Code and Work drafts. */
+  draftId?: string;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const iconOverrides = useIconOverrides();
   const QueueIcon = iconOverrides?.["composer.queue"] ?? ListPlus;
   const SteerIcon = iconOverrides?.["composer.steer"] ?? SendHorizontal;
-  const [value, setValue] = useState("");
-  const [attachments, setAttachments] = useState<DesktopAttachment[]>([]);
+  const draftKey = sessionId ?? draftId ?? "new";
+  const draft = useComposerDraftsStore((state) => state.drafts[draftKey] ?? EMPTY_COMPOSER_DRAFT);
+  const value = draft.text;
+  const attachments = draft.attachments;
+  const updateText = useComposerDraftsStore((state) => state.setText);
+  const updateAttachments = useComposerDraftsStore((state) => state.setAttachments);
+  const clearDraft = useComposerDraftsStore((state) => state.clear);
+  const setValue = (text: string): void => updateText(draftKey, text);
+  const setAttachments = (next: DesktopAttachment[] | ((current: DesktopAttachment[]) => DesktopAttachment[])): void => updateAttachments(draftKey, next);
   const [importing, setImporting] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string>();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -96,8 +111,6 @@ export function Composer({
 
   useEffect(() => setActiveCommandIndex(0), [commandQuery, snippetQ, sessionId]);
   useEffect(() => {
-    setValue("");
-    setAttachments([]);
     setAttachmentError(undefined);
   }, [sessionId]);
   useEffect(() => {
@@ -108,7 +121,8 @@ export function Composer({
   }, [editingMessage]);
   // Queued follow-ups live in the sessions store (daemon queue + events).
 
-  const canSend = !!sessionId && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled;
+  const canCompose = !!sessionId || !!onCreateSession;
+  const canSend = canCompose && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled;
   const canFollowUp = !!sessionId && running && !importing && !disabled && !editingMessage && attachments.length === 0 && value.trim().length > 0;
 
   const appendAttachments = (next: DesktopAttachment[]): void => {
@@ -171,15 +185,16 @@ export function Composer({
     return false;
   };
   const submit = (): void => {
-    if (!sessionId) return;
-    if (tryRunSlashCommand()) return;
+    if (sessionId && tryRunSlashCommand()) return;
     if (!canSend) return;
+    const destinationId = sessionId ?? onCreateSession?.(value.trim());
+    if (!destinationId) return;
     const text = value.trim() || t("sessions.composer.attachmentPrompt");
     const edit = editingMessage;
-    setValue("");
-    setAttachments([]);
+    clearDraft(draftKey);
     if (edit) cancelEditingMessage();
-    void sendWorkbenchMessage(sessionId, text, attachments, edit?.messageId);
+    void sendWorkbenchMessage(destinationId, text, attachments, edit?.messageId)
+      .catch((error) => setAttachmentError(error instanceof Error ? error.message : String(error)));
   };
   const submitFollowUp = (mode: "steer" | "queue"): void => {
     if (!sessionId || !canFollowUp) return;
@@ -194,6 +209,8 @@ export function Composer({
       .catch((error) => setAttachmentError(error instanceof Error ? error.message : String(error)));
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    // Enter confirms IME composition before it may submit a message.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (snippetMenuOpen) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -261,13 +278,10 @@ export function Composer({
     void importClipboardFiles(files);
   };
   return (
-    <div className="composer shrink-0 border-t border-line/70 bg-panel/95 px-5 pb-4 pt-3 backdrop-blur-xl">
+    <div data-tour="sessions-composer" className={sessionId ? "composer shrink-0 bg-card px-4 pb-5 pt-3 sm:px-7" : "composer w-full shrink-0 bg-card"}>
       <div
         className={cn(
-          "composer-box relative mx-auto w-full max-w-4xl rounded-2xl border bg-card transition-[border-color,box-shadow] duration-300",
-          running
-            ? "run-border border-accent/40 shadow-[0_18px_52px_-18px_var(--accent)]"
-            : "border-line-strong shadow-[0_12px_36px_-24px_rgba(15,23,42,0.42)] focus-within:border-accent/50 focus-within:shadow-[0_0_0_1px_var(--accent-soft),0_18px_48px_-20px_var(--accent)]"
+          "composer-box relative mx-auto w-full max-w-3xl rounded-2xl border border-line-strong bg-card shadow-[0_2px_10px_rgba(0,0,0,0.045)] transition-[border-color,box-shadow] duration-150 focus-within:border-ink-3/50 focus-within:shadow-[0_2px_14px_rgba(0,0,0,0.06)]"
         )}
       >
         <AnimatePresence>
@@ -331,7 +345,7 @@ export function Composer({
                   <p className="truncate text-xs font-medium text-ink-2">{attachment.name}</p>
                   <p className="mt-0.5 text-[10px] text-ink-3">{formatFileSize(attachment.sizeBytes)}</p>
                 </div>
-                <button type="button" onClick={() => setAttachments((current) => current.filter((item) => item.path !== attachment.path))} className="absolute right-1 top-1 rounded-full bg-card/90 p-1 text-ink-3 opacity-0 shadow-sm transition-opacity hover:text-danger group-hover:opacity-100" aria-label={t("sessions.composer.removeAttachment")}>
+                <button type="button" onClick={() => setAttachments((current) => current.filter((item) => item.path !== attachment.path))} className="absolute right-1 top-1 rounded-full bg-card/90 p-1 text-ink-3 opacity-60 shadow-sm transition-opacity hover:text-danger group-hover:opacity-100 focus-visible:opacity-100" aria-label={t("sessions.composer.removeAttachment")}>
                   <X className="h-3 w-3" aria-hidden />
                 </button>
               </div>
@@ -345,19 +359,23 @@ export function Composer({
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           rows={2}
-          disabled={!sessionId || disabled}
-          placeholder={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
+          disabled={!canCompose || disabled}
+          placeholder={locale === "zh-CN" ? "描述你的任务" : "Describe your task"}
           aria-label={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
-          className="block max-h-48 min-h-[58px] w-full resize-none rounded-t-2xl bg-transparent px-4 pb-1.5 pt-3.5 font-mono text-[13px] leading-6 text-ink outline-none placeholder:font-sans placeholder:text-sm placeholder:text-ink-3/65 disabled:opacity-50"
+          className="block max-h-48 min-h-[76px] w-full resize-none rounded-t-2xl bg-transparent px-4 pb-2 pt-4 text-[14px] leading-6 text-ink outline-none placeholder:text-ink-3/70 disabled:opacity-50"
         />
         {attachmentError && <p className="px-4 pb-1 text-[11px] text-danger">{attachmentError}</p>}
-        <div className="flex min-h-11 items-center gap-3 px-3 pb-2.5">
-          <button type="button" onClick={() => void pickFiles()} disabled={!sessionId || disabled || importing || running} className="composer-attach flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
-            {importing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Paperclip className="h-4 w-4" aria-hidden />}
+        <div className="flex min-h-11 flex-wrap items-center gap-1.5 px-2.5 pb-2.5">
+          <button type="button" onClick={() => void pickFiles()} disabled={!canCompose || disabled || importing || running} className="composer-attach flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
+            {importing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-[18px] w-[18px]" aria-hidden />}
           </button>
-          <p className="min-w-0 flex-1 truncate px-1 text-[11px] text-ink-3">{running ? t("sessions.composer.runningHint") : t("sessions.composer.hint")}</p>
-          <PlanModeToggle sessionId={sessionId} disabled={running || disabled} />
-          <SessionModelControl sessionId={sessionId} disabled={running || disabled} />
+          {sessionId ? (
+            <>
+              <SessionModelControl sessionId={sessionId} disabled={running || disabled} />
+              <PlanModeToggle sessionId={sessionId} disabled={running || disabled} />
+            </>
+          ) : starterControls}
+          <span className="min-w-0 flex-1" />
           <ContextUsageIndicator
             sessionId={sessionId}
             compactCommand={compactCommand}
@@ -389,7 +407,7 @@ export function Composer({
                 disabled={!canFollowUp}
                 aria-label={t("sessions.composer.steer")}
                 title={t("sessions.composer.steerTitle")}
-                className="composer-steer flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 text-xs font-medium text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
+                className="composer-steer flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 text-xs font-medium text-canvas shadow-sm transition-[transform,opacity,background-color] hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <SteerIcon className="h-3.5 w-3.5 stroke-[2.4]" aria-hidden />
                 {t("sessions.composer.steer")}
@@ -399,7 +417,7 @@ export function Composer({
                 onClick={() => sessionId && void stopWorkbenchRun(sessionId)}
                 aria-label={t("sessions.composer.stop")}
                 title={t("sessions.composer.stop")}
-                className="composer-stop flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-danger/35 bg-danger/10 text-danger shadow-[0_0_18px_-6px_var(--danger)] transition-colors hover:bg-danger/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/35"
+                className="composer-stop flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-line-strong bg-ink text-canvas transition-colors hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-3/50"
               >
                 <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
               </button>
@@ -411,7 +429,7 @@ export function Composer({
               disabled={!canSend}
               aria-label={t("sessions.composer.send")}
               title={t("sessions.composer.send")}
-              className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
+              className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:bg-ink-2 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
             >
               <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden />
             </button>

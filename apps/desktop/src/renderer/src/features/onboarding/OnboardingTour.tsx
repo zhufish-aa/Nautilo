@@ -1,38 +1,37 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { motion } from "framer-motion";
+import { X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { useSettingsStore } from "../../stores/settings";
 import { Button } from "../../components/ui/Button";
 import { ONBOARDING_STEPS } from "./steps";
 
-const SPOTLIGHT_PADDING = 8;
-const CARD_WIDTH = 320;
-/** Rough card height used to pick above/below placement. */
-const CARD_HEIGHT = 230;
-/** How long to poll for a step's target after navigation (ms). */
+const PADDING = 8;
+const CARD_WIDTH = 352;
 const TARGET_POLL_TIMEOUT = 2000;
 
-/** Spotlight target rect, or null when the element is missing/hidden/off-screen. */
 function resolveTargetRect(selector: string): DOMRect | null {
-  const el = document.querySelector(selector);
-  if (!el || el.getClientRects().length === 0) return null;
-  const style = window.getComputedStyle(el);
-  // The keep-alive workbench panes stay mounted with visibility:hidden.
-  if (style.visibility === "hidden" || style.display === "none") return null;
-  const rect = el.getBoundingClientRect();
-  const inViewport =
-    rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
-  return inViewport ? rect : null;
+  // Hidden keep-alive panes can contain an earlier matching selector.
+  for (const element of document.querySelectorAll(selector)) {
+    if (!element.getClientRects().length) continue;
+    const style = window.getComputedStyle(element);
+    if (style.visibility === "hidden" || style.display === "none") continue;
+    const rect = element.getBoundingClientRect();
+    if (
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      rect.top < window.innerHeight &&
+      rect.left < window.innerWidth
+    )
+      return rect;
+  }
+  return null;
 }
 
-/**
- * First-run guided tour: a spotlight cutout over the step target plus a small
- * explanation card. Rendered until the user finishes or skips; the flag lives
- * in the persisted settings store so it only shows once.
- */
 export function OnboardingTour(): JSX.Element | null {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const completed = useSettingsStore((state) => state.onboardingCompleted);
   const setOnboardingCompleted = useSettingsStore((state) => state.setOnboardingCompleted);
   const reduceMotion = useSettingsStore((state) => state.reduceMotion);
@@ -40,135 +39,148 @@ export function OnboardingTour(): JSX.Element | null {
   const location = useLocation();
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState<DOMRect | null>(null);
-
-  const step = ONBOARDING_STEPS[index];
+  const [cardHeight, setCardHeight] = useState(200);
+  const [viewport, setViewport] = useState({
+    width: window.innerWidth,
+    height: window.innerHeight
+  });
+  const card = useRef<HTMLDivElement>(null);
+  const step = ONBOARDING_STEPS[index]!;
+  const lang = locale === "zh-CN" ? "zh" : "en";
   const isLast = index === ONBOARDING_STEPS.length - 1;
 
-  // Restart from the first step when the tour is re-enabled from Settings.
   useEffect(() => {
     if (!completed) setIndex(0);
   }, [completed]);
-
-  // Bring the app to the page the current step talks about.
   useEffect(() => {
-    if (completed || !step.path || location.pathname === step.path) return;
-    navigate(step.path);
-  }, [completed, step, location.pathname, navigate]);
-
-  // Resolve the spotlight target: the page mounts asynchronously after
-  // navigation, so poll briefly and fall back to a centered card.
+    if (!completed && location.pathname !== step.path) navigate(step.path);
+  }, [completed, step.path, location.pathname, navigate]);
   useEffect(() => {
     if (completed) return;
-    if (!step.target) {
-      setRect(null);
-      return;
-    }
-    const selector = step.target;
     let cancelled = false;
     let timer: number | undefined;
+    let frame: number | undefined;
     const startedAt = Date.now();
-
-    const poll = (): void => {
+    setRect(null);
+    const measure = (): void => {
       if (cancelled) return;
-      const found = resolveTargetRect(selector);
-      if (found) {
-        setRect(found);
-        return;
-      }
-      if (Date.now() - startedAt < TARGET_POLL_TIMEOUT) {
-        timer = window.setTimeout(poll, 100);
-      } else {
-        setRect(null);
-      }
+      if (timer) window.clearTimeout(timer);
+      const found = resolveTargetRect(step.target);
+      setRect(found);
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+      if (card.current) setCardHeight(card.current.getBoundingClientRect().height);
+      if (!found && Date.now() - startedAt < TARGET_POLL_TIMEOUT)
+        timer = window.setTimeout(measure, 100);
     };
-    poll();
-
     const remeasure = (): void => {
-      if (!cancelled) setRect(resolveTargetRect(selector));
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
     };
+    measure();
+    const observer = new ResizeObserver(remeasure);
+    if (card.current) observer.observe(card.current);
     window.addEventListener("resize", remeasure);
+    window.addEventListener("scroll", remeasure, true);
     return () => {
       cancelled = true;
-      if (timer) window.clearTimeout(timer);
+      if (timer) clearTimeout(timer);
+      if (frame) cancelAnimationFrame(frame);
+      observer.disconnect();
       window.removeEventListener("resize", remeasure);
+      window.removeEventListener("scroll", remeasure, true);
     };
   }, [completed, step]);
 
   if (completed) return null;
-
   const finish = (): void => setOnboardingCompleted(true);
-
-  // Below the target when it fits, otherwise above; centered steps go
-  // straight to the screen center. Horizontal position is clamped on-screen.
-  const cardPos = rect
-    ? {
-        top:
-          rect.bottom + SPOTLIGHT_PADDING + 12 + CARD_HEIGHT < window.innerHeight
-            ? rect.bottom + SPOTLIGHT_PADDING + 12
-            : Math.max(16, rect.top - SPOTLIGHT_PADDING - 12 - CARD_HEIGHT),
-        left: Math.min(
-          Math.max(16, rect.left + rect.width / 2 - CARD_WIDTH / 2),
-          window.innerWidth - CARD_WIDTH - 16
-        )
-      }
-    : {
-        top: Math.max(16, (window.innerHeight - CARD_HEIGHT) / 2),
-        left: Math.max(16, (window.innerWidth - CARD_WIDTH) / 2)
-      };
-
-  const transition = reduceMotion ? { duration: 0 } : { type: "spring" as const, stiffness: 320, damping: 36 };
-
+  const width = Math.min(CARD_WIDTH, viewport.width - 32);
+  const desiredTop = rect
+    ? rect.top - PADDING - cardHeight - 14 >= 16
+      ? rect.top - PADDING - cardHeight - 14
+      : rect.bottom + PADDING + 14
+    : (viewport.height - cardHeight) / 2;
+  const top = Math.max(16, Math.min(desiredTop, viewport.height - cardHeight - 16));
+  const left = Math.max(
+    16,
+    Math.min(rect ? rect.left : (viewport.width - width) / 2, viewport.width - width - 16)
+  );
   return (
-    <div className="fixed inset-0 z-[80]" role="presentation">
-      {rect ? (
-        <motion.div
-          key={`spotlight-${step.id}`}
-          initial={false}
-          animate={{
-            top: rect.top - SPOTLIGHT_PADDING,
-            left: rect.left - SPOTLIGHT_PADDING,
-            width: rect.width + SPOTLIGHT_PADDING * 2,
-            height: rect.height + SPOTLIGHT_PADDING * 2
-          }}
-          transition={transition}
-          className="pointer-events-none fixed rounded-xl border-2 border-accent shadow-[0_0_0_9999px_rgba(0,0,0,0.55)]"
-        />
-      ) : (
-        <div className="absolute inset-0 bg-black/55" />
-      )}
-
-      <motion.div
-        key={`card-${step.id}`}
-        role="dialog"
-        aria-label={t(step.titleKey)}
-        initial={{ opacity: 0, scale: 0.97 }}
-        animate={{ opacity: 1, scale: 1, top: cardPos.top, left: cardPos.left }}
-        transition={transition}
-        className="fixed flex w-80 flex-col gap-4 rounded-2xl border border-line bg-card p-5 shadow-pop"
-      >
-        <div>
-          <h2 className="text-base font-semibold text-ink">{t(step.titleKey)}</h2>
-          <p className="mt-1 text-sm leading-relaxed text-ink-3">{t(step.descKey)}</p>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-xs text-ink-3">
-            {t("onboarding.step", { current: index + 1, total: ONBOARDING_STEPS.length })}
-          </span>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={finish}>
-              {t("onboarding.skip")}
-            </Button>
-            {index > 0 && (
-              <Button variant="outline" size="sm" onClick={() => setIndex(index - 1)}>
-                {t("onboarding.prev")}
-              </Button>
-            )}
-            <Button variant="primary" size="sm" onClick={() => (isLast ? finish() : setIndex(index + 1))}>
-              {isLast ? t("onboarding.finish") : t("onboarding.next")}
-            </Button>
+    <DialogPrimitive.Root
+      open
+      onOpenChange={(open) => {
+        if (!open) finish();
+      }}
+    >
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-[80]">
+          {rect ? (
+            <motion.div
+              initial={false}
+              animate={{
+                top: rect.top - PADDING,
+                left: rect.left - PADDING,
+                width: rect.width + PADDING * 2,
+                height: rect.height + PADDING * 2
+              }}
+              transition={{ duration: reduceMotion ? 0 : 0.16 }}
+              className="pointer-events-none fixed rounded-xl border border-line-strong shadow-[0_0_0_9999px_rgba(0,0,0,0.28)]"
+            />
+          ) : (
+            <div className="absolute inset-0 bg-black/30" />
+          )}
+        </DialogPrimitive.Overlay>
+        <DialogPrimitive.Content
+          ref={card}
+          onPointerDownOutside={(event) => event.preventDefault()}
+          className="fixed z-[81] max-h-[calc(100vh-32px)] overflow-y-auto rounded-xl border border-line bg-card p-5 shadow-pop outline-none"
+          style={{ top, left, width }}
+        >
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <DialogPrimitive.Title className="text-lg font-semibold text-ink">
+              {step.title[lang]}
+            </DialogPrimitive.Title>
+            <DialogPrimitive.Close
+              aria-label={t("common.close")}
+              className="rounded p-1 text-ink-3 hover:bg-panel focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </DialogPrimitive.Close>
           </div>
-        </div>
-      </motion.div>
-    </div>
+          <DialogPrimitive.Description className="text-sm leading-relaxed text-ink-3">
+            {step.description[lang]}
+          </DialogPrimitive.Description>
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
+            <span className="text-sm text-ink-3" aria-live="polite">
+              {index + 1} / {ONBOARDING_STEPS.length}
+            </span>
+            <div className="flex items-center gap-1">
+              <Button variant="ghost" size="sm" onClick={finish}>
+                {t("onboarding.skip")}
+              </Button>
+              {index > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setIndex((current) => Math.max(0, current - 1))}
+                >
+                  {t("onboarding.prev")}
+                </Button>
+              )}
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() =>
+                  isLast
+                    ? finish()
+                    : setIndex((current) => Math.min(ONBOARDING_STEPS.length - 1, current + 1))
+                }
+              >
+                {isLast ? t("onboarding.finish") : t("onboarding.next")}
+              </Button>
+            </div>
+          </div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }

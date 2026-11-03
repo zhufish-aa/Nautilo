@@ -1,0 +1,1 @@
+{"extends":"../../tsconfig.web.json","include":["*.tsx","visual-bridge.ts","../../src/renderer/src/**/*.d.ts"],"exclude":[]}

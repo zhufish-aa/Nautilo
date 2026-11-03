@@ -5,10 +5,11 @@ import { collectChangedFiles, type ChangedFileEntry } from "../../lib/changed-fi
 import { patchFileImages, reverseApplyUnifiedPatch, revertFileDiffs, sameContent } from "../../lib/revert-change";
 import { formatDurationMs, parseSubagentInput, parseSubagentResult, type SubagentUsage } from "../../lib/subagent-result";
 import { highlightDiffLine } from "../../lib/highlight";
+import { terminalWindowStart } from "../../lib/terminal-window";
 import { useProgressiveRows } from "../../lib/use-progressive-rows";
 import { cn } from "../../lib/utils";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
-import { Drawer } from "../../components/ui/Drawer";
+import { WorkspaceDrawer as Drawer } from "./WorkspaceDrawer";
 import { TabBar } from "../../components/ui/Tabs";
 import { Button } from "../../components/ui/Button";
 import { StatusChip, Tag } from "../../components/ui/Badge";
@@ -40,23 +41,29 @@ export function TerminalDrawer({
   const { t } = useI18n();
   const lines = useSessionsStore((state) => (sessionId ? (state.rawLog[sessionId] ?? SESSION_EMPTY.lines) : SESSION_EMPTY.lines));
   const bottomRef = useRef<HTMLDivElement>(null);
+  const followOutput = useRef(true);
+  const [lineLimit, setLineLimit] = useState(500);
+  useEffect(() => { setLineLimit(500); followOutput.current = true; }, [sessionId]);
 
   useEffect(() => {
-    if (open) bottomRef.current?.scrollIntoView({ block: "end" });
+    if (open && followOutput.current) bottomRef.current?.scrollIntoView({ block: "end" });
   }, [lines.length, open]);
 
+  if (!open) return <></>;
+  const startLine = terminalWindowStart(lines.length, lineLimit);
   return (
-    <Drawer open={open} onClose={onClose} title={t("sessions.drawers.terminal")} subtitle={t("sessions.drawers.terminalNote")}>
-      <div className="h-full overflow-y-auto bg-[#0a0c12] px-4 py-3">
+    <Drawer placement="bottom" open={open} onClose={onClose} title={t("sessions.drawers.terminal")} subtitle={t("sessions.drawers.terminalNote")}>
+      <div className="h-full overflow-y-auto bg-canvas px-5 py-4" onScroll={(event) => { const node = event.currentTarget; followOutput.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }}>
+        {startLine > 0 && <button type="button" className="mb-3 rounded px-2 py-1 text-xs text-ink-3 hover:bg-card-hover" onClick={() => setLineLimit((limit) => limit + 500)}>{t("sessions.interactions.showMore")} ({startLine})</button>}
         {lines.length === 0 ? (
           <div className="flex h-40 flex-col items-center justify-center gap-2 text-ink-3">
             <TerminalSquare className="h-6 w-6" aria-hidden />
             <p className="text-xs">{t("sessions.drawers.terminalEmpty")}</p>
           </div>
         ) : (
-          <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap">
-            {lines.map((line, index) => (
-              <div key={index} className={line.startsWith("$ ") ? "mt-2 text-accent" : "text-[#a8e6a3]/90"}>
+          <pre className="font-mono text-[13px] leading-6 whitespace-pre-wrap">
+            {lines.slice(startLine).map((line, index) => (
+              <div key={startLine + index} className={line.startsWith("$ ") ? "mt-2 text-ink" : "text-ink-2"}>
                 {line}
               </div>
             ))}
@@ -353,6 +360,7 @@ export function ArtifactsDrawer({
 
   const filtered = artifacts.filter((artifact) => artifact.kind === tab);
 
+  if (!open) return <></>;
   return (
     <Drawer open={open} onClose={onClose} title={t("sessions.drawers.artifacts")} defaultWidth={1200}>
       <div className="flex h-full flex-col">
@@ -365,13 +373,13 @@ export function ArtifactsDrawer({
             <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{t("sessions.drawers.noChanges")}</p>
           ) : (
             <div className="flex min-h-0 flex-1">
-              <ul className="w-56 shrink-0 space-y-1 overflow-y-auto border-r border-line p-3">
+              <ul className="w-40 shrink-0 space-y-1 overflow-y-auto border-r border-line p-3">
                 {(() => {
                   let flatIndex = -1;
                   return changeGroups.map((group, groupIndex) => (
                     <Fragment key={group.label ?? "main"}>
                       {group.label && (
-                        <li className={cn("px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3", groupIndex > 0 && "pt-2")}>
+                        <li className={cn("px-2.5 pb-1 text-xs font-medium text-ink-3", groupIndex > 0 && "pt-2")}>
                           {group.label}
                         </li>
                       )}
@@ -450,7 +458,7 @@ export function ArtifactsDrawer({
                               {t("sessions.drawers.beforeUnavailable")}
                             </p>
                           ) : (
-                            <div className="flex shrink-0 border-b border-line text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                            <div className="flex shrink-0 border-b border-line text-xs font-medium text-ink-3">
                               <span className="flex-1 border-r border-line px-3 py-1">{t("sessions.drawers.beforeLabel")}</span>
                               <span className="flex-1 px-3 py-1">{t("sessions.drawers.afterLabel")}</span>
                             </div>
@@ -525,7 +533,7 @@ export function ArtifactsDrawer({
                 <header className="border-b border-line bg-card-hover px-4 py-2.5 text-[13px] font-medium text-ink-2">
                   {artifact.name}
                 </header>
-                <pre className="overflow-x-auto bg-card px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2">
+                <pre className="overflow-x-auto bg-card px-4 py-3 font-mono text-[13px] leading-6 whitespace-pre-wrap text-ink-2">
                   {artifact.content}
                 </pre>
               </section>
@@ -590,6 +598,7 @@ export function DagDrawer({
     blocked_dependency: "text-warn border-warn/50"
   };
 
+  if (!open) return <></>;
   return (
     <Drawer open={open} onClose={onClose} title={t("sessions.drawers.dag")} subtitle={t("sessions.drawers.dagNote")} defaultWidth={560}>
       <div className="h-full overflow-auto p-4">
@@ -623,13 +632,11 @@ export function DagDrawer({
           )}
           {tasks.map((task, index) => {
             const pos = positions[index];
-            const tone = statusTone[task.status] ?? statusTone.queued;
             const title = task.title.length > 12 ? `${task.title.slice(0, 12)}…` : task.title;
             const subtitle = `${task.memberName ?? "—"} · ${t(`sessions.taskStatus.${task.status}` as MessageKey)}`;
             return (
               <g key={task.id} transform={`translate(${pos.x}, ${pos.y})`}>
-                <rect width="180" height="60" rx="12" fill="var(--card)" stroke="var(--line-strong)" strokeWidth="1" />
-                <rect width="4" height="60" rx="2" fill="currentColor" className={tone.split(" ")[0]} />
+                <rect width="180" height="60" rx="7" fill="var(--card)" stroke="var(--line-strong)" strokeWidth="1" />
                 <text x="16" y="24" fill="var(--ink)" fontSize="12" fontWeight="600">
                   {title}
                 </text>
@@ -713,11 +720,12 @@ export function SubagentDrawer({
   const inputView = useMemo(() => (data?.input ? parseSubagentInput(data.input) : undefined), [data?.input]);
   const resultView = useMemo(() => (data?.output ? parseSubagentResult(data.output) : undefined), [data?.output]);
 
+  if (!open) return <></>;
   return (
     <Drawer open={open} onClose={onClose} title={t("sessions.drawers.subagent")} subtitle={subagent?.task} defaultWidth={560}>
       <div className="h-full overflow-y-auto p-4">
         <div className="mb-3 flex items-center gap-2">
-          <span aria-hidden className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-info/20 bg-info/10 text-info">
+          <span aria-hidden className="flex h-6 w-6 shrink-0 items-center justify-center text-ink-3">
             <Bot className="h-4 w-4" />
           </span>
           {subagent?.agentType && <Tag label={subagent.agentType} />}
@@ -726,12 +734,12 @@ export function SubagentDrawer({
           <SubagentUsageChips usage={resultView?.usage} agentId={resultView?.agentId} />
         </div>
         {subagent?.task && (
-          <p className="mb-4 rounded-xl border border-line bg-card px-3.5 py-2.5 text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-2">
+          <p className="mb-4 px-1 py-2.5 text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-2">
             {subagent.task}
           </p>
         )}
         {activities.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-line-strong px-3 py-4 text-center">
+          <div className="rounded-xl border border-line px-3 py-4 text-center">
             <p className="text-xs text-ink-3">{t("sessions.drawers.subagentEmpty")}</p>
             {data?.status !== "running" && (
               <p className="mt-1 text-[11px] leading-relaxed text-ink-3/70">{t("sessions.drawers.subagentEmptyHint")}</p>
@@ -748,7 +756,7 @@ export function SubagentDrawer({
           <div className="mt-4 space-y-2 border-t border-line pt-3">
             {resultView && (
               <details className="overflow-hidden rounded-xl border border-line bg-card" open={activities.length === 0}>
-                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink-3">
                   {t("sessions.drawers.subagentResult")}
                 </summary>
                 <div className="max-h-96 overflow-auto border-t border-line px-3.5 py-2.5 text-[13px] text-ink-2">
@@ -758,7 +766,7 @@ export function SubagentDrawer({
             )}
             {inputView?.prompt && (
               <details className="overflow-hidden rounded-xl border border-line bg-card" open={activities.length === 0}>
-                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink-3">
                   {t("sessions.drawers.subagentPrompt")}
                 </summary>
                 <p className="max-h-56 overflow-auto border-t border-line px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap text-ink-2">
@@ -768,7 +776,7 @@ export function SubagentDrawer({
             )}
             {inputView && (inputView.raw !== undefined || inputView.fields.length > 0) && (
               <details className="overflow-hidden rounded-xl border border-line bg-card">
-                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink-3">
                   {t("sessions.drawers.subagentInputRaw")}
                 </summary>
                 {inputView.raw !== undefined ? (

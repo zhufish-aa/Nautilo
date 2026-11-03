@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
-import { BrainCircuit, Sparkles } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import type { RunLifecycle, TimelineEvent } from "../../lib/types";
 
@@ -47,45 +46,17 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
   }
   const zh = locale === "zh-CN";
   const label = waitingForDelegates
-    ? (zh ? "子 Agent 正在运行，完成后会通知主 Agent" : "Child agents are running; the main agent will be notified when they finish")
+    ? (zh ? "等待协作任务" : "Waiting for collaborators")
     : lifecycle?.status === "waiting_approval"
     ? (zh ? "等待你的批准" : "Waiting for your approval")
     : progressLabel(latest, zh);
 
-  const thinking = latest?.data.kind === "reasoning" || (latest?.data.kind === "activity" && latest.data.phase === "thinking");
-
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 12, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 300, damping: 35 }}
-      className="run-indicator run-border relative mt-4 overflow-hidden rounded-2xl border border-accent/25 bg-card/80 shadow-[0_14px_44px_-16px_var(--accent)] backdrop-blur-md"
-      role="status"
-      aria-live="polite"
-    >
-      <div className="flex items-center gap-3.5 px-4 py-3">
-        <span className="relative flex h-10 w-10 shrink-0 items-center justify-center" aria-hidden>
-          <span className="run-orb-glow absolute inset-0 rounded-full bg-accent/30 blur-md" />
-          <span className="run-orb absolute inset-1 rounded-full opacity-90" />
-          <span className="run-indicator-icon relative flex h-[26px] w-[26px] items-center justify-center rounded-full bg-card text-accent shadow-inner">
-            {thinking ? <BrainCircuit className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
-          </span>
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="shimmer-text truncate text-[13px] font-medium">{label}</p>
-          <p className="run-sublabel mt-0.5 text-[10px] font-medium uppercase tracking-[0.22em] text-ink-3">
-            {zh ? "实时运行" : "Live run"}
-          </p>
-        </div>
-        <span className="run-elapsed flex shrink-0 items-center gap-1.5 rounded-full border border-accent/25 bg-accent-soft px-2.5 py-1 font-mono text-[11px] tabular-nums text-accent">
-          <span className="relative flex h-1.5 w-1.5">
-            <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" aria-hidden />
-            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" aria-hidden />
-          </span>
-          {formatElapsed(elapsedSeconds)}
-        </span>
-      </div>
-    </motion.div>
+    <div role="status" className="flex items-center gap-2 py-1 text-sm text-ink-3">
+      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+      <span className="min-w-0 truncate">{label}</span>
+      <span className="ml-auto shrink-0 text-xs tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+    </div>
   );
 }
 

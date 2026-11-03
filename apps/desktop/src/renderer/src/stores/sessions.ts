@@ -60,6 +60,7 @@ interface SessionsState {
     model?: string;
     reasoningEffort?: string;
     serviceTier?: string;
+    permissionMode?: string;
     parentSessionId?: string;
     runId?: string;
     mode?: "code" | "work";
@@ -161,7 +162,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       startEditingMessage: (sessionId, messageId, text) => set({ editingMessage: { sessionId, messageId, text } }),
       cancelEditingMessage: () => set({ editingMessage: undefined }),
 
-      createSession: ({ projectId, target, title, model, reasoningEffort, serviceTier, parentSessionId, runId, mode }) => {
+      createSession: ({ projectId, target, title, model, reasoningEffort, serviceTier, permissionMode, parentSessionId, runId, mode }) => {
         const now = new Date().toISOString();
         const session: UiSession = {
           id: newId("sess"),
@@ -171,6 +172,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           model,
           reasoningEffort,
           serviceTier,
+          permissionMode,
           mode,
           status: "idle",
           parentSessionId,
@@ -201,6 +203,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             model,
             reasoningEffort,
             serviceTier,
+            permissionMode,
             status: "idle",
             unreadCount: 0,
             createdAt: now,

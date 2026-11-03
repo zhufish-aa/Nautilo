@@ -48,7 +48,7 @@ fn read_record(value: Option<&Value>, warnings: &mut Vec<String>, label: &str) -
             }
             Value::Number(_) | Value::Bool(_) => {
                 record.insert(key.clone(), json!(raw.to_string()));
-                warnings.push(format!("{label}.{key} 不是字符串，已转换为 \"{raw}\""));
+                warnings.push(format!("{label}.{key} 不是字符串，已转换为字符串"));
             }
             _ => warnings.push(format!("{label}.{key} 类型不支持，已忽略")),
         }
@@ -65,7 +65,7 @@ fn resolve_transport(source: &Map<String, Value>, warnings: &mut Vec<String>) ->
                 warnings.push("SSE 传输已按 HTTP 处理".to_string());
                 return Some("http");
             }
-            _ => warnings.push(format!("未知的传输类型 \"{declared}\"，已按字段推断")),
+            _ => warnings.push("未知的传输类型，已按字段推断".to_string()),
         }
     }
     if read_string(source, &["command"]).is_some() {
@@ -94,7 +94,7 @@ fn split_env(raw: Map<String, Value>, warnings: &mut Vec<String>) -> (Map<String
             continue;
         }
         if value.contains("${") {
-            warnings.push(format!("env.{key} 含无法解析的占位符 \"{value}\"，请手动确认"));
+            warnings.push(format!("env.{key} 含无法解析的占位符，请手动确认"));
         } else if looks_like_secret(&key, &value) {
             warnings.push(format!("env.{key} 是明文密钥，建议改用环境变量透传"));
         }
@@ -123,7 +123,7 @@ fn split_headers(
             continue;
         }
         if value.contains("${") {
-            warnings.push(format!("请求头 {header} 含无法解析的占位符 \"{value}\"，请手动确认"));
+            warnings.push(format!("请求头 {header} 含无法解析的占位符，请手动确认"));
         } else if looks_like_secret(&header, &value) {
             warnings.push(format!("请求头 {header} 含明文密钥，建议改用环境变量"));
         }
@@ -239,7 +239,7 @@ pub fn parse_mcp_config_json(text: &str, origin: Option<&str>) -> (Vec<Value>, V
     }
     let root: Value = match serde_json::from_str(trimmed) {
         Ok(value) => value,
-        Err(error) => return (vec![], vec![format!("JSON 解析失败：{error}")]),
+        Err(error) => return (vec![], vec![format!("JSON 解析失败：第 {} 行，第 {} 列", error.line(), error.column())]),
     };
 
     if let Value::Array(entries) = &root {
@@ -296,4 +296,22 @@ pub fn parse_mcp_config_json(text: &str, origin: Option<&str>) -> (Vec<Value>, V
         }
     }
     (servers, errors)
+}
+
+#[cfg(test)]
+mod diagnostic_privacy_tests {
+    use super::parse_mcp_config_json;
+
+    #[test]
+    fn diagnostics_do_not_echo_secret_values() {
+        let secret = "secret-value-123456";
+        let (_, errors) = parse_mcp_config_json(&format!("{{\"token\":\"{secret}\", bad}}"), None);
+        assert!(!errors.is_empty());
+        assert!(!errors.join(" ").contains(secret));
+        let json = format!(r#"{{"mcpServers":{{"local":{{"command":"npx","env":{{"TOKEN":"{secret}-${{input:bad}}"}}}},"remote":{{"url":"https://example.com","headers":{{"Authorization":"{secret}-${{input:bad}}"}}}}}}}}"#);
+        let (servers, _) = parse_mcp_config_json(&json, None);
+        let warnings = servers.iter().map(|server| server["warnings"].to_string()).collect::<Vec<_>>().join(" ");
+        assert!(warnings.contains("无法解析的占位符"));
+        assert!(!warnings.contains(secret));
+    }
 }

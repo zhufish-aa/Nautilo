@@ -1,17 +1,76 @@
-import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, Eye, EyeOff, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState, type ComponentProps } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  Eye,
+  EyeOff,
+  HelpCircle,
+  LoaderCircle,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
-import { apiTypesFor, ENV_POLICIES, permissionModesFor, supportsConfigProfile, useProviderMetas } from "../../lib/provider-catalog";
-import type { AgentInstanceConfig, CodexWireApi, WebSearchMode } from "../../lib/types";
+import {
+  apiTypesFor,
+  ENV_POLICIES,
+  permissionModesFor,
+  supportsConfigProfile,
+  useProviderMetas,
+} from "../../lib/provider-catalog";
+import type {
+  AgentInstanceConfig,
+  CodexWireApi,
+  WebSearchMode,
+} from "../../lib/types";
+import { Tooltip } from "../../components/ui/Tooltip";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
-import { Field, Input } from "../../components/ui/Input";
+import { Field as BaseField, Input } from "../../components/ui/Input";
 import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { TagInput } from "../../components/ui/TagInput";
 import { newId } from "../../lib/utils";
 import { useAgentsStore, type AgentInstanceDraft } from "../../stores/agents";
 import { toast } from "../../stores/toast";
+
+/** Help stays on demand; validation remains visible next to its input. */
+function Field({
+  hint,
+  label,
+  htmlFor,
+  error,
+  children,
+  className,
+}: ComponentProps<typeof BaseField>): JSX.Element {
+  return (
+    <div className={`space-y-2 ${className ?? ""}`}>
+      <div className="flex items-center gap-2">
+        <label htmlFor={htmlFor} className="text-sm text-ink-2">
+          {label}
+        </label>
+        {hint && (
+          <Tooltip content={hint}>
+            <button
+              type="button"
+              aria-label={hint}
+              className="rounded text-ink-3 outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <HelpCircle className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </Tooltip>
+        )}
+      </div>
+      {children}
+      {error && (
+        <p role="alert" className="text-sm text-danger">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
 
 /**
  * Instance editor: how Nautilo connects to a CLI, plus an optional curated
@@ -29,7 +88,13 @@ interface ModelRow {
 }
 
 function emptyModelRow(): ModelRow {
-  return { key: newId("model"), id: "", displayName: "", contextWindow: "", efforts: "" };
+  return {
+    key: newId("model"),
+    id: "",
+    displayName: "",
+    contextWindow: "",
+    efforts: "",
+  };
 }
 
 function canProvideNativeWebSearch(candidate: AgentInstanceConfig): boolean {
@@ -77,7 +142,7 @@ function emptyForm(): FormState {
     webSearchModel: "",
     webSearchReasoningEffort: "",
     models: [],
-    enabled: true
+    enabled: true,
   };
 }
 
@@ -92,9 +157,12 @@ function formFromInstance(instance: AgentInstanceConfig): FormState {
     permissionMode: instance.permissionMode ?? "",
     apiKey: instance.apiKey ?? "",
     baseUrl: instance.baseUrl ?? "",
-    apiType: instance.apiType ?? apiTypesFor(instance.providerId)[0]?.value ?? "",
+    apiType:
+      instance.apiType ?? apiTypesFor(instance.providerId)[0]?.value ?? "",
     wireApi: instance.wireApi ?? "responses",
-    webSearchMode: instance.webSearchMode ?? (instance.wireApi === "chat" ? "off" : "native"),
+    webSearchMode:
+      instance.webSearchMode ??
+      (instance.wireApi === "chat" ? "off" : "native"),
     webSearchInstanceId: instance.webSearchInstanceId ?? "",
     webSearchModel: instance.webSearchModel ?? "",
     webSearchReasoningEffort: instance.webSearchReasoningEffort ?? "",
@@ -103,16 +171,16 @@ function formFromInstance(instance: AgentInstanceConfig): FormState {
       id: model.id,
       displayName: model.displayName ?? "",
       contextWindow: model.contextWindow ? String(model.contextWindow) : "",
-      efforts: model.reasoningEfforts.join(", ")
+      efforts: model.reasoningEfforts.join(", "),
     })),
-    enabled: instance.enabled
+    enabled: instance.enabled,
   };
 }
 
 export function AgentEditorDialog({
   open,
   onOpenChange,
-  instance
+  instance,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -126,9 +194,14 @@ export function AgentEditorDialog({
   const instances = useAgentsStore((state) => state.instances);
 
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [saving, setSaving] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
-  const [errors, setErrors] = useState<{ name?: string; provider?: string; executable?: string }>({});
+  const [errors, setErrors] = useState<{
+    name?: string;
+    provider?: string;
+    executable?: string;
+  }>({});
 
   useEffect(() => {
     if (open) {
@@ -139,10 +212,16 @@ export function AgentEditorDialog({
     }
   }, [open, instance]);
 
-  const patch = (changes: Partial<FormState>): void => setForm((prev) => ({ ...prev, ...changes }));
+  const patch = (changes: Partial<FormState>): void =>
+    setForm((prev) => ({ ...prev, ...changes }));
 
   const patchModel = (key: string, changes: Partial<ModelRow>): void =>
-    setForm((prev) => ({ ...prev, models: prev.models.map((row) => (row.key === key ? { ...row, ...changes } : row)) }));
+    setForm((prev) => ({
+      ...prev,
+      models: prev.models.map((row) =>
+        row.key === key ? { ...row, ...changes } : row,
+      ),
+    }));
   const moveModel = (key: string, offset: -1 | 1): void =>
     setForm((prev) => {
       const index = prev.models.findIndex((row) => row.key === key);
@@ -154,8 +233,12 @@ export function AgentEditorDialog({
       return { ...prev, models };
     });
   const removeModel = (key: string): void =>
-    setForm((prev) => ({ ...prev, models: prev.models.filter((row) => row.key !== key) }));
-  const addModel = (): void => setForm((prev) => ({ ...prev, models: [...prev.models, emptyModelRow()] }));
+    setForm((prev) => ({
+      ...prev,
+      models: prev.models.filter((row) => row.key !== key),
+    }));
+  const addModel = (): void =>
+    setForm((prev) => ({ ...prev, models: [...prev.models, emptyModelRow()] }));
 
   /** Quick fetch: with a base URL the daemon queries it directly; otherwise the provider CLI catalog is used. */
   const quickFetchModels = async (): Promise<void> => {
@@ -167,7 +250,7 @@ export function AgentEditorDialog({
         executable: form.executable,
         baseUrl: form.baseUrl,
         apiKey: form.apiKey,
-        apiType: form.apiType
+        apiType: form.apiType,
       });
       if (!catalog.models.length) {
         toast.error(catalog.warning ?? t("agents.editor.models.fetchEmpty"));
@@ -177,12 +260,17 @@ export function AgentEditorDialog({
         models: catalog.models.map((model) => ({
           key: newId("model"),
           id: model.id,
-          displayName: model.displayName && model.displayName !== model.id ? model.displayName : "",
+          displayName:
+            model.displayName && model.displayName !== model.id
+              ? model.displayName
+              : "",
           contextWindow: model.contextWindow ? String(model.contextWindow) : "",
-          efforts: model.reasoningEfforts.join(", ")
-        }))
+          efforts: model.reasoningEfforts.join(", "),
+        })),
       });
-      toast.success(t("agents.editor.models.fetched", { count: catalog.models.length }));
+      toast.success(
+        t("agents.editor.models.fetched", { count: catalog.models.length }),
+      );
       if (catalog.warning) toast.info(catalog.warning);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -195,14 +283,18 @@ export function AgentEditorDialog({
   const providerOptions = useMemo(
     () =>
       providers.map((provider) => {
-        const installation = installations.find((item) => item.providerId === provider.id);
+        const installation = installations.find(
+          (item) => item.providerId === provider.id,
+        );
         return {
           value: provider.id,
           label: provider.name,
-          hint: installation ? t(`status.provider.${installation.status}` as MessageKey) : undefined
+          hint: installation
+            ? t(`status.provider.${installation.status}` as MessageKey)
+            : undefined,
         };
       }),
-    [providers, installations, t]
+    [providers, installations, t],
   );
 
   const envOptions = useMemo(
@@ -210,9 +302,9 @@ export function AgentEditorDialog({
       ENV_POLICIES.map((policy) => ({
         value: policy.id,
         label: t(policy.nameKey as MessageKey),
-        hint: t(policy.descriptionKey as MessageKey)
+        hint: t(policy.descriptionKey as MessageKey),
       })),
-    [t]
+    [t],
   );
 
   const permissionModeOptions = useMemo(
@@ -220,55 +312,77 @@ export function AgentEditorDialog({
       permissionModesFor(form.providerId).map((mode) => ({
         value: mode.value,
         label: mode.name[locale],
-        hint: mode.description[locale]
+        hint: mode.description[locale],
       })),
-    [form.providerId, locale]
+    [form.providerId, locale],
   );
 
   const apiTypeOptions = useMemo(
-    () => apiTypesFor(form.providerId).map((apiType) => ({
-      value: apiType.value,
-      label: apiType.name[locale],
-      hint: apiType.description[locale]
-    })),
-    [form.providerId, locale]
+    () =>
+      apiTypesFor(form.providerId).map((apiType) => ({
+        value: apiType.value,
+        label: apiType.name[locale],
+        hint: apiType.description[locale],
+      })),
+    [form.providerId, locale],
   );
 
   const webSearchInstanceOptions = useMemo(
     () => [
       { value: "", label: t("agents.editor.basic.webSearchInstanceNone") },
       ...instances
-        .filter((candidate) => candidate.id !== instance?.id && candidate.enabled && canProvideNativeWebSearch(candidate))
-        .map((candidate) => ({ value: candidate.id, label: candidate.displayName }))
+        .filter(
+          (candidate) =>
+            candidate.id !== instance?.id &&
+            candidate.enabled &&
+            canProvideNativeWebSearch(candidate),
+        )
+        .map((candidate) => ({
+          value: candidate.id,
+          label: candidate.displayName,
+        })),
     ],
-    [instance?.id, instances, t]
+    [instance?.id, instances, t],
   );
 
-  const selectedWebSearchInstance = instances.find((candidate) => candidate.id === form.webSearchInstanceId);
+  const selectedWebSearchInstance = instances.find(
+    (candidate) => candidate.id === form.webSearchInstanceId,
+  );
   const webSearchModelOptions = useMemo(
     () => [
       { value: "", label: t("agents.editor.basic.webSearchModelDefault") },
       ...(selectedWebSearchInstance?.models ?? []).map((model) => ({
         value: model.id,
-        label: model.displayName ? `${model.displayName} (${model.id})` : model.id
-      }))
+        label: model.displayName
+          ? `${model.displayName} (${model.id})`
+          : model.id,
+      })),
     ],
-    [selectedWebSearchInstance, t]
+    [selectedWebSearchInstance, t],
   );
-  const selectedWebSearchModel = selectedWebSearchInstance?.models?.find((model) => model.id === form.webSearchModel);
+  const selectedWebSearchModel = selectedWebSearchInstance?.models?.find(
+    (model) => model.id === form.webSearchModel,
+  );
   const webSearchReasoningOptions = useMemo(
     () => [
       { value: "", label: t("agents.editor.basic.webSearchReasoningDefault") },
-      ...(selectedWebSearchModel?.reasoningEfforts ?? []).map((effort) => ({ value: effort, label: effort }))
+      ...(selectedWebSearchModel?.reasoningEfforts ?? []).map((effort) => ({
+        value: effort,
+        label: effort,
+      })),
     ],
-    [selectedWebSearchModel, t]
+    [selectedWebSearchModel, t],
   );
 
   const save = async (): Promise<void> => {
+    if (saving) return;
     const nextErrors: typeof errors = {};
-    if (!form.displayName.trim()) nextErrors.name = t("agents.editor.nameRequired");
-    if (!form.providerId) nextErrors.provider = t("agents.editor.providerRequired");
-    if (!form.executable.trim()) nextErrors.executable = "请先探测 CLI，或填写可执行文件路径";
+    if (!form.displayName.trim())
+      nextErrors.name = t("agents.editor.nameRequired");
+    if (!form.providerId)
+      nextErrors.provider = t("agents.editor.providerRequired");
+    if (!form.executable.trim())
+      nextErrors.executable = "请先探测 CLI，或填写可执行文件路径";
     setErrors(nextErrors);
     if (nextErrors.name || nextErrors.provider || nextErrors.executable) return;
 
@@ -278,8 +392,11 @@ export function AgentEditorDialog({
         return {
           id: row.id.trim(),
           displayName: row.displayName.trim() || undefined,
-          reasoningEfforts: row.efforts.split(/[,，]/).map((effort) => effort.trim()).filter(Boolean),
-          contextWindow: Number.isFinite(size) && size > 0 ? size : undefined
+          reasoningEfforts: row.efforts
+            .split(/[,，]/)
+            .map((effort) => effort.trim())
+            .filter(Boolean),
+          contextWindow: Number.isFinite(size) && size > 0 ? size : undefined,
         };
       })
       .filter((model) => model.id);
@@ -289,50 +406,94 @@ export function AgentEditorDialog({
       providerId: form.providerId,
       executable: form.executable.trim(),
       baseArgs: form.baseArgs,
-      profile: supportsConfigProfile(form.providerId) ? form.profile.trim() || undefined : undefined,
+      profile: supportsConfigProfile(form.providerId)
+        ? form.profile.trim() || undefined
+        : undefined,
       envPolicyId: form.envPolicyId,
       permissionMode: form.permissionMode.trim() || undefined,
       apiKey: form.apiKey.trim() || undefined,
       baseUrl: form.baseUrl.trim() || undefined,
-      apiType: apiTypeOptions.length ? form.apiType.trim() || apiTypeOptions[0]?.value : undefined,
+      apiType: apiTypeOptions.length
+        ? form.apiType.trim() || apiTypeOptions[0]?.value
+        : undefined,
       wireApi: form.providerId === "codex" ? form.wireApi : undefined,
-      webSearchMode: form.providerId === "codex" ? form.webSearchMode : undefined,
-      webSearchInstanceId: form.providerId === "codex" && form.webSearchMode === "official" ? form.webSearchInstanceId || undefined : undefined,
-      webSearchModel: form.providerId === "codex" && form.webSearchMode === "official" ? form.webSearchModel || undefined : undefined,
-      webSearchReasoningEffort: form.providerId === "codex" && form.webSearchMode === "official" ? form.webSearchReasoningEffort || undefined : undefined,
+      webSearchMode:
+        form.providerId === "codex" ? form.webSearchMode : undefined,
+      webSearchInstanceId:
+        form.providerId === "codex" && form.webSearchMode === "official"
+          ? form.webSearchInstanceId || undefined
+          : undefined,
+      webSearchModel:
+        form.providerId === "codex" && form.webSearchMode === "official"
+          ? form.webSearchModel || undefined
+          : undefined,
+      webSearchReasoningEffort:
+        form.providerId === "codex" && form.webSearchMode === "official"
+          ? form.webSearchReasoningEffort || undefined
+          : undefined,
       models: models.length ? models : undefined,
-      enabled: form.enabled
+      enabled: form.enabled,
     };
 
-    if (instance) {
-      await updateInstance(instance.id, draft);
-      toast.success(t("agents.editor.savedToast", { name: draft.displayName }));
-    } else {
-      await createInstance(draft);
-      toast.success(t("agents.editor.createdToast", { name: draft.displayName }));
+    setSaving(true);
+    try {
+      if (instance) {
+        await updateInstance(instance.id, draft);
+        toast.success(
+          t("agents.editor.savedToast", { name: draft.displayName }),
+        );
+      } else {
+        await createInstance(draft);
+        toast.success(
+          t("agents.editor.createdToast", { name: draft.displayName }),
+        );
+      }
+      onOpenChange(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
     }
-    onOpenChange(false);
   };
 
   return (
     <Dialog
       open={open}
-      onOpenChange={onOpenChange}
-      title={instance ? t("agents.editor.editTitle") : t("agents.editor.createTitle")}
-      widthClass="max-w-xl"
+      onOpenChange={(next) => {
+        if (!saving) onOpenChange(next);
+      }}
+      title={
+        instance ? t("agents.editor.editTitle") : t("agents.editor.createTitle")
+      }
+      widthClass="max-w-4xl"
       footer={
         <>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={saving}
+          >
             {t("common.cancel")}
           </Button>
-          <Button variant="primary" onClick={() => void save()}>
+          <Button
+            variant="primary"
+            onClick={() => void save()}
+            disabled={saving}
+          >
+            {saving && (
+              <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden />
+            )}
             {t("common.save")}
           </Button>
         </>
       }
     >
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Field label={t("agents.editor.basic.name")} htmlFor="agent-name" error={errors.name}>
+      <div className="grid grid-cols-1 gap-x-8 gap-y-6 sm:grid-cols-2">
+        <Field
+          label={t("agents.editor.basic.name")}
+          htmlFor="agent-name"
+          error={errors.name}
+        >
           <Input
             id="agent-name"
             value={form.displayName}
@@ -342,23 +503,34 @@ export function AgentEditorDialog({
           />
         </Field>
 
-        <Field label={t("agents.editor.basic.provider")} error={errors.provider}>
+        <Field
+          label={t("agents.editor.basic.provider")}
+          error={errors.provider}
+        >
           <SelectField
             aria-label={t("agents.editor.basic.provider")}
             value={form.providerId || undefined}
-            onValueChange={(value) => patch({
-              providerId: value,
-              executable: installations.find((item) => item.providerId === value)?.executable ?? "",
-              permissionMode: "",
-              apiType: apiTypesFor(value)[0]?.value ?? "",
-              wireApi: value === "codex" ? form.wireApi : "responses"
-            })}
+            onValueChange={(value) =>
+              patch({
+                providerId: value,
+                executable:
+                  installations.find((item) => item.providerId === value)
+                    ?.executable ?? "",
+                permissionMode: "",
+                apiType: apiTypesFor(value)[0]?.value ?? "",
+                wireApi: value === "codex" ? form.wireApi : "responses",
+              })
+            }
             options={providerOptions}
             placeholder={t("agents.editor.basic.providerPlaceholder")}
           />
         </Field>
 
-        <Field label={t("agents.providers.executable")} htmlFor="agent-executable" error={errors.executable}>
+        <Field
+          label={t("agents.providers.executable")}
+          htmlFor="agent-executable"
+          error={errors.executable}
+        >
           <Input
             id="agent-executable"
             value={form.executable}
@@ -369,7 +541,10 @@ export function AgentEditorDialog({
         </Field>
 
         {supportsConfigProfile(form.providerId) && (
-          <Field label={t("agents.editor.basic.profile")} htmlFor="agent-profile">
+          <Field
+            label={t("agents.editor.basic.profile")}
+            htmlFor="agent-profile"
+          >
             <Input
               id="agent-profile"
               value={form.profile}
@@ -379,55 +554,11 @@ export function AgentEditorDialog({
           </Field>
         )}
 
-        <div className="sm:col-span-2">
-          <Field label={t("agents.editor.basic.args")} hint={t("agents.editor.basic.argsHint")}>
-            <TagInput
-              aria-label={t("agents.editor.basic.args")}
-              values={form.baseArgs}
-              onChange={(baseArgs) => patch({ baseArgs })}
-              placeholder={t("agents.editor.basic.argsPlaceholder")}
-            />
-          </Field>
-        </div>
-
-        <Field label={t("agents.editor.basic.envPolicy")}>
-          <SelectField
-            aria-label={t("agents.editor.basic.envPolicy")}
-            value={form.envPolicyId}
-            onValueChange={(envPolicyId) => patch({ envPolicyId })}
-            options={envOptions}
-          />
-        </Field>
-
-        {permissionModeOptions.length > 0 && (
-          <Field label={t("agents.editor.basic.permissionMode")} hint={t("agents.editor.basic.permissionModeHint")}>
-            <SelectField
-              aria-label={t("agents.editor.basic.permissionMode")}
-              value={form.permissionMode || undefined}
-              onValueChange={(permissionMode) => patch({ permissionMode })}
-              options={permissionModeOptions}
-              placeholder={t("agents.editor.basic.permissionModePlaceholder")}
-            />
-          </Field>
-        )}
-
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-card-hover px-3.5 py-3">
-          <div>
-            <p className="text-[13px] font-medium text-ink-2">{t("agents.editor.basic.enabled")}</p>
-            <p className="text-xs text-ink-3">{t("agents.editor.basic.enabledHint")}</p>
-          </div>
-          <Switch
-            checked={form.enabled}
-            onCheckedChange={(enabled) => patch({ enabled })}
-            aria-label={t("agents.editor.basic.enabled")}
-          />
-        </div>
-
-        <div className="sm:col-span-2 rounded-xl border border-line bg-card-hover/50 p-3.5">
+        <div className="sm:col-span-2 border-t border-line pt-6">
           <p className="mb-3 text-[13px] font-medium text-ink-2">
             {t("agents.editor.basic.credentials")}
           </p>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-x-8 gap-y-6 sm:grid-cols-2">
             <Field
               label={t("agents.editor.basic.apiKey")}
               htmlFor="agent-apikey"
@@ -446,7 +577,11 @@ export function AgentEditorDialog({
                 />
                 <button
                   type="button"
-                  aria-label={showApiKey ? t("agents.editor.basic.hideKey") : t("agents.editor.basic.showKey")}
+                  aria-label={
+                    showApiKey
+                      ? t("agents.editor.basic.hideKey")
+                      : t("agents.editor.basic.showKey")
+                  }
                   onClick={() => setShowApiKey((prev) => !prev)}
                   className="absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1.5 text-ink-3 transition-colors hover:bg-accent-soft hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none"
                 >
@@ -494,18 +629,20 @@ export function AgentEditorDialog({
                 <SelectField
                   aria-label={t("agents.editor.basic.wireApi")}
                   value={form.wireApi}
-                  onValueChange={(wireApi) => patch({ wireApi: wireApi as CodexWireApi })}
+                  onValueChange={(wireApi) =>
+                    patch({ wireApi: wireApi as CodexWireApi })
+                  }
                   options={[
                     {
                       value: "responses",
                       label: t("agents.editor.basic.wireApiResponses"),
-                      hint: t("agents.editor.basic.wireApiResponsesHint")
+                      hint: t("agents.editor.basic.wireApiResponsesHint"),
                     },
                     {
                       value: "chat",
                       label: t("agents.editor.basic.wireApiChat"),
-                      hint: t("agents.editor.basic.wireApiChatHint")
-                    }
+                      hint: t("agents.editor.basic.wireApiChatHint"),
+                    },
                   ]}
                 />
               </Field>
@@ -518,79 +655,121 @@ export function AgentEditorDialog({
                 <SelectField
                   aria-label={t("agents.editor.basic.webSearchMode")}
                   value={form.webSearchMode}
-                  onValueChange={(value) => patch({ webSearchMode: value as WebSearchMode })}
+                  onValueChange={(value) =>
+                    patch({ webSearchMode: value as WebSearchMode })
+                  }
                   options={[
-                    { value: "native", label: t("agents.editor.basic.webSearchNative"), hint: t("agents.editor.basic.webSearchNativeHint") },
-                    { value: "official", label: t("agents.editor.basic.webSearchOfficial"), hint: t("agents.editor.basic.webSearchOfficialHint") },
-                    { value: "off", label: t("agents.editor.basic.webSearchOff"), hint: t("agents.editor.basic.webSearchOffHint") }
+                    {
+                      value: "native",
+                      label: t("agents.editor.basic.webSearchNative"),
+                      hint: t("agents.editor.basic.webSearchNativeHint"),
+                    },
+                    {
+                      value: "official",
+                      label: t("agents.editor.basic.webSearchOfficial"),
+                      hint: t("agents.editor.basic.webSearchOfficialHint"),
+                    },
+                    {
+                      value: "off",
+                      label: t("agents.editor.basic.webSearchOff"),
+                      hint: t("agents.editor.basic.webSearchOffHint"),
+                    },
                   ]}
                 />
               </Field>
             )}
-            {form.providerId === "codex" && form.webSearchMode === "official" && (
-              <Field
-                label={t("agents.editor.basic.webSearchInstance")}
-                hint={t("agents.editor.basic.webSearchInstanceHint")}
-              >
-                <SelectField
-                  aria-label={t("agents.editor.basic.webSearchInstance")}
-                  value={form.webSearchInstanceId}
-                  onValueChange={(value) => patch({ webSearchInstanceId: value, webSearchModel: "", webSearchReasoningEffort: "" })}
-                  options={webSearchInstanceOptions}
-                />
-              </Field>
-            )}
-            {form.providerId === "codex" && form.webSearchMode === "official" && form.webSearchInstanceId && (
-              <>
+            {form.providerId === "codex" &&
+              form.webSearchMode === "official" && (
                 <Field
-                  label={t("agents.editor.basic.webSearchModel")}
-                  hint={t("agents.editor.basic.webSearchModelHint")}
+                  label={t("agents.editor.basic.webSearchInstance")}
+                  hint={t("agents.editor.basic.webSearchInstanceHint")}
                 >
                   <SelectField
-                    aria-label={t("agents.editor.basic.webSearchModel")}
-                    value={form.webSearchModel}
-                    onValueChange={(value) => patch({ webSearchModel: value, webSearchReasoningEffort: "" })}
-                    options={webSearchModelOptions}
+                    aria-label={t("agents.editor.basic.webSearchInstance")}
+                    value={form.webSearchInstanceId}
+                    onValueChange={(value) =>
+                      patch({
+                        webSearchInstanceId: value,
+                        webSearchModel: "",
+                        webSearchReasoningEffort: "",
+                      })
+                    }
+                    options={webSearchInstanceOptions}
                   />
                 </Field>
-                <Field
-                  label={t("agents.editor.basic.webSearchReasoning")}
-                  hint={t("agents.editor.basic.webSearchReasoningHint")}
-                >
-                  <SelectField
-                    aria-label={t("agents.editor.basic.webSearchReasoning")}
-                    value={form.webSearchReasoningEffort}
-                    onValueChange={(value) => patch({ webSearchReasoningEffort: value })}
-                    options={webSearchReasoningOptions}
-                  />
-                </Field>
-              </>
-            )}
+              )}
+            {form.providerId === "codex" &&
+              form.webSearchMode === "official" &&
+              form.webSearchInstanceId && (
+                <>
+                  <Field
+                    label={t("agents.editor.basic.webSearchModel")}
+                    hint={t("agents.editor.basic.webSearchModelHint")}
+                  >
+                    <SelectField
+                      aria-label={t("agents.editor.basic.webSearchModel")}
+                      value={form.webSearchModel}
+                      onValueChange={(value) =>
+                        patch({
+                          webSearchModel: value,
+                          webSearchReasoningEffort: "",
+                        })
+                      }
+                      options={webSearchModelOptions}
+                    />
+                  </Field>
+                  <Field
+                    label={t("agents.editor.basic.webSearchReasoning")}
+                    hint={t("agents.editor.basic.webSearchReasoningHint")}
+                  >
+                    <SelectField
+                      aria-label={t("agents.editor.basic.webSearchReasoning")}
+                      value={form.webSearchReasoningEffort}
+                      onValueChange={(value) =>
+                        patch({ webSearchReasoningEffort: value })
+                      }
+                      options={webSearchReasoningOptions}
+                    />
+                  </Field>
+                </>
+              )}
           </div>
         </div>
-        <div className="sm:col-span-2 rounded-xl border border-line bg-card-hover/50 p-3.5">
+        <div className="sm:col-span-2 border-t border-line pt-6">
           <div className="mb-1 flex items-center justify-between gap-3">
-            <p className="text-[13px] font-medium text-ink-2">{t("agents.editor.models.title")}</p>
+            <p className="text-[13px] font-medium text-ink-2">
+              {t("agents.editor.models.title")}
+            </p>
             <Button
               variant="outline"
               size="sm"
               disabled={fetchingModels || !form.providerId}
               onClick={() => void quickFetchModels()}
             >
-              {fetchingModels
-                ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                : <RefreshCw className="h-3.5 w-3.5" aria-hidden />}
+              {fetchingModels ? (
+                <LoaderCircle
+                  className="h-3.5 w-3.5 animate-spin"
+                  aria-hidden
+                />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+              )}
               {t("agents.editor.models.fetch")}
             </Button>
           </div>
-          <p className="mb-3 text-xs text-ink-3">{t("agents.editor.models.hint")}</p>
-          <div className="space-y-2.5">
+          <p className="sr-only">{t("agents.editor.models.hint")}</p>
+          <div className="space-y-1">
             {form.models.map((row, index) => (
-              <div key={row.key} className="space-y-2 rounded-lg border border-line bg-card p-2.5">
+              <div
+                key={row.key}
+                className="space-y-3 border-b border-line py-4"
+              >
                 <div className="flex flex-wrap items-center gap-2">
                   <Input
                     value={row.id}
-                    onChange={(event) => patchModel(row.key, { id: event.target.value })}
+                    onChange={(event) =>
+                      patchModel(row.key, { id: event.target.value })
+                    }
                     placeholder={t("agents.editor.models.idPlaceholder")}
                     aria-label={t("agents.editor.models.idPlaceholder")}
                     autoComplete="off"
@@ -599,7 +778,9 @@ export function AgentEditorDialog({
                   />
                   <Input
                     value={row.displayName}
-                    onChange={(event) => patchModel(row.key, { displayName: event.target.value })}
+                    onChange={(event) =>
+                      patchModel(row.key, { displayName: event.target.value })
+                    }
                     placeholder={t("agents.editor.models.namePlaceholder")}
                     aria-label={t("agents.editor.models.namePlaceholder")}
                     autoComplete="off"
@@ -608,7 +789,9 @@ export function AgentEditorDialog({
                   />
                   <Input
                     value={row.contextWindow}
-                    onChange={(event) => patchModel(row.key, { contextWindow: event.target.value })}
+                    onChange={(event) =>
+                      patchModel(row.key, { contextWindow: event.target.value })
+                    }
                     placeholder={t("agents.editor.models.contextPlaceholder")}
                     aria-label={t("agents.editor.models.contextPlaceholder")}
                     inputMode="numeric"
@@ -617,20 +800,39 @@ export function AgentEditorDialog({
                     className="w-28 font-mono text-[13px]"
                   />
                   <div className="flex items-center">
-                    <Button variant="ghost" size="icon" disabled={index === 0} onClick={() => moveModel(row.key, -1)} aria-label={t("agents.editor.models.moveUp")}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      disabled={index === 0}
+                      onClick={() => moveModel(row.key, -1)}
+                      aria-label={t("agents.editor.models.moveUp")}
+                    >
                       <ArrowUp className="h-4 w-4" aria-hidden />
                     </Button>
-                    <Button variant="ghost" size="icon" disabled={index === form.models.length - 1} onClick={() => moveModel(row.key, 1)} aria-label={t("agents.editor.models.moveDown")}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      disabled={index === form.models.length - 1}
+                      onClick={() => moveModel(row.key, 1)}
+                      aria-label={t("agents.editor.models.moveDown")}
+                    >
                       <ArrowDown className="h-4 w-4" aria-hidden />
                     </Button>
-                    <Button variant="ghost" size="icon" onClick={() => removeModel(row.key)} aria-label={t("agents.editor.models.remove")}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => removeModel(row.key)}
+                      aria-label={t("agents.editor.models.remove")}
+                    >
                       <Trash2 className="h-4 w-4" aria-hidden />
                     </Button>
                   </div>
                 </div>
                 <Input
                   value={row.efforts}
-                  onChange={(event) => patchModel(row.key, { efforts: event.target.value })}
+                  onChange={(event) =>
+                    patchModel(row.key, { efforts: event.target.value })
+                  }
                   placeholder={t("agents.editor.models.effortsPlaceholder")}
                   aria-label={t("agents.editor.models.effortsPlaceholder")}
                   autoComplete="off"
@@ -640,11 +842,79 @@ export function AgentEditorDialog({
               </div>
             ))}
           </div>
-          <Button variant="ghost" size="sm" className="mt-2.5" onClick={addModel}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mt-2.5"
+            onClick={addModel}
+          >
             <Plus className="h-3.5 w-3.5" aria-hidden />
             {t("agents.editor.models.add")}
           </Button>
         </div>
+        <details className="group sm:col-span-2 border-t border-line pt-5">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent">
+            <ChevronDown
+              className="h-4 w-4 transition-transform group-open:rotate-180"
+              aria-hidden
+            />
+            {locale === "zh-CN" ? "高级" : "Advanced"}
+          </summary>
+          <div className="mt-6 grid grid-cols-1 gap-x-8 gap-y-6 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <Field
+                label={t("agents.editor.basic.args")}
+                hint={t("agents.editor.basic.argsHint")}
+              >
+                <TagInput
+                  aria-label={t("agents.editor.basic.args")}
+                  values={form.baseArgs}
+                  onChange={(baseArgs) => patch({ baseArgs })}
+                  placeholder={t("agents.editor.basic.argsPlaceholder")}
+                />
+              </Field>
+            </div>
+
+            <Field label={t("agents.editor.basic.envPolicy")}>
+              <SelectField
+                aria-label={t("agents.editor.basic.envPolicy")}
+                value={form.envPolicyId}
+                onValueChange={(envPolicyId) => patch({ envPolicyId })}
+                options={envOptions}
+              />
+            </Field>
+
+            {permissionModeOptions.length > 0 && (
+              <Field
+                label={t("agents.editor.basic.permissionMode")}
+                hint={t("agents.editor.basic.permissionModeHint")}
+              >
+                <SelectField
+                  aria-label={t("agents.editor.basic.permissionMode")}
+                  value={form.permissionMode || undefined}
+                  onValueChange={(permissionMode) => patch({ permissionMode })}
+                  options={permissionModeOptions}
+                  placeholder={t(
+                    "agents.editor.basic.permissionModePlaceholder",
+                  )}
+                />
+              </Field>
+            )}
+
+            <div className="flex items-center justify-between gap-3 border-b border-line py-4">
+              <div>
+                <p className="text-[13px] font-medium text-ink-2">
+                  {t("agents.editor.basic.enabled")}
+                </p>
+              </div>
+              <Switch
+                checked={form.enabled}
+                onCheckedChange={(enabled) => patch({ enabled })}
+                aria-label={t("agents.editor.basic.enabled")}
+              />
+            </div>
+          </div>
+        </details>
       </div>
     </Dialog>
   );

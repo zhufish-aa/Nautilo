@@ -233,9 +233,10 @@ test("PPTX links preserve local routing across absolute, relative and encoded pa
   assert.equal(classifyLocalHref("https://example.com/outputs/deck.pptx").kind, "external");
 });
 
-test("Work click wiring reaches the preview pane and office renderer", async () => {
-  const [workPage, sessionWorkbench, timeline, markdown, fileRefChip, previewPane, documentPreview] = await Promise.all([
-    readRendererSource("features/work/WorkPage.tsx"),
+test("unified workspace click wiring reaches the preview pane and office renderer", async () => {
+  const [workPage, workspacePreview, sessionWorkbench, timeline, markdown, fileRefChip, previewPane, documentPreview] = await Promise.all([
+    readRendererSource("features/sessions/SessionsPage.tsx"),
+    readRendererSource("features/sessions/WorkspacePreview.tsx"),
     readRendererSource("features/sessions/SessionWorkbench.tsx"),
     readRendererSource("features/timeline/Timeline.tsx"),
     readRendererSource("features/timeline/MarkdownContent.tsx"),
@@ -244,10 +245,10 @@ test("Work click wiring reaches the preview pane and office renderer", async () 
     readRendererSource("features/work/preview/DocumentPreview.tsx")
   ]);
 
-  assert.match(workPage, /setRequestedPreviewPath\(path\)/);
-  assert.match(workPage, /onOpenLocalFile=\{handleOpenLocalFile\}/);
-  assert.match(workPage, /requestedPath=\{requestedPreviewPath\}/);
-  assert.match(workPage, /setRequestedPreviewPath\(undefined\)/);
+  assert.match(workPage, /setPreview\(\{ sessionId: session.id, path \}\)/);
+  assert.match(workPage, /onOpenLocalFile=\{openPreview\}/);
+  assert.match(workPage, /requestedWorkspaceFile\(preview, session\?\.id\)/);
+  assert.match(workspacePreview, /requestedPath=\{path\}/);
 
   assert.match(sessionWorkbench, /onOpenLocalFile=\{onOpenLocalFile\}/);
   assert.match(timeline, /<MarkdownContent[\s\S]*onOpenLocalFile=\{onOpenLocalFile\}/);
@@ -263,26 +264,34 @@ test("Work click wiring reaches the preview pane and office renderer", async () 
   assert.match(markdown, /target: "_blank"/);
 
   assert.match(previewPane, /mergeDeliverableTabs\(deliverables, requestedPath\)/);
-  assert.match(previewPane, /setSelected\(resolveRequestedTab\(deliverables, requestedPath\)\)/);
-  assert.match(previewPane, /useEffect\(\(\) => \{[\s\S]*setSelected\(undefined\);[\s\S]*\}, \[sessionId\]\)/);
+  assert.match(previewPane, /selected \? resolveRequestedTab\(deliverables, selected\)/);
+  assert.match(previewPane, /requestedWorkspaceFile\(selection, sessionId\)/);
+  assert.match(previewPane, /setSelection\(\{ sessionId, path: requestedPath \}\);[\s\S]*\}, \[requestedPath, sessionId\]\)/);
+  assert.doesNotMatch(previewPane, /\[requestedPath, deliverables\]/);
   assert.match(previewPane, /"artifact\.read"/);
   assert.match(previewPane, /<DocumentPreview/);
   assert.match(documentPreview, /case "pptx":\s*return <PptxPreview/);
 });
 
-test("Work preview sidebar supports resize plus collapse without unmounting its preview", async () => {
-  const workPage = await readRendererSource("features/work/WorkPage.tsx");
+test("context preview width constraints preserve conversation space and support narrow windows", async () => {
+  const { constrainWorkspacePreview } = await loadLibModule("workspace-state");
+  assert.equal(constrainWorkspacePreview(900, 1200), 860);
+  assert.equal(constrainWorkspacePreview(100, 1200), 300);
+  assert.equal(constrainWorkspacePreview(900, 480), 480);
+  assert.equal(constrainWorkspacePreview(460, 1200), 460);
+});
 
-  assert.match(workPage, /const \[previewCollapsed, setPreviewCollapsed\] = useState\(false\)/);
-  assert.match(workPage, /const \[previewWidth, setPreviewWidth\] = useState<number>\(\)/);
-  assert.match(workPage, /onPointerDown=\{beginPreviewResize\}/);
-  assert.match(workPage, /onPointerMove=\{resizePreview\}/);
-  assert.match(workPage, /onKeyDown=\{handleResizeKeyDown\}/);
-  assert.match(workPage, /start\.width \+ start\.x - event\.clientX/);
-  assert.match(workPage, /previewCollapsed \? "w-10" : previewWidth \? "max-w-none" : "w-\[42%\] max-w-2xl"/);
-  assert.match(workPage, /onClick=\{\(\) => setPreviewCollapsed\(\(collapsed\) => !collapsed\)\}/);
-  assert.match(workPage, /previewCollapsed \? "work\.preview\.expand" : "work\.preview\.collapse"/);
-  assert.match(workPage, /previewCollapsed && "hidden"/);
+test("requested files never leak between sessions of either legacy mode", async () => {
+  const { requestedWorkspaceFile, resolveWorkspaceSession } = await loadLibModule("workspace-state");
+  const sessions = [{ id: "a", mode: "code" }, { id: "b", mode: "work" }];
+  assert.equal(resolveWorkspaceSession(sessions, "?session=b", "a"), sessions[1]);
+  assert.equal(resolveWorkspaceSession(sessions, "?session=a", "b"), sessions[0]);
+  assert.equal(resolveWorkspaceSession(sessions, "?new=1", "b"), undefined);
+  assert.equal(resolveWorkspaceSession(sessions, "?session=missing", "b"), undefined);
+  assert.equal(resolveWorkspaceSession(sessions, "", "b"), sessions[1]);
+  assert.equal(requestedWorkspaceFile({ sessionId: "a", path: "report.pdf" }, "b"), undefined);
+  assert.equal(requestedWorkspaceFile({ sessionId: "a", path: "report.pdf" }, "a"), "report.pdf");
+  assert.deepEqual(sessions, [{ id: "a", mode: "code" }, { id: "b", mode: "work" }]);
 });
 
 test("Office/PDF timeline clicks are resolver-routed; external fallback stays localized", async () => {
@@ -292,7 +301,7 @@ test("Office/PDF timeline clicks are resolver-routed; external fallback stays lo
     readRendererSource("features/work/WorkPreviewPane.tsx")
   ]);
   const helperStart = timeline.indexOf("function openTimelineFile");
-  const helperEnd = timeline.indexOf("function LatestActivityLabel", helperStart);
+  const helperEnd = timeline.indexOf("function CardShell", helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart, "timeline resolver helper should exist");
   const helper = timeline.slice(helperStart, helperEnd);
   assert.match(helper, /resolveFileOpenTarget\(path, true\)/);
@@ -306,17 +315,16 @@ test("Office/PDF timeline clicks are resolver-routed; external fallback stays lo
 
 test("nested tool-group file_change rows retain the Work local-file callback", async () => {
   const timeline = await readRendererSource("features/timeline/Timeline.tsx");
-  const toolGroupStart = timeline.indexOf("function ToolGroupCard");
-  const fileChangeStart = timeline.indexOf("function FileChangeCard", toolGroupStart);
-  assert.ok(toolGroupStart >= 0 && fileChangeStart > toolGroupStart, "tool-group and file-change components should exist");
-  const toolGroup = timeline.slice(toolGroupStart, fileChangeStart);
-  assert.ok(toolGroup.includes("onOpenLocalFile"), "ToolGroupCard must accept the Work local-file callback");
-  assert.match(toolGroup, /<FileChangeCard[\s\S]*onOpenLocalFile=\{onOpenLocalFile\}/);
-
   const eventViewStart = timeline.indexOf("function TimelineEventViewImpl");
   assert.ok(eventViewStart >= 0, "TimelineEventViewImpl should exist");
   const eventView = timeline.slice(eventViewStart);
-  assert.match(eventView, /<ToolGroupCard[\s\S]*onOpenLocalFile=\{onOpenLocalFile\}/);
+  const groupStart = eventView.indexOf('case "tool_group":');
+  const groupEnd = eventView.indexOf('case "usage":', groupStart);
+  const group = eventView.slice(groupStart, groupEnd);
+  assert.match(group, /data\.items\.map/);
+  assert.match(group, /<TimelineEventView[^>]*onOpenLocalFile=\{onOpenLocalFile\}/);
+  assert.match(eventView, /<FileChangeCard[^>]*onOpenLocalFile=\{onOpenLocalFile\}/);
+
 });
 
 test("formatFileSize picks sensible units", async () => {

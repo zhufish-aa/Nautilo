@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -14,6 +14,7 @@ import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { Button } from "../../components/ui/Button";
 import { requestCore } from "../../lib/bridge";
+import { requestedWorkspaceFile } from "../../lib/workspace-state";
 import { collectChangedFiles } from "../../lib/changed-files";
 import {
   base64ToBytes,
@@ -89,19 +90,18 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
     return files;
   }, [events]);
 
-  const [selected, setSelected] = useState<string>();
+  const [selection, setSelection] = useState<{ sessionId: string; path: string }>();
+  const selected = requestedWorkspaceFile(selection, sessionId);
+  const setSelected = (path: string): void => setSelection({ sessionId, path });
   // A chat click (Markdown link / chip / artifact / file_change) requests a
   // path that may not be among the deliverables yet: it still becomes a tab
   // (deduplicated case/separator-insensitively) and the active selection.
   const tabs = useMemo(() => mergeDeliverableTabs(deliverables, requestedPath), [deliverables, requestedPath]);
   useEffect(() => {
-    if (requestedPath) setSelected(resolveRequestedTab(deliverables, requestedPath));
-  }, [requestedPath, deliverables]);
-  // Keep-alive: never leak the previous session's selection into this one.
-  useEffect(() => {
-    setSelected(undefined);
-  }, [sessionId]);
-  const activePath = selected ?? tabs[0];
+    if (requestedPath) setSelection({ sessionId, path: requestedPath });
+  }, [requestedPath, sessionId]);
+  const activePath = selected ? resolveRequestedTab(deliverables, selected) : tabs[0];
+  const loadedFileKey = useRef("");
   const [preview, setPreview] = useState<PaneState>(INITIAL_STATE);
   const [reloadTick, setReloadTick] = useState(0);
   const [zoom, setZoom] = useState<PreviewZoom>("fit-width");
@@ -139,7 +139,10 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
     let cancelled = false;
     let objectUrl: string | undefined;
     const load = async (): Promise<void> => {
-      setPreview((current) => (current.status === "ready" ? current : { ...INITIAL_STATE, status: "loading-file" }));
+      const fileKey = `${sessionId}:${activePath}`;
+      const sameFile = loadedFileKey.current === fileKey;
+      loadedFileKey.current = fileKey;
+      setPreview((current) => (sameFile && current.status === "ready" ? current : { ...INITIAL_STATE, status: "loading-file" }));
       try {
         const file = await requestCore<{ base64: string; mimeType: string; size: number; modifiedAt: string }>(
           "artifact.read",
@@ -194,7 +197,7 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [activePath, project, fileTouchCount, reloadTick]);
+  }, [activePath, project, fileTouchCount, reloadTick, sessionId]);
 
   if (tabs.length === 0) {
     return (
@@ -224,8 +227,8 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
               onClick={() => setSelected(path)}
               title={path}
               className={cn(
-                "flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-medium transition-colors",
-                activeTab ? "bg-accent-soft text-accent" : "text-ink-3 hover:bg-card-hover hover:text-ink"
+                "flex h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors",
+                activeTab ? "bg-card-hover text-ink" : "text-ink-3 hover:bg-card-hover hover:text-ink"
               )}
             >
               <FileIcon className="h-3 w-3" aria-hidden />
@@ -236,7 +239,7 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
       </div>
 
       {/* Unified toolbar: navigation, jump, zoom, fit-width, reload, system open. */}
-      <div className="flex shrink-0 items-center gap-1 border-b border-line/70 px-2 py-1">
+      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-line px-3 py-2">
         <ToolbarButton
           label={t("work.preview.prev")}
           disabled={!nav || nav.index <= 0}
@@ -245,7 +248,7 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
           <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
         </ToolbarButton>
         {nav ? (
-          <span className="flex items-center gap-1 text-[11px] tabular-nums text-ink-3">
+          <span className="flex items-center gap-1 text-xs tabular-nums text-ink-3">
             <input
               key={`${activePath}:${nav.kind}:${nav.index}`}
               type="number"
@@ -254,7 +257,7 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
               defaultValue={nav.index + 1}
               aria-label={t("work.preview.jumpTo")}
               title={t("work.preview.jumpTo")}
-              className="h-6 w-12 rounded-md border border-line bg-panel px-1 text-center text-[11px] text-ink outline-none focus:border-accent"
+              className="h-6 w-12 rounded-md border border-line bg-panel px-1 text-center text-xs text-ink outline-none focus:border-accent"
               onKeyDown={(event) => {
                 if (event.key !== "Enter") return;
                 const value = Number.parseInt(event.currentTarget.value, 10);
@@ -285,7 +288,7 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
         >
           <ZoomOut className="h-3.5 w-3.5" aria-hidden />
         </ToolbarButton>
-        <span className="w-11 text-center text-[11px] tabular-nums text-ink-3">
+        <span className="w-11 text-center text-xs tabular-nums text-ink-3">
           {zoom === "fit-width" ? "—" : `${zoomPercent}%`}
         </span>
         <ToolbarButton
@@ -327,6 +330,7 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
             result is never thrown away by a status flip. */}
         {isOffice && preview.bytes && (preview.status === "parsing" || preview.status === "ready") && activePath && (
           <DocumentPreview
+            key={`${sessionId}:${activePath}`}
             path={activePath}
             kind={preview.kind as "pdf" | "docx" | "xlsx" | "pptx"}
             bytes={preview.bytes}
@@ -338,7 +342,7 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
         )}
         {preview.status === "parsing" && (
           <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center pt-3">
-            <span className="flex items-center gap-1.5 rounded-full bg-panel/90 px-3 py-1 text-[11px] text-ink-3 shadow-sm">
+            <span className="flex items-center gap-1.5 rounded-full bg-panel/90 px-3 py-1 text-xs text-ink-3 shadow-sm">
               <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
               {t("work.preview.parsing")}
             </span>
@@ -392,7 +396,7 @@ export function WorkPreviewPane({ sessionId, requestedPath }: { sessionId: strin
       </div>
 
       {preview.status === "ready" && (
-        <div className="flex shrink-0 items-center justify-between border-t border-line/70 px-3 py-1.5 text-[11px] text-ink-3">
+        <div className="flex shrink-0 items-center justify-between border-t border-line/70 px-3 py-1.5 text-xs text-ink-3">
           <span className="truncate">{activePath}</span>
           <span className="shrink-0 tabular-nums">{formatFileSize(preview.size)}</span>
         </div>
@@ -422,8 +426,8 @@ function ToolbarButton({
       aria-label={label}
       title={label}
       className={cn(
-        "flex h-7 w-7 items-center justify-center rounded-md transition-colors",
-        active ? "bg-accent-soft text-accent" : "text-ink-3 hover:bg-card-hover hover:text-ink",
+        "flex h-8 w-8 items-center justify-center rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors",
+        active ? "bg-card-hover text-ink" : "text-ink-3 hover:bg-card-hover hover:text-ink",
         disabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-ink-3"
       )}
     >

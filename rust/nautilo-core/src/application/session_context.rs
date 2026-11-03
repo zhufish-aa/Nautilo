@@ -18,25 +18,19 @@ pub struct SessionTurnContext {
     pub recovered: bool,
 }
 
-/// Prepended when a "work" session (re)creates its provider thread.
+/// Neutral guidance for both new and recovered workspace sessions.
 pub fn work_mode_guidance(workspace_root: Option<&str>) -> String {
     [
-        "<agenthub_work_mode>",
-        "This is an Nautilo Work session. Your job is producing office deliverables, not modifying a code repository.",
+        "<agenthub_workspace>",
+        "This Nautilo workspace supports both software development and document production. Follow the user's request and applicable permissions.",
         &match workspace_root {
-            Some(root) => format!("Write every deliverable inside the workspace directory: {root}"),
-            None => "Write every deliverable inside the session workspace directory.".to_string(),
+            Some(root) => format!("Workspace directory: {root}"),
+            None => "Use the session workspace directory for deliverables.".to_string(),
         },
-        "Prefer real office formats: .docx for documents, .xlsx for spreadsheets, .pptx for slides, .md for drafts/notes, .csv for raw data.",
-        "If your environment provides office skills (documents, spreadsheets, presentations, research), follow their workflow and verification rules.",
-        "BEFORE running any office script, prepare the Python environment inside the workspace:",
-        "1. If `.venv` does not exist, create it: `python -m venv .venv`",
-        "2. Install the office toolchain dependencies (idempotent): `.venv\\Scripts\\python -m pip install python-pptx openpyxl python-docx` (Windows) or `.venv/bin/python -m pip install python-pptx openpyxl python-docx` (macOS/Linux).",
-        "3. Run every office script with the venv interpreter, never the system Python. If a script reports a missing dependency, install it into `.venv` and retry.",
-        "Whenever you create or update a deliverable, end your reply with the exact file path(s) so the user can preview them.",
-        "</agenthub_work_mode>",
-    ]
-    .join("\n")
+        "For office deliverables, use suitable formats such as .docx, .xlsx, or .pptx and follow available relevant skills and verification workflows.",
+        "When you create or update a deliverable, provide its exact file path so the user can preview it.",
+        "</agenthub_workspace>",
+    ].join("\n")
 }
 
 pub struct TurnContextInput<'a> {
@@ -45,7 +39,6 @@ pub struct TurnContextInput<'a> {
     pub artifacts: &'a [Value],
     pub current_attachments: &'a [Value],
     pub recover_provider_context: bool,
-    pub work_mode: bool,
     pub workspace_root: Option<&'a str>,
 }
 
@@ -80,7 +73,7 @@ pub fn build_session_turn_context(input: TurnContextInput) -> SessionTurnContext
     if !input.recover_provider_context {
         return SessionTurnContext { prompt: input.current_text.to_string(), local_image_paths, recovered: false };
     }
-    let guidance = if input.work_mode { work_mode_guidance(input.workspace_root) } else { String::new() };
+    let guidance = work_mode_guidance(input.workspace_root);
     if input.messages.is_empty() && input.artifacts.is_empty() {
         let prompt = [guidance, input.current_text.to_string()]
             .into_iter()
@@ -156,4 +149,29 @@ fn select_history(messages: &[Value]) -> Vec<Value> {
         }
     }
     selected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_session_turn_context, TurnContextInput};
+    use serde_json::json;
+
+    #[test]
+    fn neutral_guidance_on_new_and_recovered_threads() {
+        let history = vec![json!({"id":"1", "sender":"user", "text":"previous"})];
+        for messages in [&[][..], history.as_slice()] {
+            let result = build_session_turn_context(TurnContextInput {
+                current_text: "edit code and make a report", messages, artifacts: &[],
+                current_attachments: &[], recover_provider_context: true, workspace_root: Some("/workspace"),
+            });
+            assert!(result.prompt.contains("software development and document production"));
+            assert!(!result.prompt.contains("not modifying a code repository"));
+            assert!(!result.prompt.contains("pip install"));
+        }
+        let result = build_session_turn_context(TurnContextInput {
+            current_text: "continue", messages: &[], artifacts: &[], current_attachments: &[],
+            recover_provider_context: false, workspace_root: None,
+        });
+        assert_eq!(result.prompt, "continue");
+    }
 }

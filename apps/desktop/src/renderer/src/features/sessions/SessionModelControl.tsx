@@ -5,6 +5,7 @@ import type { ProviderModel } from "@agenthub/domain";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { configureWorkbenchSession, switchWorkbenchSessionInstance } from "../../lib/orchestration-runtime";
 import { permissionModesFor } from "../../lib/provider-catalog";
+import { useProvidersStore } from "../../stores/providers";
 import { useAgentsStore } from "../../stores/agents";
 import { useSessionsStore } from "../../stores/sessions";
 import { Input } from "../../components/ui/Input";
@@ -39,7 +40,8 @@ function groupModelsBySource(catalogModels: ProviderModel[]): { source: string; 
 }
 
 /** A Codex-style, per-session model and reasoning control. */
-export function SessionModelControl({ sessionId, disabled }: { sessionId?: string; disabled?: boolean }): JSX.Element | null {
+export type ComposerConfiguration = { model?: string; reasoningEffort?: string; serviceTier?: string; permissionMode?: string };
+export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?: string; disabled?: boolean; draft?: { instanceId: string; configuration: ComposerConfiguration; onChange: (patch: ComposerConfiguration) => void; onInstanceChange: (id: string) => void } }): JSX.Element | null {
   const { t, locale } = useI18n();
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<MenuView>("summary");
@@ -48,11 +50,13 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
   const [customModelId, setCustomModelId] = useState("");
   const [customEffort, setCustomEffort] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
-  const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
+  const storedSession = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
+  const session = storedSession ?? draft?.configuration;
+  const providerCatalog = useProvidersStore((state) => state.catalog);
   const instances = useAgentsStore((state) => state.instances);
   const catalogs = useAgentsStore((state) => state.modelCatalogs);
   const loadModels = useAgentsStore((state) => state.loadModels);
-  const instanceId = session?.target.type === "agent" ? session.target.instanceId : undefined;
+  const instanceId = storedSession?.target.type === "agent" ? storedSession.target.instanceId : draft?.instanceId;
   const instance = instances.find((item) => item.id === instanceId);
   const catalog = instance ? catalogs[instance.id] : undefined;
   const models = useMemo(() => catalog?.models ?? [], [catalog]);
@@ -83,7 +87,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
   const fastTier = speedTiers.find((item) => item.id !== "standard");
   const fastActive = !!fastTier && speedTier.id === fastTier.id;
 
-  const permissionModes = useMemo(() => (instance ? permissionModesFor(instance.providerId) : []), [instance]);
+  const permissionModes = useMemo(() => (instance ? permissionModesFor(instance.providerId) : []), [instance, providerCatalog]);
   // Same-provider enabled instances are the switchable API sources for this session.
   const sourceInstances = useMemo(
     () => (instance ? instances.filter((item) => item.providerId === instance.providerId && item.enabled) : []),
@@ -119,12 +123,16 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
     };
   }, [open]);
 
-  if (!sessionId || !instance) return null;
+  if ((!sessionId && !draft) || !instance) return null;
+  const configure = (patch: ComposerConfiguration): void => {
+    if (sessionId) void configureWorkbenchSession(sessionId, patch);
+    else draft?.onChange(patch);
+  };
 
   const selectModel = (nextModelId: string): void => {
     const next = models.find((item) => item.id === nextModelId);
     if (next && !/high[-_ ]?speed/i.test(`${next.id} ${next.displayName}`)) setPreviousStandardModelId(next.id);
-    void configureWorkbenchSession(sessionId, {
+    configure({
       model: nextModelId,
       reasoningEffort: next?.defaultReasoningEffort ?? next?.reasoningEfforts[0] ?? "",
       serviceTier: next?.defaultServiceTier ?? ""
@@ -137,7 +145,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
     selectModel(nextModelId);
   };
   const selectEffort = (nextEffort: string): void => {
-    void configureWorkbenchSession(sessionId, { reasoningEffort: nextEffort });
+    configure({ reasoningEffort: nextEffort });
     setView("summary");
   };
   const selectCustomEffort = (): void => {
@@ -147,7 +155,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
   };
   const selectPermission = (nextMode: string): void => {
     // Empty selection clears the session override so the instance setting applies.
-    void configureWorkbenchSession(sessionId, { permissionMode: nextMode.trim() || undefined });
+    configure({ permissionMode: nextMode.trim() || undefined });
     setView("summary");
   };
   const selectSpeed = (nextTierId: string): void => {
@@ -156,7 +164,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
       const nextModel = models.find((item) => item.id === nextModelId);
       if (!nextModel) return;
       if (modelId !== nextModelId) setPreviousStandardModelId(modelId);
-      void configureWorkbenchSession(sessionId, {
+      configure({
         model: nextModel.id,
         reasoningEffort: nextModel.defaultReasoningEffort ?? nextModel.reasoningEfforts[0] ?? "",
         serviceTier: ""
@@ -169,7 +177,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
         ?? models.find((item) => item.isDefault && item.id !== highspeedModel.id)
         ?? models.find((item) => item.id !== highspeedModel.id);
       if (fallback) {
-        void configureWorkbenchSession(sessionId, {
+        configure({
           model: fallback.id,
           reasoningEffort: fallback.defaultReasoningEffort ?? fallback.reasoningEfforts[0] ?? "",
           serviceTier: ""
@@ -178,7 +186,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
       setView("summary");
       return;
     }
-    void configureWorkbenchSession(sessionId, { serviceTier: nextTierId === "standard" ? "" : nextTierId });
+    configure({ serviceTier: nextTierId === "standard" ? "" : nextTierId });
     setView("summary");
   };
   const toggleFast = (): void => {
@@ -195,11 +203,13 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
 
   const displayModel = model?.displayName ?? (modelId || t("agents.editor.basic.model"));
   const displayEffort = effort ? effortLabel(effort) : t("agents.editor.basic.reasoningDefault");
+  const compactEffort = effort ? effortLabel(effort) : locale === "zh-CN" ? "默认" : "Default";
+  const compactPermission = permissionModeOption ? permissionModeOption.name[locale] : locale === "zh-CN" ? "继承权限" : "Inherited";
   const panelKey = view === "summary" ? (advancedDetails ? "advanced" : "quick") : view;
   const panelWidth = view === "models" ? 320 : view !== "summary" ? 288 : advancedDetails ? 264 : 224;
 
   return (
-    <div ref={rootRef} className="relative ml-auto shrink-0">
+    <div ref={rootRef} className="relative min-w-0">
       <AnimatePresence>
         {open && (
           <motion.div
@@ -255,7 +265,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                             animate={{ width: `${progress}%` }}
                             transition={{ type: "spring", stiffness: 420, damping: 41 }}
                           >
-                            <span className="session-speed-particles" aria-hidden />
+
                           </motion.div>
                         </div>
                         <input
@@ -354,7 +364,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                         <button
                           type="submit"
                           disabled={!customModelId.trim()}
-                          className="shrink-0 rounded-lg bg-accent px-3 text-xs font-medium text-white outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40"
+                          className="shrink-0 rounded-lg bg-accent px-3 text-xs font-medium text-on-accent outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {t("common.confirm")}
                         </button>
@@ -404,7 +414,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                         <button
                           type="submit"
                           disabled={!customEffort.trim()}
-                          className="shrink-0 rounded-lg bg-accent px-3 text-xs font-medium text-white outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40"
+                          className="shrink-0 rounded-lg bg-accent px-3 text-xs font-medium text-on-accent outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {t("common.confirm")}
                         </button>
@@ -475,6 +485,7 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
                         selected={item.id === instanceId}
                         onClick={() => {
                           if (sessionId && item.id !== instanceId) void switchWorkbenchSessionInstance(sessionId, item.id);
+                          else if (!sessionId) draft?.onInstanceChange(item.id);
                           setView("summary");
                         }}
                       />
@@ -487,23 +498,19 @@ export function SessionModelControl({ sessionId, disabled }: { sessionId?: strin
         )}
       </AnimatePresence>
 
-      <motion.button
-        animate={{ width: open ? panelWidth : 224 }}
-        transition={{ type: "spring", stiffness: 420, damping: 41, mass: 0.65 }}
-        type="button"
-        onClick={toggle}
-        disabled={disabled}
-        aria-label={`${t("agents.editor.basic.model")}: ${displayModel}; ${t("agents.editor.basic.reasoning")}: ${displayEffort}`}
-        aria-expanded={open}
-        className={`grid h-8 grid-cols-[1fr_auto_1fr] items-center rounded-full border-0 px-3 text-xs text-ink-2 outline-none transition-colors hover:bg-card-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-45 ${open ? "bg-card-hover" : "bg-transparent"}`}
-      >
-        <span aria-hidden />
-        <span className="flex min-w-0 items-center justify-center gap-1.5">
-          <span className="truncate font-medium text-ink">{displayModel}</span>
-          <span className="truncate text-ink-3">{displayEffort}</span>
-        </span>
-        <ChevronDown className={`h-3.5 w-3.5 shrink-0 justify-self-end transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
-      </motion.button>
+      <div className="flex flex-wrap items-center gap-1">
+        {!draft && <button type="button" disabled={disabled} onClick={() => { setView("sources"); setOpen(!open || view !== "sources"); }} aria-expanded={open && view === "sources"} title={t("sessions.composer.apiSource")} className="flex h-8 max-w-40 items-center gap-1.5 rounded-lg px-2 text-sm text-ink-2 hover:bg-card-hover disabled:opacity-40"><span className="truncate">{instance.displayName}</span><ChevronDown className="h-3.5 w-3.5" aria-hidden /></button>}
+        <button type="button" disabled={disabled} onClick={() => { setView("models"); setOpen(!open || view !== "models"); }} aria-expanded={open && view === "models"} title={t("agents.editor.basic.model")} className="flex h-8 max-w-52 items-center gap-1.5 rounded-lg px-2 text-sm text-ink-2 hover:bg-card-hover disabled:opacity-40">
+          <span className="truncate">{displayModel}</span><ChevronDown className="h-3.5 w-3.5" aria-hidden />
+        </button>
+        <button type="button" disabled={disabled} onClick={() => { setView("efforts"); setOpen(!open || view !== "efforts"); }} aria-expanded={open && view === "efforts"} title={`${t("agents.editor.basic.reasoning")}: ${displayEffort}`} className="flex h-8 items-center gap-1 rounded-lg px-2 text-sm text-ink-2 hover:bg-card-hover disabled:opacity-40">
+          {compactEffort}<ChevronDown className="h-3.5 w-3.5" aria-hidden />
+        </button>
+        <button type="button" disabled={disabled} onClick={() => { setView("modes"); setOpen(!open || view !== "modes"); }} aria-expanded={open && view === "modes"} title={`${t("agents.editor.basic.permissionMode")}: ${displayPermissionMode}`} className="flex h-8 items-center gap-1 rounded-lg px-2 text-sm text-ink-2 hover:bg-card-hover disabled:opacity-40">
+          {compactPermission}<ChevronDown className="h-3.5 w-3.5" aria-hidden />
+        </button>
+        <button type="button" disabled={disabled} onClick={toggle} title={t("sessions.composer.advanced")} aria-label={t("sessions.composer.advanced")} aria-expanded={open} className="h-8 rounded-lg px-2 text-ink-3 hover:bg-card-hover disabled:opacity-40">···</button>
+      </div>
     </div>
   );
 }

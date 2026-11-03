@@ -52,7 +52,7 @@ export function SelectField({
           sideOffset={6}
           className={cn(
             "ui-select-content z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-xl border border-line bg-card shadow-pop",
-            "data-[state=open]:animate-pop-in"
+            "ui-menu-motion"
           )}
         >
           <SelectPrimitive.Viewport className="p-1.5">

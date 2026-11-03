@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
 import { Check, ChevronDown, ChevronUp, ClipboardCheck, HelpCircle, RotateCcw, Send, ShieldAlert, X, type LucideIcon } from "lucide-react";
 import type { InteractionOption, InteractionQuestion, InteractionRequest, InteractionResponse } from "@agenthub/domain";
 import { useI18n, type MessageKey } from "../../lib/i18n";
@@ -70,30 +69,13 @@ function CardShell({
   time?: string;
   children: React.ReactNode;
 }): JSX.Element {
-  const toneClasses = {
-    warn: "border-warn/20 bg-warn/10 text-warn",
-    ok: "border-ok/20 bg-ok/10 text-ok",
-    muted: "border-line bg-card-hover text-ink-3",
-    plan: "border-accent/30 bg-accent-soft text-accent"
-  } as const;
   return (
-    <motion.article
-      initial={{ opacity: 0, y: 14, scale: 0.985 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 320, damping: 36 }}
-      className="flex gap-3"
-    >
-      <span aria-hidden className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border", toneClasses[tone])}>
-        <Icon className="h-4 w-4" />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="mb-1.5 flex items-baseline justify-between gap-3">
-          <div className="min-w-0 text-[13px] font-medium text-ink-2">{title}</div>
-          {time && <time className="shrink-0 text-[11px] text-ink-3">{time}</time>}
-        </div>
-        {children}
+    <article className="min-w-0 py-2" data-tone={tone}>
+      <div className="mb-3 flex items-center gap-2 text-sm text-ink-2" title={time}>
+        <Icon className="h-4 w-4 text-ink-3" aria-hidden />{title}
       </div>
-    </motion.article>
+      {children}
+    </article>
   );
 }
 
@@ -210,7 +192,7 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
         </span>
       }
     >
-      <div className="space-y-4 rounded-xl border border-warn/25 bg-warn/5 px-4 py-3">
+      <div className="space-y-4 rounded-xl border border-line bg-panel px-5 py-4">
         {interaction.title && <p className="text-sm font-medium text-ink">{interaction.title}</p>}
         {questions.map((question) => (
           <QuestionField
@@ -378,7 +360,7 @@ function ApprovalCard({ interaction }: { interaction: InteractionRequest }): JSX
         </span>
       }
     >
-      <div className="rounded-xl border border-warn/25 bg-warn/5 px-4 py-3">
+      <div className="rounded-xl border border-line bg-panel px-5 py-4">
         <p className="text-sm font-medium text-ink">{interaction.title}</p>
         {detail && (
           <div className="mt-2">
@@ -475,13 +457,13 @@ function PlanApprovalCard({ interaction }: { interaction: InteractionRequest }):
         </span>
       }
     >
-      <div className="overflow-hidden rounded-2xl border border-accent/25 bg-card shadow-[0_10px_35px_rgba(0,0,0,0.12)]">
-        <div className="flex items-start justify-between gap-4 border-b border-line bg-gradient-to-r from-accent-soft to-transparent px-5 py-4">
+      <div className="overflow-hidden rounded-xl border border-line bg-panel">
+        <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
           <div>
             <p className="text-[15px] font-semibold text-ink">{t("sessions.interactions.planReady")}</p>
-            <p className="mt-1 text-xs leading-relaxed text-ink-3">{t("sessions.interactions.planReviewHint")}</p>
+
           </div>
-          <span className="shrink-0 rounded-full border border-accent/25 bg-card px-2.5 py-1 text-[11px] font-medium text-accent">
+          <span className="shrink-0 rounded-full border border-line bg-panel px-2.5 py-1 text-xs font-medium text-ink-2">
             {interaction.providerId}
           </span>
         </div>
@@ -498,7 +480,7 @@ function PlanApprovalCard({ interaction }: { interaction: InteractionRequest }):
               <div className={cn("relative", !expanded && "max-h-80 overflow-hidden")}>
                 <MarkdownContent source={plan} />
                 {!expanded && (
-                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-card to-transparent" />
+                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-line" />
                 )}
               </div>
             )
@@ -517,7 +499,7 @@ function PlanApprovalCard({ interaction }: { interaction: InteractionRequest }):
         </div>
 
         {pending && (
-          <div className="flex flex-wrap items-center gap-2 border-t border-line bg-card-hover/50 px-5 py-3.5">
+          <div className="flex flex-wrap items-center gap-2 border-t border-line bg-panel px-5 py-3.5">
             {approve && (
               <Button variant="primary" size="sm" disabled={submitting} title={approve.description} onClick={() => void answer(approve.id)}>
                 <Check className="h-3.5 w-3.5" aria-hidden />

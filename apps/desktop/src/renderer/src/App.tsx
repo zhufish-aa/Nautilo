@@ -69,7 +69,12 @@ function useDocumentPreferences(): void {
 export default function App(): JSX.Element {
   useDocumentPreferences();
   const reduceMotion = useSettingsStore((state) => state.reduceMotion);
-  
+
+  useEffect(() => {
+    document.documentElement.toggleAttribute("data-reduce-motion", reduceMotion);
+    return () => document.documentElement.removeAttribute("data-reduce-motion");
+  }, [reduceMotion]);
+
   useEffect(() => {
     void initializeCoreState().catch((error) => console.error("Failed to initialize Core Daemon state", error));
   }, []);
@@ -81,8 +86,8 @@ export default function App(): JSX.Element {
           <Routes>
             {/* F-023: chat-first — the workbench is the default entry */}
             <Route path="/" element={<Navigate to="/sessions" replace />} />
-            {/* Code/Work workbenches are rendered keep-alive by AppShell so a
-                mode switch never remounts them; the routes only mark the URL. */}
+            {/* One workspace is kept alive by AppShell. /work is a legacy alias;
+                neither route creates a second instance or changes saved modes. */}
             <Route path="/sessions" element={null} />
             <Route path="/work" element={null} />
             <Route path="/projects" element={<ProjectsPage />} />

@@ -40,66 +40,64 @@
 
 :root {
   color-scheme: light;
-  --canvas: #f2f4f9;
-  --panel: rgba(255, 255, 255, 0.72);
+  --canvas: #f6f6f6;
+  --panel: #f6f6f6;
   --card: #ffffff;
-  --card-hover: #fafbfe;
-  --line: #e3e7ef;
-  --line-strong: #cfd6e2;
-  --ink: #151a23;
-  --ink-2: #4a5364;
-  --ink-3: #6f7989;
-  --accent: #6553f0;
-  --accent-2: #8574ff;
-  --accent-soft: rgba(101, 83, 240, 0.1);
+  --card-hover: #f3f3f3;
+  --line: #e8e8e8;
+  --line-strong: #d6d6d6;
+  --ink: #202020;
+  --ink-2: #555555;
+  --ink-3: #777777;
+  --accent: #242424;
+  --accent-2: #404040;
+  --accent-soft: #ececec;
   --on-accent: #ffffff;
   --ok: #0c9d6c;
   --warn: #c77400;
   --danger: #dc2f55;
   --info: #0476c9;
 
-  --aurora-1: rgba(124, 108, 255, 0.22);
-  --aurora-2: rgba(56, 189, 248, 0.17);
+  --aurora-1: transparent;
+  --aurora-2: transparent;
   --grid-line: rgba(21, 26, 35, 0.05);
 
   --shadow-card-value: 0 1px 2px rgba(21, 26, 35, 0.05),
     0 8px 24px -12px rgba(21, 26, 35, 0.12);
   --shadow-pop-value: 0 4px 12px rgba(21, 26, 35, 0.08),
     0 24px 64px -16px rgba(21, 26, 35, 0.28);
-  --shadow-glow-value: 0 0 0 1px rgba(101, 83, 240, 0.25),
-    0 8px 32px -8px rgba(101, 83, 240, 0.45);
+  --shadow-glow-value: none;
 }
 
 .dark {
   color-scheme: dark;
-  --canvas: #06080d;
-  --panel: rgba(10, 13, 20, 0.78);
-  --card: #0d1017;
-  --card-hover: #121622;
+  --canvas: #171717;
+  --panel: #1c1c1c;
+  --card: #212121;
+  --card-hover: #2b2b2b;
   --line: rgba(255, 255, 255, 0.07);
   --line-strong: rgba(255, 255, 255, 0.13);
-  --ink: #e9ebf2;
-  --ink-2: #a8aebf;
-  --ink-3: #798094;
-  --accent: #8b7cff;
-  --accent-2: #6a5af9;
-  --accent-soft: rgba(139, 124, 255, 0.14);
-  --on-accent: #ffffff;
+  --ink: #eeeeee;
+  --ink-2: #b5b5b5;
+  --ink-3: #8d8d8d;
+  --accent: #e5e5e5;
+  --accent-2: #d4d4d4;
+  --accent-soft: #303030;
+  --on-accent: #1b1b1b;
   --ok: #3ddc97;
   --warn: #fbbf24;
   --danger: #fb6b8b;
   --info: #4cc3ff;
 
-  --aurora-1: rgba(124, 108, 255, 0.12);
-  --aurora-2: rgba(56, 189, 248, 0.07);
+  --aurora-1: transparent;
+  --aurora-2: transparent;
   --grid-line: rgba(255, 255, 255, 0.03);
 
   --shadow-card-value: 0 1px 2px rgba(0, 0, 0, 0.4),
     0 12px 32px -16px rgba(0, 0, 0, 0.6);
   --shadow-pop-value: 0 4px 16px rgba(0, 0, 0, 0.5),
     0 32px 80px -16px rgba(0, 0, 0, 0.75);
-  --shadow-glow-value: 0 0 0 1px rgba(139, 124, 255, 0.35),
-    0 8px 40px -8px rgba(139, 124, 255, 0.5);
+  --shadow-glow-value: none;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -260,27 +258,11 @@
     min-width: 7px;
     overflow: hidden;
     border-radius: inherit;
-    background: linear-gradient(90deg, var(--accent-2), var(--accent));
+    background: var(--ink-3);
   }
-  .session-effort-fill.is-fast {
-    background: linear-gradient(100deg, var(--accent), var(--info), var(--accent-2), var(--info));
-    background-size: 260% 100%;
-    animation: session-speed-flow 1.15s linear infinite;
-  }
-  .session-speed-particles {
-    position: absolute;
-    inset: 0;
-    opacity: 0.9;
-    background-image:
-      radial-gradient(circle, rgba(255, 255, 255, 0.9) 0 1px, transparent 1.4px),
-      radial-gradient(circle, rgba(255, 255, 255, 0.58) 0 1px, transparent 1.5px);
-    background-position: 2px 4px, 13px 15px;
-    background-size: 22px 22px, 31px 22px;
-    animation: session-speed-particles 1.6s linear infinite;
-  }
-  .session-effort-fill.is-fast .session-speed-particles {
-    animation-duration: 0.75s;
-  }
+  .session-effort-fill.is-fast { background: var(--ink-2); }
+  .session-speed-particles { display: none; }
+
 }
 
 /* ------------------------------------------------------------------------- */
@@ -388,156 +370,12 @@
  * "Live run" premium effects: rotating conic-gradient borders, traveling
  * light beams, shimmer text and the energy orb shown while an agent runs.
  * ------------------------------------------------------------------------- */
-@property --gb-angle {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
-}
-
-@keyframes gb-spin {
-  to {
-    --gb-angle: 360deg;
-  }
-}
-
-@keyframes beam-slide {
-  from {
-    transform: translate3d(-130%, 0, 0);
-  }
-  to {
-    transform: translate3d(340%, 0, 0);
-  }
-}
-
-@keyframes text-shine {
-  from {
-    background-position: 220% 0;
-  }
-  to {
-    background-position: -40% 0;
-  }
-}
-
-@keyframes orb-glow {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 0.55;
-  }
-  50% {
-    transform: scale(1.35);
-    opacity: 0.9;
-  }
-}
-
 @layer utilities {
-  /* Rotating conic-gradient ring drawn along the element's border box. */
-  .run-border {
-    position: relative;
-    isolation: isolate;
-  }
-  .run-border::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    padding: 1.2px;
-    border-radius: inherit;
-    background: conic-gradient(
-      from var(--gb-angle),
-      var(--accent) 0deg,
-      var(--info) 90deg,
-      var(--accent-2) 180deg,
-      var(--info) 270deg,
-      var(--accent) 360deg
-    );
-    -webkit-mask:
-      linear-gradient(#000 0 0) content-box,
-      linear-gradient(#000 0 0);
-    -webkit-mask-composite: xor;
-    mask:
-      linear-gradient(#000 0 0) content-box,
-      linear-gradient(#000 0 0);
-    mask-composite: exclude;
-    opacity: 0;
-    animation: gb-spin 2.8s linear infinite;
-    transition: opacity 700ms ease;
-    pointer-events: none;
-  }
-  .run-border.run-border-active::before {
-    opacity: 0.82;
-  }
-
-  /* Indeterminate light beam; place inside a relative, overflow-hidden parent. */
-  .run-beam {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 2px;
-    overflow: hidden;
-    opacity: 0;
-    transition: opacity 700ms ease;
-    pointer-events: none;
-  }
-  .run-beam.run-beam-active {
-    opacity: 1;
-  }
-  .run-beam::before,
-  .run-beam::after {
-    content: "";
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 38%;
-    border-radius: 999px;
-    background: linear-gradient(
-      90deg,
-      transparent,
-      var(--accent) 35%,
-      var(--info) 65%,
-      transparent
-    );
-    filter: drop-shadow(0 0 3px var(--accent));
-    will-change: transform;
-    animation: beam-slide 2.8s linear infinite;
-  }
-  .run-beam::after {
-    animation-delay: -1.4s;
-    opacity: 0.72;
-  }
-
-  /* Gradient label text with a traveling highlight. */
-  .shimmer-text {
-    background: linear-gradient(
-      100deg,
-      var(--ink-2) 25%,
-      var(--accent) 42%,
-      var(--info) 50%,
-      var(--accent) 58%,
-      var(--ink-2) 75%
-    );
-    background-size: 240% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    animation: text-shine 2.4s linear infinite;
-  }
-
-  /* Spinning conic energy orb for the live-run indicator. */
-  .run-orb {
-    background: conic-gradient(
-      from var(--gb-angle),
-      var(--accent),
-      var(--info),
-      var(--accent-2),
-      var(--accent)
-    );
-    animation: gb-spin 1.6s linear infinite;
-  }
-  .run-orb-glow {
-    animation: orb-glow 1.8s ease-in-out infinite;
-  }
+  .run-border { position: relative; }
+  .run-border-active { border-color: var(--line-strong); }
+  .shimmer-text { color: var(--ink-2); }
+  .run-orb { background: var(--ink-3); }
+  .run-orb-glow, .run-beam { display: none; }
 }
 
 @layer utilities {
@@ -567,14 +405,8 @@
     text-wrap: balance;
   }
 
-  /* Soft accent glow bleeding in from a card's top-right corner. */
-  .card-glow {
-    background-image: radial-gradient(
-      150% 90% at 100% 0%,
-      var(--accent-soft),
-      transparent 55%
-    );
-  }
+  .card-glow { background-image: none; }
+
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -593,57 +425,7 @@
  * Living energy field: the session backdrop breathes only while the agent
  * works. Hue follows run state via [data-run-state]; idle stays calm.
  * ------------------------------------------------------------------------- */
-@property --ef-angle {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
-}
-
-.energy-field {
-  position: relative;
-  background:
-    radial-gradient(52% 30% at 50% -4%, color-mix(in srgb, var(--ef-hue, var(--accent)) var(--ef-alpha, 10%), transparent), transparent 78%),
-    var(--canvas);
-  transition: background 900ms ease;
-}
-.energy-field::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  opacity: var(--ef-flow, 0);
-  background: conic-gradient(
-    from var(--ef-angle) at 50% -12%,
-    transparent 0deg,
-    color-mix(in srgb, var(--ef-hue, var(--accent)) 14%, transparent) 60deg,
-    transparent 140deg,
-    color-mix(in srgb, var(--info) 10%, transparent) 220deg,
-    transparent 320deg
-  );
-  animation: ef-spin 26s linear infinite;
-  transition: opacity 900ms ease;
-}
-.energy-field[data-run-state="running"] {
-  --ef-hue: var(--accent);
-  --ef-alpha: 16%;
-  --ef-flow: 1;
-}
-.energy-field[data-run-state="waiting"] {
-  --ef-hue: var(--warn);
-  --ef-alpha: 13%;
-  --ef-flow: 1;
-}
-.energy-field[data-run-state="failed"] {
-  --ef-hue: var(--danger);
-  --ef-alpha: 12%;
-  --ef-flow: 0;
-}
-
-@keyframes ef-spin {
-  to {
-    --ef-angle: 360deg;
-  }
-}
+.energy-field { position: relative; background: var(--canvas); }
 
 /* Work-mode office previews: isolate third-party generated DOM. */
 .work-docx-root .work-docx-wrapper {
@@ -663,4 +445,75 @@
 }
 .pptx-preview-root * {
   box-sizing: border-box;
+}
+
+/* Quiet workspace chrome. Explicit theme packs keep their own palette. */
+.workspace-main { margin: 0; border-left: 1px solid var(--line); background: var(--card); }
+.titlebar-root { height: 44px; }
+.titlebar-logo { width: 22px; height: 22px; }
+.titlebar-name { font-size: 14px; }
+.starter-picker { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--ink-2); font-size: 13px; }
+.starter-picker select { max-width: 210px; background: transparent; color: inherit; border: 0; padding: 5px 4px; border-radius: 6px; outline-offset: 3px; cursor: pointer; }
+.starter-picker select:focus-visible { outline: 2px solid var(--ink-3); }
+.starter-picker option { background: var(--card); color: var(--ink); }
+.new-conversation .composer-root { width: 100%; }
+.agent-panel-overlay { border-left: 1px solid var(--line); background: var(--card); }
+.ui-card { box-shadow: 0 1px 2px rgb(0 0 0 / 0.025); }
+@media (max-width: 1100px) {
+  .sidebar-rail { width: 214px; }
+  .agent-panel-overlay { position: absolute; right: 0; inset-block: 0; z-index: 25; box-shadow: -8px 0 32px rgb(0 0 0 / 0.08); }
+}
+@media (max-width: 780px) {
+  .sidebar-rail { width: 180px; }
+  .workspace-main { margin-right: 4px; margin-bottom: 4px; }
+  .new-conversation { padding-inline: 20px; }
+  .work-preview-aside:not(.w-10) { position: absolute; inset: 0 0 0 auto; z-index: 25; width: min(100%, 560px) !important; max-width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; }
+}
+
+/* Context panels overlay rather than squeeze the conversation at narrow widths. */
+@media (max-width: 1100px) {
+  .workspace-preview { position: absolute; inset: 0 0 0 auto; z-index: 35; width: min(520px, 100%) !important; box-shadow: -8px 0 24px rgb(0 0 0 / .06); }
+}
+
+.workspace-main[data-sidebar-collapsed="true"] .workspace-conversation-header { padding-left: 60px; }
+
+/* Small, consistent movements help surfaces feel connected without animating
+   individual rows or the conversation timeline. */
+.sidebar-slot {
+  --sidebar-width: 232px;
+  flex: none;
+  width: var(--sidebar-width);
+  overflow: hidden;
+  transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sidebar-slot[data-collapsed="true"] { width: 0; }
+.sidebar-slot .sidebar-rail { width: var(--sidebar-width); height: 100%; }
+@media (max-width: 1100px) { .sidebar-slot { --sidebar-width: 214px; } }
+@media (max-width: 780px) { .sidebar-slot { --sidebar-width: 180px; } }
+
+@keyframes surface-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes surface-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes drawer-in { from { opacity: 0.8; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes drawer-out { from { opacity: 1; transform: translateX(0); } to { opacity: 0.8; transform: translateX(20px); } }
+@keyframes menu-out { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0.98); } }
+
+.ui-drawer-overlay[data-state="open"] { animation: surface-fade-in 180ms ease-out; }
+.ui-drawer-overlay[data-state="closed"] { animation: surface-fade-out 150ms ease-in; }
+.ui-drawer[data-state="open"] { animation: drawer-in 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.ui-drawer[data-state="closed"] { animation: drawer-out 160ms ease-in; }
+.ui-menu-motion { transform-origin: var(--radix-select-content-transform-origin); }
+.ui-menu-motion[data-state="open"] { animation: pop-in 160ms cubic-bezier(0.22, 1, 0.36, 1); }
+.ui-menu-motion[data-state="closed"] { animation: menu-out 120ms ease-in; }
+
+/* The in-app accessibility setting applies to portals as well as the shell. */
+html[data-reduce-motion] *,
+html[data-reduce-motion] *::before,
+html[data-reduce-motion] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
 }

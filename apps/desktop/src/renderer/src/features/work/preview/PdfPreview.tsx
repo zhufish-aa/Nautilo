@@ -123,7 +123,7 @@ export function PdfPreview({ bytes, zoom, onNav, onReady, onError }: OfficePrevi
   }, [doc, page, pageCount, onNav]);
 
   return (
-    <div ref={scrollRef} className="h-full overflow-auto bg-card/40 p-4">
+    <div ref={scrollRef} className="h-full overflow-auto bg-canvas p-4">
       <canvas ref={canvasRef} className="mx-auto block rounded-sm bg-white shadow-md" aria-label="PDF" />
     </div>
   );
