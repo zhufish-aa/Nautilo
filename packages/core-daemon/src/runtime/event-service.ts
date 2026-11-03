@@ -46,6 +46,7 @@ export class EventService {
           const chunk = (event.payload as { text?: string }).text ?? "";
           (event.payload as { text: string }).text = prior.text + chunk;
         }
+        this.database.connection.raw.prepare("INSERT INTO read_projection_event_coalescing(session_id) VALUES(?)").run(session.id);
         this.database.connection.raw
           .prepare("DELETE FROM runtime_events WHERE session_id = ? AND COALESCE(run_id, '') = COALESCE(?, '') AND json_extract(data, '$.type') = ? AND json_extract(data, '$.payload.messageId') = ?")
           .run(session.id, event.runId ?? null, typeName, messageId);
@@ -55,6 +56,7 @@ export class EventService {
           .run(session.id);
       }
       this.database.events.append(event);
+      this.database.connection.raw.prepare("DELETE FROM read_projection_event_coalescing WHERE session_id = ?").run(session.id);
       this.database.connection.raw.exec("COMMIT");
     } catch (error) {
       try { this.database.connection.raw.exec("ROLLBACK"); } catch { /* nothing to roll back */ }

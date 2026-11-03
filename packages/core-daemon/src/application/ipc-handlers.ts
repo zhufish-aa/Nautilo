@@ -1,3 +1,4 @@
+import { projectPollHealIds, projectPollLastSequence, readProjectPoll } from "../database/project-poll.js";
 import { IpcGateway } from "../ipc-gateway.js";
 import { join } from "node:path";
 import { Database } from "../database/index.js";
@@ -94,6 +95,30 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("team.upsert", async (input) => services.teams.upsert(input));
   gateway.register("team.remove", async ({ teamId }) => services.teams.remove(teamId));
   gateway.register("projectRun.list", async ({ projectId }) => services.database.projectRuns.list(projectId));
+  gateway.register("projectRun.poll", async (input) => {
+    const collect = (sessionId: string) => {
+      services.interactions.healOrphaned(sessionId);
+      services.sessions.healFollowUps(sessionId);
+      const afterSequence = projectPollLastSequence(services.database, sessionId);
+      return { sessionId, afterSequence, items: services.sessions.followUpList({ sessionId }).items,
+        interactions: services.interactions.list({ sessionId, status: "pending" }) };
+    };
+    const followUps = projectPollHealIds(services.database, input).map(collect);
+    let snapshot = readProjectPoll(services.database, input, followUps);
+    // A second writer may truncate between preflight healing and the snapshot.
+    // Repair only newly-reset scopes, then take one new consistent snapshot.
+    if (!("fallback" in snapshot)) {
+      const missing = snapshot.feeds.filter((feed) => feed.reset && !followUps.some((entry) => entry.sessionId === feed.sessionId));
+      if (missing.length) {
+        followUps.push(...missing.map((feed) => collect(feed.sessionId)));
+        snapshot = readProjectPoll(services.database, input, followUps);
+        if (!("fallback" in snapshot) && snapshot.feeds.some((feed) => feed.reset && !followUps.some((entry) => entry.sessionId === feed.sessionId))) {
+          throw new CoreError("IPC_INTERNAL_ERROR", { reason: "Project changed during snapshot recovery; retry" });
+        }
+      }
+    }
+    return snapshot;
+  });
   gateway.register("projectRun.get", async ({ projectRunId }) => services.orchestration.get(projectRunId));
   gateway.register("orchestration.start", async (input) => services.orchestration.start(input));
   gateway.register("orchestration.resolveDelegation", async ({ projectRunId, approved, scope }) => services.orchestration.resolveDelegation(projectRunId, approved, scope));

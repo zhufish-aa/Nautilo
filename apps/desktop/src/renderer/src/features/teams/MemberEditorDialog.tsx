@@ -29,7 +29,7 @@ interface MemberForm {
   model: string;
   reasoningEffort: string;
   serviceTier: string;
-  maxConcurrentTasks: number;
+  maxConcurrentTasks: string;
   allowedTaskTypes: string[];
   enabled: boolean;
   roleName: string;
@@ -49,7 +49,7 @@ function formFromMember(member?: UiTeamMember): { form: MemberForm; strengths: S
         model: "",
         reasoningEffort: "",
         serviceTier: "",
-        maxConcurrentTasks: 1,
+        maxConcurrentTasks: "",
         allowedTaskTypes: ["code"],
         enabled: true,
         roleName: "",
@@ -69,7 +69,7 @@ function formFromMember(member?: UiTeamMember): { form: MemberForm; strengths: S
       model: member.model ?? "",
       reasoningEffort: member.reasoningEffort ?? "",
       serviceTier: member.serviceTier ?? "",
-      maxConcurrentTasks: member.maxConcurrentTasks,
+      maxConcurrentTasks: member.maxConcurrentTasks ? String(member.maxConcurrentTasks) : "",
       allowedTaskTypes: [...member.allowedTaskTypes],
       enabled: member.enabled,
       roleName: member.role.name,
@@ -113,7 +113,7 @@ export function MemberEditorDialog({
   const [form, setForm] = useState<MemberForm>(() => formFromMember(undefined).form);
   const [strengthRows, setStrengthRows] = useState<StrengthRow[]>([]);
   const [customTaskDraft, setCustomTaskDraft] = useState("");
-  const [errors, setErrors] = useState<{ name?: string; instance?: string }>({});
+  const [errors, setErrors] = useState<{ name?: string; instance?: string; concurrency?: string }>({});
   const [policies, setPolicies] = useState<PermissionPolicy[]>([]);
   const [policyError, setPolicyError] = useState("");
   const [policyLoading, setPolicyLoading] = useState(false);
@@ -208,8 +208,10 @@ export function MemberEditorDialog({
     const nextErrors: typeof errors = {};
     if (!form.displayName.trim()) nextErrors.name = t("agents.editor.nameRequired");
     if (!form.agentInstanceId) nextErrors.instance = t("agents.editor.providerRequired");
+    if (form.maxConcurrentTasks.trim() && (!Number.isSafeInteger(Number(form.maxConcurrentTasks)) || Number(form.maxConcurrentTasks) < 1))
+      nextErrors.concurrency = locale === "zh-CN" ? "请输入正整数，或留空表示不限。" : "Enter a positive integer, or leave blank for no limit.";
     setErrors(nextErrors);
-    if (nextErrors.name || nextErrors.instance) {
+    if (nextErrors.name || nextErrors.instance || nextErrors.concurrency) {
       setTab("basic");
       return;
     }
@@ -230,7 +232,7 @@ export function MemberEditorDialog({
         model: form.model.trim() || undefined,
         reasoningEffort: form.reasoningEffort.trim() || undefined,
         serviceTier: form.serviceTier || undefined,
-        maxConcurrentTasks: form.maxConcurrentTasks,
+        maxConcurrentTasks: form.maxConcurrentTasks.trim() ? Number(form.maxConcurrentTasks) : undefined,
         allowedTaskTypes: form.allowedTaskTypes,
         enabled: form.enabled,
         role: {
@@ -445,18 +447,15 @@ export function MemberEditorDialog({
               />
             </Field>
 
-            <Field label={t("teams.member.maxConcurrent")} htmlFor="member-concurrent">
+            <Field label={t("teams.member.maxConcurrent")} htmlFor="member-concurrent" error={errors.concurrency}>
               <Input
                 id="member-concurrent"
                 type="number"
                 min={1}
-                max={8}
+                step={1}
+                placeholder={locale === "zh-CN" ? "不限" : "Unlimited"}
                 value={form.maxConcurrentTasks}
-                onChange={(event) => {
-                  const parsed = Number.parseInt(event.target.value, 10);
-                  if (!Number.isNaN(parsed))
-                    patch({ maxConcurrentTasks: Math.min(8, Math.max(1, parsed)) });
-                }}
+                onChange={(event) => patch({ maxConcurrentTasks: event.target.value })}
               />
             </Field>
 

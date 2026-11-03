@@ -793,13 +793,11 @@ impl OrchestrationService {
             let mut wave: Vec<Value> = vec![];
             for task in &ready {
                 let member_id = task.get("assignedMemberId").and_then(Value::as_str).unwrap_or("");
-                let limit = team
+                let limit = configured_task_limit(team
                     .get("members")
                     .and_then(Value::as_array)
-                    .and_then(|members| members.iter().find(|m| m.get("id").and_then(Value::as_str) == Some(member_id)).cloned())
-                    .and_then(|member| member.get("maxConcurrentTasks").and_then(Value::as_u64))
-                    .unwrap_or(1)
-                    .max(1) as usize;
+                    .and_then(|members| members.iter().find(|m| m.get("id").and_then(Value::as_str) == Some(member_id)))
+                    .and_then(|member| member.get("maxConcurrentTasks").and_then(Value::as_u64)));
                 let count = member_counts.entry(member_id.to_string()).or_insert(0);
                 if *count >= limit {
                     continue;
@@ -1425,5 +1423,28 @@ impl OrchestrationService {
             .and_then(Value::as_str)
             .and_then(|id| Repositories::new(&self.db.lock().unwrap().raw).sessions().get(id).ok().flatten());
         session.ok_or_else(|| not_found("mainSession", project_run.get("id").and_then(Value::as_str).unwrap_or("")))
+    }
+}
+
+
+/// Match the renderer/TS positive safe-integer setting; absent means no cap.
+fn configured_task_limit(value: Option<u64>) -> usize {
+    value.filter(|limit| *limit > 0 && *limit <= 9_007_199_254_740_991)
+        .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+        .unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+mod concurrency_limit_tests {
+    use super::configured_task_limit;
+
+    #[test]
+    fn member_concurrency_is_unlimited_unless_explicitly_configured() {
+        assert_eq!(configured_task_limit(None), usize::MAX);
+        assert_eq!(configured_task_limit(Some(0)), usize::MAX);
+        assert_eq!(configured_task_limit(Some(1)), 1);
+        assert_eq!(configured_task_limit(Some(2)), 2);
+        assert_eq!(configured_task_limit(Some(8)), 8);
+        assert_eq!(configured_task_limit(Some(100)), 100);
     }
 }

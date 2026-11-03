@@ -10,8 +10,8 @@ export async function settle(h, action) {
   await pending;
   if (error) throw error;
 }
-export function projectFixture(count = 21, source) {
-  const h = createHarness({ source });
+export function projectFixture(count = 21, source, { aggregated = false, interactionsModule } = {}) {
+  const h = createHarness({ source, interactionsModule });
   const sessions = Array.from({ length: count }, (_, i) => ({ ...h.session, id: i ? `child${i}` : "s", projectRunId: "pr", parentSessionId: i ? "s" : undefined, memberId: "member", agentInstanceId: "a0", title: `Session ${i}`, status: i ? "completed" : "running", permissionMode: "default" }));
   const messages = new Map(sessions.map((s) => [s.id, [{ id: `m-${s.id}`, sessionId: s.id, sender: "user", text: "History", createdAt: s.createdAt }]]));
   const feeds = new Map(sessions.map((s) => [s.id, []]));
@@ -28,6 +28,27 @@ export function projectFixture(count = 21, source) {
     "event.subscribe": ({ sessionId }) => ({ subscriptionId: `sub-${sessionId}` }),
     "event.replay": ({ subscriptionId, afterSequence }) => { const events = feeds.get(subscriptionId.slice(4)) ?? []; return { events: clone(events.filter((e) => e.sequence > afterSequence)), lastSequence: events.at(-1)?.sequence ?? 0 }; }
   });
+  if (aggregated) h.replies["projectRun.poll"] = (input) => {
+    const cursors = new Map((input.sessions ?? []).map((item) => [item.sessionId, item]));
+    const needed = new Set(input.visibleSessionIds ?? []);
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const session of sessions) if (session.parentSessionId && needed.has(session.parentSessionId) && !needed.has(session.id)) { needed.add(session.id); changed = true; }
+    }
+    return {
+      projectRun: clone(projectRun), sessions: clone(sessions), runs: clone(runs), tasks: clone(h.replies["task.list"]), verifications: clone(h.replies["verification.list"]),
+      artifacts: h.replies["artifact.changes"]({ projectRunId: input.projectRunId, cursor: input.artifactCursor }),
+      histories: sessions.filter((session) => needed.has(session.id)).map((session) => h.replies["session.history"]({ sessionId: session.id, cursor: cursors.get(session.id)?.historyCursor })),
+      feeds: sessions.map((session) => {
+        const previous = cursors.get(session.id)?.eventCursor;
+        const events = feeds.get(session.id) ?? [];
+        const sequence = events.at(-1)?.sequence ?? 0;
+        const reset = !previous || previous.epoch !== "fixture" || previous.sequence > sequence;
+        return { sessionId: session.id, reset, events: clone(events.filter((e) => reset || e.sequence > previous.sequence)), cursor: { epoch: "fixture", scope: `events:session:${session.id}`, revision: 1, sequence } };
+      }),
+      followUps: sessions.filter((session) => !cursors.get(session.id)?.eventCursor).map((session) => ({ sessionId: session.id, afterSequence: feeds.get(session.id)?.at(-1)?.sequence ?? 0, items: [] }))
+    };
+  };
   return { ...h, sessions, messages, feeds, runs, projectRun, hydrate: () => settle(h, () => h.runtime.hydrateProjectRun("pr")) };
 }
 

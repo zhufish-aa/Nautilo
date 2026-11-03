@@ -147,6 +147,34 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
     reg_str(router, daemon, "projectRun.list", "projectId", |d, id| {
         Repositories::new(&d.db.lock().unwrap().raw).project_runs().list(id).map(Value::Array)
     });
+    reg(router, daemon, "projectRun.poll", |d, input| {
+        let collect = |session_id: &str| -> CoreResult<Value> {
+            d.interactions.heal_orphaned(session_id);
+            d.sessions.heal_follow_ups(session_id);
+            let after_sequence = crate::database::project_poll::last_sequence(&d.db.lock().unwrap().raw, session_id)?;
+            let queue = d.sessions.follow_up_list(session_id)?;
+            Ok(json!({ "sessionId": session_id, "afterSequence": after_sequence, "items": queue.get("items"),
+                "interactions": d.interactions.list(Some(session_id), Some("pending")) }))
+        };
+        let heal_ids = crate::database::project_poll::heal_ids(&d.db.lock().unwrap().raw, &input)?;
+        let mut follow_ups = heal_ids.iter().map(|id| collect(id)).collect::<CoreResult<Vec<_>>>()?;
+        let mut snapshot = crate::database::project_poll::read(&d.db.lock().unwrap().raw, &input, follow_ups.clone())?;
+        let missing = |snapshot: &Value, authorities: &[Value]| -> Vec<String> {
+            snapshot.get("feeds").and_then(Value::as_array).into_iter().flatten()
+                .filter(|feed| feed.get("reset").and_then(Value::as_bool) == Some(true)
+                    && !authorities.iter().any(|entry| entry.get("sessionId") == feed.get("sessionId")))
+                .filter_map(|feed| feed.get("sessionId").and_then(Value::as_str).map(str::to_string)).collect()
+        };
+        let needed = missing(&snapshot, &follow_ups);
+        if !needed.is_empty() {
+            for id in needed { follow_ups.push(collect(&id)?); }
+            snapshot = crate::database::project_poll::read(&d.db.lock().unwrap().raw, &input, follow_ups.clone())?;
+            if !missing(&snapshot, &follow_ups).is_empty() {
+                return Err(crate::errors::CoreError::reason(crate::errors::ErrorCode::IpcInternalError, "Project changed during snapshot recovery; retry"));
+            }
+        }
+        Ok(snapshot)
+    });
     reg_str(router, daemon, "projectRun.get", "projectRunId", |d, id| d.orchestration.get(id));
     reg(router, daemon, "orchestration.start", |d, input| d.orchestration.start(&input));
     reg(router, daemon, "orchestration.resolveDelegation", |d, input| {

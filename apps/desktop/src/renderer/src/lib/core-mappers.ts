@@ -12,6 +12,10 @@ export function toUiProviderId(providerId: string): string {
   return providerId === "custom" ? "custom-cli" : providerId;
 }
 
+function codexPoolSize(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
   return {
     id: instance.id,
@@ -27,6 +31,7 @@ export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
       ...(instance.baseUrl ? { baseUrl: instance.baseUrl } : {}),
       ...(instance.apiType ? { apiType: instance.apiType } : {}),
       ...(instance.wireApi ? { wireApi: instance.wireApi } : {}),
+      ...(instance.providerId === "codex" && codexPoolSize(instance.appServerPoolSize) !== undefined ? { appServerPoolSize: codexPoolSize(instance.appServerPoolSize) } : {}),
       ...(instance.webSearchMode ? { webSearchMode: instance.webSearchMode } : {}),
       ...(instance.webSearchInstanceId ? { webSearchInstanceId: instance.webSearchInstanceId } : {}),
       ...(instance.webSearchModel ? { webSearchModel: instance.webSearchModel } : {}),
@@ -53,6 +58,7 @@ export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
     baseUrl: typeof instance.providerOptions?.baseUrl === "string" ? instance.providerOptions.baseUrl : undefined,
     apiType: typeof instance.providerOptions?.apiType === "string" ? instance.providerOptions.apiType : undefined,
     wireApi: instance.providerOptions?.wireApi === "chat" ? "chat" : "responses",
+    appServerPoolSize: instance.providerId === "codex" ? codexPoolSize(instance.providerOptions?.appServerPoolSize) : undefined,
     webSearchMode: instance.providerOptions?.webSearchMode === "official" || instance.providerOptions?.webSearchMode === "off"
       ? instance.providerOptions.webSearchMode
       : instance.providerOptions?.wireApi === "chat" ? "off" : "native",

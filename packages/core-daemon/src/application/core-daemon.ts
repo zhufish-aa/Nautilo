@@ -1,3 +1,4 @@
+import { CodexAdapter } from "../adapters/codex/adapter.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AdapterRegistry } from "../adapters/index.js";
@@ -35,7 +36,7 @@ export interface CoreDaemonOptions { dataDir?: string; databasePath?: string; wo
 
 /** Composition root only: construction and lifecycle, no business rules. */
 export class CoreDaemon {
-  private stopped = false;
+  private stopPromise?: Promise<void>;
   readonly database: Database;
   readonly adapters: AdapterRegistry;
   readonly gateway: IpcGateway;
@@ -123,12 +124,17 @@ export class CoreDaemon {
     registerIpcHandlers(this.gateway, this);
   }
   health(): { service: "core-daemon"; status: "ok"; version: string } { return { service: "core-daemon", status: "ok", version: "0.1.0" }; }
-  async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
-    await this.gateway.stop();
-    await this.plugins.stop();
-    try { this.audit.flush(); } catch { /* database may already be unavailable */ }
-    this.database.close();
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    const runsStopped = this.runs.stop();
+    const codex = this.adapters.find("codex");
+    const codexStopped = codex instanceof CodexAdapter ? codex.shutdown() : Promise.resolve();
+    this.stopPromise = (async () => {
+      await Promise.all([this.gateway.stop(), runsStopped, codexStopped]);
+      await this.plugins.stop();
+      try { this.audit.flush(); } catch { /* database may already be unavailable */ }
+      this.database.close();
+    })();
+    return this.stopPromise;
   }
 }

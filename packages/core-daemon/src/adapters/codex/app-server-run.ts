@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { assertCodexAppServerRunning, trackLegacyCodexProcess, codexAppServerPool, codexPoolSize, type CodexAppServerOwner, type CodexPoolLease, type CodexPoolSlot } from "./app-server-pool.js";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import type { AgentInstance } from "@agenthub/domain";
 import { ProcessRuntime, type ProcessEvent } from "../../process-runtime.js";
 import { JsonRpcProcessClient } from "../json-rpc-process.js";
@@ -427,30 +428,115 @@ export function buildCodexAppServerArgs(
   ];
 }
 
-export function startCodexAppServer(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
-  const runtime = new ProcessRuntime();
-  const modelCatalog = createCodexCustomModelCatalogFile(request.instance, request.model);
+export function startCodexAppServer(
+  request: AdapterStartRequest | AdapterResumeRequest,
+  resume: boolean,
+  options: { transient?: boolean; owner?: CodexAppServerOwner } = {}
+): AdapterRun {
+  // Native one-shot callers without a stable local session retain their isolated
+  // per-run process. Runtime sessions use the optionally limited session pool; transient bridges
+  // may share admission/serialization while opting out of warm retention.
+  assertCodexAppServerRunning(options.owner);
+  const pooled = Boolean(request.localSessionId);
+  const controller = new AbortController();
+  let lease: CodexPoolLease | undefined;
   let process: ReturnType<ProcessRuntime["start"]>;
-  try {
-    const invocation = resolveCodexInvocation(
-      request.instance.executable,
-      buildCodexAppServerArgs(request.instance, request.env, request.mcpServers, modelCatalog?.path)
-    );
-    process = runtime.start({
-      command: invocation.command,
-      args: invocation.args,
-      cwd: request.cwd,
-      env: request.env,
-      timeoutMs: request.timeoutMs,
-      idleTimeoutMs: request.idleTimeoutMs,
-      maxOutputBytes: request.maxOutputBytes ?? 20 * 1024 * 1024
-    });
-    if (modelCatalog) process.child.once("close", modelCatalog.cleanup);
-  } catch (error) {
-    modelCatalog?.cleanup();
-    throw error;
+  let rpc: JsonRpcProcessClient;
+  const create = (): CodexPoolSlot => {
+    const modelCatalog = createCodexCustomModelCatalogFile(request.instance, request.model);
+    try {
+      const invocation = resolveCodexInvocation(request.instance.executable,
+        buildCodexAppServerArgs(request.instance, request.env, request.mcpServers, modelCatalog?.path));
+      const child = new ProcessRuntime().start({
+        command: invocation.command, args: invocation.args, cwd: request.cwd, env: request.env,
+        timeoutMs: pooled ? undefined : request.timeoutMs,
+        idleTimeoutMs: pooled ? undefined : request.idleTimeoutMs,
+        maxOutputBytes: pooled ? undefined : request.maxOutputBytes ?? 20 * 1024 * 1024
+      });
+      if (!pooled) trackLegacyCodexProcess(child, options.owner);
+      if (modelCatalog) child.child.once("close", modelCatalog.cleanup);
+      if (pooled) watchOutput(child);
+      const client = new JsonRpcProcessClient(child);
+      return { process: child, rpc: client, initialized: false, initialize: async () => {
+        await client.request("initialize", CODEX_APP_SERVER_INITIALIZE_PARAMS);
+        client.notify("initialized", {});
+      } };
+    } catch (error) { modelCatalog?.cleanup(); throw error; }
+  };
+  let cancelled = false;
+  let timedOut: "timeout" | "idle" | "max_output" | undefined;
+  let outputBytes = 0;
+  let watchedProcess: ReturnType<ProcessRuntime["start"]> | undefined;
+  const onOutput = (chunk: Buffer): void => {
+    touchIdle();
+    outputBytes += chunk.byteLength;
+    if (outputBytes > (request.maxOutputBytes ?? 20 * 1024 * 1024)) { timedOut = "max_output"; void cancel(); }
+  };
+  let healthy = false;
+  let timeout: NodeJS.Timeout | undefined;
+  let idleTimeout: NodeJS.Timeout | undefined;
+  let resolveTurnDone: () => void = () => undefined;
+  const turnDone = new Promise<void>((resolve) => { resolveTurnDone = resolve; });
+  const release = async (keep: boolean): Promise<void> => {
+    if (timeout) clearTimeout(timeout);
+    if (idleTimeout) clearTimeout(idleTimeout);
+    if (watchedProcess) {
+      watchedProcess.child.stdout.off("data", onOutput);
+      watchedProcess.child.stderr.off("data", onOutput);
+      watchedProcess = undefined;
+    }
+    if (lease) await lease.release(keep && !options.transient);
+    else if (process) await process.cancel().catch(() => undefined);
+  };
+  let cancellation: Promise<void> | undefined;
+  const cancel = (): Promise<void> => {
+    if (cancellation) return cancellation;
+    cancelled = true;
+    controller.abort();
+    cancellation = (async () => {
+      await ready.catch(() => undefined);
+      if (process && threadId && turnId && !finished) {
+        const ack = rpc.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
+        if (pooled) {
+          let timer: NodeJS.Timeout | undefined;
+          await Promise.race([Promise.all([ack, turnDone]), new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, 3000); timer.unref();
+          })]);
+          if (timer) clearTimeout(timer);
+        }
+      }
+      finished = true;
+      await release(false);
+    })();
+    return cancellation;
+  };
+  const touchIdle = (): void => {
+    if (!pooled || !request.idleTimeoutMs) return;
+    if (idleTimeout) clearTimeout(idleTimeout);
+    idleTimeout = setTimeout(() => { timedOut = "idle"; void cancel(); }, request.idleTimeoutMs);
+    idleTimeout.unref();
+  };
+  const watchOutput = (child: ReturnType<ProcessRuntime["start"]>): void => {
+    if (watchedProcess === child) return;
+    watchedProcess = child;
+    child.child.stdout.on("data", onOutput);
+    child.child.stderr.on("data", onOutput);
+    touchIdle();
+  };
+  const ready = pooled
+    ? codexAppServerPool(request.instance.id, options.owner).acquire(request.localSessionId!,
+        JSON.stringify([request.instance, request.env, request.mcpServers, request.model, request.cwd]),
+        codexPoolSize(request.instance.providerOptions?.appServerPoolSize), controller.signal, create, createHash("sha256").update(
+          resolve(request.cwd, request.env?.CODEX_HOME || join(request.env?.HOME || request.env?.USERPROFILE || homedir(), ".codex"))
+        ).digest("hex"))
+        .then((value) => { lease = value; process = value.slot.process; rpc = value.slot.rpc; })
+    : (() => { const slot = create(); process = slot.process; rpc = slot.rpc; return Promise.resolve(); })();
+  // Admission may reject before the caller starts consuming events.
+  void ready.catch(() => undefined);
+  if (pooled && request.timeoutMs) {
+    timeout = setTimeout(() => { timedOut = "timeout"; void cancel(); }, request.timeoutMs);
+    timeout.unref();
   }
-  const rpc = new JsonRpcProcessClient(process);
   let threadId: string | undefined;
   let turnId: string | undefined;
   let finished = false;
@@ -459,19 +545,25 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
 
   async function* events(): AsyncGenerator<AdapterEvent> {
     try {
-      if (finished) return;
-      await rpc.request("initialize", CODEX_APP_SERVER_INITIALIZE_PARAMS);
-      if (finished) return;
-      rpc.notify("initialized", {});
+      await ready;
+      if (cancelled || finished) { if (timedOut) yield { kind: "timeout", reason: timedOut }; return; }
+      touchIdle();
+      if (pooled) watchOutput(process);
+      if (!lease?.slot.initialized) {
+        await rpc.request("initialize", CODEX_APP_SERVER_INITIALIZE_PARAMS);
+        if (cancelled || finished) { if (timedOut) yield { kind: "timeout", reason: timedOut }; return; }
+        rpc.notify("initialized", {});
+        if (lease) lease.slot.initialized = true;
+      }
       const threadResponse = record(await rpc.request(resume ? "thread/resume" : "thread/start", resume
         ? { threadId: (request as AdapterResumeRequest).providerSessionId, ...threadOptions(request, true) }
         : threadOptions(request, true)));
-      if (finished) return;
+      if (cancelled || finished) { if (timedOut) yield { kind: "timeout", reason: timedOut }; return; }
       const thread = record(threadResponse.thread);
       threadId = String(thread.id ?? (resume ? (request as AdapterResumeRequest).providerSessionId : ""));
       if (!threadId) throw new Error("Codex app-server did not return a thread id");
       yield { kind: "session", providerSessionId: threadId };
-      if (finished) return;
+      if (cancelled || finished) { if (timedOut) yield { kind: "timeout", reason: timedOut }; return; }
       const compact = request.providerCommand === "compact";
       if (compact && !resume) throw new Error("Codex thread compaction requires an existing provider session");
       if (compact) {
@@ -491,7 +583,8 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
       }
 
       for await (const event of rpc) {
-        if (finished) return;
+        if (finished) { if (timedOut) yield { kind: "timeout", reason: timedOut }; return; }
+        touchIdle();
         if (event.kind === "notification") {
           const params = record(event.params);
           const scopedThreadId = text(params.threadId);
@@ -524,16 +617,26 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
           if (compact && event.method === "thread/compacted") {
             finished = true;
             yield { kind: "message", text: "Codex 上下文已压缩" };
-            await process.cancel();
-            yield { kind: "exit", exitCode: 0 };
+            healthy = !cancelled;
+            resolveTurnDone();
+            if (cancelled && cancellation) await cancellation;
+            await release(pooled && healthy);
+            if (timedOut) yield { kind: "timeout", reason: timedOut };
+            yield { kind: "exit", exitCode: cancelled ? null : 0 };
             return;
           }
           if (event.method === "turn/completed") {
             finished = true;
-            await process.cancel();
-            yield { kind: "exit", exitCode: 0 };
+            healthy = !cancelled;
+            resolveTurnDone();
+            if (cancelled && cancellation) await cancellation;
+            await release(pooled && healthy);
+            if (timedOut) yield { kind: "timeout", reason: timedOut };
+            yield { kind: "exit", exitCode: cancelled ? null : 0 };
             return;
           }
+        } else if (event.kind === "request" && cancelled) {
+          rpc.respondError(event.id, -32800, "Codex run cancelled");
         } else if (event.kind === "request" && (
           (text(record(event.params).threadId) && record(event.params).threadId !== threadId && !childThreads.has(String(record(event.params).threadId)))
           || (record(event.params).threadId === threadId && text(record(event.params).turnId) && record(event.params).turnId !== turnId)
@@ -554,21 +657,23 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
       }
     } catch (error) {
       yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
-      if (!finished) await process.cancel().catch(() => undefined);
+
     } finally {
       // Consumers can close an iterator before turn/completed (cancel, navigation
       // or a wrapper error). The per-run fallback must not leave its CLI alive.
       finished = true;
-      await process.cancel().catch(() => undefined);
+      resolveTurnDone();
+      await release(pooled && healthy && !cancelled);
     }
+    if (timedOut) yield { kind: "timeout", reason: timedOut };
   }
 
   return {
-    process,
+    get process() { return process; },
     events: { [Symbol.asyncIterator]: events },
-    write: process.write,
+    write: (input) => { if (!process || cancelled || finished) throw new Error("No active Codex process"); process.write(input); },
     steer: async (input: string) => {
-      if (!threadId || !turnId || finished) throw new Error("No active Codex turn is available to steer");
+      if (!threadId || !turnId || cancelled || finished) throw new Error("No active Codex turn is available to steer");
       const response = record(await rpc.request("turn/steer", {
         threadId,
         expectedTurnId: turnId,
@@ -576,14 +681,6 @@ export function startCodexAppServer(request: AdapterStartRequest | AdapterResume
       }));
       turnId = String(response.turnId ?? turnId);
     },
-    cancel: async () => {
-      if (threadId && turnId && !finished) {
-        // The protocol defines interrupt as a request. Do not wait on a broken
-        // server before terminating this per-run (not shared) child process.
-        void rpc.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
-      }
-      finished = true;
-      await process.cancel();
-    }
+    cancel
   };
 }

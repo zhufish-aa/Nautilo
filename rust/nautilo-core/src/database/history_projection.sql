@@ -46,4 +46,11 @@ INSERT INTO read_projection_invalidations(scope, revision) SELECT scope, (SELECT
 DELETE FROM read_projection_rows WHERE scope LIKE 'artifacts:%' AND item_id IN (OLD.id);
 END;
 INSERT OR IGNORE INTO schema_meta(key, value) VALUES('history_projection_seeded_v1', '1');
+CREATE TABLE IF NOT EXISTS read_projection_event_coalescing (session_id TEXT PRIMARY KEY);
+DROP TRIGGER IF EXISTS read_projection_event_delete;
+CREATE TRIGGER read_projection_event_delete AFTER DELETE ON runtime_events
+WHEN OLD.session_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM read_projection_event_coalescing WHERE session_id = OLD.session_id) BEGIN
+UPDATE read_projection_clock SET revision = revision + 1 WHERE id = 1;
+INSERT INTO read_projection_invalidations(scope, revision) VALUES('events:session:' || OLD.session_id, (SELECT revision FROM read_projection_clock WHERE id = 1)) ON CONFLICT(scope) DO UPDATE SET revision = excluded.revision;
+END;
 COMMIT;

@@ -5,6 +5,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { AgentInstance } from "@agenthub/domain";
 import type { ProcessHandle } from "../../process-runtime.js";
 import type { AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest } from "../types.js";
+import type { CodexAppServerOwner } from "./app-server-pool.js";
 import { startCodexAppServer } from "./app-server-run.js";
 
 type RecordValue = Record<string, unknown>;
@@ -56,7 +57,8 @@ interface FunctionCallContext {
  */
 export function startCodexChatCompatAppServer(
   request: AdapterStartRequest | AdapterResumeRequest,
-  resume: boolean
+  resume: boolean,
+  options: { owner?: CodexAppServerOwner } = {}
 ): AdapterRun {
   let proxy: ChatCompatProxy | undefined;
   let inner: AdapterRun | undefined;
@@ -85,7 +87,7 @@ export function startCodexChatCompatAppServer(
           webSearchMode: request.instance.providerOptions?.webSearchMode === "native" ? "native" : "off"
         }
       };
-      inner = startCodexAppServer({ ...request, instance }, resume);
+      inner = startCodexAppServer({ ...request, instance }, resume, { transient: true, owner: options.owner });
       if (cancelled) await inner.cancel();
       yield* inner.events;
     } catch (error) {

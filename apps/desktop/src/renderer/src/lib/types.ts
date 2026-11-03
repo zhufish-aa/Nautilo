@@ -64,6 +64,8 @@ export interface AgentInstanceConfig {
   /** Provider-native upstream protocol (for example Pi's openai-completions). */
   apiType?: string;
   wireApi?: CodexWireApi;
+  /** Maximum simultaneous Codex app-server processes for this instance. */
+  appServerPoolSize?: number;
   webSearchMode?: WebSearchMode;
   webSearchInstanceId?: string;
   /** Model used when this instance delegates search to another instance. */
@@ -197,7 +199,8 @@ export interface UiTeamMember {
   serviceTier?: string;
   role: TeamRole;
   allowedTaskTypes: string[];
-  maxConcurrentTasks: number;
+  /** Optional per-member task cap; absent means no configured limit. */
+  maxConcurrentTasks?: number;
   enabled: boolean;
 }
 

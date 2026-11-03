@@ -623,6 +623,7 @@ impl<'a> EventRepository<'a> {
                         payload.insert("text".to_string(), json!(format!("{prior_text}{chunk}")));
                     }
                 }
+                self.db.execute("INSERT INTO read_projection_event_coalescing(session_id) VALUES(?1)", [session_id.unwrap_or("")]).map_err(db_fail)?;
                 self.db
                     .prepare(
                         "DELETE FROM runtime_events WHERE session_id = ?1 \
@@ -644,6 +645,7 @@ impl<'a> EventRepository<'a> {
                 map.insert("sequence".to_string(), json!(sequence));
             }
             self.append(event)?;
+            self.db.execute("DELETE FROM read_projection_event_coalescing WHERE session_id = ?1", [session_id.unwrap_or("")]).map_err(db_fail)?;
             Ok(sequence)
         })();
         match result {

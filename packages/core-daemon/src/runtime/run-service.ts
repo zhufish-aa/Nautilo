@@ -63,6 +63,27 @@ interface ActiveRun {
 }
 
 export class RunService {
+  private stopping = false;
+  private stopPromise?: Promise<void>;
+  private readonly launching = new Set<Promise<RunHandle>>();
+
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopping = true;
+    const active = [...this.active.entries()];
+    this.stopPromise = (async () => {
+      for (const [id] of active) this.interactions?.cancelForRun(id);
+      await Promise.allSettled(active.map(([id]) => this.cancel(id)));
+      await Promise.allSettled(active.map(([, run]) => run.completion));
+      await Promise.allSettled([...this.launching]);
+    })();
+    return this.stopPromise;
+  }
+
+  private assertRunning(): void {
+    if (this.stopping) throw new Error("RunService is stopping; new runs are disabled");
+  }
+
   private readonly active = new Map<string, ActiveRun>();
   private readonly outputTails = new Map<string, string>();
   private readonly messageBuffers = new Map<string, Map<string, string>>();
@@ -152,11 +173,15 @@ export class RunService {
     prompt: string,
     context: RunContext = {}
   ): Promise<RunHandle> {
+    this.assertRunning();
     // Heal orphaned interaction requests before the run's events make the
     // renderer re-read the journal — a replayed request would otherwise
     // resurrect a card whose pending entry died with an older daemon.
     this.interactions?.healOrphaned(session.id);
-    return this.sessionQueue.enqueue(session.id, () => this.launchNow(session, agent, prompt, context), context.queueKey);
+    const pending = this.sessionQueue.enqueue(session.id, () => this.launchNow(session, agent, prompt, context), context.queueKey);
+    this.launching.add(pending);
+    void pending.then(() => this.launching.delete(pending), () => this.launching.delete(pending));
+    return pending;
   }
 
   /** Withdraws a queued (not yet started) turn by its queue key. */
@@ -170,6 +195,7 @@ export class RunService {
     prompt: string,
     context: RunContext
   ): Promise<RunHandle> {
+    this.assertRunning();
     // A queued turn may wait while its predecessor learns the native thread
     // id, context window, or newer session settings. Never write the snapshot
     // captured at enqueue time back over those persisted updates.
@@ -197,6 +223,7 @@ export class RunService {
       const discoveredContextWindow = catalog?.models.find((model) => model.id === modelId)?.contextWindow;
       if (discoveredContextWindow) contextWindow = discoveredContextWindow;
     }
+    this.assertRunning();
     const project = this.database.projects.get(session.projectId);
     const policy = this.commandPolicies?.get(project?.policyId ?? "default");
     const commandEvaluation = this.commandPolicies?.evaluate({ policyId: policy?.id, command: agent.executable, args: agent.baseArgs, source: "agent" });
@@ -257,6 +284,7 @@ export class RunService {
       : this.runtimeToolProvider?.forRun(session, context, agent);
     const request = {
       instance: agent,
+      localSessionId: session.id,
       prompt,
       cwd: context.workingDirectory ?? project?.rootPath ?? process.cwd(),
       model: session.model,
@@ -285,6 +313,7 @@ export class RunService {
           if (snapshot) this.workspaceBaselines.set(runId, snapshot);
         }
       }
+      this.assertRunning();
       const currentSession = this.database.sessions.get(session.id) ?? session;
       const mustRecreateCodexThread = agent.providerId === "codex"
         && Boolean(runtimeToolBinding)

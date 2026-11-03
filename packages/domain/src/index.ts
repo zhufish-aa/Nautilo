@@ -252,7 +252,8 @@ export interface TeamMember {
   roleId: RoleId;
   strengths: Record<string, number>;
   allowedTaskTypes: string[];
-  maxConcurrentTasks: number;
+  /** Optional per-member task cap; absent means no configured limit. */
+  maxConcurrentTasks?: number;
   enabled: boolean;
 }
 

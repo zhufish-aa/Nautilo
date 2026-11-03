@@ -695,3 +695,89 @@ test("cancelling an already terminal project run is a no-op success", async () =
   assert.equal(fixture.database.projectRuns.get(started.projectRun.id)?.status, "completed");
   fixture.database.close();
 });
+
+test("two runtime-delegated members sharing one Codex instance execute in distinct concurrent sessions", { timeout: 10_000 }, async () => {
+  const daemon = new CoreDaemon({ databasePath: ":memory:", enableGitWorkflows: false });
+  const startedChildren = new Map();
+  const releases = new Map();
+  const gates = new Map(["parallel-left", "parallel-right"].map((name) => [name, new Promise((resolve) => releases.set(name, resolve))]));
+  const runFor = (request) => {
+    async function* events() {
+      yield { kind: "session", providerSessionId: `native-${request.localSessionId}` };
+      if (request.prompt.includes("[AGENTHUB_MAIN_TURN]")) {
+        for (const name of gates.keys()) await request.executeRuntimeTool({
+          providerId: "codex", callId: `delegate-${name}`, name: "agenthub_delegate",
+          arguments: { memberId: name, task: `Do ${name}` }
+        });
+        yield { kind: "message", text: "Both children dispatched" };
+      } else if (request.prompt.includes("[AGENTHUB_DELEGATED_TASK]")) {
+        const name = [...gates.keys()].find((candidate) => request.prompt.includes(candidate));
+        assert.ok(name, "delegated member is explicit");
+        startedChildren.set(name, { localSessionId: request.localSessionId, instanceId: request.instance.id });
+        await gates.get(name);
+        yield { kind: "message", text: `${name} complete` };
+      } else yield { kind: "message", text: "Parent continuation complete" };
+      yield { kind: "exit", exitCode: 0 };
+    }
+    return { process: {}, events: events(), cancel: async () => { for (const release of releases.values()) release(); }, write: () => {} };
+  };
+  daemon.adapters.register({ providerId: "codex", supportsStructuredOutput: true, supportsResume: true,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: true, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }), start: runFor, resume: runFor });
+  daemon.database.projects.save({ id: "shared-project", name: "Shared", rootPath: process.cwd(), repositoryType: "none", nonGitDiffMode: "off", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" }, now);
+  daemon.database.agents.save({ id: "one-codex", providerId: "codex", displayName: "One Codex config", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now }, now);
+  daemon.database.teams.save({ id: "shared-team", name: "Shared Codex", delegationPolicy: "autonomous",
+    members: [...gates.keys()].map((id) => ({ id, displayName: id, agentInstanceId: "one-codex", roleId: "api", strengths: {}, allowedTaskTypes: [], maxConcurrentTasks: 1, enabled: true })), createdAt: now, updatedAt: now }, now);
+  const started = daemon.orchestration.start({ projectId: "shared-project", teamId: "shared-team", agentInstanceId: "one-codex", goal: "Run independent children concurrently" });
+  try {
+    await waitUntil(() => startedChildren.size === 2, "same-instance children did not start together");
+    const identities = [...startedChildren.values()];
+    assert.equal(new Set(identities.map((item) => item.instanceId)).size, 1);
+    assert.equal(new Set(identities.map((item) => item.localSessionId)).size, 2);
+    assert.ok(identities.every((item) => item.localSessionId !== started.mainSession.id));
+    assert.ok(identities.every((item) => daemon.database.sessions.get(item.localSessionId).parentSessionId === started.mainSession.id));
+    releases.get("parallel-left")();
+    await waitUntil(() => daemon.database.tasks.list(started.projectRun.id).some((task) => task.assignedMemberId === "parallel-left" && task.status === "completed"), "left child did not complete independently");
+    assert.equal(daemon.database.tasks.list(started.projectRun.id).find((task) => task.assignedMemberId === "parallel-right").status, "running");
+    releases.get("parallel-right")();
+    await waitUntil(() => daemon.database.projectRuns.get(started.projectRun.id).status === "completed", "shared-instance child waves did not settle");
+  } finally {
+    for (const release of releases.values()) release();
+    await daemon.stop();
+  }
+});
+
+for (const limit of [undefined, 2, 8]) {
+  test(`same-member independent tasks honor optional concurrency (${limit ?? "unlimited"})`, { timeout: 10_000 }, async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const entered = new Set();
+    const fixture = setup({ responder: (request) => {
+      if (request.prompt.includes("[AGENTHUB_PLANNER_DECISION]")) return { text: JSON.stringify({ mode: "plan", rationale: "Independent work", tasks: Array.from({ length: 6 }, (_, index) => plannedTask(`parallel-${index}`, "child")) }) };
+      if (request.prompt.includes("[AGENTHUB_DELEGATED_TASK]")) {
+        entered.add(request.localSessionId);
+        return { waitFor: gate, text: "Child finished" };
+      }
+      return { text: "Continue" };
+    } });
+    const team = fixture.database.teams.get("team");
+    fixture.database.teams.save({ ...team, members: team.members.map((member) => member.id === "child" ? { ...member, maxConcurrentTasks: limit } : member) }, now);
+    const started = fixture.orchestration.start({ projectId: "project", teamId: "team", goal: "Independent tasks on one member" });
+    try {
+      const expected = limit === undefined ? 6 : Math.min(limit, 6);
+      await waitUntil(() => entered.size >= expected, "task concurrency limit was silently lowered");
+      assert.equal(entered.size, expected);
+      const children = fixture.database.sessions.list("project").filter((session) => entered.has(session.id));
+      assert.equal(children.length, expected);
+      assert.ok(children.every((session) => session.parentSessionId === started.mainSession.id));
+      release();
+      await fixture.orchestration.wait(started.projectRun.id);
+      assert.equal(entered.size, 6);
+      assert.equal(fixture.database.projectRuns.get(started.projectRun.id).status, "completed");
+    } finally {
+      release();
+      await fixture.orchestration.wait(started.projectRun.id);
+      fixture.database.close();
+    }
+  });
+}

@@ -14,7 +14,7 @@ function getQueue(): MarkdownWorkerQueue {
 /** Only parser work moves off-thread. All text remains available, and every
  * accepted snapshot is parsed as a complete document. Completion/cancellation
  * submits the newest source without dropping it or waiting for another token. */
-export function useMarkdownFragments(source: string): { fragments: string[] | undefined; pending: boolean; unformatted: string } {
+export function useMarkdownFragments(source: string, preserveFormatting = false): { fragments: string[] | undefined; pending: boolean; unformatted: string } {
   const [parsed, setParsed] = useState<{ source: string; fragments: string[] }>();
   const [failed, setFailed] = useState(false);
   const latestSource = useRef(source);
@@ -25,8 +25,9 @@ export function useMarkdownFragments(source: string): { fragments: string[] | un
   // A previously parsed short prefix remains visible during the transition to
   // the worker path, with the same fragment keys/components and focus state.
   const previous = useRef<{ source: string; fragments: string[] }>();
-  if (synchronous) previous.current = { source, fragments: synchronous };
-  else if (parsed && (source === parsed.source || source.startsWith(parsed.source))) previous.current = parsed;
+  const compatiblePrevious = previous.current && source.startsWith(previous.current.source);
+  const latest = synchronous ? { source, fragments: synchronous } : parsed;
+  if (latest && source.startsWith(latest.source) && (!preserveFormatting || !compatiblePrevious)) previous.current = latest;
 
   useEffect(() => {
     if (!asynchronous) {
@@ -47,7 +48,6 @@ export function useMarkdownFragments(source: string): { fragments: string[] | un
     if (asynchronous) subscription.current?.update(source);
   }, [source, asynchronous]);
 
-  if (synchronous) return { fragments: synchronous, pending: false, unformatted: "" };
   const visible = previous.current;
   const compatible = visible && (source === visible.source || source.startsWith(visible.source));
   return { fragments: compatible ? visible.fragments : undefined, pending: !compatible || visible.source !== source, unformatted: compatible ? source.slice(visible.source.length) : source };

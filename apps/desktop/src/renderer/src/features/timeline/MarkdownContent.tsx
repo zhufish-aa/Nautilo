@@ -1,10 +1,12 @@
-import { Children, Fragment, memo, useMemo, useState, cloneElement, isValidElement, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { Children, Fragment, memo, useLayoutEffect, useMemo, useRef, useState, cloneElement, isValidElement, type MouseEvent, type ReactElement, type ReactNode, type RefObject } from "react";
 import { Check, Copy } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { classifyLocalHref, isImagePath, isExternalOpenPath, parseFileReference, splitTextByFileReferences } from "../../lib/file-references";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { useMarkdownFragments } from "../../lib/use-markdown-fragments";
+import { useInitialMarkdownMount } from "../../lib/use-initial-markdown-mount";
+import { useMarkdownInteractionGuard } from "../../lib/use-markdown-interaction-guard";
 import { openFilePreview } from "../../stores/file-preview";
 import { openLightbox } from "../../stores/lightbox";
 import { FileRefChip } from "./FileRefChip";
@@ -61,18 +63,53 @@ export const MarkdownContent = memo(function MarkdownContent({
   inverted?: boolean;
   onOpenLocalFile?: OpenLocalFile;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const components = useMemo(() => createMarkdownComponents(inverted, onOpenLocalFile, t), [inverted, onOpenLocalFile, t]);
-  const { fragments, pending, unformatted } = useMarkdownFragments(source);
+  const rawRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const guard = useMarkdownInteractionGuard(rootRef, rawRef);
+  const { fragments, pending, unformatted } = useMarkdownFragments(source, guard.held);
+  const restoreFocus = useRef(false);
+  const mount = useInitialMarkdownMount(fragments, guard.held);
+  useLayoutEffect(() => {
+    if (mount.showFormatted && restoreFocus.current) {
+      restoreFocus.current = false;
+      rootRef.current?.focus({ preventScroll: true });
+    }
+  }, [mount.showFormatted, guard.held]);
+  const raw = mount.showFormatted ? unformatted : source;
   return (
-    <div aria-busy={pending || undefined} className={cn("min-w-0 break-words text-[15px] leading-7", inverted ? "text-on-accent" : "text-ink")}>
-      {fragments?.map((serialized, index) => <MarkdownFragment key={index} serialized={serialized} components={components} />)}
-      {/* Immediately expose ALL new text, including final/cancelled output,
-          while formatting catches up. Retain completed interactive DOM. */}
-      {unformatted && <div className="whitespace-pre-wrap">{unformatted}</div>}
+    <div ref={rootRef} tabIndex={-1} aria-busy={pending || (fragments !== undefined && !mount.showFormatted) || undefined} className={cn("min-w-0 break-words text-[15px] leading-7", inverted ? "text-on-accent" : "text-ink")}>
+      {/* Keep one wrapper so first/last-child Markdown styles do not reset at
+          fragment boundaries. Hidden staging is neither focusable nor spoken;
+          revealing changes visibility only, never moves/remounts the nodes. */}
+      <div data-markdown-formatted="" hidden={!mount.showFormatted} aria-hidden={!mount.showFormatted || undefined}
+        {...{ inert: mount.showFormatted ? undefined : "" }} style={{ display: mount.showFormatted ? "contents" : "none" }}>
+        {fragments?.slice(0, mount.count).map((serialized, index) => <MarkdownFragment key={index} serialized={serialized} components={components} />)}
+      </div>
+      {/* Complete source remains available during initial DOM preparation;
+          after the switch only new streaming text awaits formatting. */}
+      {raw && <MarkdownRawSource text={raw} elementRef={rawRef} />}
+      {(mount.held || (guard.held && Boolean(raw))) && <button type="button" className="mt-2 rounded text-xs text-ink-3 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+        title={locale === "zh-CN" ? "保留原文以继续选择或查找；点此切换为格式化内容。" : "The source stays in place for selection or Find. Switch when you are ready."}
+        onClick={() => { restoreFocus.current = true; guard.release(); }}>
+        {locale === "zh-CN" ? "显示格式化内容" : "Show formatted text"}
+      </button>}
     </div>
   );
 });
+
+function MarkdownRawSource({ text, elementRef }: { text: string; elementRef: RefObject<HTMLDivElement> }): JSX.Element {
+  useLayoutEffect(() => {
+    const element = elementRef.current;
+    if (!element) return;
+    const node = element.firstChild;
+    if (node?.nodeType === Node.TEXT_NODE && text.startsWith(node.textContent ?? "")) {
+      (node as Text).appendData(text.slice(node.textContent?.length ?? 0));
+    } else element.textContent = text;
+  }, [text, elementRef]);
+  return <div ref={elementRef} data-markdown-raw="" className="whitespace-pre-wrap" />;
+}
 
 /** Exact parsed-content equality lets React skip completed fragments. These
  * are AST fragments, not independently parsed Markdown: cross-fragment links,

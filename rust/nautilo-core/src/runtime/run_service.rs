@@ -483,6 +483,7 @@ impl RunService {
         };
         let request = AdapterStartRequest {
             instance: agent.clone(),
+            local_session_id: session.get("id").and_then(Value::as_str).map(str::to_string),
             prompt: prompt.to_string(),
             cwd: context
                 .working_directory

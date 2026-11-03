@@ -116,6 +116,7 @@ interface FormState {
   baseUrl: string;
   apiType: string;
   wireApi: CodexWireApi;
+  appServerPoolSize: string;
   webSearchMode: WebSearchMode;
   webSearchInstanceId: string;
   webSearchModel: string;
@@ -137,6 +138,7 @@ function emptyForm(): FormState {
     baseUrl: "",
     apiType: "",
     wireApi: "responses",
+    appServerPoolSize: "",
     webSearchMode: "native",
     webSearchInstanceId: "",
     webSearchModel: "",
@@ -160,6 +162,7 @@ function formFromInstance(instance: AgentInstanceConfig): FormState {
     apiType:
       instance.apiType ?? apiTypesFor(instance.providerId)[0]?.value ?? "",
     wireApi: instance.wireApi ?? "responses",
+    appServerPoolSize: instance.appServerPoolSize ? String(instance.appServerPoolSize) : "",
     webSearchMode:
       instance.webSearchMode ??
       (instance.wireApi === "chat" ? "off" : "native"),
@@ -201,6 +204,7 @@ export function AgentEditorDialog({
     name?: string;
     provider?: string;
     executable?: string;
+    concurrency?: string;
   }>({});
 
   useEffect(() => {
@@ -383,8 +387,10 @@ export function AgentEditorDialog({
       nextErrors.provider = t("agents.editor.providerRequired");
     if (!form.executable.trim())
       nextErrors.executable = "请先探测 CLI，或填写可执行文件路径";
+    if (form.providerId === "codex" && form.appServerPoolSize.trim() && (!Number.isSafeInteger(Number(form.appServerPoolSize)) || Number(form.appServerPoolSize) < 1))
+      nextErrors.concurrency = locale === "zh-CN" ? "请输入正整数，或留空表示不限。" : "Enter a positive integer, or leave blank for no limit.";
     setErrors(nextErrors);
-    if (nextErrors.name || nextErrors.provider || nextErrors.executable) return;
+    if (nextErrors.name || nextErrors.provider || nextErrors.executable || nextErrors.concurrency) return;
 
     const models = form.models
       .map((row) => {
@@ -417,6 +423,7 @@ export function AgentEditorDialog({
         ? form.apiType.trim() || apiTypeOptions[0]?.value
         : undefined,
       wireApi: form.providerId === "codex" ? form.wireApi : undefined,
+      appServerPoolSize: form.providerId === "codex" && form.appServerPoolSize.trim() ? Number(form.appServerPoolSize) : undefined,
       webSearchMode:
         form.providerId === "codex" ? form.webSearchMode : undefined,
       webSearchInstanceId:
@@ -644,6 +651,17 @@ export function AgentEditorDialog({
                       hint: t("agents.editor.basic.wireApiChatHint"),
                     },
                   ]}
+                />
+              </Field>
+            )}
+            {form.providerId === "codex" && (
+              <Field label={locale === "zh-CN" ? "并发上限" : "Concurrency limit"} error={errors.concurrency}
+                hint={locale === "zh-CN" ? "默认不限。主 Agent 和子 Agent 共用所设上限；超出时排队。实际并发取决于电脑资源和服务商限制。" : "Unlimited by default. The main agent and subagents share an optional limit; excess sessions queue. Actual concurrency depends on system resources and provider limits."}>
+                <Input type="number" min={1} step={1}
+                  aria-label={locale === "zh-CN" ? "并发上限" : "Concurrency limit"}
+                  placeholder={locale === "zh-CN" ? "不限" : "Unlimited"}
+                  value={form.appServerPoolSize}
+                  onChange={(event) => patch({ appServerPoolSize: event.target.value })}
                 />
               </Field>
             )}

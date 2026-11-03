@@ -55,6 +55,8 @@ export type AdapterEvent =
 
 export interface AdapterStartRequest {
   instance: AgentInstance;
+  /** Stable Nautilo session identity for local transport isolation, not a provider thread ID. */
+  localSessionId?: string;
   prompt: string;
   cwd: string;
   /** Session-scoped execution settings; these do not belong to AgentInstance. */

@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::adapters::codex::app_server::start_codex_app_server;
+use crate::adapters::codex::app_server::start_codex_app_server_transient;
 use crate::adapters::{AdapterEvent, AdapterRun, AdapterStartRequest};
 use crate::errors::{CoreError, CoreResult, ErrorCode};
 
@@ -63,7 +63,7 @@ pub fn start_codex_chat_compat_app_server(request: AdapterStartRequest, resume_s
     let mut inner_request = request;
     inner_request.instance = Value::Object(instance);
 
-    let inner = match start_codex_app_server(inner_request, resume_session) {
+    let inner = match start_codex_app_server_transient(inner_request, resume_session) {
         Ok(run) => run,
         Err(error) => {
             proxy.close();

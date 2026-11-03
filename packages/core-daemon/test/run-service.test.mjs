@@ -48,6 +48,7 @@ test("queued turns retain the predecessor's native thread and latest session set
     assert.deepEqual(requests.map(({ resumed }) => resumed), [false, true, true]);
     for (const { request } of requests.slice(1)) {
       assert.equal(request.providerSessionId, "native-thread-first");
+      assert.equal(request.localSessionId, session.id);
       assert.equal(request.model, "new-model");
       assert.equal(request.permissionMode, "plan");
     }
@@ -154,6 +155,7 @@ test("RunService starts a new provider session and resumes subsequent messages",
   await waitForRun(database, secondRunId);
   assert.equal(starts, 1);
   assert.equal(resumes, 1);
+  assert.deepEqual(requests.map((request) => request.localSessionId), [session.id, session.id]);
   assert.equal(requests[0].timeoutMs, 30 * 60_000);
   assert.equal(requests[0].idleTimeoutMs, 30 * 60_000);
   assert.deepEqual(requests.map(({ model, reasoningEffort, serviceTier }) => ({ model, reasoningEffort, serviceTier })), [
@@ -533,3 +535,53 @@ for (const mode of [undefined, "full", "off", "off-git"]) {
     }
   });
 }
+
+test("child sessions sharing one Codex instance reach adapters concurrently with isolated local identities", { timeout: 5_000 }, async () => {
+  const database = new Database(":memory:");
+  const root = await mkdtemp(join(tmpdir(), "nautilo-child-concurrency-"));
+  const timestamp = new Date().toISOString();
+  const project = { id: "parallel-project", name: "Parallel", rootPath: root, repositoryType: "none", nonGitDiffMode: "off", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const agent = { id: "shared-codex", providerId: "codex", displayName: "Codex", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: timestamp, updatedAt: timestamp };
+  const children = ["left", "right"].map((id) => ({ id, parentSessionId: "parent", projectId: project.id, memberId: id, agentInstanceId: agent.id, title: id, status: "idle", unreadCount: 0, permissionMode: id === "left" ? "read-only" : "plan", createdAt: timestamp, updatedAt: timestamp }));
+  database.projects.save(project, timestamp);
+  for (const session of children) database.sessions.save(session);
+  const requests = [];
+  const releases = new Map();
+  const fakeRun = (request) => {
+    requests.push(request);
+    const gate = new Promise((resolve) => releases.set(request.localSessionId, resolve));
+    async function* events() {
+      yield { kind: "session", providerSessionId: `thread-${request.localSessionId}` };
+      await gate;
+      yield { kind: "message", text: `answer-${request.localSessionId}` };
+      yield { kind: "exit", exitCode: 0 };
+    }
+    return { process: {}, events: events(), cancel: async () => releases.get(request.localSessionId)?.(), write: () => {} };
+  };
+  const adapter = {
+    providerId: "codex", supportsStructuredOutput: true, supportsResume: true,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: true, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }), start: fakeRun, resume: fakeRun
+  };
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  let handles = [];
+  try {
+    handles = await Promise.all(children.map((session) => service.launch(session, agent, session.id)));
+    assert.deepEqual(requests.map((request) => request.localSessionId).sort(), ["left", "right"]);
+    assert.equal(new Set(requests.map((request) => request.instance.id)).size, 1);
+    assert.equal(requests.find((request) => request.localSessionId === "left").permissionMode, "read-only");
+    assert.equal(requests.find((request) => request.localSessionId === "right").permissionMode, "plan");
+    releases.get("left")();
+    await handles[0].completion;
+    assert.equal(database.sessions.get("right").status, "running");
+    assert.equal(database.sessions.get("left").providerSessionId, "thread-left");
+    releases.get("right")();
+    await handles[1].completion;
+    assert.equal(database.sessions.get("right").providerSessionId, "thread-right");
+  } finally {
+    for (const release of releases.values()) release();
+    await Promise.all(handles.map((handle) => handle.completion));
+    database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -437,7 +437,8 @@ export class OrchestrationService {
       const memberCounts = new Map<string, number>();
       const wave = ready.filter((task) => {
         const member = team.members.find((candidate) => candidate.id === task.assignedMemberId);
-        const limit = Math.max(1, member?.maxConcurrentTasks ?? 1);
+        const configured = member?.maxConcurrentTasks;
+        const limit = typeof configured === "number" && Number.isSafeInteger(configured) && configured > 0 ? configured : Number.POSITIVE_INFINITY;
         const count = memberCounts.get(String(task.assignedMemberId)) ?? 0;
         if (count >= limit) return false;
         memberCounts.set(String(task.assignedMemberId), count + 1);

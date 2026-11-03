@@ -12,7 +12,7 @@ import type {
   VerificationResult
 } from "@agenthub/domain";
 import type { RuntimeEvent } from "@agenthub/event-protocol";
-import type { HistoryCursor, HistoryItem, HistoryProjection, SessionHistory, SessionUpsertInput } from "@agenthub/schemas";
+import type { HistoryCursor, HistoryItem, HistoryProjection, SessionHistory, ProjectEventCursor, ProjectPollInput, ProjectPollSnapshot, ProjectPollResult, SessionUpsertInput } from "@agenthub/schemas";
 import { getBridge, requestCore } from "./bridge";
 import { parseProviderDiff } from "./provider-diff";
 import { toDomainAgent, toDomainProject, toDomainTeam, toStandaloneUiSession } from "./core-mappers";
@@ -39,6 +39,7 @@ function currentSessionGeneration(sessionId: string, generation: number): boolea
 const projectPollers = new Map<string, ReturnType<typeof setTimeout>>();
 const projectSessionSubscriptions = new Map<string, string>();
 const projectSessionSequences = new Map<string, number>();
+const projectEventCursors = new Map<string, ProjectEventCursor>();
 const projectSessionEventCache = new Map<string, RuntimeEvent[]>();
 const projectSessionBuilt = new Set<string>();
 const projectSessionRenderedEvents = new Map<string, RuntimeEvent[]>();
@@ -554,6 +555,7 @@ function clearSessionRuntime(sessionId: string): void {
   standaloneRenderFrames.delete(sessionId);
   projectSessionSubscriptions.delete(sessionId);
   projectSessionSequences.delete(sessionId);
+  projectEventCursors.delete(sessionId);
   projectSessionEventCache.delete(sessionId);
   projectSessionBuilt.delete(sessionId);
   projectSessionRenderedEvents.delete(sessionId);
@@ -682,6 +684,7 @@ function evictProjectRunViewCaches(): void {
       forgetSessionHistory(session.id);
       projectSessionEventCache.delete(session.id);
       projectSessionSequences.delete(session.id);
+      projectEventCursors.delete(session.id);
       projectSessionSubscriptions.delete(session.id);
       projectSessionBuilt.delete(session.id);
       projectSessionRenderedEvents.delete(session.id);
@@ -914,10 +917,10 @@ function readSessionHistoryBatch(sessionIds: string[]): Map<string, ReturnType<t
   return histories;
 }
 
-async function readArtifactHistory(input: { sessionId: string } | { projectRunId: string }): Promise<{ artifacts: Artifact[]; changed: boolean }> {
+async function readArtifactHistory(input: { sessionId: string } | { projectRunId: string }, fetchProjection?: (cursor?: HistoryCursor) => Promise<HistoryProjection<Artifact>>): Promise<{ artifacts: Artifact[]; changed: boolean }> {
   const scope = "sessionId" in input ? `artifacts:session:${input.sessionId}` : `artifacts:projectRun:${input.projectRunId}`;
   const result = await readPersistedHistory<Artifact, object>(scope, "artifact.changes", input,
-    async () => ({ values: await requestCore<Artifact[]>("artifact.list", input), extra: {} }), () => ({}));
+    async () => ({ values: await requestCore<Artifact[]>("artifact.list", input), extra: {} }), () => ({}), fetchProjection);
   return { artifacts: result.values, changed: result.changed };
 }
 
@@ -1206,6 +1209,71 @@ function sameUiSession(current: UiSession, next: UiSession): boolean {
     && sameTarget(current.target, next.target);
 }
 
+/** One server snapshot removes per-session IPC round trips without sharing
+ * sequence numbers across sessions or bypassing legacy full-replay healing. */
+async function readProjectPoll(projectRunId: string): Promise<{ snapshot?: ProjectPollSnapshot; fallback?: ProjectRun }> {
+  if (unsupportedHistoryMethods.has("projectRun.poll")) return {};
+  const sessions = sessionsOfProjectRun(projectRunId);
+  if (sessions.length > 64) return {}; // bounded protocol; legacy path remains available
+  const input: ProjectPollInput = {
+    projectRunId,
+    visibleSessionIds: sessions.filter((session) => projectSessionDisplayed.has(session.id)).map((session) => session.id),
+    sessions: sessions.map((session) => ({ sessionId: session.id, eventCursor: projectEventCursors.get(session.id), historyCursor: persistedHistory.get(`messages:session:${session.id}`)?.cursor })),
+    artifactCursor: persistedHistory.get(`artifacts:projectRun:${projectRunId}`)?.cursor
+  };
+  try {
+    const response = await requestCore<ProjectPollResult>("projectRun.poll", input);
+    if ("fallback" in response) return { fallback: response.projectRun };
+    const snapshot = response;
+    const ids = new Set(snapshot.sessions.map((session) => session.id));
+    if (snapshot.projectRun.id !== projectRunId || ids.size !== snapshot.sessions.length
+      || snapshot.sessions.some((session) => session.projectRunId !== projectRunId)
+      || snapshot.feeds.some((feed) => !ids.has(feed.sessionId) || feed.cursor.scope !== `events:session:${feed.sessionId}` || feed.events.some((event) => event.sessionId !== feed.sessionId))
+      || snapshot.histories.some((history) => !ids.has(history.session.id) || history.cursor.scope !== `messages:session:${history.session.id}`)
+      || snapshot.followUps.some((entry) => !ids.has(entry.sessionId) || entry.interactions?.some((interaction) => interaction.sessionId !== entry.sessionId))
+      || snapshot.artifacts.cursor.scope !== `artifacts:projectRun:${projectRunId}`) throw new Error("Invalid projectRun.poll scope");
+    return { snapshot };
+  } catch (error) {
+    if (!unsupportedHistoryMethod(error)) throw error;
+    // The legacy project read must succeed before caching a capability miss.
+    // A genuinely missing/deleted project never disables the endpoint globally.
+    const { projectRun } = await requestCore<{ projectRun: ProjectRun }>("projectRun.get", { projectRunId });
+    unsupportedHistoryMethods.add("projectRun.poll");
+    return { fallback: projectRun };
+  }
+}
+
+function resetProjectSessionFeed(sessionId: string): void {
+  projectSessionSubscriptions.delete(sessionId);
+  projectSessionSequences.delete(sessionId);
+  projectEventCursors.delete(sessionId);
+  projectSessionEventCache.delete(sessionId);
+  projectSessionBuilt.delete(sessionId);
+  projectSessionRenderedEvents.delete(sessionId);
+  useInteractionsStore.getState()._removeSessions([sessionId]);
+  useSessionsStore.getState()._replaceQueuedFollowUps(sessionId, []);
+  useSessionsStore.getState()._bumpProviderCommands(sessionId);
+  followUpListSynced.delete(sessionId);
+}
+
+function consumeProjectPollFeed(feed: ProjectPollSnapshot["feeds"][number]): { events: RuntimeEvent[]; hasNew: boolean } {
+  const sessionId = feed.sessionId;
+  if (feed.reset) resetProjectSessionFeed(sessionId);
+  projectEventCursors.set(sessionId, feed.cursor);
+  projectSessionSequences.set(sessionId, feed.cursor.sequence);
+  const cached = projectSessionEventCache.get(sessionId) ?? [];
+  const known = new Set(cached.map((event) => event.eventId));
+  const fresh = feed.events.filter((event) => !known.has(event.eventId));
+  if (fresh.length) {
+    ingestInteractionEvents(fresh);
+    ingestFollowUpEvents(sessionId, fresh);
+    ingestProviderCommandEvents(sessionId, fresh);
+  }
+  const events = fresh.length ? mergeEventCache(cached, fresh) : cached;
+  projectSessionEventCache.set(sessionId, events);
+  return { events, hasNew: feed.reset || fresh.length > 0 };
+}
+
 async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   const readVersion = (projectRunReadVersions.get(projectRunId) ?? 0) + 1;
   projectRunReadVersions.set(projectRunId, readVersion);
@@ -1213,8 +1281,16 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   const isLatest = () => projectRunReadVersions.get(projectRunId) === readVersion;
   const isCurrent = (id: string) => isLatest() && currentSessionGeneration(id, generations.get(id) ?? 0);
   projectRunHydrated.add(projectRunId);
-  const { projectRun } = await requestCore<{ projectRun: ProjectRun; mainSession: DomainSession }>("projectRun.get", { projectRunId });
+  const { snapshot, fallback } = await readProjectPoll(projectRunId);
+  const projectRun = snapshot?.projectRun ?? fallback ?? (await requestCore<{ projectRun: ProjectRun }>("projectRun.get", { projectRunId })).projectRun;
   if (!isLatest()) return projectRun;
+  const legacyResetIds = new Set<string>();
+  if (!snapshot) for (const session of sessionsOfProjectRun(projectRunId)) {
+    if (projectEventCursors.has(session.id)) {
+      legacyResetIds.add(session.id);
+      resetProjectSessionFeed(session.id);
+    }
+  }
   const team = requireUiTeam(String(projectRun.teamId));
   const legacyMain = team.members.find((member) => member.id === projectRun.mainMemberId);
   const mainAgent = useAgentsStore.getState().instances.find((instance) => instance.id === (projectRun.mainAgentInstanceId ?? legacyMain?.agentInstanceId));
@@ -1235,7 +1311,9 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     changed = true;
     projectsState.setActiveRun(projectRun.projectId, nextActiveRun);
   }
-  const [allSessions, tasks, artifactHistory, verifications, runs] = await Promise.all([
+  const [allSessions, tasks, artifactHistory, verifications, runs] = snapshot ? [
+    snapshot.sessions, snapshot.tasks, await readArtifactHistory({ projectRunId }, () => Promise.resolve(snapshot.artifacts)), snapshot.verifications, snapshot.runs
+  ] as const : await Promise.all([
     requestCore<DomainSession[]>("session.list", { projectId: projectRun.projectId }),
     requestCore<Task[]>("task.list", { projectRunId }),
     readArtifactHistory({ projectRunId }),
@@ -1272,7 +1350,13 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     if (projectSessionDisplayed.has(session.id)) expandNeeded(session.id);
   }
 
-  const histories = readSessionHistoryBatch([...neededSessionIds]);
+  const histories = snapshot ? new Map(snapshot.histories.filter((history) => isCurrent(history.session.id)).map((history) => {
+    const pending = readSessionHistory(history.session.id, () => Promise.resolve(history));
+    void pending.catch(() => {});
+    return [history.session.id, pending] as const;
+  })) : readSessionHistoryBatch([...neededSessionIds]);
+  const feeds = new Map(snapshot?.feeds.map((feed) => [feed.sessionId, feed]));
+  const queues = new Map(snapshot?.followUps.map((queue) => [queue.sessionId, queue]));
   for (const session of sessions) {
     if (!isCurrent(session.id)) continue;
     const needed = neededSessionIds.has(session.id);
@@ -1280,12 +1364,35 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     // Fetch a small revision projection even for idle displayed histories:
     // edits/deletes can share timestamps and do not always emit an event.
     // Event replay remains parallel, preserving the first-token path.
+    const snapshotFeed = feeds.get(session.id);
     const [feed, , refreshed] = await Promise.all([
-      projectSessionEvents(session.id),
-      syncQueuedFollowUps(session.id),
+      snapshotFeed ? Promise.resolve(consumeProjectPollFeed(snapshotFeed)) : projectSessionEvents(session.id),
+      snapshot && queues.has(session.id) ? Promise.resolve() : syncQueuedFollowUps(session.id),
       histories.get(session.id) ?? Promise.resolve(undefined)
     ]);
     if (!isCurrent(session.id)) continue;
+    if (legacyResetIds.has(session.id)) {
+      // The fresh subscription's full replay heals queues. Read its authority
+      // after replay, rather than letting historical queued events restore one.
+      followUpListSynced.delete(session.id);
+      await syncQueuedFollowUps(session.id);
+      if (!isCurrent(session.id)) continue;
+    }
+    if (queues.has(session.id)) {
+      const queue = queues.get(session.id)!;
+      store._replaceQueuedFollowUps(session.id, queue.items);
+      // The in-memory queue was read before the DB snapshot. Replay newer
+      // queue mutations so that an earlier empty list cannot erase a new item.
+      const newer = snapshotFeed?.events.filter((event) => event.sequence > queue.afterSequence) ?? [];
+      ingestFollowUpEvents(session.id, newer);
+      if (queue.interactions) {
+        const interactions = useInteractionsStore.getState();
+        interactions._removeSessions([session.id]);
+        for (const interaction of queue.interactions) interactions._upsert(interaction);
+        ingestInteractionEvents(newer);
+      }
+      followUpListSynced.add(session.id);
+    }
     if (refreshed) projectSessionDetails.set(session.id, refreshed);
     const detail = refreshed ?? (needed ? cached : undefined) ?? { session, messages: [] };
     // Metadata comes from this tick even when its unchanged message history
@@ -1345,7 +1452,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     }
     // A transition to a different run id means the oldest queued follow-up
     // started its turn; previousRunId undefined is first hydrate (no shift).
-    if (activeRun && previousRunId && activeRun.id !== previousRunId) store._shiftQueuedFollowUp(session.id);
+    if (!queues.has(session.id) && activeRun && previousRunId && activeRun.id !== previousRunId) store._shiftQueuedFollowUp(session.id);
   }
   if (!isLatest()) return projectRun;
   projectRunRenderedArtifacts.set(projectRunId, artifacts);
@@ -1382,6 +1489,7 @@ async function replayProjectSessionEvents(sessionId: string): Promise<{ events: 
     resetHistoryCapabilities();
     projectSessionSubscriptions.delete(sessionId);
     projectSessionSequences.delete(sessionId);
+  projectEventCursors.delete(sessionId);
     projectSessionEventCache.delete(sessionId);
     projectSessionBuilt.delete(sessionId);
     projectSessionRenderedEvents.delete(sessionId);

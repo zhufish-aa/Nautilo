@@ -18,6 +18,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   if (q.id === undefined || !q.method) return;
   const result = (value) => send({ id: q.id, result: value });
   if (q.method === 'initialize') return result({});
+  if (q.method === 'test/crash') { result({}); setTimeout(() => process.exit(17), 0); return; }
   if (q.method === 'thread/start' || q.method === 'thread/resume') return result({ thread: { id: q.params.threadId ?? `thread-${process.pid}-${++sequence}` } });
   if (q.method === 'thread/subscribe') return result({});
   if (q.method === 'turn/start') {
@@ -26,6 +27,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     active = { threadId: q.params.threadId, turnId: `turn-${++sequence}`, prompt };
     result({ turn: { id: active.turnId } });
     send({ method: 'turn/started', params: { threadId: active.threadId, turnId: active.turnId } });
+    if (prompt === 'crash') {
+      active.timer = setTimeout(() => process.exit(17), 90);
+      return;
+    }
     if (prompt === 'foreign') {
       send({ method: 'item/agentMessage/delta', params: { threadId: 'previous-session', turnId: 'old', delta: 'MUST NOT LEAK' } });
       send({ method: 'item/agentMessage/delta', params: { threadId: active.threadId, turnId: 'old', delta: 'MUST NOT LEAK OLD TURN' } });
@@ -33,7 +38,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       send({ id: 'foreign-tool', method: 'item/tool/call', params: { threadId: 'previous-session', tool: 'must_not_run', arguments: {} } });
       send({ method: 'turn/completed', params: { threadId: 'previous-session', turn: { id: 'old' } } });
     }
-    if (!['hang', 'stubborn', 'no-interrupt-response', 'tool-after-interrupt'].includes(prompt)) active.timer = setTimeout(finish, prompt === 'slow' ? 180 : 20);
+    if (!['hang', 'stubborn', 'no-interrupt-response', 'tool-after-interrupt', 'crash-controlled'].includes(prompt)) active.timer = setTimeout(finish, prompt === 'slow' ? 180 : 20);
     return;
   }
   if (q.method === 'turn/interrupt') {

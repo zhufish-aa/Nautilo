@@ -63,6 +63,22 @@ export interface SessionHistoryInput { sessionId: string; cursor?: HistoryCursor
 export type SessionHistory = HistoryProjection<Message> & { session: Session };
 export type ArtifactChangesInput = ({ sessionId: string; projectRunId?: never } | { projectRunId: string; sessionId?: never }) & { cursor?: HistoryCursor };
 
+export interface ProjectEventCursor extends HistoryCursor { sequence: number }
+export interface ProjectPollInput {
+  projectRunId: string;
+  visibleSessionIds?: string[];
+  sessions?: Array<{ sessionId: string; eventCursor?: ProjectEventCursor; historyCursor?: HistoryCursor }>;
+  artifactCursor?: HistoryCursor;
+}
+export interface ProjectPollSnapshot {
+  projectRun: ProjectRun; sessions: Session[]; tasks: Task[]; runs: AgentRun[]; verifications: VerificationResult[];
+  artifacts: HistoryProjection<Artifact>; histories: SessionHistory[];
+  feeds: Array<{ sessionId: string; reset: boolean; cursor: ProjectEventCursor; events: RuntimeEvent[] }>;
+  followUps: Array<{ sessionId: string; afterSequence: number; interactions?: InteractionRequest[]; items: Array<{ messageId: string; text: string; queuedAt: string }> }>;
+}
+
+export type ProjectPollResult = ProjectPollSnapshot | { fallback: true; projectRun: ProjectRun };
+
 export interface IpcRequestMap {
   "health.get": { input: undefined; output: { status: "ok"; version: string } };
   "project.list": { input: undefined; output: Project[] };
@@ -92,6 +108,7 @@ export interface IpcRequestMap {
   "team.upsert": { input: TeamDefinition; output: TeamDefinition };
   "team.remove": { input: { teamId: string }; output: { removed: true } };
   "projectRun.list": { input: { projectId: string }; output: ProjectRun[] };
+  "projectRun.poll": { input: ProjectPollInput; output: ProjectPollResult };
   "projectRun.get": { input: { projectRunId: string }; output: { projectRun: ProjectRun; mainSession: Session } };
   "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string; attachments?: MessageAttachmentInput[] }; output: { projectRun: ProjectRun; mainSession: Session } };
   "orchestration.resolveDelegation": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };

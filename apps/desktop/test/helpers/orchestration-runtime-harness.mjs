@@ -16,7 +16,7 @@ const runtimeSource = readFileSync(new URL("orchestration-runtime.ts", lib), "ut
 
 // Runs the real runtime and timeline builders with deterministic IPC and clock.
 // No desktop, daemon, provider process, network, or model requests are made.
-export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCount = 1, failMethod, bridgeAvailable = true } = {}) {
+export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCount = 1, failMethod, bridgeAvailable = true, interactionsModule } = {}) {
   let now = 10_000, nextTimer = 1;
   const timers = new Map(), calls = [], renders = [];
   const setTimeout = (fn, delay = 0) => { const id = nextTimer++; timers.set(id, { fn, at: now + delay }); return id; };
@@ -25,7 +25,7 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
   const instances = Array.from({ length: agentCount }, (_, i) => ({ id: `a${i}`, executable: "fake", displayName: `Agent ${i}` }));
   const team = { id: "t", members: instances.map((instance) => ({ agentInstanceId: instance.id, enabled: true })) };
   const state = {
-    sessions: [session], tasks: {}, artifacts: {}, foreground: {}, running: {}, activeAgentRunIds: {}, events: { s: [] }, queuedFollowUps: { s: [] },
+    providerCommandRevisions: {}, sessions: [session], tasks: {}, artifacts: {}, foreground: {}, running: {}, activeAgentRunIds: {}, events: { s: [] }, queuedFollowUps: { s: [] },
     _append: (id, data) => state.events[id].push({ id: `local-${state.events[id].length}`, sessionId: id, timestamp: session.createdAt, sequence: 0, data }),
     _replaceEvents: (id, rows) => { state.events[id] = rows; renders.push({ at: now, rows }); },
     _replaceContextUsage() {}, _replaceRawLog() {},
@@ -38,12 +38,13 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
     _upsertExternalSession: (item) => { state.sessions = [...state.sessions.filter((s) => s.id !== item.id), item]; },
     _shiftQueuedFollowUp: (id) => { state.queuedFollowUps[id]?.shift(); },
     _evictSessionView() {}, _replaceQueuedFollowUps: (id, items) => { state.queuedFollowUps[id] = items; },
-    _addQueuedFollowUp: (id, item) => { state.queuedFollowUps[id].push(item); },
+    _addQueuedFollowUp: (id, item) => { if (!state.queuedFollowUps[id].some((queued) => queued.messageId === item.messageId)) state.queuedFollowUps[id].push(item); },
     _removeQueuedFollowUp: (id, messageId) => { state.queuedFollowUps[id] = state.queuedFollowUps[id].filter((item) => item.messageId !== messageId); },
-    _setProviderCommands() {},
+    _setProviderCommands() {}, _bumpProviderCommands(id) { state.providerCommandRevisions[id] = (state.providerCommandRevisions[id] ?? 0) + 1; },
     _configureSession: (id, patch) => { Object.assign(session, patch); return session; }
   };
   const replies = {
+    "projectRun.poll": () => { throw new Error("unknown method projectRun.poll"); },
     "session.send": { accepted: true, runId: "r" },
     "session.get": { session, messages: [] },
     "run.list": [{ id: "r", sessionId: "s", status: "running" }],
@@ -93,12 +94,12 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
     "../stores/agents": { useAgentsStore: { getState: () => ({ instances }) } },
     "../stores/projects": { useProjectsStore: { getState: () => projectState } },
     "../stores/teams": { useTeamsStore: { getState: () => ({ teams: [team] }) } },
-    "../stores/interactions": { ingestInteractionEvents() {}, useInteractionsStore: { getState: () => ({ _removeSessions() {} }) } }
+    "../stores/interactions": interactionsModule ?? { ingestInteractionEvents() {}, useInteractionsStore: { getState: () => ({ _removeSessions() {} }) } }
   };
   const exports = {};
   const optionalExports = (source.includes("function isAwaitingFirstOutput(") ? ", isAwaitingFirstOutput, projectRunAwaitingOutput" : "")
     + (source.includes("function needsStandalonePersistenceSync(") ? ", needsStandalonePersistenceSync" : "");
-  const extraExports = `\nexport { toUiArtifact, sameArtifacts, syncProjectAndAgents, mergeStandaloneEvents, standaloneHydrated, standaloneMessageCache, standaloneEventCache, standaloneLastRebuildAt, scheduleStandaloneRender, clearSessionRuntime, schedulePoll, buildStandaloneTimeline, hydrateProjectRun, projectSessionBuilt, mergeEventCache, readSessionHistory, readArtifactHistory, persistedHistory, resetHistoryCapabilities, hydrateStandaloneSession, refreshStandaloneSessionState, readSessionHistoryBatch, standaloneSequences, projectSessionSequences, projectSessionEventCache, projectSessionDetails${optionalExports} };\nexport function setTestProjectHydrator(fn) { hydrateProjectRun = fn; }`;
+  const extraExports = `\nexport { toUiArtifact, sameArtifacts, syncProjectAndAgents, mergeStandaloneEvents, standaloneHydrated, standaloneMessageCache, standaloneEventCache, standaloneLastRebuildAt, scheduleStandaloneRender, clearSessionRuntime, schedulePoll, buildStandaloneTimeline, hydrateProjectRun, projectSessionBuilt, mergeEventCache, readSessionHistory, readArtifactHistory, persistedHistory, resetHistoryCapabilities, hydrateStandaloneSession, refreshStandaloneSessionState, readSessionHistoryBatch, standaloneSequences, projectSessionSequences, projectSessionEventCache, projectSessionDetails, consumeProjectPollFeed, projectEventCursors${optionalExports} };\nexport function setTestProjectHydrator(fn) { hydrateProjectRun = fn; }`;
   class FakeDate extends Date { static now() { return now; } }
   vm.runInNewContext(compile(source + extraExports), { exports, require: (name) => {
     if (!(name in modules)) throw new Error(`Unexpected import: ${name}`);

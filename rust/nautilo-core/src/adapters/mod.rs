@@ -99,6 +99,8 @@ impl TimeoutKind {
 #[derive(Clone, Default)]
 pub struct AdapterStartRequest {
     pub instance: Value,
+    /// Stable Nautilo identity for local transport isolation, not a provider thread ID.
+    pub local_session_id: Option<String>,
     pub prompt: String,
     pub cwd: String,
     pub model: Option<String>,

@@ -81,12 +81,14 @@ async fn main() -> anyhow::Result<()> {
     // next heartbeat write fails — self-exit instead of living on as an
     // orphan that keeps the data directory locked (a killed shell used to
     // leave one daemon behind per restart).
-    tokio::spawn(async {
+    let (shell_closed, mut shell_closed_receiver) = tokio::sync::oneshot::channel::<()>();
+    let heartbeat = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             let mut out = std::io::stdout();
             if writeln!(out).is_err() {
-                std::process::exit(0);
+                let _ = shell_closed.send(());
+                return;
             }
         }
     });
@@ -104,9 +106,17 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    tokio::signal::ctrl_c().await?;
-    let _ = daemon.audit.flush();
-    gateway.cleanup();
+    // Both a normal stop and a dead shell take the same cleanup path. Do not
+    // process::exit from the heartbeat: that skips resident CLI termination.
+    let shutdown_result = tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        _ = &mut shell_closed_receiver => Ok(()),
+    };
     accept_task.abort();
+    gateway.cleanup();
+    adapters::codex::app_server::shutdown_codex_app_server_pools().await;
+    heartbeat.abort();
+    let _ = daemon.audit.flush();
+    shutdown_result?;
     Ok(())
 }
