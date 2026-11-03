@@ -7,6 +7,7 @@ import {
 } from "react-router-dom";
 import {
   ArrowLeft,
+  BarChart3,
   Bell,
   Box,
   ChevronRight,
@@ -41,8 +42,12 @@ import { ProviderToolsPanel } from "../agents/ProviderToolsPanel";
 import { PluginMarketPanel } from "../agents/PluginMarketPanel";
 import { RuntimeOperationsCard } from "./RuntimeOperationsCard";
 import { PermissionPolicyCard } from "./PermissionPolicyCard";
+import { UsagePanel } from "./UsagePanel";
+import { ConnectionsPanel } from "./ConnectionsPanel";
 
 type SettingsSection =
+  | "accounts"
+  | "usage"
   | "general"
   | "appearance"
   | "agents"
@@ -60,6 +65,8 @@ const SECTIONS: Array<{
   { id: "general", zh: "通用", en: "General", icon: Settings2 },
   { id: "appearance", zh: "外观", en: "Appearance", icon: Monitor },
   { id: "agents", zh: "模型与 Agent", en: "Models & agents", icon: Box },
+  { id: "accounts", zh: "供应商与账号", en: "Providers & accounts", icon: Users },
+  { id: "usage", zh: "用量与费用", en: "Usage & costs", icon: BarChart3 },
   { id: "skills", zh: "技能与插件", en: "Skills & plugins", icon: Layers },
   { id: "permissions", zh: "权限与安全", en: "Permissions", icon: Shield },
   {
@@ -172,9 +179,6 @@ export function SettingsPage(): JSX.Element {
   } = settings;
   const zh = locale === "zh-CN";
   const [appInfo, setAppInfo] = useState<AppInfo>();
-  const [agentTab, setAgentTab] = useState<"instances" | "providers">(
-    "instances",
-  );
   const contentRef = useRef<HTMLDivElement>(null);
   // Keep the policy editor alive across categories so unsaved rules are not lost.
   const permissionsVisited = useRef(section === "permissions");
@@ -266,7 +270,7 @@ export function SettingsPage(): JSX.Element {
         <div
           className={cn(
             "mx-auto w-full",
-            ["agents", "skills", "plugins", "permissions", "advanced"].includes(
+            ["agents", "accounts", "skills", "plugins", "permissions", "advanced", "usage"].includes(
               section,
             )
               ? "max-w-[1000px]"
@@ -276,6 +280,8 @@ export function SettingsPage(): JSX.Element {
           <h1 className="mb-8 text-[25px] font-semibold tracking-tight text-ink outline-none">
             {zh ? activeItem.zh : activeItem.en}
           </h1>
+
+          {section === "usage" && <UsagePanel />}
 
           {section === "general" && (
             <>
@@ -433,52 +439,15 @@ export function SettingsPage(): JSX.Element {
             </>
           )}
 
+          {section === "accounts" && <ConnectionsPanel />}
+
           {section === "agents" && (
             <>
-              <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-                <div
-                  className="flex gap-5 border-b border-line"
-                  role="group"
-                  aria-label={zh ? "模型与 Agent" : "Models & agents"}
-                >
-                  {(
-                    [
-                      { id: "instances", label: zh ? "Agent" : "Agents" },
-                      { id: "providers", label: "CLI" },
-                    ] as const
-                  ).map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      aria-pressed={agentTab === item.id}
-                      onClick={() => setAgentTab(item.id)}
-                      className={cn(
-                        "border-b-2 px-1 py-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent",
-                        agentTab === item.id
-                          ? "border-ink font-medium text-ink"
-                          : "border-transparent text-ink-2",
-                      )}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => navigate("/teams")}
-                >
-                  <Users className="h-4 w-4" aria-hidden />
-                  {zh ? "团队" : "Teams"}
-                </Button>
+              <div className="mb-6 flex items-center justify-between gap-3">
+                <p className="text-sm text-muted">{zh ? "管理已安装的 CLI 与 Agent 团队。供应商、账号与模型价格在「供应商与账号」中配置。" : "Manage installed CLIs and agent teams. Configure provider accounts and model prices in Providers & accounts."}</p>
+                <Button size="sm" variant="outline" onClick={() => navigate("/teams")}><Users className="h-4 w-4" aria-hidden />{zh ? "团队" : "Teams"}</Button>
               </div>
-              <div data-tour="agents-page">
-                {agentTab === "instances" ? (
-                  <InstancesPanel />
-                ) : (
-                  <ProvidersPanel />
-                )}
-              </div>
+              <div data-tour="agents-page" className="space-y-8"><InstancesPanel /><details className="rounded-lg border border-line p-4"><summary className="cursor-pointer text-sm text-muted">{zh ? "CLI 安装与检测" : "CLI installation & detection"}</summary><div className="mt-4"><ProvidersPanel /></div></details></div>
             </>
           )}
 

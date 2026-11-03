@@ -13,6 +13,7 @@ export class CredentialRepository {
     const row = this.db.prepare("SELECT data FROM credentials WHERE agent_instance_id = ?").get(agentInstanceId) as Row | undefined;
     return row ? JSON.parse(String(row.data)) as EncryptedCredential : undefined;
   }
+  ids(): string[] { return (this.db.prepare("SELECT agent_instance_id FROM credentials").all() as Row[]).map((row) => String(row.agent_instance_id)); }
   has(agentInstanceId: string): boolean { return !!this.db.prepare("SELECT 1 AS value FROM credentials WHERE agent_instance_id = ?").get(agentInstanceId); }
   remove(agentInstanceId: string): boolean { return Number(this.db.prepare("DELETE FROM credentials WHERE agent_instance_id = ?").run(agentInstanceId).changes) > 0; }
 }

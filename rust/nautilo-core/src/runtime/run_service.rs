@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::adapters::registry::AdapterRegistry;
+use crate::adapters::model_config::configured_model_reasoning_effort;
 use crate::adapters::{AdapterEvent, AdapterRun, AdapterStartRequest, TimeoutKind};
 use crate::application::interaction_service::InteractionService;
 use crate::application::session_context::{build_session_turn_context, TurnContextInput};
@@ -21,7 +22,7 @@ use crate::runtime::message_attachment_service::MessageAttachmentService;
 use crate::runtime::orchestration::member_router::MemberRouter;
 use crate::runtime::run_diff_collector as diff_collector;
 use crate::runtime::run_workspace_snapshot::{capture_workspace_snapshot, WorkspaceSnapshot};
-use crate::runtime::security::environment_policy::{build_environment, provider_environment_passthrough};
+use crate::runtime::security::environment_policy::{build_environment, provider_environment_passthrough, isolate_login_profile};
 use crate::runtime::security::{ApprovalService, CommandPolicyService, CredentialService, RedactionService};
 use crate::runtime::session_run_queue::SessionRunQueue;
 use crate::runtime::subagent_detection::subagent_meta;
@@ -273,6 +274,8 @@ impl RunService {
     }
 
     /// Withdraws a queued (not yet started) turn by its queue key.
+    pub fn session_busy(&self, session_id: &str) -> bool { self.session_queue.busy(session_id) }
+
     pub fn cancel_queued(&self, session_id: &str, key: &str) -> bool {
         self.session_queue.cancel_pending(session_id, key)
     }
@@ -286,20 +289,56 @@ impl RunService {
     ) -> CoreResult<(String, watch::Receiver<bool>)> {
         // Re-read after reaching the head of the queue. Its predecessor may
         // have learned a native thread id or saved newer settings meanwhile.
-        let latest_session = Repositories::new(&self.db.lock().unwrap().raw)
+        let mut latest_session = Repositories::new(&self.db.lock().unwrap().raw)
             .sessions()
             .get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
             .unwrap_or_else(|| session.clone());
         if latest_session.get("projectId") != session.get("projectId")
             || latest_session.get("agentInstanceId") != session.get("agentInstanceId")
+
         {
             return Err(invalid_field("sessionId", "The session target changed while this turn was queued. Send the message again."));
         }
+        let binding_changed = latest_session.get("connectionId") != session.get("connectionId") || latest_session.get("connectionRevision") != session.get("connectionRevision");
+        // A queued request owns the connection selection captured when it was submitted.
+        for field in ["connectionId","connectionRevision","model","reasoningEffort","serviceTier"] {
+            if let Some(value) = session.get(field) { latest_session[field] = value.clone(); }
+            else { latest_session.as_object_mut().unwrap().remove(field); }
+        }
+        if binding_changed {
+            for field in ["providerSessionId","providerContextSyncedAt","providerContextWindow","runtimeToolVersion"] {
+                if let Some(value) = session.get(field) { latest_session[field] = value.clone(); }
+                else { latest_session.as_object_mut().unwrap().remove(field); }
+            }
+        }
         let session = &latest_session;
+        let (resolved_agent, bound_connection) = {
+            let db = self.db.lock().unwrap();
+            crate::application::connection_service::resolve_session_connection(&db.raw, session, agent)?
+        };
+        let agent = &resolved_agent;
         // An explicit per-model context window from the instance editor wins;
         // live discovery only runs when nothing is configured.
         let session_model = session.get("model").and_then(Value::as_str).unwrap_or("");
         let models = agent.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
+        let configured_model = models.iter().find(|entry| entry.get("id").and_then(Value::as_str).map(str::trim) == Some(session_model));
+        if configured_model.and_then(|entry| entry.get("enabled")).and_then(Value::as_bool) == Some(false) {
+            return Err(invalid_field("model", "This model is disabled. Choose an enabled model."));
+        }
+        let reasoning_effort = session.get("reasoningEffort").and_then(Value::as_str)
+            .map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+            .or_else(|| {
+                let anthropic_bridge = agent.get("providerId").and_then(Value::as_str) == Some("codex")
+                    && agent.pointer("/providerOptions/wireApi").and_then(Value::as_str) == Some("anthropic");
+                if anthropic_bridge {
+                    // Preserve an explicit default, but do not interpret a legacy list of
+                    // advertised efforts as a user choice for an unsupported conversion.
+                    configured_model.and_then(|model| model.get("defaultReasoningEffort"))
+                        .and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+                } else {
+                    configured_model.and_then(configured_model_reasoning_effort)
+                }
+            });
         let configured_context_window = models
             .iter()
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(session_model))
@@ -322,7 +361,7 @@ impl RunService {
             .filter(|window| *window > 0)
             .or(configured_context_window);
         let provider_id = agent.get("providerId").and_then(Value::as_str).unwrap_or("");
-        if context_window.is_none() {
+        if context_window.is_none() && bound_connection.is_none() {
             let discovery = self.adapters
                 .find(provider_id)
                 .map(|adapter| adapter.descriptor().get("contextWindowDiscovery").and_then(Value::as_bool) == Some(true))
@@ -430,6 +469,17 @@ impl RunService {
             }
         }
 
+        let descriptor = self.adapters.find(provider_id).map(|a| a.descriptor());
+        let mut additions = provider_environment_passthrough(agent, descriptor.as_ref());
+        if bound_connection.is_none() {
+            additions.extend(self.credentials_environment(agent.get("id").and_then(Value::as_str).unwrap_or(""), provider_id));
+        }
+        let environment = build_environment(Some(&policy), additions);
+        let environment = match bound_connection.as_ref() {
+            Some(connection) => crate::application::connection_service::connection_environment(agent, connection, &self.credentials, environment)?,
+            None => isolate_login_profile(agent, environment)?,
+        };
+
         let run_id = Uuid::new_v4().to_string();
         let started_at = now_iso();
         let mut run = Map::new();
@@ -442,6 +492,8 @@ impl RunService {
         }
         run.insert("sessionId".to_string(), session.get("id").cloned().unwrap_or(Value::Null));
         run.insert("agentInstanceId".to_string(), agent.get("id").cloned().unwrap_or(Value::Null));
+        for field in ["connectionId","connectionRevision","model"] { if let Some(value) = session.get(field) { run.insert(field.into(),value.clone()); } }
+        if let Some(pricing) = configured_model.and_then(|model| model.get("pricing")) { run.insert("pricingSnapshot".into(),pricing.clone()); }
         run.insert("memberId".to_string(), member_id.clone().map(Value::String).unwrap_or(Value::Null));
         run.insert("mode".to_string(), json!("headless_structured"));
         run.insert("status".to_string(), json!("starting"));
@@ -470,9 +522,6 @@ impl RunService {
             let _ = self.events.append(&run, session, "run.started", json!({ "runId": run_id }));
         }
 
-        let descriptor = self.adapters.find(provider_id).map(|a| a.descriptor());
-        let mut additions = provider_environment_passthrough(agent, descriptor.as_ref());
-        additions.extend(self.credentials_environment(agent.get("id").and_then(Value::as_str).unwrap_or(""), provider_id));
         let provider_command = context.presentation.as_deref() == Some("provider_command");
         let runtime_tool_binding = if provider_command {
             None
@@ -491,11 +540,11 @@ impl RunService {
                 .or_else(|| project.as_ref().and_then(|p| p.get("rootPath")).and_then(Value::as_str).map(str::to_string))
                 .unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
             model: session.get("model").and_then(Value::as_str).map(str::to_string),
-            reasoning_effort: session.get("reasoningEffort").and_then(Value::as_str).map(str::to_string),
+            reasoning_effort,
             service_tier: session.get("serviceTier").and_then(Value::as_str).map(str::to_string),
             permission_mode: session.get("permissionMode").and_then(Value::as_str).map(str::to_string),
             context_window,
-            env: Some(build_environment(Some(&policy), additions)),
+            env: Some(environment),
             timeout_ms: Some(30 * 60_000),
             idle_timeout_ms: Some(30 * 60_000),
             max_output_bytes: None,
@@ -542,8 +591,10 @@ impl RunService {
             && request.runtime_tools.is_some()
             && current_session.get("runtimeToolVersion").and_then(Value::as_i64)
                 != Some(crate::runtime::RUNTIME_TOOL_SCHEMA_VERSION);
-        let provider_session_id = current_session.get("providerSessionId").and_then(Value::as_str).map(str::to_string);
-        let native_resume = provider_session_id.is_some()
+        let same_connection = current_session.get("connectionId") == session.get("connectionId") && current_session.get("connectionRevision") == session.get("connectionRevision");
+        let resume_session = if same_connection { &current_session } else { session };
+        let provider_session_id = resume_session.get("providerSessionId").and_then(Value::as_str).map(str::to_string);
+        let native_resume = session["connectionContextRebuildRequired"] != true && provider_session_id.is_some()
             && self.adapters
                 .capabilities(agent)
                 .map(|capabilities| capabilities.native_resume)
@@ -777,6 +828,15 @@ impl RunService {
             run_log::run_event(run_id, "consume_exit", json!({ "status": "crashed", "sawExit": saw_exit, "messages": messages.len() }));
             return RunCompletionSnapshot { run: crashed, final_message: last_message_text(&messages) };
         }
+        if session["connectionContextRebuildRequired"] == true && !provider_command {
+            let db = self.db.lock().unwrap(); let sessions = Repositories::new(&db.raw).sessions();
+            if let Ok(Some(mut current)) = sessions.get(session["id"].as_str().unwrap_or("")) {
+                if current.get("connectionId") == session.get("connectionId") && current.get("connectionRevision") == session.get("connectionRevision") {
+                    current.as_object_mut().unwrap().remove("connectionContextRebuildRequired");
+                    let _ = sessions.save(&current);
+                }
+            }
+        }
         let mut completed = latest.as_object().cloned().unwrap_or_default();
         completed.insert("status".to_string(), json!("completed"));
         if completed.get("endedAt").is_none() {
@@ -948,6 +1008,7 @@ impl RunService {
                 let guard = self.db.lock().unwrap();
                 let repos = Repositories::new(&guard.raw);
                 if let Ok(Some(current)) = repos.sessions().get(session.get("id").and_then(Value::as_str).unwrap_or("")) {
+                    if current.get("connectionId") != session.get("connectionId") || current.get("connectionRevision") != session.get("connectionRevision") { return None; }
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("providerSessionId".to_string(), json!(provider_session_id));
                     updated.insert("providerContextSyncedAt".to_string(), json!(now_iso()));
@@ -959,8 +1020,26 @@ impl RunService {
                 }
                 None
             }
-            AdapterEvent::Usage { input_tokens, output_tokens, context_used, context_window, raw, .. } => {
+            AdapterEvent::Usage { input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, usage_scope, usage_key, input_tokens_includes_cache, cache_creation_input_tokens, reported_cost, estimated_cost, currency, context_used, context_window, raw } => {
                 let _ = self.events.append(run, session, "usage.updated", json!({
+                    "usageScope": usage_scope,
+                    "usageKey": usage_key.clone().or_else(|| match usage_scope.as_deref() {
+                        Some("turn") => run.get("id").and_then(Value::as_str).map(str::to_string),
+                        Some("session") => session.get("providerSessionId").or_else(|| session.get("id")).and_then(Value::as_str).map(str::to_string),
+                        _ => None,
+                    }),
+                    "model": run.get("model").or_else(|| session.get("model")),
+                    "connectionId": run.get("connectionId"),
+                    "connectionRevision": run.get("connectionRevision"),
+                    "pricingSnapshot": run.get("pricingSnapshot"),
+                    "agentInstanceId": run.get("agentInstanceId"),
+                    "inputTokensIncludesCache": input_tokens_includes_cache,
+                    "cachedInputTokens": cached_input_tokens,
+                    "cacheCreationInputTokens": cache_creation_input_tokens,
+                    "reasoningOutputTokens": reasoning_output_tokens,
+                    "reportedCost": reported_cost,
+                    "estimatedCost": estimated_cost,
+                    "currency": currency,
                     "inputTokens": input_tokens.map(Value::from).unwrap_or(Value::Null),
                     "outputTokens": output_tokens.map(Value::from).unwrap_or(Value::Null),
                     "contextUsed": context_used.map(Value::from).unwrap_or(Value::Null),

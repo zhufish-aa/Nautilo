@@ -9,6 +9,7 @@ import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
+import { SessionModelControl, type ComposerConfiguration } from "./SessionModelControl";
 
 const NO_TEAM = "no-team";
 
@@ -32,6 +33,8 @@ export function NewSessionDialog({
   const createSession = useSessionsStore((state) => state.createSession);
   const [projectId, setProjectId] = useState("");
   const [providerId, setProviderId] = useState("");
+  const [instanceId, setInstanceId] = useState("");
+  const [configuration, setConfiguration] = useState<ComposerConfiguration>({});
   const [teamId, setTeamId] = useState(NO_TEAM);
   const [title, setTitle] = useState("");
 
@@ -62,16 +65,17 @@ export function NewSessionDialog({
     ],
     [teams, t]
   );
-  // The session still binds to one agent instance underneath; the provider
-  // picker just chooses which family, defaulting to its first enabled instance.
-  // The instance (API source) can be switched later inside the session.
+  // Select the concrete Agent before creation; its identity stays fixed.
   const selectedProvider = providers.find((provider) => provider.id === providerId);
-  const defaultInstance = instances.find((instance) => instance.providerId === providerId && instance.enabled);
+  const eligibleInstances = instances.filter((instance) => instance.providerId === providerId && instance.enabled);
+  const defaultInstance = eligibleInstances.find(instance => instance.id === instanceId) ?? eligibleInstances[0];
   const canCreate = !!projectId && !!selectedProvider && !!defaultInstance;
 
   const reset = (): void => {
     setProjectId("");
     setProviderId("");
+    setInstanceId("");
+    setConfiguration({});
     setTeamId(NO_TEAM);
     setTitle("");
   };
@@ -81,7 +85,8 @@ export function NewSessionDialog({
       projectId,
       target: { type: "agent", instanceId: defaultInstance.id, teamId: teamId === NO_TEAM ? undefined : teamId },
       title: title.trim() || selectedProvider.name,
-      mode
+      mode,
+      ...configuration
     });
     onCreated(session.id);
     onOpenChange(false);
@@ -109,8 +114,9 @@ export function NewSessionDialog({
           <SelectField aria-label={t("sessions.projectLabel")} value={projectId || undefined} onValueChange={setProjectId} options={projectOptions} placeholder={t("sessions.projectLabel")} />
         </Field>
         <Field label={t("sessions.cliLabel")}>
-          <SelectField aria-label={t("sessions.cliLabel")} value={providerId || undefined} onValueChange={setProviderId} options={providerOptions} placeholder={t("sessions.cliPlaceholder")} />
+          <SelectField aria-label={t("sessions.cliLabel")} value={providerId || undefined} onValueChange={id => { setProviderId(id); setInstanceId(""); setConfiguration({}); }} options={providerOptions} placeholder={t("sessions.cliPlaceholder")} />
         </Field>
+        {defaultInstance && <Field label="Agent"><SelectField aria-label="Agent" value={defaultInstance.id} onValueChange={id => { setInstanceId(id); setConfiguration({}); }} options={eligibleInstances.map(instance => ({ value: instance.id, label: instance.displayName }))} /><SessionModelControl draft={{ instanceId: defaultInstance.id, configuration, onChange: patch => setConfiguration(current => ({ ...current, ...patch })) }} /></Field>}
         <Field label={t("sessions.delegateTeamLabel")} hint={t("sessions.delegateTeamHint")}>
           <SelectField aria-label={t("sessions.delegateTeamLabel")} value={teamId} onValueChange={setTeamId} options={teamOptions} />
         </Field>

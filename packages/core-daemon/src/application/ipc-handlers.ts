@@ -1,3 +1,4 @@
+import { ConnectionService } from "./connection-service.js";
 import { projectPollHealIds, projectPollLastSequence, readProjectPoll } from "../database/project-poll.js";
 import { IpcGateway } from "../ipc-gateway.js";
 import { join } from "node:path";
@@ -30,6 +31,7 @@ export interface ApplicationServices {
   runs: RunService;
   projects: ProjectService;
   agents: AgentService;
+  connections: ConnectionService;
   teams: TeamService;
   sessions: SessionService;
   orchestration: OrchestrationService;
@@ -49,6 +51,11 @@ export interface ApplicationServices {
   dataDir: string;
 }
 export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationServices): void {
+  gateway.register("connection.list", async () => services.connections.list());
+  gateway.register("connection.get", async ({ connectionId, revision }) => services.connections.get(connectionId, revision));
+  gateway.register("connection.upsert", async (input) => services.connections.upsert(input));
+  gateway.register("connection.remove", async ({ connectionId }) => services.connections.remove(connectionId));
+  gateway.register("connection.models", async (input) => services.connections.discover(input));
   gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0" }));
   gateway.register("project.list", async () => services.projects.list());
   gateway.register("project.add", async (input) => services.projects.add(input));
@@ -158,11 +165,15 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("interaction.respond", async ({ interactionId, outcome, optionId, answers }) =>
     services.interactions.respond(interactionId, { outcome, optionId, answers }));
   gateway.register("credential.set", async ({ agentInstanceId, apiKey, envName }) => {
+    if (agentInstanceId.startsWith("connection:")) throw new CoreError("IPC_INVALID_REQUEST", { field: "agentInstanceId", reason: "Connection credentials are revisioned; use connection.upsert" });
     services.credentials.set(agentInstanceId, { apiKey, envName });
     return { stored: true } as const;
   });
   gateway.register("credential.status", async ({ agentInstanceId }) => ({ stored: services.credentials.has(agentInstanceId) }));
-  gateway.register("credential.delete", async ({ agentInstanceId }) => ({ removed: services.credentials.remove(agentInstanceId) }));
+  gateway.register("credential.delete", async ({ agentInstanceId }) => {
+    if (agentInstanceId.startsWith("connection:")) throw new CoreError("IPC_INVALID_REQUEST", { field: "agentInstanceId", reason: "Connection credentials are revisioned; use connection.upsert" });
+    return { removed: services.credentials.remove(agentInstanceId) };
+  });
   gateway.register("recovery.list", async () => services.recovery.list());
   gateway.register("audit.list", async (input) => services.audit.list(input));
   gateway.register("metrics.get", async ({ projectId }) => services.metrics.snapshot(projectId));

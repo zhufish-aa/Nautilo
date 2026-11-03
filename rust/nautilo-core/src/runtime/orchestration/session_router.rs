@@ -33,6 +33,12 @@ impl SessionRouter {
                 );
                 updated.insert("updatedAt".to_string(), json!(now_iso()));
                 let updated = Value::Object(updated);
+                {
+                    let db = self.db.lock().unwrap();
+                    if crate::application::session_service::effective_agent_id(&db.raw,&existing)? != crate::application::session_service::effective_agent_id(&db.raw,&updated)? {
+                        return Err(crate::errors::invalid("agentInstanceId","An existing session cannot change Agent during team routing"));
+                    }
+                }
                 Repositories::new(&self.db.lock().unwrap().raw).sessions().save(&updated)?;
                 return Ok(updated);
             }
@@ -44,7 +50,9 @@ impl SessionRouter {
             &format!("Run: {}", goal.chars().take(80).collect::<String>()),
             &json!({
                 "teamId": team.get("id").cloned().unwrap_or(Value::Null),
-                "agentInstanceId": project_run.get("mainAgentInstanceId").cloned().unwrap_or(Value::Null)
+                "agentInstanceId": project_run.get("mainAgentInstanceId").cloned().unwrap_or(Value::Null),
+                "connectionId": project_run.get("connectionId").cloned().unwrap_or(Value::Null),
+                "connectionRevision": project_run.get("connectionRevision").cloned().unwrap_or(Value::Null)
             }),
         )
     }
@@ -78,6 +86,11 @@ impl SessionRouter {
                 details.insert("memberId".to_string(), json!(member_id));
                 return Err(CoreError::details(ErrorCode::PlanSchemaInvalid, details));
             };
+            let expected_id = member.get("connectionId").or_else(|| parent.get("connectionId"));
+            let expected_revision = if member.get("connectionId").is_some() { member.get("connectionRevision") } else { parent.get("connectionRevision") };
+            if target.get("connectionId") != expected_id || (expected_revision.is_some() && target.get("connectionRevision") != expected_revision) {
+                return Err(crate::errors::invalid("connectionId","Continued delegated session uses a different provider/account; create a new delegated session"));
+            }
             let mut continued = target.as_object().cloned().unwrap_or_default();
             continued.insert("projectRunId".to_string(), project_run.get("id").cloned().unwrap_or(Value::Null));
             continued.insert("parentSessionId".to_string(), json!(parent_id));
@@ -99,6 +112,11 @@ impl SessionRouter {
                     && session.get("taskId").and_then(Value::as_str) == Some(task_id)
             });
         if let Some(existing) = existing {
+            let expected_id = member.get("connectionId").or_else(|| parent.get("connectionId"));
+            let expected_revision = if member.get("connectionId").is_some() { member.get("connectionRevision") } else { parent.get("connectionRevision") };
+            if existing.get("connectionId") != expected_id || (expected_revision.is_some() && existing.get("connectionRevision") != expected_revision) {
+                return Err(crate::errors::invalid("connectionId","Existing delegated task belongs to a different provider/account; create a new task session"));
+            }
             return Ok(existing);
         }
         self.create(
@@ -109,6 +127,8 @@ impl SessionRouter {
                 "teamId": team.get("id").cloned().unwrap_or(Value::Null),
                 "parentSessionId": parent.get("id").cloned().unwrap_or(Value::Null),
                 "taskId": task_id,
+                "connectionId": member.get("connectionId").or_else(|| parent.get("connectionId")).cloned().unwrap_or(Value::Null),
+                "connectionRevision": if member.get("connectionId").is_some() { member.get("connectionRevision").cloned().unwrap_or(Value::Null) } else { parent.get("connectionRevision").cloned().unwrap_or(Value::Null) },
                 "model": member.get("model").cloned().unwrap_or(Value::Null),
                 "reasoningEffort": member.get("reasoningEffort").cloned().unwrap_or(Value::Null),
                 "serviceTier": member.get("serviceTier").cloned().unwrap_or(Value::Null)
@@ -129,6 +149,8 @@ impl SessionRouter {
             &json!({
                 "teamId": team.get("id").cloned().unwrap_or(Value::Null),
                 "parentSessionId": previous.get("id").cloned().unwrap_or(Value::Null),
+                "connectionId": previous.get("connectionId").cloned().unwrap_or(Value::Null),
+                "connectionRevision": previous.get("connectionRevision").cloned().unwrap_or(Value::Null),
                 "agentInstanceId": member.as_ref().and_then(|m| m.get("agentInstanceId").cloned()).unwrap_or(Value::Null),
                 "model": member.as_ref().and_then(|m| m.get("model").cloned()).unwrap_or(Value::Null),
                 "reasoningEffort": member.as_ref().and_then(|m| m.get("reasoningEffort").cloned()).unwrap_or(Value::Null),
@@ -153,13 +175,15 @@ impl SessionRouter {
             "updatedAt": now
         });
         let mut session = session.as_object().cloned().unwrap_or_default();
-        for key in ["parentSessionId", "taskId", "agentInstanceId", "model", "reasoningEffort", "serviceTier"] {
+        for key in ["parentSessionId", "taskId", "agentInstanceId", "model", "reasoningEffort", "serviceTier", "connectionId", "connectionRevision"] {
             if let Some(value) = nullable(key) {
                 session.insert(key.to_string(), value);
             }
         }
-        let session = Value::Object(session);
-        Repositories::new(&self.db.lock().unwrap().raw).sessions().save(&session)?;
+        let mut session = Value::Object(session);
+        let db = self.db.lock().unwrap();
+        crate::application::connection_service::bind_session(&db.raw,&mut session,None)?;
+        Repositories::new(&db.raw).sessions().save(&session)?;
         Ok(session)
     }
 }

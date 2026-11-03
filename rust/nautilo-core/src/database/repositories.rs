@@ -107,6 +107,8 @@ impl<'a> Repositories<'a> {
     pub fn agents(&self) -> JsonRepository<'a> {
         JsonRepository::new(self.db, "agents")
     }
+    pub fn runtime_connections(&self) -> JsonRepository<'a> { JsonRepository::new(self.db, "runtime_connections") }
+    pub fn runtime_connection_versions(&self) -> JsonRepository<'a> { JsonRepository::new(self.db, "runtime_connection_versions") }
     pub fn teams(&self) -> JsonRepository<'a> {
         JsonRepository::new(self.db, "teams")
     }

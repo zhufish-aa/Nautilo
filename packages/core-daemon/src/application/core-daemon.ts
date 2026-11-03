@@ -1,3 +1,4 @@
+import { ConnectionService } from "./connection-service.js";
 import { CodexAdapter } from "../adapters/codex/adapter.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +45,7 @@ export class CoreDaemon {
   readonly runs: RunService;
   readonly projects: ProjectService;
   readonly agents: AgentService;
+  readonly connections: ConnectionService;
   readonly teams: TeamService;
   readonly sessions: SessionService;
   readonly projections: ProjectionService;
@@ -93,6 +95,7 @@ export class CoreDaemon {
     );
     this.projects = new ProjectService(this.database);
     this.agents = new AgentService(this.database, this.adapters, this.credentials, this.environment);
+    this.connections = new ConnectionService(this.database, this.credentials, this.adapters, this.environment);
     this.teams = new TeamService(this.database);
     this.sessions = new SessionService(this.database, this.runs, this.events);
     this.projections = new ProjectionService(this.database);

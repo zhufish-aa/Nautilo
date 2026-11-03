@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { EnvironmentPolicyService, isolateLoginProfile } from "../security/environment-policy.js";
 import type { AgentInstance } from "@agenthub/domain";
 import type { RuntimeToolCall, RuntimeToolResult, RuntimeToolSpec } from "../../adapters/runtime-tools.js";
 import type { Database } from "../../database/index.js";
@@ -29,7 +31,7 @@ export function supportsOfficialWebSearch(agent: AgentInstance, database: Databa
   if (agent.providerOptions?.webSearchMode !== "official") return false;
   const targetId = stringValue(agent.providerOptions?.webSearchInstanceId);
   const target = targetId ? database.agents.get(targetId) : undefined;
-  return !!target && target.enabled && target.status !== "disabled" && target.providerId === "codex";
+  return !!target && target.enabled && target.status !== "disabled" && target.providerId === "codex" && target.providerOptions?.wireApi !== "anthropic";
 }
 
 export async function executeOfficialWebSearch(
@@ -47,19 +49,30 @@ export async function executeOfficialWebSearch(
     return { success: false, content: "The selected web search instance must use the Codex adapter." };
   }
 
+  if (target.providerOptions?.wireApi === "anthropic") {
+    return { success: false, content: "Anthropic Messages compatibility does not support native web search. Select a Responses or Chat search instance." };
+  }
+
   const baseUrl = stringValue(target.providerOptions?.baseUrl) ?? "https://api.openai.com/v1";
   let endpoint: URL;
   try {
-    endpoint = new URL(`${baseUrl.replace(/\/+$/, "")}/responses`);
+    endpoint = new URL(baseUrl);
+    if (!["https:", "http:"].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Invalid search endpoint");
+    if (endpoint.protocol === "http:" && !["127.0.0.1", "[::1]"].includes(endpoint.hostname)) throw new Error("Search requires TLS");
+    endpoint.pathname = endpoint.pathname.replace(/\/+$/, "");
+    if (!endpoint.pathname.endsWith("/responses")) endpoint.pathname += "/responses";
   } catch {
-    return { success: false, content: "The selected official search instance has an invalid API URL." };
+    return { success: false, content: "The selected search instance needs an HTTPS API URL without credentials, query parameters or fragments. Local HTTP requires a literal loopback address." };
   }
-  const environment = credentials.environment(target.id, target.providerId);
+  let environment: Record<string, string>;
+  try { environment = buildOfficialSearchEnvironment(target, credentials.environment(target.id, target.providerId)); }
+  catch { return { success: false, content: "The selected search account profile is invalid. Check its login directory and connection settings." }; }
   const apiKey = environment.OPENAI_API_KEY ?? environment.CODEX_API_KEY ?? environment.AGENTHUB_API_KEY;
 
   const argumentsValue = parseArguments(call.arguments);
   const query = stringValue(argumentsValue.query)?.trim();
   if (!query) return { success: false, content: "Search query cannot be empty." };
+  if (Buffer.byteLength(query, "utf8") > 64 * 1024) return { success: false, content: "Search query exceeds the 64 KiB limit." };
   const contextSize = argumentsValue.search_context_size === "low" || argumentsValue.search_context_size === "high"
     ? argumentsValue.search_context_size
     : "medium";
@@ -109,15 +122,16 @@ async function executePersistentCodexWebSearch(
   environment: Record<string, string | undefined>,
   reasoningEffort?: string
 ): Promise<RuntimeToolResult> {
-  let worker = persistentSearchWorkers.get(target.id);
+  const workerKey = officialSearchWorkerKey(target, environment);
+  let worker = persistentSearchWorkers.get(workerKey);
   if (!worker || worker.closed) {
     worker = new PersistentCodexSearchWorker(target, model, environment);
-    persistentSearchWorkers.set(target.id, worker);
+    persistentSearchWorkers.set(workerKey, worker);
   }
   try {
     return { success: true, content: await worker.search(query, model, reasoningEffort) };
   } catch (error) {
-    persistentSearchWorkers.delete(target.id);
+    persistentSearchWorkers.delete(workerKey);
     await worker.close();
     return { success: false, content: `Codex native web search failed: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -154,7 +168,7 @@ class PersistentCodexSearchWorker {
       command: invocation.command,
       args: invocation.args,
       cwd: process.cwd(),
-      env: { ...process.env, ...environment },
+      env: environment,
       idleTimeoutMs: 5 * 60_000,
       maxOutputBytes: 8 * 1024 * 1024
     });
@@ -243,10 +257,11 @@ async function executeResponsesWebSearch(
   apiKey: string,
   reasoningEffort?: string
 ): Promise<RuntimeToolResult> {
-  let response: Response;
   try {
-    response = await fetch(endpoint, {
+    const response = await fetch(endpoint, {
       method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(120_000),
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
         model,
@@ -257,15 +272,43 @@ async function executeResponsesWebSearch(
         ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {})
       })
     });
-  } catch (error) {
-    return { success: false, content: `Web search request failed: ${error instanceof Error ? error.message : String(error)}` };
+    if (!response.ok) {
+      await response.body?.cancel();
+      return { success: false, content: `Web search failed (${response.status}).` };
+    }
+    const body = recordValue(JSON.parse(await readSearchResponse(response)));
+    if (!body || body.error || body.status === "failed" || body.status === "incomplete"
+      || !(stringValue(body.output_text)?.trim() || extractResponsesMessageText(body.output))) {
+      return { success: false, content: "Web search returned an invalid or incomplete response." };
+    }
+    return { success: true, content: formatSearchResult(body) };
+  } catch {
+    // Provider errors may contain credentials or echo the private search query.
+    return { success: false, content: "Web search request failed, timed out or exceeded the response limit." };
   }
-  const body = await response.json().catch(() => ({})) as RecordValue;
-  if (!response.ok) {
-    const error = recordValue(body.error);
-    return { success: false, content: `Web search failed (${response.status}): ${stringValue(error?.message) ?? "unknown error"}` };
+}
+
+async function readSearchResponse(response: Response): Promise<string> {
+  const limit = 8 * 1024 * 1024;
+  if (Number(response.headers.get("content-length")) > limit) {
+    await response.body?.cancel();
+    throw new Error("Search response exceeds size limit");
   }
-  return { success: true, content: formatSearchResult(body) };
+  if (!response.body) throw new Error("Missing search response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new Error("Search response exceeds size limit");
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+
 }
 
 async function executeNativeOfficialWebSearch(
@@ -293,7 +336,7 @@ async function executeNativeOfficialWebSearch(
     cwd: process.cwd(),
     model,
     ...(reasoningEffort ? { reasoningEffort } : {}),
-    env: { ...process.env, ...environment },
+    env: environment,
     timeoutMs: 120_000,
     idleTimeoutMs: 60_000,
     maxOutputBytes: 8 * 1024 * 1024
@@ -373,4 +416,15 @@ function recordValue(value: unknown): RecordValue | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/** Search is a separate execution boundary: never inherit the full daemon env. */
+export function buildOfficialSearchEnvironment(target: AgentInstance, credentialEnvironment: Record<string, string>): Record<string, string> {
+  return isolateLoginProfile(target, new EnvironmentPolicyService().build(undefined, credentialEnvironment));
+}
+
+/** An edited account/endpoint or rotated credential must never reuse an old CLI thread.
+ * Hash env values instead of retaining credentials in a readable cache key. */
+export function officialSearchWorkerKey(target: AgentInstance, environment: Record<string, string | undefined>): string {
+  return createHash("sha256").update(JSON.stringify([target.id, target.executable, target.baseArgs, target.profile, target.providerOptions, Object.entries(environment).sort(([a], [b]) => a.localeCompare(b))])).digest("hex");
 }

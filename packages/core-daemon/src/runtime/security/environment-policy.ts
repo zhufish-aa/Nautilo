@@ -1,3 +1,5 @@
+import { isAbsolute, join } from "node:path";
+import { CoreError } from "../../errors.js";
 import type { AgentInstance, PermissionPolicy } from "@agenthub/domain";
 
 const PLATFORM_KEYS = process.platform === "win32"
@@ -42,4 +44,36 @@ export class EnvironmentPolicyService {
     for (const [key, value] of Object.entries(additions)) if (value !== undefined) environment[key] = value;
     return environment;
   }
+}
+
+/** Profile directories are owned by the official CLI. Never read/copy credentials. */
+export function loginProfileDirectory(instance: AgentInstance): string | undefined {
+  const raw = instance.providerOptions?.loginProfileDirectory;
+  if (raw === undefined || raw === "") return undefined;
+  if (typeof raw !== "string" || !raw.trim() || !isAbsolute(raw.trim()) || /[\r\n\0]/.test(raw)) {
+    throw new CoreError("IPC_INVALID_REQUEST", { field: "loginProfileDirectory", reason: "Use an absolute account configuration directory" });
+  }
+  if (!["codex", "claude-code"].includes(instance.providerId)) {
+    throw new CoreError("IPC_INVALID_REQUEST", { field: "loginProfileDirectory", reason: "This harness does not support isolated login profiles" });
+  }
+  if (instance.providerOptions?.baseUrl || instance.baseArgs.length || instance.profile) {
+    throw new CoreError("IPC_INVALID_REQUEST", { field: "loginProfileDirectory", reason: "Account profiles cannot be combined with API endpoints, CLI profiles, or custom arguments" });
+  }
+  return raw.trim();
+}
+
+/** Apply LAST, after allowlists and stored credentials, to prevent API credentials
+ * from silently taking precedence over the selected CLI login. */
+export function isolateLoginProfile(instance: AgentInstance, environment: Record<string, string>): Record<string, string> {
+  const directory = loginProfileDirectory(instance);
+  if (!directory) return environment;
+  const isolated = { ...environment };
+  for (const key of Object.keys(isolated)) {
+    if (/^(OPENAI_|CODEX_|ANTHROPIC_|CLAUDE_CODE_(OAUTH|API|USE_|SESSION_ACCESS)|CLAUDE_CONFIG_DIR$|AGENTHUB_API_KEY$)/i.test(key)) delete isolated[key];
+  }
+  isolated[instance.providerId === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"] = directory;
+  // Official WIF resolution honors this before HOME/APPDATA. A global active
+  // federation profile can otherwise outrank the selected claude.ai login.
+  if (instance.providerId === "claude-code") isolated.ANTHROPIC_CONFIG_DIR = join(directory, "anthropic");
+  return isolated;
 }

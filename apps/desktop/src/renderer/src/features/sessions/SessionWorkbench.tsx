@@ -250,9 +250,10 @@ export function SessionWorkbench({
     <div className="conversation-workspace relative flex h-full min-h-0 min-w-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="workspace-conversation-header relative flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-3 sm:px-7">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <h1 title={`${project?.name ?? ""} · ${targetName}`} className="truncate text-[15px] font-medium text-ink">{session.title || t("sessions.header.untitled")}</h1>
+            <span data-testid="session-fixed-agent" title={locale === "zh-CN" ? "会话 Agent 已固定；账号、供应商和模型可在下方选择，下一轮生效。" : "Agent is fixed for this conversation. Change account, provider or model below for the next message."} className="inline-flex max-w-48 shrink-0 items-center gap-1.5 rounded-md border border-line bg-surface/50 px-2 py-1 text-xs text-muted"><span aria-hidden>◈</span><span className="truncate">{targetName}</span></span>
             {(visibleStatus === "running" || visibleStatus === "waiting_approval" || visibleStatus === "failed") && <StatusChip
               tone={visibleStatus === "running" ? "accent" : visibleStatus === "waiting_approval" ? "warn" : visibleStatus === "failed" ? "danger" : "muted"}
               label={t(`sessions.status.${visibleStatus}` as MessageKey)}

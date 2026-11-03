@@ -36,6 +36,9 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
     const last = record(usage.last ?? usage);
     return [{
       kind: "usage",
+      usageScope: "session",
+      usageKey: text(params.threadId),
+      inputTokensIncludesCache: true,
       inputTokens: typeof total.inputTokens === "number" ? total.inputTokens : undefined,
       cachedInputTokens: typeof total.cachedInputTokens === "number" ? total.cachedInputTokens : undefined,
       outputTokens: typeof total.outputTokens === "number" ? total.outputTokens : undefined,

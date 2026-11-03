@@ -1,3 +1,4 @@
+import { useUsageStore } from "../stores/usage";
 import type {
   AgentInstance,
   AgentRun,
@@ -485,7 +486,7 @@ const sessionConfigWrites = new Map<string, Promise<void>>();
 
 export async function configureWorkbenchSession(
   sessionId: string,
-  patch: { model?: string; reasoningEffort?: string; serviceTier?: string; permissionMode?: string }
+  patch: { model?: string; reasoningEffort?: string; serviceTier?: string; permissionMode?: string; connectionId?: string | null; connectionRevision?: number; confirmConnectionChange?: boolean }
 ): Promise<void> {
   const previous = sessionConfigWrites.get(sessionId) ?? Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
@@ -493,11 +494,15 @@ export async function configureWorkbenchSession(
     const session = state.sessions.find((item) => item.id === sessionId);
     if (!session) throw new Error(`Session ${sessionId} is missing`);
     if (!getBridge()) throw new Error("Core Daemon is unavailable");
+    if ([state.running[sessionId]?.status, state.foreground[sessionId]?.status].some(status => status === "running" || status === "waiting_approval") || (state.queuedFollowUps[sessionId]?.length ?? 0) > 0) throw new Error("Wait for the current request and queued messages to finish before changing configuration");
     try {
       // Serialize edits and only publish a configuration the daemon saved.
       // Failed permission changes leave the previous visible value intact.
-      await requestCore<DomainSession>("session.upsert", toDomainSession({ ...session, ...patch }));
-      state._configureSession(sessionId, patch);
+      const { confirmConnectionChange, connectionId, ...configuration } = patch;
+      const hasConnection = Object.prototype.hasOwnProperty.call(patch, "connectionId");
+      const input = toDomainSession({ ...session, ...configuration, ...(hasConnection ? { connectionId: connectionId ?? undefined } : {}) });
+      const saved = await requestCore<DomainSession>("session.upsert", { ...input, ...(hasConnection ? { connectionId: connectionId ?? null } : {}), ...(confirmConnectionChange ? { confirmConnectionChange: true } : {}) });
+      state._configureSession(sessionId, { ...configuration, ...(hasConnection ? { connectionId: saved.connectionId, connectionRevision: saved.connectionRevision } : {}) });
     } catch (error) {
       state._append(sessionId, { kind: "error", code: "SESSION_CONFIG_FAILED", message: error instanceof Error ? error.message : String(error), retryable: true });
       throw error;
@@ -508,30 +513,11 @@ export async function configureWorkbenchSession(
   finally { if (sessionConfigWrites.get(sessionId) === write) sessionConfigWrites.delete(sessionId); }
 }
 
-/**
- * Rebinds a session to another agent instance of the same provider (i.e. a
- * different API source). The Core Daemon treats an agentInstanceId change as a
- * provider-thread boundary: it resets the native thread and replays the message
- * history into the new instance on the next send.
- */
+/** Session Agent identity is immutable; create a new conversation to change it. */
 export async function switchWorkbenchSessionInstance(sessionId: string, instanceId: string): Promise<void> {
-  const session = useSessionsStore.getState().sessions.find((item) => item.id === sessionId);
-  if (!session || session.target.type !== "agent") throw new Error(`Session ${sessionId} is not an agent session`);
-  const target = session.target;
-  if (target.instanceId === instanceId) return;
-  const agents = useAgentsStore.getState();
-  const current = agents.instances.find((item) => item.id === target.instanceId);
-  const next = agents.instances.find((item) => item.id === instanceId);
-  if (!next) throw new Error(`Agent instance ${instanceId} is missing`);
-  if (current && current.providerId !== next.providerId) {
-    throw new Error(`Instance ${next.displayName} belongs to a different provider`);
-  }
-  const updated = useSessionsStore.getState()._setSessionInstance(sessionId, instanceId);
-  if (updated && getBridge()) {
-    await requestCore<AgentInstance>("agent.upsert", toDomainAgent(next));
-    await requestCore<DomainSession>("session.upsert", toDomainSession(updated));
-  }
-  await agents.loadModels(instanceId);
+  const session = useSessionsStore.getState().sessions.find(item => item.id === sessionId);
+  if (session?.target.type === "agent" && session.target.instanceId === instanceId) return;
+  throw new Error("Agent is fixed for this conversation. Start a new conversation to change Agent.");
 }
 
 function clearSessionRuntime(sessionId: string): void {
@@ -760,6 +746,8 @@ function toDomainSession(session: UiSession, _team?: UiTeam): SessionUpsertInput
     parentSessionId: session.parentSessionId,
     taskId: session.taskId,
     agentInstanceId: session.target.type === "agent" ? session.target.instanceId : undefined,
+    connectionId: session.connectionId,
+    connectionRevision: session.connectionRevision,
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     serviceTier: session.serviceTier,
@@ -1117,6 +1105,7 @@ function renderStandaloneCache(sessionId: string): void {
   const store = useSessionsStore.getState();
   store._replaceEvents(sessionId, buildStandaloneTimeline(messages, events, artifacts));
   store._replaceContextUsage(sessionId, latestContextUsage(events));
+  useUsageStore.getState().ingest(sessionId, events);
   store._replaceArtifacts(sessionId, artifacts.flatMap(toUiArtifact));
   store._replaceRawLog(sessionId, buildRawLog(events, artifacts));
 }
@@ -1198,7 +1187,7 @@ function sameTarget(current: SessionTarget, next: SessionTarget): boolean {
 
 /** Compares the persisted fields rendered by the workbench. */
 function sameUiSession(current: UiSession, next: UiSession): boolean {
-  return current.title === next.title && current.model === next.model
+  return current.connectionId === next.connectionId && current.connectionRevision === next.connectionRevision && current.title === next.title && current.model === next.model
     && current.reasoningEffort === next.reasoningEffort && current.serviceTier === next.serviceTier
     && current.permissionMode === next.permissionMode
     && current.mode === next.mode && current.status === next.status
@@ -1414,6 +1403,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     if (timelineDirty) {
       store._replaceEvents(session.id, buildTimeline(detail.messages, feed.events, projectRun, team, tasks, sessionArtifacts, verifications, session.id === projectRun.mainSessionId));
       store._replaceContextUsage(session.id, latestContextUsage(feed.events));
+      useUsageStore.getState().ingest(session.id, feed.events);
       store._replaceRawLog(session.id, buildRawLog(feed.events, sessionArtifacts));
       projectSessionBuilt.add(session.id);
       projectSessionRenderedEvents.set(session.id, feed.events);
@@ -2168,6 +2158,8 @@ function toUiSession(session: DomainSession, projectRun: ProjectRun, team: UiTea
   const mainAgentInstanceId = session.agentInstanceId ?? projectRun.mainAgentInstanceId ?? legacyMain?.agentInstanceId ?? session.memberId;
   return {
     id: session.id,
+    connectionId: session.connectionId,
+    connectionRevision: session.connectionRevision,
     projectId: session.projectId,
     target: isMain ? { type: "agent", instanceId: mainAgentInstanceId, teamId: team.id } : { type: "member", teamId: team.id, memberId: session.memberId },
     title: session.title,

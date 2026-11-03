@@ -9,3 +9,4 @@ export * from "./provider-config.js";
 export * from "./image-generation.js";
 export * from "./chat-completions-run.js";
 export * from "./chat-compat-proxy.js";
+export * from "./anthropic-compat-proxy.js";

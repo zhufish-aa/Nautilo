@@ -27,6 +27,8 @@ export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
     models: instance.models?.length ? instance.models : undefined,
     providerOptions: {
       envPolicyId: instance.envPolicyId,
+      ...(instance.loginProfileDirectory ? { loginProfileDirectory: instance.loginProfileDirectory.trim() } : {}),
+      ...(instance.loginProfileLabel ? { loginProfileLabel: instance.loginProfileLabel.trim() } : {}),
       ...(instance.permissionMode ? { permissionMode: instance.permissionMode } : {}),
       ...(instance.baseUrl ? { baseUrl: instance.baseUrl } : {}),
       ...(instance.apiType ? { apiType: instance.apiType } : {}),
@@ -55,6 +57,8 @@ export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
     profile: instance.profile,
     envPolicyId: typeof instance.providerOptions?.envPolicyId === "string" ? instance.providerOptions.envPolicyId : "env-standard",
     permissionMode: typeof instance.providerOptions?.permissionMode === "string" ? instance.providerOptions.permissionMode : undefined,
+    loginProfileDirectory: typeof instance.providerOptions?.loginProfileDirectory === "string" ? instance.providerOptions.loginProfileDirectory : undefined,
+    loginProfileLabel: typeof instance.providerOptions?.loginProfileLabel === "string" ? instance.providerOptions.loginProfileLabel : undefined,
     baseUrl: typeof instance.providerOptions?.baseUrl === "string" ? instance.providerOptions.baseUrl : undefined,
     apiType: typeof instance.providerOptions?.apiType === "string" ? instance.providerOptions.apiType : undefined,
     wireApi: instance.providerOptions?.wireApi === "chat" ? "chat" : "responses",
@@ -198,6 +202,8 @@ export function toDomainProject(project: UiProject): Project {
 
 export function toStandaloneUiSession(session: Session): UiSession {
   return {
+    connectionId: session.connectionId,
+    connectionRevision: session.connectionRevision,
     id: session.id,
     projectId: session.projectId,
     // Mirror MemberRouter.resolveSession: an explicit agentInstanceId means an

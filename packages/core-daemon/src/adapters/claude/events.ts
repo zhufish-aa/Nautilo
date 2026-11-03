@@ -99,19 +99,24 @@ function parseAssistant(event: RecordValue, state: ClaudeParseState, raw: unknow
   }
   // Per-request usage is the only truthful context-footprint source: the
   // result event's usage is cumulative across every API call of the CLI
-  // session (cache reads included), which overcounts the window massively.
+  // execution (cache reads included), which overcounts the window massively.
   // Sub-agent requests have their own contexts and must not move the indicator.
   if (!subagentDispatchId) {
     const usage = record(message.usage);
     const inputTokens = number(usage.input_tokens);
-    const cachedInputTokens = (number(usage.cache_read_input_tokens) ?? 0) + (number(usage.cache_creation_input_tokens) ?? 0);
-    if (inputTokens !== undefined || cachedInputTokens > 0) {
-      const contextUsed = (inputTokens ?? 0) + cachedInputTokens;
+    const cachedInputTokens = number(usage.cache_read_input_tokens);
+    const cacheCreationInputTokens = number(usage.cache_creation_input_tokens);
+    if (inputTokens !== undefined || cachedInputTokens !== undefined || cacheCreationInputTokens !== undefined) {
+      const contextUsed = (inputTokens ?? 0) + (cachedInputTokens ?? 0) + (cacheCreationInputTokens ?? 0);
       state.lastContextUsed = contextUsed;
       events.push({
         kind: "usage",
+        usageScope: "context",
+        usageKey: text(message.id),
         inputTokens,
-        cachedInputTokens: cachedInputTokens > 0 ? cachedInputTokens : undefined,
+        cachedInputTokens,
+        cacheCreationInputTokens,
+        inputTokensIncludesCache: false,
         outputTokens: number(usage.output_tokens),
         contextUsed,
         contextWindow: state.contextWindow,
@@ -153,16 +158,22 @@ function parseResult(event: RecordValue, state: ClaudeParseState, raw: unknown):
   const modelUsage = Object.values(record(event.modelUsage)).map(record);
   const contextWindow = modelUsage.map((entry) => number(entry.contextWindow)).find((value) => value !== undefined);
   if (contextWindow !== undefined) state.contextWindow = contextWindow;
-  // result.usage totals are cumulative across the whole CLI session; they stay
+  // result.usage totals are cumulative across this CLI execution; they stay
   // useful as throughput numbers, but contextUsed must come from the latest
   // single request (tracked in parseAssistant), never from these sums.
   const inputTokens = number(usage.input_tokens);
-  const cachedInputTokens = (number(usage.cache_read_input_tokens) ?? 0) + (number(usage.cache_creation_input_tokens) ?? 0);
-  if (inputTokens !== undefined || cachedInputTokens > 0 || number(usage.output_tokens) !== undefined) {
+  const cachedInputTokens = number(usage.cache_read_input_tokens);
+  const cacheCreationInputTokens = number(usage.cache_creation_input_tokens);
+  if (inputTokens !== undefined || cachedInputTokens !== undefined || cacheCreationInputTokens !== undefined || number(usage.output_tokens) !== undefined || number(event.total_cost_usd) !== undefined) {
     events.push({
       kind: "usage",
+      usageScope: "turn",
+      reportedCost: number(event.total_cost_usd),
+      currency: number(event.total_cost_usd) !== undefined ? "USD" : undefined,
       inputTokens,
-      cachedInputTokens: cachedInputTokens > 0 ? cachedInputTokens : undefined,
+      cachedInputTokens,
+      cacheCreationInputTokens,
+      inputTokensIncludesCache: false,
       outputTokens: number(usage.output_tokens),
       contextUsed: state.lastContextUsed,
       contextWindow,

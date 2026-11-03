@@ -73,12 +73,12 @@ export class CodexAdapter extends ProcessAdapter {
   }
   override start(request: AdapterStartRequest): AdapterRun {
     assertCodexAppServerRunning(this.appServerOwner);
-    if (resolveCodexWireApi(request.instance) === "chat") return startCodexChatCompatAppServer(request, false, { owner: this.appServerOwner });
+    if (resolveCodexWireApi(request.instance) !== "responses") return startCodexChatCompatAppServer(request, false, { owner: this.appServerOwner, anthropic: resolveCodexWireApi(request.instance) === "anthropic" });
     return request.instance.baseArgs.length ? super.start(request) : startCodexAppServer(request, false, { owner: this.appServerOwner });
   }
   override resume(request: AdapterResumeRequest): AdapterRun {
     assertCodexAppServerRunning(this.appServerOwner);
-    if (resolveCodexWireApi(request.instance) === "chat") return startCodexChatCompatAppServer(request, true, { owner: this.appServerOwner });
+    if (resolveCodexWireApi(request.instance) !== "responses") return startCodexChatCompatAppServer(request, true, { owner: this.appServerOwner, anthropic: resolveCodexWireApi(request.instance) === "anthropic" });
     return request.instance.baseArgs.length ? super.resume(request) : startCodexAppServer(request, true, { owner: this.appServerOwner });
   }
   listModels(instance: AgentInstance, context?: AdapterDiscoveryContext) { return discoverCodexModels(instance, context); }

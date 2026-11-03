@@ -45,7 +45,15 @@ export type AdapterEvent =
   | { kind: "file"; path: string; changeType?: string; additions?: number; deletions?: number; diff?: string; raw?: unknown }
   | { kind: "session"; providerSessionId: string; raw?: unknown }
   | { kind: "status"; phase: "turn_started" | "turn_completed" | "turn_failed"; raw?: unknown }
-  | { kind: "usage"; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningOutputTokens?: number; contextUsed?: number; contextWindow?: number; raw?: unknown }
+  /** Usage is a replacement snapshot for (usageScope, usageKey), never a delta.
+   * context is footprint-only; turn is one CLI execution; session is a provider thread total.
+   * Missing scope means accounting is unknown. Missing numbers are unavailable, not zero.
+   * cachedInputTokens counts cache reads; cacheCreationInputTokens counts cache writes.
+   * inputTokensIncludesCache declares whether those are subsets of inputTokens.
+   * reasoningOutputTokens is a subset of outputTokens, not additional output.
+   * reportedCost is provider accounting, not proof of billing (including subscriptions).
+   */
+  | { kind: "usage"; usageScope?: "context" | "turn" | "session"; usageKey?: string; inputTokensIncludesCache?: boolean; cacheCreationInputTokens?: number; reportedCost?: number; estimatedCost?: number; currency?: string; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningOutputTokens?: number; contextUsed?: number; contextWindow?: number; raw?: unknown }
   | { kind: "commands"; commands: Array<{ name: string; description: string; inputHint?: string; providerCommand?: "compact" }>; raw?: unknown }
   | { kind: "artifact"; artifactType: "image" | "file"; name: string; mimeType?: string; data?: string; path?: string; raw?: unknown }
   | { kind: "raw"; stream: "stdout" | "stderr"; text: string }

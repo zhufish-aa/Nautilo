@@ -1,3 +1,4 @@
+import { privateClaudeConfig } from "./private-config.js";
 import type { AgentInstance, ProviderModelCatalog } from "@agenthub/domain";
 import type { ProcessHandle } from "../../process-runtime.js";
 import { ProcessAdapter, streamEvents } from "../process-adapter.js";
@@ -105,9 +106,12 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
     const state = createClaudeParseState();
     let handle: ProcessHandle | undefined;
     let bridge: RuntimeMcpBridge | undefined;
+    let config: Awaited<ReturnType<typeof privateClaudeConfig>> | undefined;
+    let cancelled = false;
 
     const events = async function* (this: ClaudeCodeAdapter): AsyncGenerator<AdapterEvent> {
       try {
+        if (cancelled) return;
         let args = resume
           ? buildClaudeResumeArgs(instance, (request as AdapterResumeRequest).providerSessionId, request.prompt, request as AdapterResumeRequest)
           : buildClaudeStartArgs(instance, request.prompt, request);
@@ -125,9 +129,12 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
           // Keep the prompt in the final position after injecting MCP flags.
           args = [...args.slice(0, -1), ...injectedArgs, args.at(-1)!];
         }
+        if (cancelled) return;
+        config = await privateClaudeConfig(args);
+        if (cancelled) return;
         handle = this.runtime.start({
           command: instance.executable,
-          args,
+          args: config.args,
           cwd: request.cwd,
           // The CLI gates output_config.effort behind a hardcoded model-name
           // allowlist (only the *-4-6 families in 2.1.x), so an explicit user
@@ -140,12 +147,15 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
           idleTimeoutMs: request.idleTimeoutMs,
           maxOutputBytes: request.maxOutputBytes ?? 20 * 1024 * 1024
         });
+        await config.recordChild(handle.pid);
         handle.child.stdin.end();
         yield* streamEvents(handle, true, (value) => parseClaudeJsonEvent(value, state));
       } catch (error) {
         yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
       } finally {
+        await handle?.cancel().catch(() => undefined);
         await bridge?.close().catch(() => undefined);
+        await config?.cleanup();
       }
     }.call(this);
 
@@ -162,8 +172,10 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
       },
       write: (input: string) => handle?.write(input),
       cancel: async () => {
+        cancelled = true;
         await handle?.cancel();
         await bridge?.close().catch(() => undefined);
+        await config?.cleanup();
       },
       wait: () => (handle ? handle.wait() : Promise.resolve({ exitCode: null }))
     };

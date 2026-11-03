@@ -54,6 +54,8 @@ interface SessionsState {
   startEditingMessage: (sessionId: string, messageId: string, text: string) => void;
   cancelEditingMessage: () => void;
   createSession: (input: {
+    connectionId?: string;
+    connectionRevision?: number;
     projectId: string;
     target: SessionTarget;
     title: string;
@@ -71,8 +73,8 @@ interface SessionsState {
   _setRunning: (sessionId: string, run: RunLifecycle | undefined) => void;
   _setForeground: (sessionId: string, run: RunLifecycle | undefined) => void;
   _setActiveAgentRun: (sessionId: string, runId: string | undefined) => void;
-  _configureSession: (sessionId: string, patch: Pick<Partial<UiSession>, "title" | "model" | "reasoningEffort" | "serviceTier" | "permissionMode">) => UiSession | undefined;
-  /** Rebinds an agent-targeted session to another instance of the same provider, resetting model overrides. */
+  _configureSession: (sessionId: string, patch: Pick<Partial<UiSession>, "title" | "model" | "reasoningEffort" | "serviceTier" | "permissionMode" | "connectionId" | "connectionRevision">) => UiSession | undefined;
+  /** Compatibility guard: Agent identity cannot be rebound in an existing session. */
   _setSessionInstance: (sessionId: string, instanceId: string) => UiSession | undefined;
   _upsertTask: (sessionId: string, task: SessionTask) => void;
   _appendRaw: (sessionId: string, lines: string[]) => void;
@@ -162,10 +164,12 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       startEditingMessage: (sessionId, messageId, text) => set({ editingMessage: { sessionId, messageId, text } }),
       cancelEditingMessage: () => set({ editingMessage: undefined }),
 
-      createSession: ({ projectId, target, title, model, reasoningEffort, serviceTier, permissionMode, parentSessionId, runId, mode }) => {
+      createSession: ({ connectionId, connectionRevision, projectId, target, title, model, reasoningEffort, serviceTier, permissionMode, parentSessionId, runId, mode }) => {
         const now = new Date().toISOString();
         const session: UiSession = {
           id: newId("sess"),
+          connectionId,
+          connectionRevision,
           projectId,
           target,
           title,
@@ -287,22 +291,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       },
 
       _setSessionInstance: (sessionId, instanceId) => {
-        const session = get().sessions.find((item) => item.id === sessionId);
+        const session = get().sessions.find(item => item.id === sessionId);
         if (!session || session.target.type !== "agent") return undefined;
-        const updated: UiSession = {
-          ...session,
-          target: { ...session.target, instanceId },
-          // Model overrides belong to the previous instance's catalog; clear
-          // them so the new instance's defaults apply.
-          model: undefined,
-          reasoningEffort: undefined,
-          serviceTier: undefined,
-          updatedAt: new Date().toISOString()
-        };
-        set((state) => ({
-          sessions: state.sessions.map((item) => item.id === sessionId ? updated : item)
-        }));
-        return updated;
+        if (session.target.instanceId !== instanceId) throw new Error("Agent is fixed for this conversation. Start a new conversation to change Agent.");
+        return session;
       },
 
       _upsertTask: (sessionId, task) =>

@@ -44,6 +44,7 @@ pub struct Daemon {
     pub adapters: AdapterRegistry,
     pub runs: std::sync::Arc<RunService>,
     pub agents: AgentService,
+    pub connections: crate::application::ConnectionService,
     pub interactions: std::sync::Arc<InteractionService>,
     pub slash_commands: SlashCommandService,
     pub capability_imports: CapabilityImportService,
@@ -115,6 +116,7 @@ impl Daemon {
                 orchestration
             },
             plugins: PluginService::new(&data_dir.clone(), adapters.clone()),
+            connections: crate::application::ConnectionService::new(db.clone(), credentials.clone(), adapters.clone()),
             agents,
             adapters,
             runs,
@@ -156,6 +158,7 @@ impl Daemon {
             "health.get",
             "project.list",
             "agent.list",
+            "connection.list", "connection.get", "connection.models",
             "team.list",
             "team.get",
             "capability.list",

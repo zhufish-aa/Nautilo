@@ -3,7 +3,7 @@ import type { AdapterDetectionResult, ProviderNativeCommand } from "../adapters/
 import { AdapterRegistry, discoverOpenAiCompatibleModels, mergeInstanceModelConfig } from "../adapters/index.js";
 import { Database } from "../database/index.js";
 import { CoreError } from "../errors.js";
-import { CredentialService, EnvironmentPolicyService, providerEnvironmentPassthrough } from "../runtime/security/index.js";
+import { CredentialService, EnvironmentPolicyService, providerEnvironmentPassthrough, isolateLoginProfile, loginProfileDirectory } from "../runtime/security/index.js";
 
 export class AgentService {
   constructor(
@@ -28,6 +28,13 @@ export class AgentService {
   upsert(instance: AgentInstance): AgentInstance {
     if (!instance.executable.trim()) {
       throw new CoreError("IPC_INVALID_REQUEST", { field: "executable" });
+    }
+    const directory = loginProfileDirectory(instance);
+    const current = this.database.agents.get(instance.id);
+    if (current && (directory !== loginProfileDirectory(current) || instance.providerId !== current.providerId)
+      && (this.database.sessions.listAll().some((session) => session.agentInstanceId === instance.id)
+        || this.database.runs.list().some((run) => run.agentInstanceId === instance.id))) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "loginProfileDirectory", reason: "Create a new instance to switch accounts; existing sessions retain their account" });
     }
     this.database.agents.save(instance, instance.updatedAt);
     return instance;
@@ -105,7 +112,7 @@ export class AgentService {
       const credentialEnvironment = { ...(this.credentials?.environment(instance.id, instance.providerId) ?? {}) };
       if (apiKey) for (const key of descriptor?.credentialEnv ?? []) credentialEnvironment[key] = apiKey;
       const context = {
-        env: this.environment.build(undefined, { ...providerEnvironmentPassthrough(instance, process.env, descriptor), ...credentialEnvironment })
+        env: isolateLoginProfile(instance, this.environment.build(undefined, { ...providerEnvironmentPassthrough(instance, process.env, descriptor), ...credentialEnvironment }))
       };
       // Instance-editor quick fetch must honor the unsaved endpoint currently
       // visible in the form. Once the user supplies a base URL, never silently

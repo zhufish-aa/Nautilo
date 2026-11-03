@@ -16,6 +16,7 @@ use crate::process_runtime::{ProcessRequest, ProcessRuntime};
 use crate::adapters::runtime_mcp_bridge::{start_runtime_mcp_bridge, PERMISSION_PROMPT_TOOL_NAME};
 
 pub mod models;
+mod private_config;
 
 pub const CLAUDE_RUNTIME_MCP_SERVER: &str = "agenthub";
 const CLAUDE_PERMISSION_MODES: [&str; 6] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "dontAsk"];
@@ -367,19 +368,26 @@ fn parse_assistant(event: &Value, state: &mut ClaudeParseState, raw: &Value, sub
         }
     }
     // Per-request usage is the only truthful context-footprint source; the
-    // result event's usage is cumulative across the CLI session. Sub-agent
+    // result event's usage is cumulative across this CLI execution. Sub-agent
     // requests must not move the indicator.
     if subagent_dispatch_id.is_none() {
         let usage = message.get("usage").cloned().unwrap_or(Value::Null);
         let input_tokens = usage.get("input_tokens").and_then(number_of);
         let cached = usage.get("cache_read_input_tokens").and_then(number_of).unwrap_or(0)
             + usage.get("cache_creation_input_tokens").and_then(number_of).unwrap_or(0);
-        if input_tokens.is_some() || cached > 0 {
+        if input_tokens.is_some() || usage.get("cache_read_input_tokens").and_then(number_of).is_some() || usage.get("cache_creation_input_tokens").and_then(number_of).is_some() {
             let context_used = input_tokens.unwrap_or(0) + cached;
             state.last_context_used = Some(context_used);
             events.push(AdapterEvent::Usage {
+                usage_scope: Some("context".to_string()),
+                usage_key: message.get("id").and_then(text_of),
+                input_tokens_includes_cache: Some(false),
+                cache_creation_input_tokens: usage.get("cache_creation_input_tokens").and_then(number_of),
+                reported_cost: None,
+                estimated_cost: None,
+                currency: None,
                 input_tokens,
-                cached_input_tokens: if cached > 0 { Some(cached) } else { None },
+                cached_input_tokens: usage.get("cache_read_input_tokens").and_then(number_of),
                 output_tokens: usage.get("output_tokens").and_then(number_of),
                 reasoning_output_tokens: None,
                 context_used: Some(context_used),
@@ -435,13 +443,18 @@ fn parse_result(event: &Value, state: &mut ClaudeParseState, raw: &Value) -> Vec
     // result.usage totals are cumulative; contextUsed stays with the latest
     // single request tracked in parse_assistant.
     let input_tokens = usage.get("input_tokens").and_then(number_of);
-    let cached = usage.get("cache_read_input_tokens").and_then(number_of).unwrap_or(0)
-        + usage.get("cache_creation_input_tokens").and_then(number_of).unwrap_or(0);
     let output_tokens = usage.get("output_tokens").and_then(number_of);
-    if input_tokens.is_some() || cached > 0 || output_tokens.is_some() {
+    if input_tokens.is_some() || usage.get("cache_read_input_tokens").is_some() || usage.get("cache_creation_input_tokens").is_some() || output_tokens.is_some() || event.get("total_cost_usd").and_then(Value::as_f64).is_some() {
         events.push(AdapterEvent::Usage {
+            usage_scope: Some("turn".to_string()),
+            usage_key: None,
+            input_tokens_includes_cache: Some(false),
+            cache_creation_input_tokens: usage.get("cache_creation_input_tokens").and_then(number_of),
+            reported_cost: event.get("total_cost_usd").and_then(Value::as_f64),
+            estimated_cost: None,
+            currency: event.get("total_cost_usd").and_then(Value::as_f64).map(|_| "USD".to_string()),
             input_tokens,
-            cached_input_tokens: if cached > 0 { Some(cached) } else { None },
+            cached_input_tokens: usage.get("cache_read_input_tokens").and_then(number_of),
             output_tokens,
             reasoning_output_tokens: None,
             context_used: state.last_context_used,
@@ -919,22 +932,27 @@ impl ClaudeCodeAdapter {
                     pump.await;
                 }
                 Err(error) => {
+                    let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
                     let _ = ready_sender.send(Err(error));
                 }
             }
         });
         let handle_placeholder = shared_handle_slot();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ready_cancelled = cancelled.clone();
         let cancel_slot = handle_placeholder.clone();
         let write_slot = handle_placeholder.clone();
         tokio::spawn(async move {
             if let Ok(Ok(handle)) = ready_receiver.await {
-                *handle_placeholder.lock().unwrap() = Some(handle);
+                *handle_placeholder.lock().unwrap() = Some(handle.clone());
+                if ready_cancelled.load(std::sync::atomic::Ordering::SeqCst) { handle.cancel().await; }
             }
         });
         let run = AdapterRun::new(
             receiver,
             move || {
                 Box::pin(async move {
+                    cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                     let handle = cancel_slot.lock().unwrap().clone();
                     if let Some(handle) = handle {
                         handle.cancel().await;
@@ -985,6 +1003,11 @@ async fn launch_inner(
         args.extend(injected);
         args.push(prompt);
     }
+    let private_config = private_config::materialize(args).map_err(|error| {
+        if let Some(bridge) = &bridge { bridge.close(); }
+        crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed, error.to_string())
+    })?;
+    let args = private_config.args.clone();
     let mut env = request.env.clone().unwrap_or_default();
     // The CLI gates output_config.effort behind a model-name allowlist, so an
     // explicit user effort is silently dropped for other models. Opt out via
@@ -1008,8 +1031,14 @@ async fn launch_inner(
         crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed, error.to_string())
     })?;
     let handle = started.handle.clone();
+    if let Err(error) = private_config.record_child(handle.pid) {
+        handle.cancel().await;
+        if let Some(bridge) = &bridge { bridge.close(); }
+        return Err(crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed, error.to_string()));
+    }
     handle.end_stdin(None);
     let events = stream_events(started.events, true, Arc::new(move |value, _stream| parse_claude_json_event(value, &parse_state)));
+    let cleanup_handle = handle.clone();
     let pump = async move {
         let mut events = events;
         while let Some(event) = events.recv().await {
@@ -1017,9 +1046,45 @@ async fn launch_inner(
                 break;
             }
         }
+        cleanup_handle.cancel().await;
         if let Some(bridge) = bridge {
             bridge.close();
         }
+        drop(private_config);
     };
     Ok((handle, pump))
+}
+
+#[cfg(test)]
+mod usage_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn result_preserves_zero_cost_and_separate_cache_categories() {
+        let state = create_claude_parse_state();
+        let events = parse_claude_json_event(&json!({
+            "type": "result", "total_cost_usd": 0,
+            "usage": { "input_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 10, "output_tokens": 0 }
+        }), &state);
+        let usage = events.iter().find(|e| matches!(e, AdapterEvent::Usage { .. })).unwrap();
+        assert!(matches!(usage, AdapterEvent::Usage {
+            usage_scope: Some(scope), input_tokens: Some(0), cached_input_tokens: Some(0),
+            cache_creation_input_tokens: Some(10), input_tokens_includes_cache: Some(false),
+            reported_cost: Some(cost), estimated_cost: None, currency: Some(currency), ..
+        } if scope == "turn" && *cost == 0.0 && currency == "USD"));
+    }
+
+    #[test]
+    fn request_context_is_not_a_turn_total() {
+        let state = create_claude_parse_state();
+        let events = parse_claude_json_event(&json!({ "type": "assistant", "message": {
+            "id": "m1", "content": [], "usage": { "input_tokens": 2,
+                "cache_read_input_tokens": 3, "cache_creation_input_tokens": 5 }
+        }}), &state);
+        assert!(matches!(events.as_slice(), [AdapterEvent::Usage {
+            usage_scope: Some(scope), usage_key: Some(key), context_used: Some(10),
+            cached_input_tokens: Some(3), cache_creation_input_tokens: Some(5), ..
+        }] if scope == "context" && key == "m1"));
+    }
 }

@@ -166,6 +166,25 @@ export interface DiagnosticExportResult {
   eventCount: number;
 }
 
+/** Reusable authentication/endpoint connection, independent of CLI instances. */
+export interface RuntimeConnection {
+  id: string;
+  name: string;
+  kind: "api" | "login";
+  revision: number;
+  enabled: boolean;
+  protocol?: "responses" | "chat" | "anthropic";
+  baseUrl?: string;
+  harness?: string;
+  loginProfileDirectory?: string;
+  models?: InstanceModelConfig[];
+  createdAt: string;
+  updatedAt: string;
+  /** Computed on reads; credentials never appear in connection JSON. */
+  hasCredential?: boolean;
+}
+export type RuntimeConnectionInput = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential">;
+
 export interface AgentInstance {
   id: AgentInstanceId;
   providerId: string;
@@ -188,13 +207,26 @@ export interface AgentInstance {
   updatedAt: string;
 }
 
+export interface ModelPricing {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
 export interface InstanceModelConfig {
   /** Exact model id passed to the provider CLI's model option. */
   id: string;
   /** Optional display label override. */
   displayName?: string;
-  /** Ordered reasoning efforts for this model; the first entry is the default. */
+  /** Ordered provider-native reasoning values. */
   reasoningEfforts: string[];
+  /** Explicit default; the first effort remains the legacy fallback. */
+  defaultReasoningEffort?: string;
+  /** Disabled models remain configured but are hidden from model selection. */
+  enabled?: boolean;
+  /** Optional user-entered USD prices per one million tokens, not a provider quote. */
+  pricing?: ModelPricing;
   /** Optional context window override in tokens. */
   contextWindow?: number;
 }
@@ -211,6 +243,8 @@ export interface ProviderModel {
   defaultReasoningEffort?: string;
   serviceTiers: ProviderServiceTier[];
   defaultServiceTier?: string;
+  /** User-configured USD prices per one million tokens. */
+  pricing?: ModelPricing;
 }
 
 export interface ProviderServiceTier {
@@ -363,6 +397,11 @@ export interface Session {
   parentSessionId?: SessionId;
   taskId?: TaskId;
   agentInstanceId?: AgentInstanceId;
+  /** Immutable endpoint/account revision selected when this conversation is created. */
+  connectionId?: string;
+  connectionRevision?: number;
+  /** Next turn must rebuild full local text after changing authentication/endpoint. */
+  connectionContextRebuildRequired?: boolean;
   /** Session-level overrides captured when the user creates the conversation. */
   model?: string;
   reasoningEffort?: string;
@@ -451,6 +490,10 @@ export interface AgentRun {
   taskId?: TaskId;
   sessionId: SessionId;
   agentInstanceId: AgentInstanceId;
+  connectionId?: string;
+  connectionRevision?: number;
+  model?: string;
+  pricingSnapshot?: ModelPricing;
   memberId?: string;
   mode: RunMode;
   status: AgentRunStatus;

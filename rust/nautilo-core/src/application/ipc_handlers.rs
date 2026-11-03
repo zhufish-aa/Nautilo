@@ -27,15 +27,20 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
     reg(router, daemon, "agent.list", |d, _| {
         Repositories::new(&d.db.lock().unwrap().raw).agents().list_default().map(Value::Array)
     });
-    reg(router, daemon, "agent.upsert", |d, input| {
-        let now = input
-            .get("updatedAt")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(now_iso);
-        Repositories::new(&d.db.lock().unwrap().raw).agents().save(&input, &now)?;
-        Ok(input)
-    });
+    reg(router, daemon, "agent.upsert", |d, input| d.agents.upsert(&input));
+
+    // ---- versioned, harness-independent runtime connections
+    reg(router, daemon, "connection.list", |d, _| d.connections.list().map(Value::Array));
+    reg(router, daemon, "connection.get", |d, input| d.connections.get(input["connectionId"].as_str().unwrap_or(""), input["revision"].as_u64()));
+    reg(router, daemon, "connection.upsert", |d, input| d.connections.upsert(&input));
+    reg_str(router, daemon, "connection.remove", "connectionId", |d, id| d.connections.remove(id));
+    {
+        let daemon = daemon.clone();
+        router.register("connection.models", move |input| {
+            let daemon = daemon.clone();
+            async move { daemon.connections.models(&input).await.map_err(anyhow::Error::new) }
+        });
+    }
 
     // ---- teams
     reg(router, daemon, "team.list", |d, _| d.teams.list().map(Value::Array));

@@ -2,10 +2,11 @@ import type { AgentInstance } from "@agenthub/domain";
 
 export const AGENTHUB_CODEX_PROVIDER_ID = "agenthub_proxy";
 export const AGENTHUB_CODEX_API_KEY_ENV = "OPENAI_API_KEY";
-export type CodexWireApi = "responses" | "chat";
+export type CodexWireApi = "responses" | "chat" | "anthropic";
 
 export function resolveCodexWireApi(instance: AgentInstance): CodexWireApi {
-  return instance.providerOptions?.wireApi === "chat" ? "chat" : "responses";
+  const value = instance.providerOptions?.wireApi;
+  return value === "chat" || value === "anthropic" ? value : "responses";
 }
 
 /**

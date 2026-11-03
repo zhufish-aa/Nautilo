@@ -54,8 +54,8 @@ export class CredentialService {
   }
 
   secretValues(): string[] {
-    return this.database.agents.list().flatMap((agent) => {
-      const credential = this.read(agent.id);
+    return this.database.credentials.ids().flatMap((id) => {
+      const credential = this.read(id);
       return credential?.apiKey ? [credential.apiKey] : [];
     });
   }

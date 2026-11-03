@@ -44,7 +44,7 @@ export interface EnvironmentPolicy {
 
 /** A CLI-native permission mode exposed for a provider (e.g. Codex approval modes). */
 export type PermissionModeOption = ProviderPermissionMode;
-export type CodexWireApi = "responses" | "chat";
+export type CodexWireApi = "responses" | "chat" | "anthropic";
 export type WebSearchMode = "native" | "official" | "off";
 
 export interface AgentInstanceConfig {
@@ -60,6 +60,9 @@ export interface AgentInstanceConfig {
   /** Write-only editor value; it is never hydrated from Core. */
   apiKey?: string;
   credentialStored?: boolean;
+  /** Official CLI account directory; no credential contents enter the renderer. */
+  loginProfileDirectory?: string;
+  loginProfileLabel?: string;
   baseUrl?: string;
   /** Provider-native upstream protocol (for example Pi's openai-completions). */
   apiType?: string;
@@ -233,6 +236,8 @@ export type SessionTarget =
   | { type: "agent"; instanceId: string; teamId?: string };
 
 export interface UiSession {
+  connectionId?: string;
+  connectionRevision?: number;
   id: string;
   projectId: string;
   target: SessionTarget;

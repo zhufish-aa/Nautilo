@@ -1,3 +1,4 @@
+import { registerAccountLoginHandlers } from "./account-login";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { join } from "node:path";
 import { readWindowState, trackWindowState } from "./window-state";
@@ -97,6 +98,7 @@ function registerIpcHandlers(): void {
 
   registerInteractionHandlers();
   registerProviderUpdateHandlers();
+  registerAccountLoginHandlers();
 }
 
 async function registeredProjectRoots(): Promise<string[]> {

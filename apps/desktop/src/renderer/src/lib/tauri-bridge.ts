@@ -82,6 +82,14 @@ function installTauriBridge(): void {
       writeText: (input) => invoke("file_write_text", { payload: input }),
       delete: (input) => invoke("file_delete", { payload: input })
     },
+    accounts: {
+      recoverableLogins: () => invoke("account_login_recoverable"),
+      acknowledgeLogin: (input) => invoke("account_login_attached", { providerId: input.providerId, profileId: input.profileId }),
+      prepareLogin: (providerId) => invoke("account_login_prepare", { providerId }),
+      startLogin: (input) => invoke("account_login_start", { input }),
+      loginStatus: (profileId) => invoke("account_login_status", { profileId }),
+      cancelLogin: (profileId) => invoke("account_login_cancel", { profileId })
+    },
     providers: {
       startUpdate: (input) => invoke("provider_update_start", { payload: input }),
       cancelUpdate: async (updateId) => {

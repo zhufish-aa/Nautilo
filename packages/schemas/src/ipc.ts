@@ -1,3 +1,4 @@
+import type { RuntimeConnection, RuntimeConnectionInput } from "@agenthub/domain";
 import type {
   AgentInstance,
   AgentRun,
@@ -25,7 +26,7 @@ import type {
 } from "@agenthub/domain";
 
 /** Missing permissionMode preserves the stored override; null explicitly resets inheritance. */
-export type SessionUpsertInput = Omit<Session, "permissionMode"> & { permissionMode?: string | null };
+export type SessionUpsertInput = Omit<Session, "permissionMode" | "connectionId" | "connectionRevision"> & { permissionMode?: string | null; connectionId?: string | null; connectionRevision?: number | null; confirmConnectionChange?: boolean };
 
 export interface MessageAttachmentInput {
   path: string;
@@ -80,6 +81,12 @@ export interface ProjectPollSnapshot {
 export type ProjectPollResult = ProjectPollSnapshot | { fallback: true; projectRun: ProjectRun };
 
 export interface IpcRequestMap {
+  "connection.list": { input: Record<string, never>; output: RuntimeConnection[] };
+  "connection.get": { input: { connectionId: string; revision?: number }; output: RuntimeConnection };
+  "connection.upsert": { input: { connection: RuntimeConnectionInput; expectedRevision?: number; apiKey?: string; clearApiKey?: boolean }; output: RuntimeConnection };
+  "connection.remove": { input: { connectionId: string }; output: { removed: boolean } };
+  "connection.models": { input: { connectionId: string; revision?: number; agentInstanceId?: string }; output: ProviderModelCatalog };
+
   "health.get": { input: undefined; output: { status: "ok"; version: string } };
   "project.list": { input: undefined; output: Project[] };
   "project.add": { input: { rootPath: string; name?: string }; output: Project };
@@ -119,7 +126,7 @@ export interface IpcRequestMap {
   "session.history": { input: SessionHistoryInput; output: SessionHistory };
   "session.historyBatch": { input: { items: SessionHistoryInput[] }; output: { items: SessionHistory[] } };
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
-  "session.create": { input: { projectId: string; memberId: string; title?: string }; output: Session };
+  "session.create": { input: { projectId: string; memberId: string; title?: string; connectionId?: string; connectionRevision?: number }; output: Session };
   "session.upsert": { input: SessionUpsertInput; output: Session };
   "session.delete": { input: { sessionId: string }; output: { removed: true; sessionIds: string[] } };
   "session.followUp": { input: { sessionId: string; text: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };

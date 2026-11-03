@@ -17,7 +17,7 @@ fn secret_pattern() -> &'static Regex {
 
 fn safe_telemetry_field() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^(?:input|output|cachedInput|reasoningOutput)Tokens$").unwrap())
+    RE.get_or_init(|| Regex::new(r"^(?:(?:input|output|cachedInput|cacheCreationInput|reasoningOutput)Tokens|inputTokensIncludesCache)$").unwrap())
 }
 
 #[derive(Clone)]

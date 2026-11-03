@@ -90,6 +90,7 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
     ...helperModules,
     "./bridge": { getBridge: () => bridgeAvailable ? bridge : undefined, requestCore },
     "./core-mappers": Object.fromEntries(["toDomainProject", "toDomainAgent", "toDomainTeam", "toStandaloneUiSession"].map((name) => [name, (value) => value])),
+    "../stores/usage": { useUsageStore: { getState: () => ({ ingest() {} }) } },
     "../stores/sessions": { useSessionsStore: { getState: () => state } },
     "../stores/agents": { useAgentsStore: { getState: () => ({ instances }) } },
     "../stores/projects": { useProjectsStore: { getState: () => projectState } },

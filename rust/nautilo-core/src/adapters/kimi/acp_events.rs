@@ -204,6 +204,13 @@ pub fn parse_kimi_acp_update(value: &Value, state: &mut KimiAcpParseState) -> Ve
             }
         }
         "usage_update" => vec![AdapterEvent::Usage {
+            usage_scope: Some("context".to_string()),
+            usage_key: None,
+            input_tokens_includes_cache: None,
+            cache_creation_input_tokens: None,
+            reported_cost: None,
+            estimated_cost: None,
+            currency: None,
             input_tokens: None,
             cached_input_tokens: None,
             output_tokens: None,

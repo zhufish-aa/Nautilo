@@ -70,6 +70,8 @@ export function parseCodexJsonEvent(value: unknown): AdapterEvent[] {
     const events: AdapterEvent[] = [];
     if (usage) events.push({
       kind: "usage",
+      usageScope: "turn",
+      inputTokensIncludesCache: true,
       inputTokens: number(usage.input_tokens),
       cachedInputTokens: number(usage.cached_input_tokens),
       outputTokens: number(usage.output_tokens),

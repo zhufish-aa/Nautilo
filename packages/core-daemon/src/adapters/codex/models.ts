@@ -1,4 +1,6 @@
+import { readModelResponseJson } from "../bounded-model-response.js";
 import type { AgentInstance, ProviderModel, ProviderModelCatalog } from "@agenthub/domain";
+import { validateModelEndpoint } from "../model-config.js";
 import { ProcessRuntime } from "../../process-runtime.js";
 import { EnvironmentPolicyService } from "../../runtime/security/environment-policy.js";
 import type { AdapterDiscoveryContext } from "../types.js";
@@ -34,11 +36,20 @@ const CODEX_API_MODEL_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "
 export async function discoverCodexModels(instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<ProviderModelCatalog> {
   const environment = new EnvironmentPolicyService();
   const env = environment.build(undefined, context?.env);
+  const configuredUrl = typeof instance.providerOptions?.baseUrl === "string"
+    ? instance.providerOptions.baseUrl.trim() : "";
+  const explicitEndpoint = configuredUrl || env.OPENAI_BASE_URL?.trim();
+  // Endpoint policy must not be caught by the CLI fallback: that process would
+  // otherwise receive the rejected URL and provider credential unchanged.
+  if (explicitEndpoint) validateModelEndpoint(explicitEndpoint);
   let apiWarning: string | undefined;
   try {
     const apiCatalog = await discoverCodexModelsViaApi(instance, env);
     if (apiCatalog) return apiCatalog;
   } catch (error) {
+    // A custom endpoint failure (including a redirect) must fail closed rather
+    // than hand the same endpoint to an uncontrolled CLI HTTP client.
+    if (explicitEndpoint) throw error;
     const reason = error instanceof Error ? error.message : String(error);
     console.warn(`[agenthub] codex API model discovery failed (${reason}); falling back to the local CLI`);
     apiWarning = `模型列表 API 请求失败（${reason}），已回退到本机 CLI 获取。`;
@@ -47,23 +58,27 @@ export async function discoverCodexModels(instance: AgentInstance, context?: Ada
   return apiWarning ? { ...catalog, warning: apiWarning } : catalog;
 }
 
-async function discoverCodexModelsViaApi(instance: AgentInstance, env: Record<string, string>): Promise<ProviderModelCatalog | undefined> {
+export async function discoverCodexModelsViaApi(instance: AgentInstance, env: Record<string, string>): Promise<ProviderModelCatalog | undefined> {
   const configured = instance.providerOptions?.baseUrl;
   const baseUrlOption = typeof configured === "string" && configured.trim() ? configured.trim() : env.OPENAI_BASE_URL?.trim();
   const apiKey = env.OPENAI_API_KEY?.trim() || env.CODEX_API_KEY?.trim();
   // Without an explicit base URL the API path only makes sense with a credential;
   // local no-auth endpoints (env_key-less providers) are reachable by URL alone.
   if (!baseUrlOption && !apiKey) return undefined;
-  const baseUrl = (baseUrlOption || DEFAULT_CODEX_API_BASE_URL).replace(/\/+$/, "");
+  const baseUrl = validateModelEndpoint(baseUrlOption || DEFAULT_CODEX_API_BASE_URL);
   const response = await fetch(`${baseUrl}/models`, {
     headers: {
       accept: "application/json",
       ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {})
     },
+    redirect: "error",
     signal: AbortSignal.timeout(10_000)
   });
-  if (!response.ok) throw new Error(`Codex API /models request failed (${response.status})`);
-  const catalog = parseCodexApiModelList(await response.json());
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`Codex API /models request failed (${response.status})`);
+  }
+  const catalog = parseCodexApiModelList(await readModelResponseJson(response));
   if (!catalog.models.length) throw new Error("Codex API /models returned an empty list");
   return catalog;
 }

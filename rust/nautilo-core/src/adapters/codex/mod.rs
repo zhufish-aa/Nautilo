@@ -16,6 +16,7 @@ use crate::errors::now_iso;
 
 pub mod app_server;
 pub mod chat_compat;
+mod anthropic_compat;
 pub mod events;
 pub mod image_gen;
 
@@ -39,7 +40,9 @@ fn provider_option<'a>(instance: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 pub fn resolve_codex_wire_api(instance: &Value) -> &'static str {
-    if provider_option(instance, "wireApi") == Some("chat") {
+    if provider_option(instance, "wireApi") == Some("anthropic") {
+        "anthropic"
+    } else if provider_option(instance, "wireApi") == Some("chat") {
         "chat"
     } else {
         "responses"
@@ -362,8 +365,9 @@ async fn discover_codex_models_via_api(instance: &Value, env: &HashMap<String, S
         return Ok(None);
     }
     let base_url = base_url_option.unwrap_or_else(|| DEFAULT_CODEX_API_BASE_URL.to_string());
-    let base_url = base_url.trim_end_matches('/');
+    let base_url = crate::adapters::model_config::validated_model_endpoint(&base_url)?;
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_millis(10_000))
         .build()
         .map_err(|e| CoreError::reason(ErrorCode::IpcInternalError, e.to_string()))?;
@@ -496,20 +500,28 @@ async fn discover_codex_models_via_cli(instance: &Value, env: &HashMap<String, S
     Ok(Value::Object(catalog))
 }
 
-/// API-first discovery; falls back to the local CLI app-server.
+/// API-first discovery; only official-account discovery may fall back to the local CLI.
 pub async fn discover_codex_models(instance: &Value, context: Option<&Value>) -> CoreResult<Value> {
     let env: HashMap<String, String> = context
         .and_then(|c| c.get("env"))
         .and_then(Value::as_object)
         .map(|env| env.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
         .unwrap_or_default();
+    let custom_endpoint = provider_option(instance, "baseUrl").map(str::trim).filter(|s| !s.is_empty())
+        .or_else(|| env.get("OPENAI_BASE_URL").map(String::as_str).map(str::trim).filter(|s| !s.is_empty()));
+    // Validation must happen outside any API-to-CLI fallback. A rejected URL
+    // must never be delegated to a CLI along with the provider credential.
+    if let Some(endpoint) = custom_endpoint {
+        crate::adapters::model_config::validated_model_endpoint(endpoint)?;
+    }
     let mut api_warning: Option<String> = None;
     match discover_codex_models_via_api(instance, &env).await {
         Ok(Some(catalog)) => return Ok(catalog),
         Ok(None) => {}
         Err(error) => {
-            eprintln!("[nautilo-core] codex API model discovery failed ({error}); falling back to the local CLI");
-            api_warning = Some(format!("模型列表 API 请求失败（{error}），已回退到本机 CLI 获取。"));
+            if custom_endpoint.is_some() { return Err(error); }
+            eprintln!("[nautilo-core] official Codex API model discovery failed; trying local CLI");
+            api_warning = Some("官方模型列表 API 请求失败，已回退到本机 CLI 获取。".to_string());
         }
     }
     let catalog = discover_codex_models_via_cli(instance, &env).await?;
@@ -650,7 +662,7 @@ impl AgentCliAdapter for CodexAdapter {
     }
 
     fn start(&self, request: AdapterStartRequest) -> CoreResult<AdapterRun> {
-        if resolve_codex_wire_api(&request.instance) == "chat" {
+        if matches!(resolve_codex_wire_api(&request.instance), "chat" | "anthropic") {
             return chat_compat::start_codex_chat_compat_app_server(request, None);
         }
         if !base_args(&request.instance).is_empty() {
@@ -661,7 +673,7 @@ impl AgentCliAdapter for CodexAdapter {
     }
 
     fn resume(&self, request: AdapterResumeRequest) -> CoreResult<AdapterRun> {
-        if resolve_codex_wire_api(&request.start.instance) == "chat" {
+        if matches!(resolve_codex_wire_api(&request.start.instance), "chat" | "anthropic") {
             return chat_compat::start_codex_chat_compat_app_server(request.start, Some(request.provider_session_id));
         }
         if !base_args(&request.start.instance).is_empty() {
@@ -700,4 +712,40 @@ fn start_exec_process(request: AdapterStartRequest, args: Vec<String>) -> CoreRe
         std::sync::Arc::new(|value, _stream| events::parse_codex_json_event(value)),
     );
     Ok(AdapterRun::from_process(events, &handle))
+}
+
+#[cfg(test)]
+mod native_discovery_security_tests {
+    use super::*;
+    #[tokio::test]
+    async fn rejected_custom_discovery_endpoint_never_falls_back_to_cli() {
+        let instance = json!({"executable":"nautilo-test-cli-must-not-be-launched", "providerOptions":{"baseUrl":"https://user:secret@example.invalid/v1"}});
+        let error = discover_codex_models(&instance, Some(&json!({"env":{"OPENAI_API_KEY":"fixture-key"}}))).await.unwrap_err().to_string();
+        assert!(error.contains("cannot contain credentials"));
+        assert!(!error.contains("secret")); assert!(!error.contains("fixture-key"));
+        let instance = json!({"executable":"nautilo-test-cli-must-not-be-launched"});
+        let error = discover_codex_models(&instance, Some(&json!({"env":{"OPENAI_BASE_URL":"http://remote.invalid/v1","OPENAI_API_KEY":"fixture-key"}}))).await.unwrap_err().to_string();
+        assert!(error.contains("HTTPS"));
+    }
+    #[tokio::test]
+    async fn native_discovery_never_follows_credential_redirects() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", source.local_addr().unwrap());
+        let target_url = format!("http://{}/models", target.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            stream.read(&mut buffer).unwrap();
+            write!(stream, "HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let instance = json!({"providerOptions": {"baseUrl": base_url}});
+        let env = HashMap::from([("OPENAI_API_KEY".to_string(), "fixture-key".to_string())]);
+        assert!(discover_codex_models_via_api(&instance, &env).await.is_err());
+        server.join().unwrap();
+        assert!(matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    }
 }

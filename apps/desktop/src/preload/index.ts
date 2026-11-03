@@ -1,3 +1,4 @@
+import type { AccountLoginInput, AccountLoginStatus } from "../main/account-login";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { DesktopAttachment } from "../main/attachment-file-service";
 import type { FileDeleteResult, FileReadTextPayload, FileReadTextResult, FileWriteTextPayload, FileWriteTextResult, ImagePayload, NativeMenuItemPayload } from "../main/desktop-interactions";
@@ -62,6 +63,14 @@ const bridge = {
     readText: (input: FileReadTextPayload): Promise<FileReadTextResult> => ipcRenderer.invoke("file:read-text", input),
     writeText: (input: FileWriteTextPayload): Promise<FileWriteTextResult> => ipcRenderer.invoke("file:write-text", input),
     delete: (input: { path: string }): Promise<FileDeleteResult> => ipcRenderer.invoke("file:delete", input)
+  },
+  accounts: {
+    recoverableLogins: (): Promise<Array<{ profileId: string; providerId: string; directory: string; createdAt: number }>> => ipcRenderer.invoke("account:login-recoverable"),
+    acknowledgeLogin: (input: { profileId: string; providerId: string }): Promise<void> => ipcRenderer.invoke("account:login-attached", input),
+    prepareLogin: (providerId: string): Promise<{ profileId: string; directory: string }> => ipcRenderer.invoke("account:login-prepare", providerId),
+    startLogin: (input: AccountLoginInput): Promise<{ ok: boolean; reason?: string }> => ipcRenderer.invoke("account:login-start", input),
+    loginStatus: (profileId: string): Promise<AccountLoginStatus> => ipcRenderer.invoke("account:login-status", profileId),
+    cancelLogin: (profileId: string): Promise<void> => ipcRenderer.invoke("account:login-cancel", profileId)
   },
   providers: {
     startUpdate: (input: ProviderUpdateStartPayload): Promise<ProviderUpdateStartResult> => ipcRenderer.invoke("provider:update-start", input),

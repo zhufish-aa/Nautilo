@@ -305,7 +305,8 @@ export function buildCodexCustomModelCatalog(instance: AgentInstance, requestedM
 
   return {
     models: [...configured.entries()].map(([id, model]) => {
-      const efforts = normalizeReasoningEfforts(model.reasoningEfforts);
+      const anthropicBridge = instance.providerOptions?.anthropicCompat === true;
+      const efforts = anthropicBridge ? ["none"] : normalizeReasoningEfforts(model.reasoningEfforts);
       const contextWindow = Number.isFinite(model.contextWindow) && (model.contextWindow ?? 0) > 0
         ? Math.floor(model.contextWindow!)
         : CODEX_MODEL_CATALOG_CONTEXT_WINDOW;
@@ -319,7 +320,7 @@ export function buildCodexCustomModelCatalog(instance: AgentInstance, requestedM
         // Keep a valid catalog enum even when search is disabled. The
         // supports_search_tool flag below remains the authoritative switch.
         web_search_tool_type: "text",
-        input_modalities: ["text", "image"],
+        input_modalities: anthropicBridge ? ["text"] : ["text", "image"],
         supports_image_detail_original: false,
         truncation_policy: { mode: "tokens", limit: 10_000 },
         supports_parallel_tool_calls: true,
@@ -346,11 +347,11 @@ export function buildCodexCustomModelCatalog(instance: AgentInstance, requestedM
         base_instructions: "",
         model_messages: null,
         include_skills_usage_instructions: false,
-        supports_reasoning_summary_parameter: true,
+        supports_reasoning_summary_parameter: !anthropicBridge,
         supports_search_tool: codexWebSearchEnabled(instance),
         service_tiers: [],
         additional_speed_tiers: [],
-        supports_reasoning_summaries: true,
+        supports_reasoning_summaries: !anthropicBridge,
         effective_context_window_percent: 95,
         experimental_supported_tools: [],
         use_responses_lite: false,
@@ -407,7 +408,7 @@ export function buildCodexAppServerArgs(
     ...profileArgs,
     "app-server",
     "--stdio",
-    "--enable",
+    instance.providerOptions?.anthropicCompat === true ? "--disable" : "--enable",
     "image_generation",
     // Headless runs never touch Codex desktop apps (browser/calendar/slack/…
     // plugins served by the built-in `codex_apps` MCP). Worse: when that MCP

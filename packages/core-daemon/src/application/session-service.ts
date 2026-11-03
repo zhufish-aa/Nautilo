@@ -1,3 +1,5 @@
+import { bindNewSession } from "../runtime/runtime-connection.js";
+import { assertSessionIdentityUpdate } from "../runtime/session-binding-guard.js";
 import { randomUUID } from "node:crypto";
 import type { Message, Session } from "@agenthub/domain";
 import type { IpcRequestMap } from "@agenthub/schemas";
@@ -29,7 +31,8 @@ export class SessionService {
   }
   create(input: IpcRequestMap["session.create"]["input"]): Session {
     const now = new Date().toISOString();
-    const session: Session = { id: randomUUID(), projectId: input.projectId, memberId: input.memberId, title: input.title ?? "New session", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+    let session: Session = { id: randomUUID(), projectId: input.projectId, memberId: input.memberId, connectionId: input.connectionId, connectionRevision: input.connectionRevision, title: input.title ?? "New session", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+    if (session.connectionId) session = bindNewSession(this.database, session, this.members.resolveSession(session));
     this.database.sessions.save(session);
     return session;
   }
@@ -78,7 +81,8 @@ export class SessionService {
       currentText: text,
       messages: existingMessages,
       artifacts,
-      recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt,
+      fullHistory: session.connectionContextRebuildRequired,
+      recoverProviderContext: !!session.connectionContextRebuildRequired || !session.providerSessionId || !session.providerContextSyncedAt,
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
     const message = followUpMessage(session, text);
@@ -189,16 +193,34 @@ export class SessionService {
    * would start a new provider thread and lose conversational context.
    */
   upsert(input: IpcRequestMap["session.upsert"]["input"]): Session {
-    const { permissionMode, ...metadata } = input;
-    const normalized: Session = {
+    const { permissionMode, connectionId, connectionRevision, confirmConnectionChange, connectionContextRebuildRequired: _untrustedRebuild, ...metadata } = input;
+    let normalized: Session = {
       ...metadata,
+      ...(Object.prototype.hasOwnProperty.call(input, "connectionId") ? { connectionId: connectionId ?? undefined, connectionRevision: connectionId === null ? undefined : connectionRevision ?? undefined } : {}),
       ...(Object.prototype.hasOwnProperty.call(input, "permissionMode")
         ? { permissionMode: permissionMode?.trim() || undefined } : {})
     };
     const current = this.database.sessions.get(normalized.id);
     if (!current) {
+      if (normalized.connectionId) normalized = bindNewSession(this.database, normalized, this.members.resolveSession(normalized));
       this.database.sessions.save(normalized);
       return normalized;
+    }
+
+    assertSessionIdentityUpdate(current, normalized, this.database);
+    if (!Object.prototype.hasOwnProperty.call(input, "connectionId")) {
+      normalized.connectionId = current.connectionId;
+      normalized.connectionRevision = current.connectionRevision;
+    } else if (normalized.connectionId) {
+      normalized = bindNewSession(this.database, normalized, this.members.resolveSession({ ...current, ...normalized }));
+    }
+    const connectionChanged = current.connectionId !== normalized.connectionId || current.connectionRevision !== normalized.connectionRevision;
+    if (connectionChanged) {
+      if (confirmConnectionChange !== true) throw new CoreError("IPC_INVALID_REQUEST", { field: "confirmConnectionChange", reason: "Confirm rebuilding text context when switching account or supplier" });
+      const active = this.database.runs.list().some((run) => run.sessionId === current.id && !["completed", "failed", "cancelled", "crashed", "timed_out"].includes(run.status));
+      if (active || (this.pendingFollowUps.get(current.id)?.length ?? 0) > 0) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "Wait for active and queued turns before changing connection" });
+      const bytes = Buffer.byteLength(this.database.sessions.messages(current.id).map((message) => message.text).join("\n"), "utf8");
+      if (bytes > 1024 * 1024) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "History is too large to rebuild safely (1 MiB). Create a new conversation with an explicit summary instead" });
     }
 
     // The orchestrator temporarily rebinds `memberId` from the renderer's
@@ -206,7 +228,7 @@ export class SessionService {
     // routing metadata, not a provider-thread boundary. Reset the native
     // provider session only when the project or actual CLI instance changes.
     const sameProviderBinding = current.projectId === normalized.projectId
-      && current.agentInstanceId === normalized.agentInstanceId;
+      && current.agentInstanceId === normalized.agentInstanceId && !connectionChanged;
     const updated: Session = {
       ...current,
       ...normalized,
@@ -216,11 +238,13 @@ export class SessionService {
       taskId: normalized.taskId ?? current.taskId,
       providerSessionId: sameProviderBinding
         ? current.providerSessionId ?? normalized.providerSessionId
-        : normalized.providerSessionId,
+        : connectionChanged ? undefined : normalized.providerSessionId,
       providerContextSyncedAt: sameProviderBinding ? current.providerContextSyncedAt : undefined,
       runtimeToolVersion: sameProviderBinding
         ? current.runtimeToolVersion ?? normalized.runtimeToolVersion
-        : normalized.runtimeToolVersion
+        : connectionChanged ? undefined : normalized.runtimeToolVersion,
+      connectionContextRebuildRequired: connectionChanged || current.connectionContextRebuildRequired,
+      providerContextWindow: connectionChanged ? undefined : current.providerContextWindow
     };
     this.database.sessions.save(updated);
     return updated;
@@ -251,7 +275,8 @@ export class SessionService {
       messages: existingMessages,
       artifacts,
       currentAttachments,
-      recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration,
+      fullHistory: session.connectionContextRebuildRequired,
+      recoverProviderContext: !!session.connectionContextRebuildRequired || !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration,
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
     const message: Message = editedMessage

@@ -75,22 +75,21 @@ async fn fetch_anthropic_models(env: Option<&Value>) -> Result<Vec<Value>, Strin
         return Err("missing_credential".to_string());
     }
     let base_url = env_value(env, "ANTHROPIC_BASE_URL").unwrap_or_else(|| "https://api.anthropic.com".to_string());
-    let base_url = base_url.trim_end_matches('/').to_string();
-    if !base_url.to_lowercase().starts_with("http") {
-        return Err(format!("invalid_base_url:{base_url}"));
-    }
+    let base_url = crate::adapters::model_config::validated_model_endpoint(&base_url).map_err(|_| "invalid_base_url".to_string())?;
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_millis(8_000))
         .build()
         .map_err(|e| format!("network:{e}"))?;
     let mut entries: Vec<Value> = vec![];
     let mut after: Option<String> = None;
     for _ in 0..5 {
-        let mut url = format!("{base_url}/v1/models?limit=100");
+        let mut url = reqwest::Url::parse(&format!("{base_url}/v1/models")).map_err(|_| "invalid_base_url".to_string())?;
+        url.query_pairs_mut().append_pair("limit", "100");
         if let Some(after) = &after {
-            url.push_str(&format!("&after_id={after}"));
+            url.query_pairs_mut().append_pair("after_id", after);
         }
-        let mut request = client.get(&url).header("anthropic-version", "2023-06-01");
+        let mut request = client.get(url).header("anthropic-version", "2023-06-01");
         if let Some(key) = &api_key {
             request = request.header("x-api-key", key);
         }
@@ -120,8 +119,8 @@ fn discovery_warning(reason: &str, env: Option<&Value>) -> String {
     if reason == "missing_credential" {
         return "未找到 Anthropic 凭证（ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN），无法在线拉取模型列表，已回退到内置别名目录。".to_string();
     }
-    if let Some(url) = reason.strip_prefix("invalid_base_url:") {
-        return format!("ANTHROPIC_BASE_URL 不是合法的 http(s) 地址（{url}），已回退到内置别名目录。");
+    if reason == "invalid_base_url" {
+        return "ANTHROPIC_BASE_URL 必须使用 HTTPS（本机可用 HTTP），且不能包含凭证、查询参数或片段。已回退到内置别名目录。".to_string();
     }
     if let Some(status) = reason.strip_prefix("http_") {
         return format!("模型列表接口 {base_url}/v1/models 返回 HTTP {status}（凭证或中转站不支持该接口），已回退到内置别名目录。");
@@ -204,4 +203,29 @@ fn fallback_with_warning(reason: &str, env: Option<&Value>) -> CoreResult<Value>
     let mut catalog = list_claude_models().as_object().cloned().unwrap_or_default();
     catalog.insert("warning".to_string(), json!(discovery_warning(reason, env)));
     Ok(Value::Object(catalog))
+}
+
+#[cfg(test)]
+mod native_discovery_security_tests {
+    use super::*;
+    #[tokio::test]
+    async fn native_discovery_never_follows_credential_redirects() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", source.local_addr().unwrap());
+        let target_url = format!("http://{}/models", target.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            stream.read(&mut buffer).unwrap();
+            write!(stream, "HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let env = json!({"ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_API_KEY": "fixture-key", "ANTHROPIC_AUTH_TOKEN": "fixture-token"});
+        assert!(fetch_anthropic_models(Some(&env)).await.is_err());
+        server.join().unwrap();
+        assert!(matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    }
 }

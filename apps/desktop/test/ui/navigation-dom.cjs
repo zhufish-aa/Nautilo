@@ -40,6 +40,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   await sleep(200);
   const find = (text, root = d) => [...root.querySelectorAll('button,a')].find(element => element.textContent.trim() === text);
   const route = async hash => { w.location.hash = hash; await sleep(100); };
+  const waitFor = async (read, label) => { for (let i = 0; i < 60; i++) { const value = read(); if (value) return value; await sleep(50); } throw new Error(`Timed out waiting for ${label}`); };
   const check = async (name, fn) => { try { await fn(); passed.push(name); console.log('PASS', name); } catch (error) { failures.push(`${name}: ${error.message}`); console.error('FAIL', name, error.message); } };
   const key = (element, value, options = {}) => element.dispatchEvent(new w.KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true, ...options }));
   await check('one workspace, grouped mixed-mode history and bounded rows', () => {
@@ -80,7 +81,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   });
   await check('new-conversation draft survives settings and legacy route' , async () => {
     qa.drafts.getState().setText('new:conversation', 'Keep this unsent draft'); await sleep(60);
-    find('设置').click(); await sleep(100); find('返回对话').click(); await sleep(100);
+    const settingsLink = await waitFor(() => d.querySelector('[data-nav="settings"]'), 'Settings link'); settingsLink.click();
+    const returnButton = await waitFor(() => d.querySelector('button[aria-label="返回对话"]'), 'Back to chat button'); assert(w.location.hash.includes('/settings')); returnButton.click();
+    await waitFor(() => !w.location.hash.includes('/settings') && d.querySelector('.composer textarea'), 'conversation after return');
     assert.equal(d.querySelector('.composer textarea').value, 'Keep this unsent draft');
     await route('/work?new=1'); assert.equal(d.querySelector('.composer textarea').value, 'Keep this unsent draft');
   });
@@ -125,11 +128,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     dialog.querySelector('[aria-label="放大"]').click(); await sleep(50); assert(dialog.textContent.includes('125%'));
     key(dialog, 'Escape'); await sleep(220); assert.equal(qa.lightbox.getState().image, null); assert.equal(d.activeElement, previous);
   });
-  await check('all management routes and eight settings deep links render without duplicate workspaces', async () => {
+  await check('all management routes and ten settings deep links render without duplicate workspaces', async () => {
     for (const path of ['/projects', '/projects/p', '/teams', '/tasks', '/runs', '/agents']) {
       await route(path); assert(d.querySelector('#main-content')); assert.equal(d.querySelectorAll('.composer').length, 1);
     }
-    for (const section of ['general', 'appearance', 'agents', 'skills', 'plugins', 'permissions', 'notifications', 'advanced']) {
+    for (const section of ['general', 'appearance', 'agents', 'accounts', 'usage', 'skills', 'plugins', 'permissions', 'notifications', 'advanced']) {
       await route(`/settings?section=${section}`);
       assert(d.querySelector('nav[aria-label="设置分类"]'), section); assert.equal(d.querySelectorAll('.composer').length, 1);
     }
@@ -147,12 +150,14 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   });
   await check('first Send preserves selected model, permission and Plan using an in-memory bridge', async () => {
     const calls = [];
-    const catalog = { providerId: 'claude', source: 'test', fetchedAt: now, models: [{ id: 'test-model', displayName: 'Test model', reasoningEfforts: ['high'], defaultReasoningEffort: 'high', serviceTiers: [] }] };
+    const catalog = { providerId: 'claude', source: 'test', fetchedAt: now, models: [{ id: 'test-model', displayName: 'Test model', reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', capabilities: [], serviceTiers: [] }] };
     // Attached only after startup: no daemon initialization, filesystem, CLI or external calls.
     // Sending is captured then intentionally rejected, so no real run/poll can begin.
     w.agenthub = { window: { isMaximized: async () => false, onMaximizedChange: () => () => {} }, core: { request: async request => {
       calls.push(request);
       if (request.method === 'provider.models') return catalog;
+      if (request.method === 'artifact.changes') return { cursor: { scope: request.input.sessionId ? `artifacts:session:${request.input.sessionId}` : `artifacts:projectRun:${request.input.projectRunId}`, epoch: 'test-only', revision: 0 }, reset: !request.input.cursor, items: [] };
+      if (request.method === 'session.history') throw Object.assign(new Error('Unknown method session.history'), { code: 'IPC_METHOD_NOT_FOUND' });
       if (request.method === 'session.get') return { session: calls.findLast(call => call.method === 'session.upsert' && call.input.id === request.input.sessionId).input, messages: [] };
       if (request.method === 'event.subscribe') return { subscriptionId: 'test-only' };
       if (request.method === 'event.replay') return { events: [], lastSequence: 0 };
@@ -165,9 +170,12 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     qa.providers.setState({ catalog: [{ providerId: 'claude', name: 'Test Claude', vendor: 'Test', capabilities: [], permissionModes: ['default', 'acceptEdits', 'plan'].map(value => ({ value, name: { 'zh-CN': value, 'en-US': value }, description: { 'zh-CN': '', 'en-US': '' } })) }] });
     qa.agents.setState({ instances: [{ ...qa.agents.getState().instances[0], providerId: 'claude', executable: 'test-cli' }], modelCatalogs: { a: catalog } });
     await route('/sessions?new=1&project=q');
-    d.querySelector('.composer button[title="模型"]').click(); await sleep(80);
+    d.querySelector('.composer button[aria-label="选择模型"]').click(); await sleep(80);
     const model = [...d.querySelectorAll('button')].find(button => button.textContent.includes('Test model'));
     assert(model); model.click(); await sleep(70);
+    d.querySelector('.composer button[aria-label="选择推理强度"]').click(); await sleep(50);
+    const low = [...d.querySelectorAll('button')].find(button => button.textContent.trim() === 'Low'); assert(low, 'Low reasoning option'); low.click(); await sleep(50);
+    assert(d.querySelector('.composer button[aria-label="选择推理强度"]').textContent.includes('Low'));
     key(d.body, 'Escape'); await sleep(50);
     const plan = find('Plan'); assert(plan); plan.click(); await sleep(70);
     assert.equal(plan.getAttribute('aria-pressed'), 'true');
@@ -175,9 +183,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const send = d.querySelector('.composer-send'); assert(send && !send.disabled); send.click(); await sleep(250);
     const created = qa.sessions.getState().sessions.find(session => session.title === 'Check the initial configuration'); assert(created);
     assert.equal(created.projectId, 'q'); assert.equal(created.model, 'test-model'); assert.equal(created.permissionMode, 'plan');
-    assert.equal(created.reasoningEffort, 'high');
+    assert.equal(created.reasoningEffort, 'low');
     const persisted = calls.find(call => call.method === 'session.upsert' && call.input.id === created.id); assert(persisted);
-    assert.equal(persisted.input.model, 'test-model'); assert.equal(persisted.input.permissionMode, 'plan');
+    assert.equal(persisted.input.model, 'test-model'); assert.equal(persisted.input.permissionMode, 'plan'); assert.equal(persisted.input.reasoningEffort, 'low');
     const sent = calls.find(call => call.method === 'session.send'); assert(sent); assert.equal(sent.input.sessionId, created.id); assert.equal(sent.input.text, 'Check the initial configuration');
     assert.equal(d.querySelectorAll('.composer').length, 1);
     delete w.agenthub;

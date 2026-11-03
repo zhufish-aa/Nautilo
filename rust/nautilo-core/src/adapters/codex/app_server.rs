@@ -61,7 +61,7 @@ fn thread_options(request: &AdapterStartRequest, include_dynamic_tools: bool) ->
     options.insert("approvalPolicy".to_string(), json!(approval));
     options.insert("sandbox".to_string(), json!(sandbox));
     if include_dynamic_tools {
-        if let Some(tools) = build_codex_dynamic_tools(request.runtime_tools.as_ref(), is_codex_image_generation_configured(request))? {
+        if let Some(tools) = build_codex_dynamic_tools(request.runtime_tools.as_ref(), request.instance.pointer("/providerOptions/anthropicCompat").and_then(Value::as_bool) != Some(true) && is_codex_image_generation_configured(request))? {
             options.insert("dynamicTools".to_string(), tools);
         }
     }
@@ -126,10 +126,11 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
     if configured.is_empty() {
         return None;
     }
+    let anthropic_compat = instance.pointer("/providerOptions/anthropicCompat").and_then(Value::as_bool) == Some(true);
     let models: Vec<Value> = configured
         .iter()
         .map(|(id, model)| {
-            let efforts: Vec<String> = model
+            let mut efforts: Vec<String> = model
                 .get("reasoningEfforts")
                 .and_then(Value::as_array)
                 .map(|efforts| {
@@ -145,6 +146,7 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
                 })
                 .filter(|e: &Vec<String>| !e.is_empty())
                 .unwrap_or_else(|| CODEX_MODEL_REASONING_EFFORTS.iter().map(|e| e.to_string()).collect());
+            if anthropic_compat { efforts = vec!["none".to_string()]; }
             let context_window = model
                 .get("contextWindow")
                 .and_then(Value::as_i64)
@@ -158,7 +160,7 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
                 "default_verbosity": "low",
                 "apply_patch_tool_type": "freeform",
                 "web_search_tool_type": "text",
-                "input_modalities": ["text", "image"],
+                "input_modalities": if anthropic_compat { json!(["text"]) } else { json!(["text", "image"]) },
                 "supports_image_detail_original": false,
                 "truncation_policy": { "mode": "tokens", "limit": 10_000 },
                 "supports_parallel_tool_calls": true,
@@ -182,11 +184,11 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
                 "base_instructions": "",
                 "model_messages": null,
                 "include_skills_usage_instructions": false,
-                "supports_reasoning_summary_parameter": true,
+                "supports_reasoning_summary_parameter": !anthropic_compat,
                 "supports_search_tool": codex_web_search_enabled(instance),
                 "service_tiers": [],
                 "additional_speed_tiers": [],
-                "supports_reasoning_summaries": true,
+                "supports_reasoning_summaries": !anthropic_compat,
                 "effective_context_window_percent": 95,
                 "experimental_supported_tools": [],
                 "use_responses_lite": false,
@@ -242,7 +244,7 @@ pub fn build_codex_app_server_args(
     args.extend([
         "app-server".to_string(),
         "--stdio".to_string(),
-        "--enable".to_string(),
+        if instance.pointer("/providerOptions/anthropicCompat").and_then(Value::as_bool) == Some(true) { "--disable" } else { "--enable" }.to_string(),
         "image_generation".to_string(),
         // Headless runs never touch Codex desktop apps (the built-in
         // `codex_apps` MCP); when it fails to start it blocks every turn until

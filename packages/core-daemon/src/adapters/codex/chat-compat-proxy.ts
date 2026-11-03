@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { AgentInstance } from "@agenthub/domain";
 import type { ProcessHandle } from "../../process-runtime.js";
@@ -8,11 +8,14 @@ import type { AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartReques
 import type { CodexAppServerOwner } from "./app-server-pool.js";
 import { startCodexAppServer } from "./app-server-run.js";
 
+import { startAnthropicCompatProxy } from "./anthropic-compat-proxy.js";
+
 type RecordValue = Record<string, unknown>;
 type ChatContent = string | Array<RecordValue>;
 
 interface ChatCompatProxy {
   baseUrl: string;
+  token?: string;
   close(): Promise<void>;
 }
 
@@ -58,7 +61,7 @@ interface FunctionCallContext {
 export function startCodexChatCompatAppServer(
   request: AdapterStartRequest | AdapterResumeRequest,
   resume: boolean,
-  options: { owner?: CodexAppServerOwner } = {}
+  options: { owner?: CodexAppServerOwner; anthropic?: boolean } = {}
 ): AdapterRun {
   let proxy: ChatCompatProxy | undefined;
   let inner: AdapterRun | undefined;
@@ -68,9 +71,13 @@ export function startCodexChatCompatAppServer(
   const events = async function* (): AsyncGenerator<AdapterEvent> {
     eventsStarted = true;
     try {
+      if (options.anthropic && request.localImagePaths?.length) throw new Error("Anthropic compatibility does not support image input");
+      if (options.anthropic && request.serviceTier && request.serviceTier !== "auto") throw new Error("Anthropic compatibility does not support service tier");
+      if (options.anthropic && request.reasoningEffort && request.reasoningEffort !== "none") throw new Error("Anthropic compatibility does not support explicit reasoning effort");
+      if (options.anthropic && request.instance.providerOptions?.webSearchMode === "native") throw new Error("Anthropic compatibility does not support native web search");
       const remoteBaseUrl = configuredBaseUrl(request.instance);
-      if (!remoteBaseUrl) throw new Error("Chat Completions compatibility mode needs a configured API base URL");
-      proxy = await startChatCompatProxy({
+      if (!remoteBaseUrl) throw new Error("Protocol compatibility mode needs a configured API base URL");
+      proxy = await (options.anthropic ? startAnthropicCompatProxy : startChatCompatProxy)({
         remoteBaseUrl,
         environment: request.env,
         allowNativeWebSearch: request.instance.providerOptions?.webSearchMode === "native"
@@ -83,11 +90,13 @@ export function startCodexChatCompatAppServer(
           ...request.instance.providerOptions,
           baseUrl: proxy.baseUrl,
           wireApi: "responses",
+          ...(options.anthropic ? { anthropicCompat: true } : {}),
           webSearch: request.instance.providerOptions?.webSearchMode === "native",
           webSearchMode: request.instance.providerOptions?.webSearchMode === "native" ? "native" : "off"
         }
       };
-      inner = startCodexAppServer({ ...request, instance }, resume, { transient: true, owner: options.owner });
+      const env = proxy.token ? compatibilityChildEnvironment(request.env, proxy.token, proxy.baseUrl) : request.env;
+      inner = startCodexAppServer({ ...request, instance, env, ...(options.anthropic ? { reasoningEffort: "none" } : {}) }, resume, { transient: true, owner: options.owner });
       if (cancelled) await inner.cancel();
       yield* inner.events;
     } catch (error) {
@@ -125,23 +134,48 @@ export function startCodexChatCompatAppServer(
     events: { [Symbol.asyncIterator]: events },
     cancel: process.cancel,
     steer: async (input) => {
-      if (!inner?.steer) throw new Error("Chat Completions compatibility mode does not support steering before the Codex turn starts");
+      if (!inner?.steer) throw new Error("Protocol compatibility mode does not support steering before the Codex turn starts");
       await inner.steer(input);
     },
     write: process.write
   };
 }
 
+/** Remove upstream credentials even on case-insensitive Windows environments. */
+export function compatibilityChildEnvironment(environment: Record<string, string | undefined> | undefined, token: string, baseUrl: string): Record<string, string | undefined> {
+  const secrets = new Set(["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_AUTH_TOKEN", "AGENTHUB_API_KEY"]);
+  return {
+    ...Object.fromEntries(Object.entries(environment ?? {}).filter(([key]) => !secrets.has(key.toUpperCase()) && key.toUpperCase() !== "OPENAI_BASE_URL")),
+    OPENAI_API_KEY: token,
+    OPENAI_BASE_URL: baseUrl
+  };
+}
+
 export async function startChatCompatProxy(config: ChatCompatConfig): Promise<ChatCompatProxy> {
+  // Local clients receive a run-scoped capability, never the provider secret.
+  chatEndpoint(config.remoteBaseUrl);
+  const token = randomBytes(32).toString("hex");
+  const controllers = new Set<AbortController>();
   const server = createServer((request, response) => {
-    void handleProxyRequest(request, response, config).catch((error) => {
+    const supplied = Buffer.from(request.headers.authorization ?? "");
+    const expected = Buffer.from(`Bearer ${token}`);
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+      writeJsonError(response, 401, "Invalid compatibility capability");
+      return;
+    }
+    const controller = new AbortController();
+    controllers.add(controller);
+    response.on("close", () => controller.abort());
+    void handleProxyRequest(request, response, config, AbortSignal.any([controller.signal, AbortSignal.timeout(300_000)])).catch(() => {
       if (response.headersSent) {
-        response.destroy(error instanceof Error ? error : undefined);
+        response.destroy();
         return;
       }
-      writeJsonError(response, 502, error instanceof Error ? error.message : String(error));
-    });
+      writeJsonError(response, 502, "Chat Completions compatibility request failed");
+    }).finally(() => { controller.abort(); controllers.delete(controller); });
   });
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 10_000;
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error): void => { server.off("listening", onListening); reject(error); };
     const onListening = (): void => { server.off("error", onError); resolve(); };
@@ -150,35 +184,50 @@ export async function startChatCompatProxy(config: ChatCompatConfig): Promise<Ch
     server.listen(0, "127.0.0.1");
   });
   const address = server.address() as AddressInfo;
+  let closing: Promise<void> | undefined;
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve()))
+    token,
+    close: () => closing ??= new Promise<void>((resolve) => {
+      for (const controller of controllers) controller.abort();
+      server.close(() => resolve());
+      server.closeAllConnections();
+    })
   };
 }
 
 async function handleProxyRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  config: ChatCompatConfig
+  config: ChatCompatConfig,
+  signal: AbortSignal
 ): Promise<void> {
-  if (request.method !== "POST" || !/\/responses\/?$/i.test(request.url ?? "")) {
+  if (request.method !== "POST" || !/^\/v1\/responses\/?$/.test(request.url ?? "")) {
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "Responses compatibility endpoint not found", type: "invalid_request_error" } }));
     return;
   }
-  const input = JSON.parse(await readRequestBody(request)) as RecordValue;
+  if (Number(request.headers["content-length"]) > 20 * 1024 * 1024) { writeJsonError(response, 413, "Request body exceeds size limit"); return; }
+  let input: RecordValue;
+  try {
+    const parsed = asRecord(JSON.parse(await readRequestBody(request)));
+    if (!parsed) throw new Error("Invalid request");
+    input = parsed;
+  } catch { writeJsonError(response, 400, "Invalid Responses request body"); return; }
   const chatRequest = responsesToChatRequest(input, config.allowNativeWebSearch === true);
   const remoteResponse = await fetch(chatEndpoint(config.remoteBaseUrl), {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: request.headers.authorization || bearer(config.environment)
+      authorization: bearer(config.environment)
     },
-    body: JSON.stringify(chatRequest)
+    body: JSON.stringify(chatRequest),
+    redirect: "error",
+    signal
   });
   if (!remoteResponse.ok) {
-    const detail = (await remoteResponse.text()).slice(-4_000);
-    writeJsonError(response, remoteResponse.status, `Chat Completions upstream failed (${remoteResponse.status}): ${detail}`);
+    await remoteResponse.body?.cancel();
+    writeJsonError(response, remoteResponse.status, `Chat Completions upstream failed (${remoteResponse.status})`);
     return;
   }
   response.writeHead(200, {
@@ -859,16 +908,19 @@ function messageOutputIndex(context: ResponseContext): number {
 
 async function* readChatStream(response: Response): AsyncGenerator<RecordValue> {
   if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
-    yield await response.json() as RecordValue;
+    yield JSON.parse(await readBoundedResponse(response)) as RecordValue;
     return;
   }
   if (!response.body) return;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let pending = "";
+  let total = 0;
   try {
     while (true) {
       const next = await reader.read();
+      total += next.value?.byteLength ?? 0;
+      if (total > 20 * 1024 * 1024) throw new Error("Upstream response exceeds size limit");
       pending += decoder.decode(next.value, { stream: !next.done });
       const lines = pending.split(/\r?\n/);
       pending = lines.pop() ?? "";
@@ -887,8 +939,26 @@ async function* readChatStream(response: Response): AsyncGenerator<RecordValue> 
       if (payload && payload !== "[DONE]") yield JSON.parse(payload) as RecordValue;
     }
   } finally {
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+}
+
+async function readBoundedResponse(response: Response): Promise<string> {
+  if (!response.body) throw new Error("Missing upstream body");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > 20 * 1024 * 1024) throw new Error("Upstream response exceeds size limit");
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
 }
 
 function responseObject(context: ResponseContext, status: string): RecordValue {
@@ -951,6 +1021,9 @@ function configuredBaseUrl(instance: AgentInstance): string | undefined {
 }
 
 function chatEndpoint(baseUrl: string): string {
+  const parsed = new URL(baseUrl);
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("Invalid Chat Completions base URL");
+  if (parsed.protocol === "http:" && !["127.0.0.1", "[::1]"].includes(parsed.hostname)) throw new Error("Remote Chat Completions endpoints require HTTPS; use a literal loopback address for local HTTP");
   const normalized = baseUrl.replace(/\/+$/, "");
   return /\/chat\/completions$/i.test(normalized) ? normalized : `${normalized}/chat/completions`;
 }

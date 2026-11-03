@@ -1,3 +1,4 @@
+import { applyConnection, boundConnection, connectionEnvironment } from "./runtime-connection.js";
 import { randomUUID } from "node:crypto";
 import type {
   AgentInstance,
@@ -9,9 +10,10 @@ import type {
   TaskId
 } from "@agenthub/domain";
 import { AdapterRegistry, type AdapterEvent, type AdapterFileDiff, type AdapterInteractionInput, type AdapterMcpServer, type AdapterSkill } from "../adapters/index.js";
+import { configuredModelReasoningEffort } from "../adapters/model-config.js";
 import { Database } from "../database/index.js";
 import { EventService } from "./event-service.js";
-import { ApprovalService, CommandPolicyService, CredentialService, EnvironmentPolicyService, RedactionService, providerEnvironmentPassthrough } from "./security/index.js";
+import { ApprovalService, CommandPolicyService, CredentialService, EnvironmentPolicyService, RedactionService, providerEnvironmentPassthrough, isolateLoginProfile } from "./security/index.js";
 import { CoreError } from "../errors.js";
 import { AuditService } from "./observability/audit-service.js";
 import { ArtifactService } from "./artifact-service.js";
@@ -178,6 +180,16 @@ export class RunService {
     // renderer re-read the journal — a replayed request would otherwise
     // resurrect a card whose pending entry died with an older daemon.
     this.interactions?.healOrphaned(session.id);
+    // Capture model preferences at submission, while retaining fresh native-thread
+    // state and permission tightening when this queued request actually starts.
+    const submitted = this.database.sessions.get(session.id);
+    if (submitted) {
+      if (submitted.projectId !== session.projectId || submitted.agentInstanceId !== session.agentInstanceId || submitted.connectionId !== session.connectionId || submitted.connectionRevision !== session.connectionRevision) {
+        throw new CoreError("IPC_INVALID_REQUEST", { field: "sessionId", reason: "Conversation identity changed before admission; send again" });
+      }
+      session = { ...session, model: submitted.model, reasoningEffort: submitted.reasoningEffort, serviceTier: submitted.serviceTier };
+    }
+
     const pending = this.sessionQueue.enqueue(session.id, () => this.launchNow(session, agent, prompt, context), context.queueKey);
     this.launching.add(pending);
     void pending.then(() => this.launching.delete(pending), () => this.launching.delete(pending));
@@ -201,11 +213,28 @@ export class RunService {
     // captured at enqueue time back over those persisted updates.
     const latestSession = this.database.sessions.get(session.id);
     if (latestSession) {
-      if (latestSession.projectId !== session.projectId || latestSession.agentInstanceId !== session.agentInstanceId) {
+      if (latestSession.projectId !== session.projectId || latestSession.agentInstanceId !== session.agentInstanceId || latestSession.connectionId !== session.connectionId || latestSession.connectionRevision !== session.connectionRevision) {
         throw new CoreError("IPC_INVALID_REQUEST", { field: "sessionId", reason: "The session target changed while this turn was queued. Send the message again." });
       }
-      session = latestSession;
+      session = { ...latestSession, model: session.model, reasoningEffort: session.reasoningEffort, serviceTier: session.serviceTier };
     }
+    const selectedConnection = boundConnection(this.database, session);
+    if (selectedConnection) {
+      agent = applyConnection(selectedConnection, agent);
+      connectionEnvironment(selectedConnection, agent, {}, this.credentials);
+      if (selectedConnection.kind === "api" && !session.model) throw new CoreError("IPC_INVALID_REQUEST", { field: "model", reason: "Choose an explicit model for the selected API connection" });
+    }
+    const configuredModel = agent.models?.find((entry) => entry.id.trim() === session.model);
+    if (configuredModel?.enabled === false) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "model", reason: "This model is disabled. Choose an enabled model." });
+    }
+    // The Messages bridge cannot translate reasoning effort. Do not turn an
+    // old supported-efforts list into an implicit request; explicit choices
+    // still reach the bridge guard and produce a clear unsupported error.
+    const anthropicBridge = agent.providerId === "codex" && agent.providerOptions?.wireApi === "anthropic";
+    const reasoningEffort = session.reasoningEffort?.trim() || (anthropicBridge
+      ? configuredModel?.defaultReasoningEffort?.trim() || undefined
+      : configuredModelReasoningEffort(configuredModel));
     // An explicit per-model context window from the instance editor always wins;
     // live discovery (kimi/claude) only runs when nothing is configured.
     const configuredContextWindow = agent.models?.find((entry) => entry.id === session.model)?.contextWindow
@@ -217,7 +246,7 @@ export class RunService {
     let contextWindow: number | undefined = session.providerContextWindow && session.providerContextWindow > 0
       ? session.providerContextWindow
       : configuredContextWindow;
-    if (!contextWindow && this.adapters.find(agent.providerId)?.descriptor?.contextWindowDiscovery) {
+    if (!contextWindow && !selectedConnection && this.adapters.find(agent.providerId)?.descriptor?.contextWindowDiscovery) {
       const catalog = await this.adapters.listModelsForRun(agent);
       const modelId = session.model || catalog?.defaultModel;
       const discoveredContextWindow = catalog?.models.find((model) => model.id === modelId)?.contextWindow;
@@ -265,6 +294,10 @@ export class RunService {
       taskId: context.taskId,
       sessionId: session.id,
       agentInstanceId: agent.id,
+      connectionId: selectedConnection?.id,
+      connectionRevision: selectedConnection?.revision,
+      model: session.model,
+      pricingSnapshot: agent.models?.find((model) => model.id === session.model)?.pricing,
       memberId: context.memberId ?? session.memberId,
       mode: "headless_structured",
       status: "starting",
@@ -277,7 +310,7 @@ export class RunService {
 
     const additions = {
       ...providerEnvironmentPassthrough(agent, process.env, this.adapters.find(agent.providerId)?.descriptor),
-      ...this.credentials?.environment(agent.id, agent.providerId)
+      ...(!selectedConnection ? this.credentials?.environment(agent.id, agent.providerId) : {})
     };
     const runtimeToolBinding = context.presentation === "provider_command"
       ? undefined
@@ -288,11 +321,11 @@ export class RunService {
       prompt,
       cwd: context.workingDirectory ?? project?.rootPath ?? process.cwd(),
       model: session.model,
-      reasoningEffort: session.reasoningEffort,
+      reasoningEffort,
       serviceTier: session.serviceTier,
       permissionMode: session.permissionMode,
       contextWindow,
-      env: this.environment.build(policy, additions),
+      env: selectedConnection ? connectionEnvironment(selectedConnection, agent, this.environment.build(policy, additions), this.credentials) : isolateLoginProfile(agent, this.environment.build(policy, additions)),
       timeoutMs: 30 * 60_000,
       idleTimeoutMs: 30 * 60_000,
       localImagePaths: context.localImagePaths,
@@ -318,7 +351,7 @@ export class RunService {
       const mustRecreateCodexThread = agent.providerId === "codex"
         && Boolean(runtimeToolBinding)
         && currentSession.runtimeToolVersion !== RUNTIME_TOOL_SCHEMA_VERSION;
-      const adapterRun = currentSession.providerSessionId && this.adapters.capabilities(agent).nativeResume && !mustRecreateCodexThread
+      const adapterRun = !currentSession.connectionContextRebuildRequired && currentSession.providerSessionId && this.adapters.capabilities(agent).nativeResume && !mustRecreateCodexThread
         ? this.adapters.resume({ ...request, providerSessionId: currentSession.providerSessionId })
         : this.adapters.start(request);
       const completion = this.consume(run, currentSession, adapterRun.events, {
@@ -399,6 +432,12 @@ export class RunService {
 
       const completed: AgentRun = { ...latest, status: "completed", endedAt: latest.endedAt ?? new Date().toISOString() };
       this.database.runs.save(completed);
+      if (context.presentation !== "provider_command" && session.connectionContextRebuildRequired) {
+        const current = this.database.sessions.get(session.id);
+        if (current && current.connectionId === session.connectionId && current.connectionRevision === session.connectionRevision) {
+          this.database.sessions.save({ ...current, connectionContextRebuildRequired: false });
+        }
+      }
       this.audit?.record({ actorType: "agent", actorId: run.memberId ?? session.memberId, action: "run.completed", resourceType: "run", resourceId: run.id, outcome: "success", details: { exitCode: completed.exitCode } });
       if (context.presentation !== "provider_command") {
         this.events.append(session, completed, "run.completed", { summary: messages.at(-1)?.text ?? "CLI process completed" });
@@ -506,6 +545,20 @@ export class RunService {
       });
     } else if (event.kind === "usage") {
       this.events.append(session, run, "usage.updated", {
+        agentInstanceId: run.agentInstanceId,
+        usageScope: event.usageScope,
+        usageKey: event.usageKey ?? (event.usageScope === "turn" ? run.id : event.usageScope === "session" ? (this.database.sessions.get(session.id)?.providerSessionId ?? session.id) : undefined),
+        inputTokensIncludesCache: event.inputTokensIncludesCache,
+        cachedInputTokens: event.cachedInputTokens,
+        cacheCreationInputTokens: event.cacheCreationInputTokens,
+        reasoningOutputTokens: event.reasoningOutputTokens,
+        reportedCost: event.reportedCost,
+        estimatedCost: event.estimatedCost,
+        currency: event.currency,
+        connectionId: run.connectionId,
+        connectionRevision: run.connectionRevision,
+        model: run.model,
+        pricingSnapshot: run.pricingSnapshot,
         inputTokens: event.inputTokens,
         outputTokens: event.outputTokens,
         contextUsed: event.contextUsed,

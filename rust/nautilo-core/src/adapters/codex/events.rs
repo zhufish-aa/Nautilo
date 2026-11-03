@@ -113,6 +113,13 @@ pub fn parse_codex_json_event(value: &Value) -> Vec<AdapterEvent> {
             let mut events = vec![];
             if let Some(usage) = value.get("usage") {
                 events.push(AdapterEvent::Usage {
+                    usage_scope: Some("turn".to_string()),
+                    usage_key: None,
+                    input_tokens_includes_cache: Some(true),
+                    cache_creation_input_tokens: None,
+                    reported_cost: None,
+                    estimated_cost: None,
+                    currency: None,
                     input_tokens: usage.get("input_tokens").and_then(number_of),
                     cached_input_tokens: usage.get("cached_input_tokens").and_then(number_of),
                     output_tokens: usage.get("output_tokens").and_then(number_of),
@@ -196,6 +203,13 @@ pub fn parse_codex_app_server_notification(method: &str, params: &Value) -> Vec<
             let total = usage.get("total").unwrap_or(&usage);
             let last = usage.get("last").unwrap_or(&usage);
             vec![AdapterEvent::Usage {
+                usage_scope: Some("session".to_string()),
+                usage_key: params.get("threadId").and_then(text_of),
+                input_tokens_includes_cache: Some(true),
+                cache_creation_input_tokens: None,
+                reported_cost: None,
+                estimated_cost: None,
+                currency: None,
                 input_tokens: total.get("inputTokens").and_then(number_of),
                 cached_input_tokens: total.get("cachedInputTokens").and_then(number_of),
                 output_tokens: total.get("outputTokens").and_then(number_of),
@@ -466,5 +480,29 @@ mod native_diff_tests {
         assert!(!is_current_codex_turn_diff(&json!({ "threadId": "child", "turnId": "u" }), "t", Some("u")));
         assert!(!is_current_codex_turn_diff(&json!({ "threadId": "t", "turnId": "old" }), "t", Some("u")));
         assert!(!is_current_codex_turn_diff(&json!({ "threadId": "t", "turnId": "u" }), "t", None));
+    }
+}
+
+#[cfg(test)]
+mod usage_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn app_server_snapshot_is_session_scoped_and_exec_is_turn_scoped() {
+        let events = parse_codex_app_server_notification("thread/tokenUsage/updated", &json!({
+            "threadId": "thread-1", "tokenUsage": {
+                "total": { "inputTokens": 20, "cachedInputTokens": 0, "outputTokens": 4 },
+                "last": { "totalTokens": 10 }
+            }
+        }));
+        assert!(matches!(events.as_slice(), [AdapterEvent::Usage {
+            usage_scope: Some(scope), usage_key: Some(key), input_tokens: Some(20),
+            cached_input_tokens: Some(0), input_tokens_includes_cache: Some(true),
+            context_used: Some(10), reported_cost: None, ..
+        }] if scope == "session" && key == "thread-1"));
+        let events = parse_codex_json_event(&json!({"type": "turn.completed", "usage": {"input_tokens": 0}}));
+        assert!(matches!(&events[0], AdapterEvent::Usage {
+            usage_scope: Some(scope), input_tokens: Some(0), cached_input_tokens: None, ..
+        } if scope == "turn"));
     }
 }

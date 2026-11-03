@@ -494,7 +494,7 @@ test("Codex Responses compatibility proxy translates input and streams Responses
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [{ type: "text", text: "hi" }],
@@ -543,7 +543,7 @@ test("Codex Responses compatibility proxy translates Chat tool calls", async (t)
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [{ type: "text", text: "hi" }],
@@ -585,7 +585,7 @@ test("Codex Responses compatibility proxy round-trips custom apply_patch calls",
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [{ type: "text", text: "create fixed.txt" }],
@@ -630,7 +630,7 @@ test("Codex Responses compatibility proxy sends custom tool results back through
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [
@@ -661,7 +661,7 @@ test("Codex Responses compatibility proxy does not mark an empty upstream respon
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({ model: "deepseek-v4-flash-free", input: "hi", stream: true })
   });
   const body = await response.text();
@@ -690,7 +690,7 @@ test("Codex Responses compatibility proxy preserves reasoning for tool results",
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [
@@ -1161,7 +1161,7 @@ test("Codex model discovery prefers the instance-configured API endpoint", async
   assert.equal(requests[0].init.headers.authorization, "Bearer sk-test");
 });
 
-test("Codex model discovery falls back to the local CLI when the API fails", async (t) => {
+test("Codex default endpoint discovery can fall back to the local CLI when the API fails", async (t) => {
   const workspace = mkdtempSync(join(tmpdir(), "agenthub-codex-models-"));
   t.after(() => rmSync(workspace, { recursive: true, force: true }));
   t.mock.method(globalThis, "fetch", async () => {
@@ -1171,7 +1171,7 @@ test("Codex model discovery falls back to the local CLI when the API fails", asy
   const previousCwd = process.cwd();
   process.chdir(workspace);
   try {
-    const configured = { ...instance, baseArgs: [], providerOptions: { baseUrl: "https://api.deepseek.com/" } };
+    const configured = { ...instance, baseArgs: [], providerOptions: undefined };
     const catalog = await discoverCodexModels(configured, { env: { PATH: process.env.PATH, OPENAI_API_KEY: "sk-test" } });
     assert.equal(catalog.source, "provider_cli");
     assert.equal(catalog.defaultModel, "gpt-fake-codex");
@@ -1278,7 +1278,10 @@ test("Claude stream-json parser exposes session, commands, messages, tools, and 
   // Per-request usage reports the real context footprint of that single call.
   const requestUsage = assistant[3];
   assert.equal(requestUsage.inputTokens, 12);
-  assert.equal(requestUsage.cachedInputTokens, 9500);
+  assert.equal(requestUsage.cachedInputTokens, 9000);
+  assert.equal(requestUsage.cacheCreationInputTokens, 500);
+  assert.equal(requestUsage.usageScope, "context");
+  assert.equal(requestUsage.inputTokensIncludesCache, false);
   assert.equal(requestUsage.outputTokens, 7);
   assert.equal(requestUsage.contextUsed, 9512);
 
@@ -1304,7 +1307,9 @@ test("Claude stream-json parser exposes session, commands, messages, tools, and 
   // result.usage totals stay cumulative (throughput), but contextUsed keeps the
   // latest single-request footprint instead of the session-wide cache sum.
   assert.equal(usage.inputTokens, 5);
-  assert.equal(usage.cachedInputTokens, 1000);
+  assert.equal(usage.cachedInputTokens, 900);
+  assert.equal(usage.cacheCreationInputTokens, 100);
+  assert.equal(usage.usageScope, "turn");
   assert.equal(usage.outputTokens, 42);
   assert.equal(usage.contextUsed, 9512);
   assert.equal(usage.contextWindow, 200000);
@@ -1383,7 +1388,8 @@ test("Claude model discovery explains why it fell back", async () => {
 
   const badBaseUrl = await discoverClaudeModels({ ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_BASE_URL: "not-a-url" });
   assert.match(badBaseUrl.warning ?? "", /ANTHROPIC_BASE_URL/);
-  assert.match(badBaseUrl.warning ?? "", /not-a-url/);
+  assert.match(badBaseUrl.warning ?? "", /HTTPS/);
+  assert.doesNotMatch(badBaseUrl.warning ?? "", /not-a-url/);
 });
 
 test("Claude model discovery reports HTTP failures and parses live model lists", async (t) => {
@@ -1592,4 +1598,29 @@ test("Codex app-server executes image_gen through the configured Images API", as
   assert.deepEqual(readFileSync(artifact.path), imageBytes);
   assert.match(artifact.path, /output[\\/]imagegen[\\/]e2e-blue-square\.png$/);
   assert.equal(events.find((event) => event.kind === "exit")?.exitCode, 0);
+});
+
+
+test("usage accounting distinguishes snapshots, cache categories, zero and unavailable costs", () => {
+  const claude = parseClaudeJsonEvent({ type: "result", total_cost_usd: 0,
+    usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 } }).find(e => e.kind === "usage");
+  assert.equal(claude.usageScope, "turn");
+  assert.equal(claude.cachedInputTokens, 0);
+  assert.equal(claude.cacheCreationInputTokens, 0);
+  assert.equal(claude.reportedCost, 0);
+  assert.equal(claude.currency, "USD");
+  assert.equal(claude.estimatedCost, undefined);
+  const exec = parseCodexJsonEvent({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0 } }).find(e => e.kind === "usage");
+  assert.equal(exec.usageScope, "turn");
+  assert.equal(exec.inputTokensIncludesCache, true);
+  assert.equal(exec.cachedInputTokens, 0);
+  assert.equal(exec.reportedCost, undefined);
+  const snapshot = { threadId: "thread-usage", tokenUsage: { total: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 2 }, last: { totalTokens: 7 } } };
+  const first = parseCodexAppServerNotification("thread/tokenUsage/updated", snapshot)[0];
+  const repeated = parseCodexAppServerNotification("thread/tokenUsage/updated", snapshot)[0];
+  assert.equal(first.usageScope, "session");
+  assert.equal(first.usageKey, "thread-usage");
+  assert.equal(first.inputTokensIncludesCache, true);
+  assert.deepEqual(first, repeated);
+  assert.equal(first.contextUsed, 7);
 });

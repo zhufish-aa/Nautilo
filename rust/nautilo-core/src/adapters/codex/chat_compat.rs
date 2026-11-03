@@ -38,14 +38,32 @@ pub fn start_codex_chat_compat_app_server(request: AdapterStartRequest, resume_s
     let Some(remote_base_url) = remote_base_url else {
         return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Chat Completions compatibility mode needs a configured API base URL"));
     };
-    let allow_native_web_search = request
+    let anthropic = super::resolve_codex_wire_api(&request.instance) == "anthropic";
+    if anthropic {
+        let enabled = request.env.as_ref().and_then(|env| env.get("NAUTILO_EXPERIMENTAL_ANTHROPIC_BRIDGE")).is_some_and(|value| value == "1")
+            || std::env::var("NAUTILO_EXPERIMENTAL_ANTHROPIC_BRIDGE").as_deref() == Ok("1");
+        if !enabled {
+            return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Rust Anthropic protocol conversion is experimental and disabled pending build/integration verification. To test explicitly, set NAUTILO_EXPERIMENTAL_ANTHROPIC_BRIDGE=1 in the agent environment. Use a native Anthropic-capable harness otherwise."));
+        }
+        if request.instance.pointer("/providerOptions/webSearchMode").and_then(Value::as_str) == Some("native") {
+            return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Anthropic protocol conversion does not support native web search; select a non-native search mode"));
+        }
+        if request.reasoning_effort.as_deref().is_some_and(|effort| !effort.is_empty() && effort != "none") {
+            return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Anthropic protocol conversion does not support reasoning effort; select none for this model"));
+        }
+        super::anthropic_compat::endpoint(&remote_base_url).map_err(|_| CoreError::reason(ErrorCode::IpcInvalidRequest, "Invalid Anthropic endpoint: use HTTPS without URL credentials or query parameters"))?;
+    }
+    if !anthropic {
+        chat_endpoint(&remote_base_url).map_err(|_| CoreError::reason(ErrorCode::IpcInvalidRequest, "Invalid Chat endpoint: use HTTPS without URL credentials or query parameters"))?;
+    }
+    let allow_native_web_search = !anthropic && request
         .instance
         .get("providerOptions")
         .and_then(|o| o.get("webSearchMode"))
         .and_then(Value::as_str)
         == Some("native");
 
-    let proxy = ChatCompatProxy::start(remote_base_url, request.env.clone().unwrap_or_default(), allow_native_web_search)
+    let proxy = ChatCompatProxy::start_protocol(remote_base_url, request.env.clone().unwrap_or_default(), allow_native_web_search, anthropic)
         .map_err(|e| CoreError::reason(ErrorCode::RunStartFailed, e.to_string()))?;
 
     // Point the inner app-server at the shim over the Responses wire format.
@@ -57,11 +75,20 @@ pub fn start_codex_chat_compat_app_server(request: AdapterStartRequest, resume_s
         .unwrap_or_default();
     options.insert("baseUrl".to_string(), json!(proxy.base_url()));
     options.insert("wireApi".to_string(), json!("responses"));
+    if anthropic { options.insert("anthropicCompat".to_string(), json!(true)); }
     options.insert("webSearch".to_string(), json!(allow_native_web_search));
     options.insert("webSearchMode".to_string(), json!(if allow_native_web_search { "native" } else { "off" }));
     instance.insert("providerOptions".to_string(), Value::Object(options));
     let mut inner_request = request;
     inner_request.instance = Value::Object(instance);
+    // Only the proxy owns remote credentials; Codex receives a local throwaway key.
+    let environment = inner_request.env.get_or_insert_with(HashMap::new);
+    environment.retain(|key, _| !matches!(key.to_ascii_uppercase().as_str(), "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" | "OPENAI_API_KEY" | "OPENAI_AUTH_TOKEN" | "CODEX_API_KEY" | "CODEX_AUTH_TOKEN" | "AGENTHUB_API_KEY" | "AGENTHUB_AUTH_TOKEN"));
+    environment.insert("OPENAI_API_KEY".to_string(), Uuid::new_v4().to_string());
+    environment.insert("OPENAI_BASE_URL".to_string(), proxy.base_url());
+    if anthropic && inner_request.reasoning_effort.as_deref().is_none_or(|s| s.is_empty()) {
+        inner_request.reasoning_effort = Some("none".to_string());
+    }
 
     let inner = match start_codex_app_server_transient(inner_request, resume_session) {
         Ok(run) => run,
@@ -102,6 +129,115 @@ pub fn start_codex_chat_compat_app_server(request: AdapterStartRequest, resume_s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn anthropic_bridge_rejects_wrong_capability_and_unsupported_requests() {
+        let proxy = ChatCompatProxy::start_protocol("http://127.0.0.1:1/v1".into(), HashMap::new(), false, true).unwrap();
+        let client = reqwest::Client::new();
+        let url = reqwest::Url::parse(&proxy.base_url()).unwrap();
+        let wrong = format!("http://127.0.0.1:{}/v1/responses", url.port().unwrap());
+        assert_eq!(client.post(wrong).json(&json!({})).send().await.unwrap().status().as_u16(), 404);
+        let endpoint = format!("{}/responses", proxy.base_url());
+        let response = client.post(&endpoint).json(&json!({"model":"m","input":"hi","reasoning":{"effort":"high"}})).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 400);
+        let response = client.post(&endpoint).header("authorization", "Bearer caller-secret").json(&json!({"model":"m","input":"hi"})).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 401, "incoming bearer must not become upstream authentication");
+        proxy.close();
+    }
+
+    #[tokio::test]
+    async fn anthropic_bridge_streams_text_and_sanitizes_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new(); let mut byte = [0u8; 1];
+            while !bytes.ends_with(b"\r\n\r\n") { socket.read_exact(&mut byte).await.unwrap(); bytes.push(byte[0]); }
+            let headers = String::from_utf8(bytes).unwrap();
+            assert!(headers.contains("x-api-key: selected-key"));
+            assert!(!headers.contains("caller-secret"));
+            let len: usize = headers.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap();
+            let mut body = vec![0; len]; socket.read_exact(&mut body).await.unwrap();
+            let events = [json!({"type":"message_start","message":{"usage":{"input_tokens":2}}}), json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}), json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你好"}}), json!({"type":"content_block_stop","index":0}), json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}), json!({"type":"message_stop"})];
+            let body = events.iter().map(|e| format!("data: {e}\n\n")).collect::<String>();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let proxy = ChatCompatProxy::start_protocol(format!("http://127.0.0.1:{port}/v1"), HashMap::from([("ANTHROPIC_API_KEY".into(), "selected-key".into())]), false, true).unwrap();
+        let result = reqwest::Client::new().post(format!("{}/responses", proxy.base_url())).header("authorization", "Bearer caller-secret").json(&json!({"model":"m","input":"hi"})).send().await.unwrap().text().await.unwrap();
+        assert!(result.contains("response.completed")); assert!(result.contains("你好")); assert!(!result.contains("selected-key"));
+        upstream.await.unwrap(); proxy.close();
+    }
+
+    #[tokio::test]
+    async fn anthropic_bridge_cancels_upstream_on_downstream_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new(); let mut byte = [0u8; 1];
+            while !bytes.ends_with(b"\r\n\r\n") { socket.read_exact(&mut byte).await.unwrap(); bytes.push(byte[0]); }
+            let headers = String::from_utf8(bytes).unwrap();
+            let len: usize = headers.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap();
+            let mut body = vec![0; len]; socket.read_exact(&mut body).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            let closed = tokio::time::timeout(std::time::Duration::from_secs(3), socket.read(&mut byte)).await;
+            assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "upstream must close after downstream cancellation");
+        });
+        let proxy = ChatCompatProxy::start_protocol(format!("http://127.0.0.1:{port}/v1"), HashMap::from([("ANTHROPIC_API_KEY".into(), "selected-key".into())]), false, true).unwrap();
+        let response = reqwest::Client::new().post(format!("{}/responses", proxy.base_url())).json(&json!({"model":"m","input":"hi"})).send().await.unwrap();
+        drop(response);
+        upstream.await.unwrap(); proxy.close();
+    }
+
+    #[test]
+    fn chat_endpoint_rejects_credential_bearing_or_insecure_urls() {
+        for url in ["http://example.com/v1", "http://localhost/v1", "https://user:secret@example.com/v1", "https://example.com/v1?api_key=secret", "https://example.com/v1#secret", "file:///tmp/key"] {
+            assert!(chat_endpoint(url).is_err());
+        }
+        assert_eq!(chat_endpoint("https://example.com/v1").unwrap(), "https://example.com/v1/chat/completions");
+        assert_eq!(chat_endpoint("http://127.0.0.1:1234/v1").unwrap(), "http://127.0.0.1:1234/v1/chat/completions");
+    }
+
+    #[tokio::test]
+    async fn chat_proxy_uses_configured_key_redacts_errors_and_refuses_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect_port = redirect_target.local_addr().unwrap().port();
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new(); let mut byte = [0u8; 1];
+            while !bytes.ends_with(b"\r\n\r\n") { socket.read_exact(&mut byte).await.unwrap(); bytes.push(byte[0]); }
+            let headers = String::from_utf8(bytes).unwrap();
+            assert!(headers.contains("authorization: Bearer selected-key"));
+            assert!(!headers.contains("caller-secret"));
+            let len: usize = headers.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap();
+            let mut body = vec![0; len]; socket.read_exact(&mut body).await.unwrap();
+            let body = "selected-key private-upstream-error";
+            socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{redirect_port}/steal\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let proxy = ChatCompatProxy::start(format!("http://127.0.0.1:{port}/v1"), HashMap::from([("OPENAI_API_KEY".into(), "selected-key".into())]), false).unwrap();
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let response = client.post(format!("{}/responses", proxy.base_url())).header("authorization", "Bearer caller-secret").json(&json!({"model":"m","input":"hi"})).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 302);
+        assert!(response.headers().get("location").is_none());
+        let body = response.text().await.unwrap();
+        assert!(!body.contains("selected-key")); assert!(!body.contains("private-upstream-error"));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), redirect_target.accept()).await.is_err());
+        upstream.await.unwrap(); proxy.close();
+    }
+
+    #[tokio::test]
+    async fn proxy_checks_capability_before_waiting_for_declared_body() {
+        let proxy = ChatCompatProxy::start("https://example.invalid/v1".into(), HashMap::new(), false).unwrap();
+        let url = reqwest::Url::parse(&proxy.base_url()).unwrap();
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", url.port().unwrap())).await.unwrap();
+        socket.write_all(b"POST /wrong/v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 20971520\r\n\r\n").await.unwrap();
+        let mut response = [0u8; 256];
+        let read = tokio::time::timeout(std::time::Duration::from_secs(1), socket.read(&mut response)).await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&response[..read]).contains("404"));
+        proxy.close();
+    }
 
     fn sample_tools() -> Value {
         json!([
@@ -192,25 +328,38 @@ impl ChatCompatProxy {
     }
 
     pub fn start(remote_base_url: String, environment: HashMap<String, String>, allow_native_web_search: bool) -> std::io::Result<Self> {
+        Self::start_protocol(remote_base_url, environment, allow_native_web_search, false)
+    }
+
+    fn start_protocol(remote_base_url: String, environment: HashMap<String, String>, allow_native_web_search: bool, anthropic: bool) -> std::io::Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
-        let base_url = format!("http://127.0.0.1:{port}/v1");
+        let token = Uuid::new_v4().to_string();
+        let base_url = format!("http://127.0.0.1:{port}/{token}/v1");
         let connections: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(vec![]));
         let accept_connections = connections.clone();
         let accept_task = tokio::spawn(async move {
             let listener = TcpListener::from_std(listener).expect("tokio listener");
-            let config = Arc::new(ProxyConfig { remote_base_url, environment, allow_native_web_search });
+            let config = Arc::new(ProxyConfig { remote_base_url, environment, allow_native_web_search, anthropic, token });
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
+                        {
+                            let mut connections = accept_connections.lock().unwrap();
+                            connections.retain(|task| !task.is_finished());
+                            if connections.len() >= 64 { continue; }
+                        }
                         let config = config.clone();
                         let task = tokio::spawn(async move {
-                            if let Err(error) = handle_proxy_request(stream, config).await {
-                                eprintln!("[nautilo-core] chat compat proxy error: {error}");
+                            if !matches!(tokio::time::timeout(std::time::Duration::from_secs(630), handle_proxy_request(stream, config)).await, Ok(Ok(()))) {
+                                // Never log upstream URLs, credentials or response bodies.
+                                eprintln!("[nautilo-core] protocol compatibility request failed");
                             }
                         });
-                        accept_connections.lock().unwrap().push(task);
+                        let mut connections = accept_connections.lock().unwrap();
+                        connections.retain(|task| !task.is_finished());
+                        connections.push(task);
                     }
                     Err(_) => break,
                 }
@@ -239,6 +388,8 @@ struct ProxyConfig {
     remote_base_url: String,
     environment: HashMap<String, String>,
     allow_native_web_search: bool,
+    anthropic: bool,
+    token: String,
 }
 
 async fn handle_proxy_request(stream: tokio::net::TcpStream, config: Arc<ProxyConfig>) -> anyhow::Result<()> {
@@ -246,8 +397,9 @@ async fn handle_proxy_request(stream: tokio::net::TcpStream, config: Arc<ProxyCo
     // Request line + headers + content-length body (loopback, single request).
     let mut header_bytes: Vec<u8> = vec![];
     let mut byte = [0u8; 1];
+    let header_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     while !header_bytes.ends_with(b"\r\n\r\n") {
-        if reader.read_exact(&mut byte).await.is_err() {
+        if !matches!(tokio::time::timeout_at(header_deadline, reader.read_exact(&mut byte)).await, Ok(Ok(_))) {
             return Ok(());
         }
         header_bytes.push(byte[0]);
@@ -260,46 +412,106 @@ async fn handle_proxy_request(stream: tokio::net::TcpStream, config: Arc<ProxyCo
     let request_line = lines.next().unwrap_or("");
     let method = request_line.split_whitespace().next().unwrap_or("");
     let target = request_line.split_whitespace().nth(1).unwrap_or("");
+    if method != "POST" || target.trim_end_matches('/') != format!("/{}/v1/responses", config.token) {
+        return write_json_error(&mut writer, 404, "Responses compatibility endpoint not found").await;
+    }
     let mut content_length = 0usize;
-    let mut authorization = String::new();
+    let mut saw_length = false;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().unwrap_or(0);
+                if saw_length { return write_json_error(&mut writer, 400, "Duplicate Content-Length").await; }
+                saw_length = true;
+                content_length = match value.trim().parse() {
+                    Ok(length) => length,
+                    Err(_) => return write_json_error(&mut writer, 400, "Invalid Content-Length").await,
+                };
             }
-            if name.trim().eq_ignore_ascii_case("authorization") {
-                authorization = value.trim().to_string();
+            if name.trim().eq_ignore_ascii_case("transfer-encoding") {
+                return write_json_error(&mut writer, 400, "Chunked request bodies are unsupported").await;
             }
         }
     }
-    let mut body = vec![0u8; content_length.min(20 * 1024 * 1024)];
-    reader.read_exact(&mut body).await?;
+    if content_length > 20 * 1024 * 1024 {
+        return write_json_error(&mut writer, 413, "Request exceeds size limit").await;
+    }
+    let mut body = vec![0u8; content_length];
+    if !matches!(tokio::time::timeout(std::time::Duration::from_secs(30), reader.read_exact(&mut body)).await, Ok(Ok(_))) {
+        return write_json_error(&mut writer, 408, "Request body read timed out or was incomplete").await;
+    }
 
-    if method != "POST" || !target.to_lowercase().trim_end_matches('/').ends_with("/responses") {
-        return write_json_error(&mut writer, 404, "Responses compatibility endpoint not found").await;
+    let input: Value = match serde_json::from_slice(&body) {
+        Ok(input) => input,
+        Err(_) => return write_json_error(&mut writer, 400, "Invalid JSON request").await,
+    };
+    if config.anthropic {
+        let operation = handle_anthropic_request(&mut writer, &config, &input);
+        let mut disconnect_buffer = [0u8; 1];
+        // Dropping the request/response futures closes upstream on downstream disconnect.
+        tokio::select! {
+            result = operation => return result,
+            _ = reader.read(&mut disconnect_buffer) => return Ok(()),
+        }
     }
-    let input: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let chat_request = responses_to_chat_request(&input, config.allow_native_web_search);
-    let auth = if authorization.is_empty() { bearer(&config.environment) } else { authorization };
-    let client = reqwest::Client::new();
-    let mut upstream = client
-        .post(chat_endpoint(&config.remote_base_url))
-        .header("content-type", "application/json");
-    if !auth.is_empty() {
-        upstream = upstream.header("authorization", auth);
+    let mut disconnect_buffer = [0u8; 1];
+    tokio::select! {
+        result = handle_chat_request(&mut writer, &config, &input) => result,
+        _ = reader.read(&mut disconnect_buffer) => Ok(()),
     }
-    let remote = upstream.json(&chat_request).send().await?;
+}
+
+async fn handle_chat_request(writer: &mut tokio::net::tcp::OwnedWriteHalf, config: &ProxyConfig, input: &Value) -> anyhow::Result<()> {
+    let endpoint = match chat_endpoint(&config.remote_base_url) {
+        Ok(endpoint) => endpoint,
+        Err(_) => return write_json_error(writer, 400, "Invalid Chat upstream URL").await,
+    };
+    let chat_request = responses_to_chat_request(input, config.allow_native_web_search);
+    let auth = bearer(&config.environment);
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(600)).build()?;
+    let mut upstream = client.post(endpoint).header("content-type", "application/json");
+    if !auth.is_empty() { upstream = upstream.header("authorization", auth); }
+    let remote = match upstream.json(&chat_request).send().await {
+        Ok(remote) => remote,
+        Err(_) => return write_json_error(writer, 502, "Chat Completions upstream connection failed").await,
+    };
     if !remote.status().is_success() {
         let status = remote.status().as_u16();
-        let detail = remote.text().await.unwrap_or_default();
-        let detail: String = detail.chars().skip(detail.chars().count().saturating_sub(4_000)).collect();
-        return write_json_error(&mut writer, status, &format!("Chat Completions upstream failed ({status}): {detail}")).await;
+        return write_json_error(writer, status, "Chat Completions upstream rejected the request; check endpoint, model and API key").await;
     }
-    writer
-        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n")
-        .await?;
-    write_responses_stream(remote, &mut writer, &input).await?;
-    // terminating chunk
+    writer.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n").await?;
+    write_responses_stream(remote, writer, input).await?;
+    writer.write_all(b"0\r\n\r\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn handle_anthropic_request(writer: &mut tokio::net::tcp::OwnedWriteHalf, config: &ProxyConfig, input: &Value) -> anyhow::Result<()> {
+    let body = match super::anthropic_compat::request(input) {
+        Ok(body) => body,
+        Err(error) => return write_json_error(writer, 400, &error.to_string()).await,
+    };
+    let endpoint = super::anthropic_compat::endpoint(&config.remote_base_url)?;
+    let key = config.environment.get("ANTHROPIC_API_KEY")
+        .or_else(|| config.environment.get("OPENAI_API_KEY"))
+        .or_else(|| config.environment.get("CODEX_API_KEY"))
+        .or_else(|| config.environment.get("AGENTHUB_API_KEY"));
+    let Some(key) = key.filter(|key| !key.trim().is_empty()) else {
+        return write_json_error(writer, 401, "Anthropic bridge requires an explicitly configured API key").await;
+    };
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(600)).build()?;
+    let remote = match client.post(endpoint).header("x-api-key", key).header("anthropic-version", "2023-06-01").json(&body).send().await {
+        Ok(remote) => remote,
+        Err(_) => return write_json_error(writer, 502, "Anthropic upstream connection failed").await,
+    };
+    if !remote.status().is_success() {
+        return write_json_error(writer, remote.status().as_u16(), "Anthropic upstream rejected the request; check endpoint, model and API key").await;
+    }
+    writer.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n").await?;
+    super::anthropic_compat::stream(remote, writer, input).await?;
     writer.write_all(b"0\r\n\r\n").await?;
     writer.flush().await?;
     Ok(())
@@ -318,7 +530,7 @@ async fn write_json_error(writer: &mut tokio::net::tcp::OwnedWriteHalf, status: 
     Ok(())
 }
 
-async fn write_sse(writer: &mut tokio::net::tcp::OwnedWriteHalf, event: &str, value: &Value) -> anyhow::Result<()> {
+pub(super) async fn write_sse(writer: &mut tokio::net::tcp::OwnedWriteHalf, event: &str, value: &Value) -> anyhow::Result<()> {
     let payload = format!("event: {event}\ndata: {}\n\n", value);
     writer.write_all(format!("{:x}\r\n", payload.len()).as_bytes()).await?;
     writer.write_all(payload.as_bytes()).await?;
@@ -326,13 +538,15 @@ async fn write_sse(writer: &mut tokio::net::tcp::OwnedWriteHalf, event: &str, va
     Ok(())
 }
 
-fn chat_endpoint(base_url: &str) -> String {
+fn chat_endpoint(base_url: &str) -> anyhow::Result<String> {
+    // Share URL security policy, but retain Chat Completions endpoint semantics.
+    super::anthropic_compat::endpoint(base_url)?;
     let normalized = base_url.trim_end_matches('/');
-    if normalized.to_lowercase().ends_with("/chat/completions") {
+    Ok(if normalized.to_lowercase().ends_with("/chat/completions") {
         normalized.to_string()
     } else {
         format!("{normalized}/chat/completions")
-    }
+    })
 }
 
 fn bearer(environment: &HashMap<String, String>) -> String {
@@ -617,7 +831,7 @@ fn chat_content(value: &Value) -> Option<Value> {
     }
 }
 
-fn chat_tools(value: Option<&Value>) -> Vec<Value> {
+pub(super) fn chat_tools(value: Option<&Value>) -> Vec<Value> {
     let Some(tools) = value.and_then(Value::as_array) else {
         return vec![];
     };
@@ -747,7 +961,7 @@ fn chat_tool_choice(value: &Value) -> Value {
 /// must be a function_call (not custom_tool_call). Both the hyphenated chat
 /// name and the dotted codex name are registered so whichever the model calls,
 /// the call-back routes correctly.
-fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String, String)> {
+pub(super) fn response_tool_types(value: Option<&Value>) -> HashMap<String, (String, String, String)> {
     let mut result = HashMap::new();
     let Some(tools) = value.and_then(Value::as_array) else {
         return result;
@@ -833,7 +1047,7 @@ struct FunctionCallContext {
 }
 
 async fn write_responses_stream(
-    remote: reqwest::Response,
+    mut remote: reqwest::Response,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     request: &Value,
 ) -> anyhow::Result<()> {
@@ -861,39 +1075,34 @@ async fn write_responses_stream(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_lowercase();
+    const LIMIT: usize = 20 * 1024 * 1024;
+    anyhow::ensure!(remote.content_length().is_none_or(|size| size <= LIMIT as u64), "Upstream response exceeds size limit");
+    let mut total = 0usize;
     if !content_type.contains("text/event-stream") {
-        let body: Value = remote.json().await?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = remote.chunk().await? {
+            total += chunk.len();
+            anyhow::ensure!(total <= LIMIT, "Upstream response exceeds size limit");
+            bytes.extend_from_slice(&chunk);
+        }
+        let body: Value = serde_json::from_slice(&bytes)?;
+        anyhow::ensure!(body.get("error").is_none_or(Value::is_null), "Upstream returned an error");
         process_chat_chunk(&body, &mut context, writer, &tool_types).await?;
     } else {
-        let mut remote = remote;
-        let mut pending = String::new();
+        let mut decoder = super::anthropic_compat::SseDecoder::default();
+        let mut finished = false;
         while let Some(chunk) = remote.chunk().await? {
-            pending.push_str(&String::from_utf8_lossy(&chunk));
-            let mut lines: Vec<String> = pending.split('\n').map(str::to_string).collect();
-            pending = lines.pop().unwrap_or_default();
-            for line in lines {
-                let trimmed = line.trim();
-                if !trimmed.starts_with("data:") {
-                    continue;
-                }
-                let payload = trimmed[5..].trim();
-                if payload.is_empty() || payload == "[DONE]" {
-                    continue;
-                }
-                if let Ok(chunk) = serde_json::from_str::<Value>(payload) {
-                    process_chat_chunk(&chunk, &mut context, writer, &tool_types).await?;
-                }
+            total += chunk.len();
+            anyhow::ensure!(total <= LIMIT, "Upstream response exceeds size limit");
+            for payload in decoder.feed(&chunk)? {
+                if payload.trim() == "[DONE]" { finished = true; continue; }
+                let chunk: Value = serde_json::from_str(&payload)?;
+                anyhow::ensure!(chunk.get("error").is_none_or(Value::is_null), "Upstream returned an error");
+                if chunk.pointer("/choices/0/finish_reason").is_some_and(|value| !value.is_null()) { finished = true; }
+                process_chat_chunk(&chunk, &mut context, writer, &tool_types).await?;
             }
         }
-        let trailing = pending.trim().to_string();
-        if let Some(payload) = trailing.strip_prefix("data:") {
-            let payload = payload.trim();
-            if !payload.is_empty() && payload != "[DONE]" {
-                if let Ok(chunk) = serde_json::from_str::<Value>(payload) {
-                    process_chat_chunk(&chunk, &mut context, writer, &tool_types).await?;
-                }
-            }
-        }
+        anyhow::ensure!(finished, "Upstream stream ended without completion");
     }
 
     finalize_responses_stream(&mut context, writer).await

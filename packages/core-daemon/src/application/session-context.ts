@@ -29,11 +29,12 @@ export function buildSessionTurnContext(input: {
   artifacts: Artifact[];
   currentAttachments?: Artifact[];
   recoverProviderContext: boolean;
+  fullHistory?: boolean;
   workspaceRoot?: string;
 }): SessionTurnContext {
   const currentAttachments = input.currentAttachments ?? [];
   const images = input.artifacts.filter((artifact) => artifact.kind === "image" && artifact.path && existsSync(artifact.path));
-  const latestImage = IMAGE_REFERENCE.test(input.currentText) ? images.at(-1)?.path : undefined;
+  const latestImage = !input.fullHistory && IMAGE_REFERENCE.test(input.currentText) ? images.at(-1)?.path : undefined;
   const localImagePaths = [...new Set([
     ...currentAttachments.filter((artifact) => artifact.kind === "image" && artifact.path && existsSync(artifact.path)).map((artifact) => artifact.path!),
     ...(latestImage ? [latestImage] : [])
@@ -44,7 +45,8 @@ export function buildSessionTurnContext(input: {
     return { prompt: [guidance, input.currentText].filter(Boolean).join("\n\n"), localImagePaths, recovered: true };
   }
 
-  const transcript = selectHistory(input.messages)
+  if (input.fullHistory && Buffer.byteLength(input.messages.map((message) => message.text).join("\n"), "utf8") > 1024 * 1024) throw new Error("History exceeds the safe 1 MiB context rebuild limit; create a new conversation with an explicit summary");
+  const transcript = (input.fullHistory ? input.messages : selectHistory(input.messages))
     .map((message) => `${message.sender === "user" ? "User" : message.sender === "agent" ? "Assistant" : "System"}: ${message.text}`)
     .join("\n\n");
   const artifactInventory = input.artifacts.slice(-8).map((artifact) =>

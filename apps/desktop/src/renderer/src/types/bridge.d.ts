@@ -104,6 +104,14 @@ export interface AgentHubBridge {
     /** Moves a file to the OS trash (revert of an agent-created file). */
     delete(input: { path: string }): Promise<FileDeleteResult>;
   };
+  accounts: {
+    recoverableLogins(): Promise<Array<{ profileId: string; providerId: string; directory: string; createdAt: number }>>;
+    acknowledgeLogin(input: { profileId: string; providerId: string }): Promise<void>;
+    prepareLogin(providerId: string): Promise<{ profileId: string; directory: string }>;
+    startLogin(input: { profileId: string; providerId: string; executable: string; directory: string }): Promise<{ ok: boolean; reason?: string }>;
+    loginStatus(profileId: string): Promise<{ state: "idle" | "running" | "succeeded" | "failed" | "cancelled"; reason?: string }>;
+    cancelLogin(profileId: string): Promise<void>;
+  };
   providers: {
     /** Spawns the provider CLI's self-update command; output streams via onUpdateOutput. */
     startUpdate(input: ProviderUpdateStartPayload): Promise<ProviderUpdateStartResult>;

@@ -214,6 +214,21 @@ export interface RuntimeEventPayloadMap {
     taskId?: TaskId;
   };
   "usage.updated": {
+    connectionId?: string;
+    connectionRevision?: number;
+    model?: string;
+    pricingSnapshot?: import("@agenthub/domain").ModelPricing;
+    agentInstanceId?: string;
+    /** Cumulative snapshots: replace the same scope/key, never sum repeated snapshots. */
+    usageScope?: "context" | "turn" | "session";
+    usageKey?: string;
+    inputTokensIncludesCache?: boolean;
+    cachedInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    reasoningOutputTokens?: number;
+    /** Provider-reported accounting cost, not evidence of a billed payment. */
+    reportedCost?: number;
+    currency?: string;
     inputTokens?: number;
     outputTokens?: number;
     contextUsed?: number;

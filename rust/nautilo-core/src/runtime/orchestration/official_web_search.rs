@@ -12,6 +12,7 @@ use crate::adapters::AdapterStartRequest;
 use crate::database::{Database, Repositories};
 use crate::runtime::orchestration::runtime_tool_names::RUNTIME_TOOL_WEB_SEARCH;
 use crate::runtime::security::CredentialService;
+use crate::runtime::security::environment_policy::{build_environment, isolate_login_profile};
 
 pub fn official_web_search_tool() -> Value {
     json!({
@@ -46,6 +47,7 @@ pub fn supports_official_web_search(agent: &Value, db: &Arc<Mutex<Database>>) ->
             target.get("enabled").and_then(Value::as_bool) == Some(true)
                 && target.get("status").and_then(Value::as_str) != Some("disabled")
                 && target.get("providerId").and_then(Value::as_str) == Some("codex")
+                && provider_option(target, "wireApi") != Some("anthropic")
         })
         .is_some()
 }
@@ -71,12 +73,18 @@ pub async fn execute_official_web_search(
         return tool_result(false, "The selected web search instance must use the Codex adapter.");
     }
 
+    if provider_option(&target, "wireApi") == Some("anthropic") {
+        return tool_result(false, "Anthropic conversion does not support native web search. Select a Responses or Chat search instance.");
+    }
     let base_url = provider_option(&target, "baseUrl").unwrap_or("https://api.openai.com/v1").trim_end_matches('/').to_string();
-    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+    if validate_search_endpoint(&base_url).is_err() {
         return tool_result(false, "The selected official search instance has an invalid API URL.");
     }
     let endpoint = format!("{base_url}/responses");
-    let environment = credential_environment(credentials, target.get("id").and_then(Value::as_str).unwrap_or(""), "codex");
+    let environment = match build_native_search_environment(&target, credential_environment(credentials, target.get("id").and_then(Value::as_str).unwrap_or(""), "codex")) {
+        Ok(environment) => environment,
+        Err(_) => return tool_result(false, "The selected search account profile is invalid. Check its login directory and connection settings."),
+    };
     let api_key = environment
         .get("OPENAI_API_KEY")
         .or_else(|| environment.get("CODEX_API_KEY"))
@@ -140,6 +148,24 @@ fn credential_environment(credentials: &Arc<CredentialService>, agent_instance_i
     environment
 }
 
+fn validate_search_endpoint(endpoint: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(endpoint)?;
+    anyhow::ensure!(url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none(), "Credential-bearing URL is unsupported");
+    anyhow::ensure!(url.scheme() == "https" || (url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))), "HTTPS is required except literal loopback");
+    Ok(())
+}
+
+async fn bounded_search_body(mut response: reqwest::Response) -> anyhow::Result<Value> {
+    const LIMIT: usize = 8 * 1024 * 1024;
+    anyhow::ensure!(response.content_length().is_none_or(|n| n <= LIMIT as u64), "Response too large");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(bytes.len() + chunk.len() <= LIMIT, "Response too large");
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
 async fn execute_responses_web_search(
     endpoint: &str,
     model: &str,
@@ -148,9 +174,13 @@ async fn execute_responses_web_search(
     api_key: &str,
     reasoning_effort: Option<&str>,
 ) -> Value {
-    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build() {
+    if validate_search_endpoint(endpoint).is_err() {
+        return tool_result(false, "Invalid search endpoint. Use HTTPS without URL credentials or query parameters.");
+    }
+    let client = match reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(20)).timeout(std::time::Duration::from_secs(120)).build() {
         Ok(client) => client,
-        Err(error) => return tool_result(false, format!("Web search request failed: {error}")),
+        Err(_) => return tool_result(false, "Web search client initialization failed."),
     };
     let mut body = Map::new();
     body.insert("model".to_string(), json!(model));
@@ -170,17 +200,18 @@ async fn execute_responses_web_search(
         .await
     {
         Ok(response) => response,
-        Err(error) => return tool_result(false, format!("Web search request failed: {error}")),
+        Err(_) => return tool_result(false, "Web search request failed or timed out. Check the selected provider connection."),
     };
     let status = response.status();
-    let body: Value = response.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
-        let message = body
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown error");
-        return tool_result(false, format!("Web search failed ({}): {message}", status.as_u16()));
+        return tool_result(false, format!("Web search upstream rejected the request ({}). Check endpoint, model and API key.", status.as_u16()));
+    }
+    let body = match bounded_search_body(response).await {
+        Ok(body) => body,
+        Err(_) => return tool_result(false, "Web search returned an invalid, oversized or incomplete response."),
+    };
+    if body.get("error").is_some_and(|error| !error.is_null()) || matches!(body.get("status").and_then(Value::as_str), Some("failed" | "incomplete" | "cancelled")) {
+        return tool_result(false, "Web search upstream reported a failed or incomplete response.");
     }
     tool_result(true, format_search_result(&body))
 }
@@ -245,20 +276,12 @@ fn extract_responses_message_text(value: Option<&Value>) -> String {
 
 /// Builds the child environment for a native Codex web-search subprocess.
 ///
-/// The process runtime clears the child environment by design (exact env, never
-/// inherited), so the spawned Codex CLI must receive the daemon's own process
-/// environment merged with the search instance's credentials on top. This mirrors
-/// the TS daemon's `{ ...process.env, ...environment }` so that official-login
-/// instances (no API key in the credential store) still start and can locate
-/// `~/.codex/auth.json` via USERPROFILE/HOME instead of dying on an empty
-/// environment (node aborts before it can even respond to `initialize`).
-fn build_native_search_environment(environment: HashMap<String, String>) -> HashMap<String, String> {
-    let mut merged: HashMap<String, String> = std::env::vars().collect();
-    merged.extend(environment);
-    merged
+/// The runtime uses an exact environment. Keep platform basics while preventing daemon secrets or an API key from
+/// overriding the explicitly selected login account.
+fn build_native_search_environment(target: &Value, environment: HashMap<String, String>) -> crate::errors::CoreResult<HashMap<String, String>> {
+    isolate_login_profile(target, build_environment(None, environment))
 }
 
-/// Launches a real Codex turn whose model owns a native web search tool.
 async fn execute_native_official_web_search(
     target: &Value,
     model: &str,
@@ -266,6 +289,9 @@ async fn execute_native_official_web_search(
     environment: HashMap<String, String>,
     reasoning_effort: Option<&str>,
 ) -> Value {
+    if provider_option(target, "wireApi") == Some("anthropic") {
+        return tool_result(false, "Anthropic conversion does not support native web search.");
+    }
     let mut native_target = target.as_object().cloned().unwrap_or_default();
     let mut options = native_target
         .get("providerOptions")
@@ -289,7 +315,7 @@ async fn execute_native_official_web_search(
         cwd: std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
         model: Some(model.to_string()),
         reasoning_effort: reasoning_effort.map(str::to_string),
-        env: Some(build_native_search_environment(environment)),
+        env: Some(environment),
         timeout_ms: Some(120_000),
         idle_timeout_ms: Some(60_000),
         max_output_bytes: Some(8 * 1024 * 1024),
@@ -302,7 +328,7 @@ async fn execute_native_official_web_search(
     };
     let run = match run {
         Ok(run) => run,
-        Err(error) => return tool_result(false, format!("Official Codex native web search failed: {error}")),
+        Err(_) => return tool_result(false, "Official Codex native web search could not start. Check the selected search instance configuration."),
     };
     let (mut events, cancel, _steer, _write) = run.into_parts();
     let mut answer = String::new();
@@ -331,22 +357,79 @@ async fn execute_native_official_web_search(
     if !text.is_empty() {
         return tool_result(true, text);
     }
-    tool_result(false, format!("Official Codex native web search failed: {}", failure.unwrap_or_else(|| "no search result returned".to_string())))
+    tool_result(false, if failure.is_some() { "Official Codex native web search failed. Check the selected provider connection." } else { "Official Codex native web search returned no result." })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn search_endpoint_policy_rejects_plaintext_and_embedded_secrets() {
+        for url in ["http://example.com/v1/responses", "http://localhost/v1/responses", "https://user:secret@example.com", "https://example.com?key=secret", "https://example.com#secret", "file:///tmp/key"] {
+            assert!(validate_search_endpoint(url).is_err());
+        }
+        assert!(validate_search_endpoint("https://api.openai.com/v1/responses").is_ok());
+        assert!(validate_search_endpoint("http://127.0.0.1:1234/v1/responses").is_ok());
+    }
+
+    async fn search_fixture(reply: String) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://127.0.0.1:{}/v1/responses", listener.local_addr().unwrap().port());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new(); let mut byte = [0u8; 1];
+            while !bytes.ends_with(b"\r\n\r\n") { socket.read_exact(&mut byte).await.unwrap(); bytes.push(byte[0]); }
+            let headers = String::from_utf8(bytes).unwrap();
+            let length: usize = headers.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap();
+            let mut body = vec![0; length]; socket.read_exact(&mut body).await.unwrap();
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        });
+        (endpoint, task)
+    }
+
+    #[tokio::test]
+    async fn search_rejects_redirects_and_redacts_remote_errors() {
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let location = format!("http://127.0.0.1:{}/steal", target.local_addr().unwrap().port());
+        let body = "private-provider-error secret-key";
+        let (endpoint, task) = search_fixture(format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())).await;
+        let result = execute_responses_web_search(&endpoint, "m", "query", "low", "secret-key", None).await;
+        assert_eq!(result["success"], false);
+        assert!(!result.to_string().contains("secret-key")); assert!(!result.to_string().contains("private-provider-error"));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), target.accept()).await.is_err());
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_rejects_oversized_body_and_anthropic_native_route() {
+        let (endpoint, task) = search_fixture("HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\nConnection: close\r\n\r\n{}".into()).await;
+        let result = execute_responses_web_search(&endpoint, "m", "query", "low", "key", None).await;
+        assert_eq!(result["success"], false); assert!(result["content"].as_str().unwrap().contains("oversized"));
+        task.await.unwrap();
+        let result = execute_native_official_web_search(&json!({"providerOptions":{"wireApi":"anthropic"}}), "m", "q", HashMap::new(), None).await;
+        assert_eq!(result["success"], false); assert!(result["content"].as_str().unwrap().contains("does not support"));
+    }
+
+    #[tokio::test]
+    async fn search_treats_http_success_error_payload_as_failure() {
+        let body = r#"{"error":{"message":"private-key"},"status":"failed"}"#;
+        let (endpoint, task) = search_fixture(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())).await;
+        let result = execute_responses_web_search(&endpoint, "m", "q", "low", "key", None).await;
+        assert_eq!(result["success"], false); assert!(!result.to_string().contains("private-key"));
+        task.await.unwrap();
+    }
+
     /// The child env must carry the daemon's own platform basics (home dir)
     /// plus the instance credentials. Before the fix the helper passed the raw
     /// (possibly empty) credential map straight through, which left the spawned
     /// Codex CLI with no environment at all and aborted on startup.
     #[test]
-    fn native_search_environment_preserves_process_env_and_layers_credentials() {
+    fn native_search_environment_preserves_platform_basics_and_layers_credentials() {
         let credential_env: HashMap<String, String> =
             [("OPENAI_API_KEY".to_string(), "sk-test".to_string())].into_iter().collect();
-        let merged = build_native_search_environment(credential_env);
+        let merged = build_native_search_environment(&json!({ "providerId": "codex" }), credential_env).unwrap();
 
         // Credentials are layered on top and win over anything inherited.
         assert_eq!(merged.get("OPENAI_API_KEY").map(String::as_str), Some("sk-test"));
@@ -356,4 +439,14 @@ mod tests {
         let has_home = merged.get("HOME").is_some() || merged.get("USERPROFILE").is_some() || merged.get("HOMEDRIVE").is_some();
         assert!(has_home, "expected a home-directory variable in the merged child environment");
     }
+    #[test]
+    fn native_search_uses_selected_profile_without_vault_api_credentials() {
+        let directory = std::env::temp_dir().join("search-account-a").to_string_lossy().to_string();
+        let target = json!({ "providerId": "codex", "baseArgs": [], "providerOptions": { "loginProfileDirectory": directory } });
+        let environment = HashMap::from([("OPENAI_API_KEY".to_string(), "secret".to_string())]);
+        let environment = build_native_search_environment(&target, environment).unwrap();
+        assert_eq!(environment.get("CODEX_HOME"), Some(&directory));
+        assert!(!environment.contains_key("OPENAI_API_KEY"));
+    }
+
 }

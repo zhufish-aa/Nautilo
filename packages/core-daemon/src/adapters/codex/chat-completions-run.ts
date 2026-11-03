@@ -190,6 +190,10 @@ function chatUsage(usage: RecordValue): AdapterEvent {
   const completionTokens = numberValue(usage.completion_tokens ?? usage.output_tokens);
   return {
     kind: "usage",
+    usageScope: "turn",
+    inputTokensIncludesCache: true,
+    cachedInputTokens: numberValue(record(usage.prompt_tokens_details ?? usage.input_tokens_details)?.cached_tokens),
+    reasoningOutputTokens: numberValue(record(usage.completion_tokens_details ?? usage.output_tokens_details)?.reasoning_tokens),
     inputTokens: promptTokens,
     outputTokens: completionTokens,
     raw: usage
@@ -198,4 +202,8 @@ function chatUsage(usage: RecordValue): AdapterEvent {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function record(value: unknown): RecordValue {
+  return value !== null && typeof value === "object" ? value as RecordValue : {};
 }

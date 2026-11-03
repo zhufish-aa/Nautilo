@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AdapterRegistry, Database, EventService, RunService } from "../dist/index.js";
 
-test("queued turns retain the predecessor's native thread and latest session settings", async () => {
+test("queued turns retain native thread and tightened permissions but keep their submitted model", async () => {
   const database = new Database(":memory:");
   const timestamp = new Date().toISOString();
   const project = { id: "queue-project", name: "Queue", rootPath: process.cwd(), repositoryType: "git", nonGitDiffMode: "off", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
-  const session = { id: "queue-session", projectId: project.id, memberId: "queue-agent", agentInstanceId: "queue-agent", title: "Before", status: "idle", unreadCount: 0, createdAt: timestamp, updatedAt: timestamp };
+  const session = { id: "queue-session", projectId: project.id, memberId: "queue-agent", agentInstanceId: "queue-agent", model: "submitted-model", reasoningEffort: "low", serviceTier: "fast", title: "Before", status: "idle", unreadCount: 0, createdAt: timestamp, updatedAt: timestamp };
   const agent = { id: "queue-agent", providerId: "queue-fake", displayName: "Queue fake", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: timestamp, updatedAt: timestamp };
   database.projects.save(project, timestamp);
   database.sessions.save(session);
@@ -40,7 +40,7 @@ test("queued turns retain the predecessor's native thread and latest session set
     assert.equal(stale.providerSessionId, undefined);
     const queuedSecond = service.launch(stale, agent, "second");
     const queuedThird = service.launch(stale, agent, "third");
-    database.sessions.save({ ...database.sessions.get(session.id), title: "Renamed while queued", model: "new-model", permissionMode: "plan" });
+    database.sessions.save({ ...database.sessions.get(session.id), title: "Renamed while queued", model: "new-model", reasoningEffort: "high", serviceTier: "flex", permissionMode: "plan" });
     releaseFirst();
     await first.completion;
     await (await queuedSecond).completion;
@@ -49,7 +49,9 @@ test("queued turns retain the predecessor's native thread and latest session set
     for (const { request } of requests.slice(1)) {
       assert.equal(request.providerSessionId, "native-thread-first");
       assert.equal(request.localSessionId, session.id);
-      assert.equal(request.model, "new-model");
+      assert.equal(request.model, "submitted-model", "already submitted messages keep their original model choice");
+      assert.equal(request.reasoningEffort, "low");
+      assert.equal(request.serviceTier, "fast");
       assert.equal(request.permissionMode, "plan");
     }
     assert.equal(database.sessions.get(session.id).title, "Renamed while queued");
@@ -177,7 +179,7 @@ test("RunService prefers the instance-configured context window over provider-re
     start: (request) => {
       requests.push(request);
       async function* events() {
-        yield { kind: "usage", contextUsed: 80220, contextWindow: 258400 };
+        yield { kind: "usage", usageScope: "turn", inputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 3, reasoningOutputTokens: 2, inputTokensIncludesCache: false, reportedCost: 0, currency: "USD", contextUsed: 80220, contextWindow: 258400 };
         yield { kind: "message", text: "ok" };
         yield { kind: "exit", exitCode: 0 };
       }
@@ -198,6 +200,18 @@ test("RunService prefers the instance-configured context window over provider-re
   const usage = database.events.replay({ sessionId: session.id }).find((event) => event.type === "usage.updated");
   assert.equal(usage?.payload.contextWindow, 1000000);
   assert.equal(usage?.payload.contextUsed, 80220);
+  assert.equal(usage.payload.usageScope, "turn");
+  assert.equal(usage.payload.usageKey, runId);
+  assert.equal(usage.payload.inputTokens, 0);
+  assert.equal(usage.payload.cachedInputTokens, 0);
+  assert.equal(usage.payload.cacheCreationInputTokens, 3);
+  assert.equal(usage.payload.reasoningOutputTokens, 2);
+  assert.equal(usage.payload.inputTokensIncludesCache, false);
+  assert.equal(usage.payload.reportedCost, 0);
+  assert.equal(usage.payload.currency, "USD");
+  assert.equal(usage.payload.estimatedCost, undefined);
+  assert.equal(usage.payload.model, "deepseek-v4-flash");
+  assert.equal(usage.payload.agentInstanceId, "a1");
   database.close();
 });
 

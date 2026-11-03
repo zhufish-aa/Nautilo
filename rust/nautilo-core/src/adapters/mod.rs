@@ -61,7 +61,16 @@ pub enum AdapterEvent {
     File { path: String, change_type: Option<String>, additions: Option<i64>, deletions: Option<i64>, diff: Option<String>, raw: Option<Value> },
     Session { provider_session_id: String, raw: Option<Value> },
     Status { phase: String, raw: Option<Value> },
+    /// Replacement snapshot: context footprint, turn execution, or provider session total.
+    /// Reported cost is accounting metadata, never evidence of a billed payment.
     Usage {
+        usage_scope: Option<String>,
+        usage_key: Option<String>,
+        input_tokens_includes_cache: Option<bool>,
+        cache_creation_input_tokens: Option<i64>,
+        reported_cost: Option<f64>,
+        estimated_cost: Option<f64>,
+        currency: Option<String>,
         input_tokens: Option<i64>,
         cached_input_tokens: Option<i64>,
         output_tokens: Option<i64>,
@@ -304,6 +313,13 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
         "session" => AdapterEvent::Session { provider_session_id: opt_str("providerSessionId").unwrap_or_default(), raw },
         "status" => AdapterEvent::Status { phase: opt_str("phase").unwrap_or_default(), raw },
         "usage" => AdapterEvent::Usage {
+            usage_scope: opt_str("usageScope"),
+            usage_key: opt_str("usageKey"),
+            input_tokens_includes_cache: value.get("inputTokensIncludesCache").and_then(Value::as_bool),
+            cache_creation_input_tokens: opt_i64("cacheCreationInputTokens"),
+            reported_cost: value.get("reportedCost").and_then(Value::as_f64),
+            estimated_cost: value.get("estimatedCost").and_then(Value::as_f64),
+            currency: opt_str("currency"),
             input_tokens: opt_i64("inputTokens"),
             cached_input_tokens: opt_i64("cachedInputTokens"),
             output_tokens: opt_i64("outputTokens"),

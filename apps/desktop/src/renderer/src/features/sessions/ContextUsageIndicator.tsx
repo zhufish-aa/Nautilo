@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { useUsageStore } from "../../stores/usage";
 import { motion } from "framer-motion";
 import { Loader2, Shrink } from "lucide-react";
 import type { SlashCommandDefinition } from "@agenthub/domain";
@@ -51,6 +53,7 @@ export function ContextUsageIndicator({
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const { used, limit, percentage } = useContextUsage(sessionId);
+  const sessionUsage = useUsageStore(state => sessionId ? state.summaries[sessionId] : undefined);
 
   // Interactive popover: stays open while hovered, closes with a small delay
   // after leaving trigger or panel, and on Escape.
@@ -134,6 +137,10 @@ export function ContextUsageIndicator({
           onClick={(event) => event.stopPropagation()}
         >
           <span className="block leading-relaxed">{tooltip}</span>
+          <span className="mt-2 block border-t border-line pt-2 leading-relaxed text-muted">
+            {zh ? "累计 Token" : "Total tokens"}: {sessionUsage?.totalTokens === undefined ? "—" : tokenLabel(sessionUsage.totalTokens)}
+          </span>
+          <Link to={`/settings?section=usage&session=${encodeURIComponent(sessionId)}`} className="mt-1 inline-block text-accent hover:underline">{zh ? "查看会话用量与费用 →" : "View session usage & costs →"}</Link>
           {compactCommand && (
             <button
               type="button"

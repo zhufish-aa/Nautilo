@@ -22,7 +22,7 @@ export async function readKimiSessionUsage(
   if (!wirePath) return undefined;
   const text = await readTail(wirePath);
   const used = parseKimiWireContextUsed(text, window);
-  return used === undefined ? undefined : { kind: "usage", contextUsed: used, contextWindow: window };
+  return used === undefined ? undefined : { kind: "usage", usageScope: "context", contextUsed: used, contextWindow: window };
 }
 
 /** Reads `max_context_size` from the CLI's own config.toml (plain line scan;

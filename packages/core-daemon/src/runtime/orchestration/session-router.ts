@@ -1,3 +1,6 @@
+import { assertSessionIdentityUpdate } from "../session-binding-guard.js";
+import { bindNewSession } from "../runtime-connection.js";
+import { MemberRouter } from "./member-router.js";
 import { randomUUID } from "node:crypto";
 import type { ProjectRun, Session, TeamDefinition, TeamMember } from "@agenthub/domain";
 import { Database } from "../../database/index.js";
@@ -11,6 +14,7 @@ export class SessionRouter {
       const existing = this.database.sessions.get(existingSessionId);
       if (existing && existing.projectId === projectRun.projectId) {
         const updated = { ...existing, teamId: team.id, projectRunId: projectRun.id, memberId: projectRun.mainMemberId, agentInstanceId: projectRun.mainAgentInstanceId, updatedAt: new Date().toISOString() };
+        assertSessionIdentityUpdate(existing, updated, this.database);
         this.database.sessions.save(updated);
         return updated;
       }
@@ -48,6 +52,9 @@ export class SessionRouter {
     return this.create(projectRun, member.id, title, {
       teamId: team.id,
       parentSessionId: parent.id,
+      connectionId: parent.connectionId,
+      connectionRevision: parent.connectionRevision,
+      agentInstanceId: member.agentInstanceId,
       taskId,
       model: member.model,
       reasoningEffort: member.reasoningEffort,
@@ -60,6 +67,8 @@ export class SessionRouter {
     return this.create(projectRun, memberId, `Recovery: ${projectRun.goal.slice(0, 80)}`, {
       teamId: team.id,
       parentSessionId: previous.id,
+      connectionId: previous.connectionId,
+      connectionRevision: previous.connectionRevision,
       agentInstanceId: member?.agentInstanceId,
       model: member?.model,
       reasoningEffort: member?.reasoningEffort,
@@ -71,10 +80,10 @@ export class SessionRouter {
     projectRun: ProjectRun,
     memberId: string,
     title: string,
-    context: Pick<Session, "teamId" | "parentSessionId" | "taskId" | "agentInstanceId" | "model" | "reasoningEffort" | "serviceTier"> = { teamId: projectRun.teamId }
+    context: Pick<Session, "teamId" | "parentSessionId" | "taskId" | "agentInstanceId" | "model" | "reasoningEffort" | "serviceTier" | "connectionId" | "connectionRevision"> = { teamId: projectRun.teamId }
   ): Session {
     const now = new Date().toISOString();
-    const session: Session = {
+    let session: Session = {
       id: randomUUID(),
       projectId: projectRun.projectId,
       projectRunId: projectRun.id,
@@ -82,6 +91,8 @@ export class SessionRouter {
       parentSessionId: context.parentSessionId,
       taskId: context.taskId,
       agentInstanceId: context.agentInstanceId,
+      connectionId: context.connectionId,
+      connectionRevision: context.connectionRevision,
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       serviceTier: context.serviceTier,
@@ -92,6 +103,7 @@ export class SessionRouter {
       createdAt: now,
       updatedAt: now
     };
+    if (session.connectionId) session = bindNewSession(this.database, session, new MemberRouter(this.database).resolveSession(session));
     this.database.sessions.save(session);
     return session;
   }

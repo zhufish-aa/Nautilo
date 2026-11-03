@@ -28,6 +28,13 @@ pub async fn read_kimi_session_usage(
     let text = read_tail(&wire_path).await?;
     let used = parse_kimi_wire_context_used(&text, context_window)?;
     Some(AdapterEvent::Usage {
+        usage_scope: Some("context".to_string()),
+        usage_key: None,
+        input_tokens_includes_cache: None,
+        cache_creation_input_tokens: None,
+        reported_cost: None,
+        estimated_cost: None,
+        currency: None,
         input_tokens: None,
         cached_input_tokens: None,
         output_tokens: None,

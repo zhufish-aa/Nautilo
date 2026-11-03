@@ -54,16 +54,16 @@ test("project workspace mode lets users choose direct editing or Git isolation",
   assert.match(mappers, /project\.workspaceMode \?\? "direct"/);
 });
 
-test("session model control keeps compact effort slider and advanced details mutually exclusive", () => {
+test("session controls expose model/effort and confirmed source switching, never Agent rebinding", () => {
   const source = readFileSync(join(renderer, "features/sessions/SessionModelControl.tsx"), "utf8");
-  assert.match(source, /!advancedDetails/);
-  assert.match(source, /session-effort-range/);
-  assert.match(source, /setAdvancedDetails\(true\)/);
-  assert.match(source, /setAdvancedDetails\(false\)/);
-  assert.match(source, /sessions\.composer\.speed/);
-  assert.match(source, /configure\(\{ serviceTier:/);
+  assert.doesNotMatch(source, /switchWorkbenchSessionInstance|selectCustomModel|selectCustomEffort|advancedDetails/);
+  assert.match(source, /connectionSupportsAgent/);
+  assert.match(source, /confirmConnectionChange: true/);
+  assert.match(source, /getConnection\(connectionId, connectionRevision\)/);
   assert.match(source, /configureWorkbenchSession\(sessionId, patch\)/);
-  assert.match(source, /draft\?\.onChange\(patch\)/);
+  assert.match(source, /disabled=\{locked \|\| !efforts.length\}/);
+  const header = readFileSync(join(renderer, "features/sessions/SessionWorkbench.tsx"), "utf8");
+  assert.match(header, /session-fixed-agent/);
 });
 
 test("CLI instances own connectivity while team members own delegated model defaults", () => {

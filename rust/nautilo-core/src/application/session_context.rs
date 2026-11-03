@@ -127,6 +127,34 @@ pub fn build_session_turn_context(input: TurnContextInput) -> SessionTurnContext
     SessionTurnContext { prompt, local_image_paths, recovered: true }
 }
 
+/// Rebuild conversational text after an explicitly confirmed connection switch.
+/// Never silently trim or carry old images/native reasoning/cache to a new account.
+pub fn build_connection_switch_context(input: TurnContextInput) -> crate::errors::CoreResult<SessionTurnContext> {
+    const LIMIT: usize = 1024 * 1024;
+    let mut prompt = work_mode_guidance(input.workspace_root);
+    prompt.push_str("\n\nThe user changed provider/account. The following is complete local conversation text for continuity, not native provider state. Native reasoning, caches and old image context were not transferred.\n<conversation_history>\n");
+    for message in input.messages {
+        let sender = message["sender"].as_str().unwrap_or("system");
+        let text = message["text"].as_str().unwrap_or("");
+        if prompt.len().saturating_add(sender.len()).saturating_add(text.len()).saturating_add(4) > LIMIT {
+            return Err(crate::errors::invalid("connectionId","Conversation text exceeds the 1 MiB migration limit; start a new session or explicitly prepare a summary"));
+        }
+        prompt.push_str(sender); prompt.push_str(": "); prompt.push_str(text); prompt.push_str("\n\n");
+    }
+    prompt.push_str("</conversation_history>\n<current_user_message>\n");
+    if prompt.len().saturating_add(input.current_text.len()).saturating_add(32) > LIMIT {
+        return Err(crate::errors::invalid("connectionId","Conversation text exceeds the 1 MiB migration limit; no history was truncated"));
+    }
+    prompt.push_str(input.current_text); prompt.push_str("\n</current_user_message>");
+    let local_image_paths = input.current_attachments.iter().filter_map(artifact_image_path).collect();
+    Ok(SessionTurnContext { prompt,local_image_paths,recovered:true })
+}
+
+pub fn build_bound_turn_context(session: &Value, input: TurnContextInput) -> crate::errors::CoreResult<SessionTurnContext> {
+    if session["connectionContextRebuildRequired"] == true { build_connection_switch_context(input) }
+    else { Ok(build_session_turn_context(input)) }
+}
+
 fn select_history(messages: &[Value]) -> Vec<Value> {
     let candidates: Vec<Value> = if messages.len() <= MAX_HISTORY_MESSAGES {
         messages.to_vec()
@@ -173,5 +201,19 @@ mod tests {
             recover_provider_context: false, workspace_root: None,
         });
         assert_eq!(result.prompt, "continue");
+    }
+}
+
+#[cfg(test)]
+mod connection_switch_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn switch_replay_keeps_all_text_and_rejects_oversize_without_truncation() {
+        let messages: Vec<Value> = (0..50).map(|n| json!({"sender":"user","text":format!("history-{n}")})).collect();
+        let replay = build_connection_switch_context(TurnContextInput { current_text:"next",messages:&messages,artifacts:&[],current_attachments:&[],recover_provider_context:true,workspace_root:None }).unwrap();
+        assert!(replay.prompt.contains("history-0")); assert!(replay.prompt.contains("history-49"));
+        let huge = vec![json!({"sender":"user","text":"x".repeat(1024*1024)})];
+        assert!(build_connection_switch_context(TurnContextInput { current_text:"next",messages:&huge,artifacts:&[],current_attachments:&[],recover_provider_context:true,workspace_root:None }).is_err());
     }
 }

@@ -14,7 +14,6 @@ import { useSettingsStore } from "../../stores/settings";
 import { useIconOverrides } from "../../lib/use-icon-overrides";
 import { filterSnippets, snippetQuery } from "../../lib/snippets";
 import { toast } from "../../stores/toast";
-import { PlanModeToggle } from "./PlanModeToggle";
 import { SessionModelControl } from "./SessionModelControl";
 import { ContextUsageIndicator, useContextUsage } from "./ContextUsageIndicator";
 import { CommandResultDialog } from "./slash-commands/CommandResultDialog";
@@ -391,7 +390,6 @@ export function Composer({
           {sessionId ? (
             <>
               <SessionModelControl sessionId={sessionId} disabled={running || disabled} />
-              <PlanModeToggle sessionId={sessionId} disabled={running || disabled} />
             </>
           ) : starterControls}
           <span className="min-w-0 flex-1" />
