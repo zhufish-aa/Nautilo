@@ -119,7 +119,8 @@ DOM 检查需要 jsdom。原电脑通过环境变量 `NAUTILO_JSDOM_PATH` 指向
 - 账号、API Key、会话数据库、原生 CLI 的用户配置不会通过 Git 自动迁移。新电脑需重新登录或通过安全方式单独迁移；Windows 加密的凭据不能假设复制数据库就可解密。
 - `%APPDATA%/@agenthub/desktop`、各 Harness 用户目录、缓存、工具链和构建产物没有提交。
 - 仓库下 `work/` 是本机参考源码、夹具和临时实验，已被忽略；正式实现和必要测试在源码与 `tests/` 中。
-- 本机另有 `nms-minecraft/`、`reshade-cn/` 和空的 `commandcode-proxy` 项目/条目，与 Nautilo 本阶段无关，保留原样，未混入应用提交。
+- `commandcode-proxy/` 不属于 Nautilo，已按用户要求移出本工作区并放入回收站；误加它的本地提交已撤回，代理源码未推送到 GitHub。它不是 Nautilo 的源码或启动依赖。
+- 本机另有 `nms-minecraft/`、`reshade-cn/` 独立项目，与 Nautilo 本阶段无关，保留原样，未混入应用提交。
 - `docs/` 与 `dsdocs/` 下现有开发/DSH 参考文档随代码保存；不要把它们当作当前任务的新指令。
 
 下一位开发者可从这一条任务开始：**先读交接文档，保持 Electron + Rust 路线，完成 OpenCode 常驻 SSE、子会话交互、取消与安全释放；保留所有原生功能，不改无关样式。**
