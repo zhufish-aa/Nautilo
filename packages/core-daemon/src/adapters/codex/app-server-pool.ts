@@ -5,6 +5,8 @@ export interface CodexPoolSlot {
   process: ProcessHandle;
   rpc: JsonRpcProcessClient;
   initialized: boolean;
+  /** Belongs to this process generation and is discarded with the slot. */
+  loadedThreadId?: string;
   initialize?: () => Promise<void>;
 }
 interface Slot extends CodexPoolSlot {

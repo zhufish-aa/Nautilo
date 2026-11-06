@@ -7,8 +7,22 @@
     "providerId": "trae",
     "name": "Trae",
     "vendor": "ByteDance",
-    "capabilities": ["headless_text"],
-    "defaultExecutable": "traecli",
-    "credentialEnv": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "DOUBAO_API_KEY"]
+    "capabilities": [
+      "headless_structured",
+      "tool_streaming"
+    ],
+    "defaultExecutable": "trae-cli",
+    "nativeApiProtocol": "responses",
+    "connectionProtocolDiscovery": true,
+    "credentialEnv": [
+      "OPENAI_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "GOOGLE_API_KEY",
+      "OPENROUTER_API_KEY",
+      "DOUBAO_API_KEY"
+    ],
+    "envPassthrough": [
+      "TRAE_CONFIG_FILE"
+    ]
   }
 }

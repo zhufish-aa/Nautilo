@@ -40,6 +40,9 @@ export function resolveSpawnCommand(
 
 /** Case-insensitive env lookup: Windows typically spells it "Path". */
 function envValue(env: Record<string, string | undefined>, key: string): string | undefined {
+  // An invocation can add PATH beside the ambient Windows spelling Path.
+  // Prefer the exact explicit key rather than the older inherited entry.
+  if (env[key] !== undefined) return env[key];
   for (const [name, value] of Object.entries(env)) {
     if (name.toLowerCase() === key.toLowerCase()) return value;
   }

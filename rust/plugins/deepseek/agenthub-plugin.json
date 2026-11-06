@@ -1,0 +1,65 @@
+{
+  "id": "deepseek",
+  "apiVersion": 1,
+  "main": "agenthub-plugin-deepseek",
+  "version": "0.1.0",
+  "descriptor": {
+    "providerId": "deepseek",
+    "name": "DeepSeek Harness",
+    "vendor": "DeepSeek",
+    "capabilities": [
+      "headless_structured",
+      "native_resume",
+      "tool_streaming"
+    ],
+    "defaultExecutable": "dsh",
+    "credentialEnv": [
+      "DEEPSEEK_API_KEY"
+    ],
+    "envPassthrough": [
+      "DSH_HOME",
+      "DSH_AGENTS_HOME",
+      "DSH_PRIMARY_RUNTIME",
+      "DSH_BUNDLED_PRIMARY_RUNTIME",
+      "DSH_BUNDLED_OFFICE_CLI",
+      "DSH_BUNDLED_OFFICE_SKILLS",
+      "DEEPSEEK_API_KEY"
+    ],
+    "modeDiscovery": true,
+    "permissionModes": [
+      {
+        "value": "workspace-write",
+        "name": {
+          "zh-CN": "工作区内修改",
+          "en-US": "Workspace write"
+        },
+        "description": {
+          "zh-CN": "允许工作区内修改，需要额外权限时询问",
+          "en-US": "Allow workspace edits and ask for additional access"
+        }
+      },
+      {
+        "value": "read-only",
+        "name": {
+          "zh-CN": "只读",
+          "en-US": "Read only"
+        },
+        "description": {
+          "zh-CN": "查看文件，需要额外权限时询问",
+          "en-US": "Read files and ask for additional access"
+        }
+      },
+      {
+        "value": "danger-full-access",
+        "name": {
+          "zh-CN": "完全访问权限",
+          "en-US": "Full access"
+        },
+        "description": {
+          "zh-CN": "允许原生工具完整访问",
+          "en-US": "Allow full access for native tools"
+        }
+      }
+    ]
+  }
+}

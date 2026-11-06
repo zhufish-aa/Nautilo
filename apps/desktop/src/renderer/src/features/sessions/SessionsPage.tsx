@@ -21,6 +21,7 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
   }, [session?.id]);
   const [showAgents, setShowAgents] = useState(false);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const agentsPanel = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLElement | null>(null);
   const closeAgents = useCallback((): void => { setShowAgents(false); trigger.current?.focus(); }, []);
   const toggleAgents = useCallback((): void => {
@@ -38,9 +39,14 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
     const escape = (event: KeyboardEvent): void => {
       if (event.key === "Escape") { setShowAgents(false); trigger.current?.focus(); }
     };
+    const dismiss = (event: PointerEvent): void => {
+      if (session?.target.teamId || !(event.target instanceof Node)) return;
+      if (!agentsPanel.current?.contains(event.target) && !trigger.current?.contains(event.target)) setShowAgents(false);
+    };
     window.addEventListener("keydown", escape);
-    return () => window.removeEventListener("keydown", escape);
-  }, [showAgents, active]);
+    document.addEventListener("pointerdown", dismiss);
+    return () => { window.removeEventListener("keydown", escape); document.removeEventListener("pointerdown", dismiss); };
+  }, [showAgents, active, session?.target.teamId]);
   const previewPath = requestedWorkspaceFile(preview, session?.id);
   if (missingSession) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-ink-2"><p>{locale === "zh-CN" ? "此会话不存在或已移除" : "This conversation is unavailable"}</p><a href="#/sessions?new=1" className="rounded-lg border border-line px-4 py-2 text-ink hover:bg-panel">{locale === "zh-CN" ? "新会话" : "New conversation"}</a></div>;
   if (!session) return <NewConversation mode="code" onCreated={openSession} />;
@@ -51,7 +57,7 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
       </section>
 
       {previewPath && <WorkspacePreview key={session.id} sessionId={session.id} path={previewPath} onClose={closePreview} />}
-      {showAgents && <div className="agent-panel-overlay relative flex h-full shrink-0 flex-col"><div className="flex h-12 shrink-0 items-center justify-end px-3"><button ref={closeButton} type="button" aria-label={locale === "zh-CN" ? "关闭团队" : "Close team"} onClick={closeAgents} className="rounded-lg p-2 text-ink-3 hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-accent"><X className="h-4 w-4" /></button></div><AgentPanel session={session} onOpenSession={openSession} /></div>}
+      {showAgents && <div ref={agentsPanel} id="session-agent-inspector" data-presentation={session.target.teamId ? "sidebar" : "popover"} role={session.target.teamId ? undefined : "dialog"} aria-label={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} className="agent-panel-overlay relative flex h-full shrink-0 flex-col"><button ref={closeButton} type="button" aria-label={locale === "zh-CN" ? "关闭 Agent 分配" : "Close agent assignment"} onClick={closeAgents} className="agent-panel-close"><X size={15} /></button><AgentPanel session={session} onOpenSession={openSession} /></div>}
     </div>
   );
 }

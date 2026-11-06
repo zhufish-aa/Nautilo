@@ -1,3 +1,4 @@
+import { childEvents } from "./subagents.js";
 /**
  * AgentHub provider plugin for Pi.
  *
@@ -7,6 +8,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { TurnUsage } from "./usage.js";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import { platform, tmpdir } from "node:os";
@@ -114,6 +116,8 @@ const numberValue = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
 interface PiParseState {
+  childSnapshots?: Map<string,string>;
+  usage?: TurnUsage;
   messageSequence: number;
   currentMessageId?: string;
   currentThinkingId?: string;
@@ -363,7 +367,7 @@ class PiPluginAdapter implements AgentCliAdapter {
 
   private run(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
     const executable = request.instance.executable || descriptor.defaultExecutable || "pi";
-    const env = { ...process.env, ...(request.env ?? {}), PI_OFFLINE: "1" } as Record<string, string>;
+    const env = { ...(request.instance.providerOptions?.runtimeConnectionId ? {} : process.env), ...(request.env ?? {}) } as Record<string, string>;
     configurePiProviderEnvironment(request.instance, env);
     const runtimeToolUrl = request.runtimeTools?.length && request.executeRuntimeTool
       ? piRuntimeToolServer.register({ tools: request.runtimeTools, execute: request.executeRuntimeTool })
@@ -584,7 +588,7 @@ export function piRunArgs(
   resume: boolean,
   skillPaths: string[] = []
 ): string[] {
-  const args = [...request.instance.baseArgs, "--mode", "rpc", "--offline"];
+  const args = [...request.instance.baseArgs, "--mode", "rpc"];
   const mode = request.permissionMode ?? "standard";
   if (mode === "isolated" || mode === "auto") args.push("--no-approve");
   else args.push("--approve");
@@ -1170,7 +1174,7 @@ function configurePiProviderEnvironment(instance: AgentInstance, env: Record<str
   });
   env.AGENTHUB_PI_PROVIDER_CONFIG = JSON.stringify({
     name: instance.displayName || "AgentHub API",
-    baseUrl: String(instance.providerOptions?.baseUrl).replace(/\/+$/, ""),
+    baseUrl: String(instance.providerOptions?.baseUrl).replace(/\/+$/, "").replace(api === "anthropic-messages" ? /\/v1$/ : /$^/, ""),
     api,
     models
   });
@@ -1201,6 +1205,15 @@ function agentHubPiExtensionPath(): string {
 }
 
 export function parsePiRpcEvent(value: RecordValue, state: PiParseState): AdapterEvent[] {
+  const events=parsePiRpcEventInner(value,state);
+  if (value.type === "tool_execution_update" || value.type === "tool_execution_end") {
+    const name=String(value.toolName ?? state.toolArgs.get(String(value.toolCallId))?.name ?? "");
+    events.push(...childEvents(value,name,state.childSnapshots ??= new Map()));
+  }
+  return events;
+}
+
+function parsePiRpcEventInner(value: RecordValue, state: PiParseState): AdapterEvent[] {
   const type = stringValue(value.type);
   if (type === "message_start") {
     const message = asRecord(value.message);
@@ -1240,12 +1253,12 @@ export function parsePiRpcEvent(value: RecordValue, state: PiParseState): Adapte
       const text = content.filter((part) => part.type === "text").map((part) => String(part.text ?? "")).join("");
       if (text) events.push({ kind: "message", text, phase: "delta", messageId: state.currentMessageId, raw: value });
     }
+    const thinking = content.filter((part) => part.type === "thinking").map((part) => String(part.thinking ?? "")).join("");
     if (!state.streamedThinking) {
-      const thinking = content.filter((part) => part.type === "thinking").map((part) => String(part.thinking ?? "")).join("");
       if (thinking) events.push({ kind: "thinking", text: thinking, phase: "delta", messageId: state.currentThinkingId, raw: value });
     }
     if (state.streamedThinking || content.some((part) => part.type === "thinking")) {
-      events.push({ kind: "thinking", text: "", phase: "completed", messageId: state.currentThinkingId, raw: value });
+      events.push({ kind: "thinking", text: thinking, phase: "completed", messageId: state.currentThinkingId, raw: value });
     }
     events.push({ kind: "message", text: "", phase: "completed", messageId: state.currentMessageId, raw: value });
     const usage = asRecord(message.usage);
@@ -1263,8 +1276,11 @@ export function parsePiRpcEvent(value: RecordValue, state: PiParseState): Adapte
       if (promptTokens > 0 || (numberValue(usage.output) ?? 0) > 0) {
         events.push({
           kind: "usage",
+          usageScope: "context",
+          inputTokensIncludesCache: false,
           inputTokens: numberValue(usage.input),
           cachedInputTokens: numberValue(usage.cacheRead),
+          cacheCreationInputTokens: numberValue(usage.cacheWrite),
           outputTokens: numberValue(usage.output),
           reasoningOutputTokens: numberValue(usage.reasoning),
           contextUsed: promptTokens > 0 ? promptTokens : numberValue(usage.totalTokens),
@@ -1272,6 +1288,8 @@ export function parsePiRpcEvent(value: RecordValue, state: PiParseState): Adapte
         });
       }
     }
+    const usageEvent = events.find((event): event is Extract<AdapterEvent, { kind: "usage" }> => event.kind === "usage");
+    if (usageEvent) events.push((state.usage ??= new TurnUsage()).update(String(state.messageSequence), usageEvent));
     const errorMessage = stringValue(message.errorMessage);
     if (state.modelError) {
       events.push({
@@ -1290,6 +1308,16 @@ export function parsePiRpcEvent(value: RecordValue, state: PiParseState): Adapte
       return [{ kind: "command", callId, command: String(args.command ?? ""), phase: "started", raw: value }];
     }
     return [{ kind: "tool", callId, name, phase: "started", input: args, fileDiff: piFileDiff(name, args), raw: value }];
+  }
+  if (type === "tool_execution_update") {
+    const callId = String(value.toolCallId ?? "");
+    const stored = state.toolArgs.get(callId);
+    const name = stringValue(value.toolName) ?? stored?.name ?? "tool";
+    const args = asRecord(value.args ?? stored?.args);
+    const output = toolResultText(value.partialResult);
+    return name === "bash"
+      ? [{ kind:"command", callId, command:String(args.command ?? ""), phase:"updated", output, raw:value }]
+      : [{ kind:"tool", callId, name, phase:"updated", input:args, output, raw:value }];
   }
   if (type === "tool_execution_end") {
     const callId = String(value.toolCallId ?? "");
@@ -1511,7 +1539,7 @@ async function rpcCapture(
   env: Record<string, string | undefined> | undefined,
   commands: RecordValue[]
 ): Promise<RecordValue[]> {
-  const merged = { ...process.env, ...(env ?? {}), PI_OFFLINE: "1" } as Record<string, string>;
+  const merged = { ...process.env, ...(env ?? {}) } as Record<string, string>;
   const resolved = resolveSpawnCommand(command, args, merged);
   return await new Promise((resolve, reject) => {
     const child = spawn(resolved.command, resolved.args, {

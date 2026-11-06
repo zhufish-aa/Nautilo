@@ -18,7 +18,8 @@ test("real bootstrap hydrates each live project once and keeps project inspectio
     "../stores/agents": { useAgentsStore: store("agents") },
     "../stores/providers": { useProvidersStore: store("providers") },
     "../stores/provider-tools": { useProviderToolsStore: store("tools") },
-    "../stores/teams": { useTeamsStore: store("teams") }
+    "../stores/teams": { useTeamsStore: store("teams") },
+    "../stores/connections": { useConnectionsStore: store("connections") }
   };
   const source = readFileSync(new URL("../src/renderer/src/lib/core-bootstrap.ts", import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -29,6 +30,7 @@ test("real bootstrap hydrates each live project once and keeps project inspectio
   assert.equal(h.calls.filter((c) => c.method === "projectRun.list").length, 2, "resume reads a fresh index");
   assert.deepEqual(hydrations.find(([name]) => name === "projects"), ["projects", false]);
   assert.equal(notifications.length, 1);
+  assert.deepEqual(hydrations.find(([name]) => name === "connections"), ["connections"]);
   await settle(h, () => exports.initializeCoreState());
   assert.equal(h.calls.filter((c) => c.method === "projectRun.get").length, 1, "bootstrap is idempotent");
 });

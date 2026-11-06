@@ -11,6 +11,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
+import { TurnUsage } from "./usage.js";
 import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -44,6 +45,7 @@ const descriptor: ProviderDescriptor = {
   name: "OpenCode",
   vendor: "OpenCode",
   capabilities: ["headless_text", "provider_server"],
+  envPassthrough: ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"],
   defaultExecutable: "opencode",
   credentialEnv: ["OPENCODE_API_KEY"],
   permissionModes: [
@@ -129,7 +131,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     if (!request.instance.baseArgs.length || request.providerCommand) return this.serverRun(request, true);
     return this.spawnRun(
       request,
-      [...request.instance.baseArgs, "--session", request.providerSessionId, request.prompt]
+      [...startArgs(request.instance,request), "--session", request.providerSessionId]
     );
   }
 
@@ -154,7 +156,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
   }
 
   private spawnRun(request: AdapterStartRequest, args: string[]): AdapterRun {
-    const env = (request.env ?? {}) as Record<string, string>;
+    const env = buildOpenCodeEnvironment(request);
     const resolved = resolveSpawnCommand(request.instance.executable || descriptor.defaultExecutable || "opencode", args, env);
     const child = spawn(resolved.command, resolved.args, {
       cwd: request.cwd,
@@ -229,16 +231,12 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
           await apiJson(baseUrl, request.cwd, `/session/${encodeURIComponent(sessionId)}/prompt_async`, {
             method: "POST",
             body: {
-              ...(openCodeModel(request.model) ? { model: openCodeModel(request.model) } : {}),
+              ...(openCodeModel(request.instance.providerOptions?.runtimeConnectionId && request.model ? `nautilo/${request.model}` : request.model) ? { model: openCodeModel(request.instance.providerOptions?.runtimeConnectionId && request.model ? `nautilo/${request.model}` : request.model) } : {}),
               ...(mode === "plan" || mode === "build" ? { agent: mode } : {}),
+              ...(request.reasoningEffort ? { variant: request.reasoningEffort } : {}),
               parts: [
                 { type: "text", text: request.prompt },
-                ...(request.localImagePaths ?? []).map((path) => ({
-                  type: "file",
-                  url: pathToFileURL(path).href,
-                  filename: path.split(/[\\/]/).at(-1) ?? "image",
-                  mime: "application/octet-stream"
-                }))
+                ...(request.localImagePaths ?? []).map((path) => openCodeImagePart(path, request.cwd))
               ]
             }
           });
@@ -251,6 +249,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
         const pendingTaskParts: string[] = [];
         const childSessions = new Map<string, string>();
         const rejectedSessions = new Set<string>();
+        const partStream = new OpenCodePartStream();
 
         for await (const raw of stream.events) {
           const event = unwrapServerEvent(raw);
@@ -262,6 +261,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
             && eventSessionId !== sessionId
             && !knownChild
             && String(event.type ?? "") !== "message.part.updated"
+            && String(event.type ?? "") !== "message.part.delta"
           ) continue;
           switch (String(event.type ?? "")) {
             case "message.part.updated": {
@@ -299,11 +299,25 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
                 // Unknown or unrelated session: drop, exactly as before.
                 if (!subagentDispatchId) break;
               }
-              const events = parseOpenCodePart(
+              const events = partStream.update(
                 part,
                 raw,
                 typeof properties.delta === "string" ? properties.delta : undefined
               );
+              yield* (subagentDispatchId ? withOpenCodeSubagentDispatch(events, subagentDispatchId) : events);
+              break;
+            }
+            case "message.part.delta": {
+              let subagentDispatchId = childSessions.get(eventSessionId);
+              if (eventSessionId && eventSessionId !== sessionId && !subagentDispatchId) {
+                if (rejectedSessions.has(eventSessionId)) break;
+                const parentId = await fetchOpenCodeSessionParent(baseUrl, request.cwd, eventSessionId);
+                if (parentId !== sessionId) { rejectedSessions.add(eventSessionId); break; }
+                subagentDispatchId = pendingTaskParts.shift();
+                if (!subagentDispatchId) break;
+                childSessions.set(eventSessionId, subagentDispatchId);
+              }
+              const events = partStream.delta(properties, raw);
               yield* (subagentDispatchId ? withOpenCodeSubagentDispatch(events, subagentDispatchId) : events);
               break;
             }
@@ -419,7 +433,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
 
   private async launchServer(key: string, request: AdapterStartRequest | AdapterResumeRequest): Promise<ManagedServer> {
     const port = await availablePort();
-    const env = (request.env ?? {}) as Record<string, string>;
+    const env = buildOpenCodeEnvironment(request);
     const args = ["serve", "--hostname", "127.0.0.1", "--port", String(port)];
     const resolvedCommand = resolveSpawnCommand(request.instance.executable || descriptor.defaultExecutable || "opencode", args, env);
     const child = spawn(resolvedCommand.command, resolvedCommand.args, {
@@ -438,6 +452,47 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
       throw error;
     }
   }
+}
+
+function mergeNativeConfig(target: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const previous = target[key];
+      target[key] = mergeNativeConfig(previous && typeof previous === "object" && !Array.isArray(previous) ? previous as Record<string, unknown> : {}, value as Record<string, unknown>);
+    } else target[key] = value;
+  }
+  return target;
+}
+
+export function buildOpenCodeEnvironment(request: AdapterStartRequest): Record<string, string> {
+  const env = { ...(request.env ?? {}) } as Record<string, string>;
+    const options = request.instance.providerOptions;
+    if (options?.runtimeConnectionId) {
+      const api = options.apiType;
+      const npm = api === "anthropic-messages" ? "@ai-sdk/anthropic" : api === "openai-responses" ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible";
+      const overlay = { enabled_providers: ["nautilo"], provider: { nautilo: {
+        name: options.runtimeConnectionName ?? "Nautilo", npm,
+        options: { baseURL: options.baseUrl, apiKey: "{env:NAUTILO_CONNECTION_API_KEY}" },
+        models: Object.fromEntries((request.instance.models ?? []).filter(model => model.enabled !== false).map(model => [model.id, {
+          id: model.id, name: model.displayName ?? model.id,
+          reasoning: model.reasoningEfforts.length > 0, limit: { context: model.contextWindow ?? 128_000, output: 16_384 },
+          variants: Object.fromEntries(model.reasoningEfforts.map(effort => [effort, api === "anthropic-messages" ? { effort } : { reasoningEffort: effort }])),
+          options: api === "openai-responses" ? { reasoningSummary: "auto", include: ["reasoning.encrypted_content"] } : {},
+        }])),
+      } } };
+      const native = env.OPENCODE_CONFIG_CONTENT ? JSON.parse(env.OPENCODE_CONFIG_CONTENT) : {};
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(mergeNativeConfig(native, overlay));
+    }
+  const mcp = Object.fromEntries((request.mcpServers ?? []).map(server => [server.name,
+    server.transport === "http"
+      ? { type: "remote", url: server.url, headers: server.headers, enabled: true }
+      : { type: "local", command: [server.command, ...(server.args ?? [])], environment: server.env, enabled: true }
+  ]));
+  if (Object.keys(mcp).length) {
+    const native = env.OPENCODE_CONFIG_CONTENT ? JSON.parse(env.OPENCODE_CONFIG_CONTENT) : {};
+    env.OPENCODE_CONFIG_CONTENT = JSON.stringify(mergeNativeConfig(native, { mcp }));
+  }
+  return env;
 }
 
 type RecordValue = Record<string, unknown>;
@@ -564,12 +619,80 @@ function parseOpenCodePart(part: RecordValue, raw: unknown, delta?: string): Ada
   const type = String(part.type ?? "");
   if (type === "text" || type === "reasoning") {
     const kind = type === "text" ? "message" : "thinking";
-    const messageId = typeof part.messageID === "string" ? part.messageID : undefined;
+    const messageId = partMessageId(part);
     if (delta) return [{ kind, phase: "delta", messageId, text: delta, raw } as AdapterEvent];
     if (!asRecord(part.time).end) return [];
   }
   const mappedType = type === "tool" ? "tool_use" : type.replace("-", "_");
   return parseOpenCodeEvent({ type: mappedType, sessionID: part.sessionID, part, raw });
+}
+
+export function openCodeImagePart(path: string, cwd: string): RecordValue {
+  const resolved = resolve(cwd, path);
+  const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+  const mime = ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" } as Record<string, string>)[extension];
+  if (!mime) throw new Error(`Unsupported image attachment format: ${path}`);
+  const file = statSync(resolved);
+  if (!file.isFile() || file.size === 0) throw new Error(`Image attachment is missing or empty: ${path}`);
+  return { type: "file", url: pathToFileURL(resolved).href, filename: path.split(/[\\/]/).at(-1) ?? "image", mime };
+}
+
+function partMessageId(part: RecordValue): string | undefined {
+  return [part.id, part.partID, part.messageID].find((id): id is string => typeof id === "string");
+}
+
+export class OpenCodePartStream {
+  event(value: RecordValue): AdapterEvent[] {
+    const events = parseOpenCodeEvent(value);
+    const part = asRecord(value.part);
+    const id = partMessageId(part);
+    const usage = events.find((event): event is Extract<AdapterEvent,{kind:"usage"}> => event.kind === "usage");
+    if (id && usage) {
+      const session = String(part.sessionID ?? value.sessionID ?? "");
+      const accumulator = this.usage.get(session) ?? new TurnUsage();
+      this.usage.set(session,accumulator);
+      events.push(accumulator.update(id,usage));
+    }
+    return events;
+  }
+  private usage = new Map<string, TurnUsage>();
+  private types = new Map<string, string>();
+  private pending = new Map<string, Array<{ properties: RecordValue; raw: unknown }>>();
+
+  update(part: RecordValue, raw: unknown, delta?: string): AdapterEvent[] {
+    const id = partMessageId(part);
+    const events: AdapterEvent[] = [];
+    if (id && typeof part.type === "string") {
+      this.types.set(id, part.type);
+      const pending = this.pending.get(id) ?? [];
+      this.pending.delete(id);
+      for (const event of pending) events.push(...this.delta(event.properties, event.raw));
+    }
+    events.push(...parseOpenCodePart(part, raw, delta));
+    const usageEvent = events.find((event): event is Extract<AdapterEvent, { kind: "usage" }> => event.kind === "usage");
+    if (id && usageEvent) {
+      const session = typeof part.sessionID === "string" ? part.sessionID : "";
+      const accumulator = this.usage.get(session) ?? new TurnUsage();
+      this.usage.set(session, accumulator);
+      events.push(accumulator.update(id, usageEvent));
+    }
+    return events;
+  }
+
+  delta(properties: RecordValue, raw: unknown): AdapterEvent[] {
+    const id = typeof properties.partID === "string" ? properties.partID : "";
+    if (!id || typeof properties.delta !== "string" || !properties.delta) return [];
+    if (typeof properties.field === "string" && properties.field !== "text") return [];
+    const type = this.types.get(id);
+    if (!type) {
+      const pending = this.pending.get(id) ?? [];
+      pending.push({ properties, raw });
+      this.pending.set(id, pending);
+      return [];
+    }
+    if (type !== "text" && type !== "reasoning") return [];
+    return [{ kind: type === "reasoning" ? "thinking" : "message", phase: "delta", messageId: id, text: properties.delta, raw }];
+  }
 }
 
 function openCodeModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
@@ -771,7 +894,7 @@ export function parseOpenCodeEvent(value: unknown): AdapterEvent[] {
   if (typeof record.sessionID === "string" && record.sessionID) {
     events.push({ kind: "session", providerSessionId: record.sessionID, raw: value });
   }
-  const messageId = typeof part.messageID === "string" ? part.messageID : undefined;
+  const messageId = partMessageId(part);
   switch (String(record.type ?? "")) {
     case "text":
       // opencode emits each text part once, complete — not as streaming
@@ -815,10 +938,13 @@ export function parseOpenCodeEvent(value: unknown): AdapterEvent[] {
           : undefined;
         events.push({
           kind: "usage",
+          usageScope: "context",
+          inputTokensIncludesCache: false,
           inputTokens: input,
           outputTokens: numberOrUndefined(tokens.output),
           reasoningOutputTokens: numberOrUndefined(tokens.reasoning),
           cachedInputTokens: cacheRead,
+          cacheCreationInputTokens: cacheWrite,
           contextUsed,
           raw: value
         });
@@ -853,16 +979,17 @@ async function fetchOpenCodeSessionParent(baseUrl: string, cwd: string, childSes
 }
 
 /** Tags activity from a task-tool child session with the dispatching call id. */
-function withOpenCodeSubagentDispatch(events: AdapterEvent[], subagentDispatchId: string): AdapterEvent[] {
-  return events.map((event) => {
+export function withOpenCodeSubagentDispatch(events: AdapterEvent[], subagentDispatchId: string): AdapterEvent[] {
+  return events.flatMap((event): AdapterEvent[] => {
     switch (event.kind) {
       case "message":
       case "thinking":
       case "tool":
       case "command":
-        return { ...event, subagentDispatchId };
+        return [{ ...event, subagentDispatchId }];
       default:
-        return event;
+        // Keep child lifecycle/usage from mutating the parent session or run.
+        return [];
     }
   });
 }
@@ -870,7 +997,19 @@ function withOpenCodeSubagentDispatch(events: AdapterEvent[], subagentDispatchId
 /** Splits the process output into JSONL lines and normalizes each line. */
 async function* streamEvents(process: ProcessHandle): AsyncGenerator<AdapterEvent> {
   yield { kind: "commands", commands: NATIVE_COMMANDS };
+  const parts = new OpenCodePartStream();
   const pending: Record<"stdout" | "stderr", string> = { stdout: "", stderr: "" };
+  const flush = (): AdapterEvent[] => {
+    const events: AdapterEvent[]=[];
+    for (const stream of ["stdout","stderr"] as const) {
+      const text=pending[stream]; pending[stream]="";
+      if (!text.trim()) continue;
+      let parsed: AdapterEvent[]=[];
+      try {parsed=parts.event(asRecord(JSON.parse(text)));} catch { /* raw diagnostic */ }
+      events.push(...(parsed.length ? parsed : [{kind:"raw" as const,stream,text}]));
+    }
+    return events;
+  };
   for await (const event of process.events) {
     if (event.kind === "stdout" || event.kind === "stderr") {
       pending[event.kind] += event.text;
@@ -879,35 +1018,46 @@ async function* streamEvents(process: ProcessHandle): AsyncGenerator<AdapterEven
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
-          const parsed = parseOpenCodeEvent(JSON.parse(line) as unknown);
+          const parsed = parts.event(asRecord(JSON.parse(line)));
           yield* (parsed.length ? parsed : [{ kind: "raw", stream: event.kind, text: line }]);
         } catch {
           yield { kind: "raw", stream: event.kind, text: line };
         }
       }
     } else if (event.kind === "exit" || event.kind === "timeout" || event.kind === "error") {
+      if (event.kind === "exit") yield* flush();
       yield event;
     }
   }
-  for (const stream of ["stdout", "stderr"] as const) {
-    if (pending[stream].trim()) yield { kind: "raw", stream, text: pending[stream] };
-  }
+  yield* flush();
 }
 
 /**
- * CLI args for one `opencode run`. Custom baseArgs take over the whole CLI
- * surface (model/variant flags only apply to the default path).
+ * CLI args for one `opencode run`. Custom prefixes retain the selected
+ * model, variant, agent and attachments.
  * (Named-exported for host-side tests; the host only uses the default factory.)
  */
 export function startArgs(instance: AgentInstance, request: AdapterStartRequest): string[] {
-  if (instance.baseArgs.length) return [...instance.baseArgs, request.prompt];
-  return [
-    "run", "--format", "json",
-    ...(request.model ? ["--model", request.model] : []),
-    // OpenCode's reasoning effort is a model "variant" (run --variant).
-    ...(request.reasoningEffort ? ["--variant", request.reasoningEffort] : []),
-    request.prompt
-  ];
+  const args = [...instance.baseArgs];
+  if (!args.includes("run")) args.push("run");
+  const set = (flag: string,value: string,alias?: string) => {
+    for (let i=0;i<args.length;) {
+      if (args[i] === flag || args[i] === alias) args.splice(i,2);
+      else if (args[i].startsWith(flag+"=")) args.splice(i,1);
+      else i++;
+    }
+    args.push(flag,value);
+  };
+  set("--format","json");
+  if (request.model) set("--model",request.model,"-m");
+  if (request.reasoningEffort) set("--variant",request.reasoningEffort);
+  if (request.permissionMode && ["build","plan"].includes(request.permissionMode)) set("--agent",request.permissionMode);
+  args.push(request.prompt);
+  if (request.localImagePaths?.length) {
+    request.localImagePaths.forEach(path => openCodeImagePart(path,request.cwd));
+    args.push("--file", ...request.localImagePaths.map(path => resolve(request.cwd,path)));
+  }
+  return args;
 }
 
 /**

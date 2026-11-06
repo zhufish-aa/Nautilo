@@ -40,17 +40,6 @@ pub fn start_codex_chat_compat_app_server(request: AdapterStartRequest, resume_s
     };
     let anthropic = super::resolve_codex_wire_api(&request.instance) == "anthropic";
     if anthropic {
-        let enabled = request.env.as_ref().and_then(|env| env.get("NAUTILO_EXPERIMENTAL_ANTHROPIC_BRIDGE")).is_some_and(|value| value == "1")
-            || std::env::var("NAUTILO_EXPERIMENTAL_ANTHROPIC_BRIDGE").as_deref() == Ok("1");
-        if !enabled {
-            return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Rust Anthropic protocol conversion is experimental and disabled pending build/integration verification. To test explicitly, set NAUTILO_EXPERIMENTAL_ANTHROPIC_BRIDGE=1 in the agent environment. Use a native Anthropic-capable harness otherwise."));
-        }
-        if request.instance.pointer("/providerOptions/webSearchMode").and_then(Value::as_str) == Some("native") {
-            return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Anthropic protocol conversion does not support native web search; select a non-native search mode"));
-        }
-        if request.reasoning_effort.as_deref().is_some_and(|effort| !effort.is_empty() && effort != "none") {
-            return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Anthropic protocol conversion does not support reasoning effort; select none for this model"));
-        }
         super::anthropic_compat::endpoint(&remote_base_url).map_err(|_| CoreError::reason(ErrorCode::IpcInvalidRequest, "Invalid Anthropic endpoint: use HTTPS without URL credentials or query parameters"))?;
     }
     if !anthropic {
@@ -138,7 +127,7 @@ mod tests {
         let wrong = format!("http://127.0.0.1:{}/v1/responses", url.port().unwrap());
         assert_eq!(client.post(wrong).json(&json!({})).send().await.unwrap().status().as_u16(), 404);
         let endpoint = format!("{}/responses", proxy.base_url());
-        let response = client.post(&endpoint).json(&json!({"model":"m","input":"hi","reasoning":{"effort":"high"}})).send().await.unwrap();
+        let response = client.post(&endpoint).json(&json!({"model":"m","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/image.png"}]}]})).send().await.unwrap();
         assert_eq!(response.status().as_u16(), 400);
         let response = client.post(&endpoint).header("authorization", "Bearer caller-secret").json(&json!({"model":"m","input":"hi"})).send().await.unwrap();
         assert_eq!(response.status().as_u16(), 401, "incoming bearer must not become upstream authentication");
@@ -331,7 +320,7 @@ impl ChatCompatProxy {
         Self::start_protocol(remote_base_url, environment, allow_native_web_search, false)
     }
 
-    fn start_protocol(remote_base_url: String, environment: HashMap<String, String>, allow_native_web_search: bool, anthropic: bool) -> std::io::Result<Self> {
+    pub(crate) fn start_protocol(remote_base_url: String, environment: HashMap<String, String>, allow_native_web_search: bool, anthropic: bool) -> std::io::Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
@@ -490,7 +479,9 @@ async fn handle_chat_request(writer: &mut tokio::net::tcp::OwnedWriteHalf, confi
 async fn handle_anthropic_request(writer: &mut tokio::net::tcp::OwnedWriteHalf, config: &ProxyConfig, input: &Value) -> anyhow::Result<()> {
     let body = match super::anthropic_compat::request(input) {
         Ok(body) => body,
-        Err(error) => return write_json_error(writer, 400, &error.to_string()).await,
+        Err(error) => {
+            return write_json_error(writer, 400, &error.to_string()).await;
+        },
     };
     let endpoint = super::anthropic_compat::endpoint(&config.remote_base_url)?;
     let key = config.environment.get("ANTHROPIC_API_KEY")

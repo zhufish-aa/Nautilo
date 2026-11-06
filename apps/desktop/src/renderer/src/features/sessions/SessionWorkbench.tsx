@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { ClipboardList, Users, ListChecks, GitFork, FileDiff, Package, SquareTerminal } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { TimelineEventView, type TimelineRow, TimelineViewport } from "../timeline/Timeline";
+import { ConversationTurnView } from "../timeline/ConversationTurnView";
 import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Composer } from "./Composer";
-import { QueuedFollowUpBar } from "./QueuedFollowUpBar";
+import { providerUiState } from "../../lib/provider-ui";
+import { useNativeTerminalStatus } from "../../lib/use-native-terminal";
 import { ArtifactsDrawer, DagDrawer, SubagentDrawer, TerminalDrawer } from "./Drawers";
 import { RunActivityIndicator } from "./RunActivityIndicator";
 import { sessionTargetName } from "./SessionListPanel";
@@ -22,11 +24,14 @@ import {
   registerProjectSessionView,
   registerStandaloneSessionView
 } from "../../lib/orchestration-runtime";
-import { conversationTimeline } from "../../lib/conversation-timeline";
+import { conversationRows } from "../../lib/conversation-timeline";
 import { cachedChangedFileCount } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
 import { TodoGoalCard } from "./TodoGoalCard";
+import { requestCore } from "../../lib/bridge";
+
+const pendingTitles = new Map<string, Promise<{ title?: string }>>();
 
 export type DrawerKind = "terminal" | "artifacts" | "dag" | null;
 
@@ -105,6 +110,14 @@ export function SessionWorkbench({
   const { t, locale } = useI18n();
   const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
   const events = useSessionsStore((state) => state.events[sessionId] ?? NO_EVENTS);
+  const extensionUi = useMemo(() => providerUiState(events), [events]);
+  const nativeOwnsSession = useNativeTerminalStatus(sessionId, active);
+  const queuedFollowUps = useSessionsStore((state) => state.queuedFollowUps[sessionId]);
+  const visibleEvents = useMemo(() => {
+    if (!queuedFollowUps?.length) return events;
+    const queuedIds = new Set(queuedFollowUps.map((item) => item.messageId));
+    return events.filter((event) => event.data.kind !== "message" || !event.data.messageId || !queuedIds.has(event.data.messageId));
+  }, [events, queuedFollowUps]);
   const tasks = useSessionsStore((state) => state.tasks[sessionId] ?? NO_TASKS);
   const foregroundLifecycle = useSessionsStore((state) => state.foreground[sessionId]);
   const orchestrationLifecycle = useSessionsStore((state) => state.running[sessionId]);
@@ -118,12 +131,32 @@ export function SessionWorkbench({
   // The event log is immutable, so its array identity is the reliable signal
   // that any rendered timeline content changed.
   const lastUserMessageId = useMemo(() => {
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index];
+    for (let index = visibleEvents.length - 1; index >= 0; index -= 1) {
+      const event = visibleEvents[index];
       if (event.data.kind === "message" && event.data.sender === "user") return event.id;
     }
     return undefined;
-  }, [events]);
+  }, [visibleEvents]);
+
+  const lastCompletedReplyId = useMemo(() => [...events].reverse().find(event =>
+    event.data.kind === "message" && event.data.sender === "agent" && !event.data.streaming)?.id, [events]);
+  useEffect(() => {
+    if (!active || !session || !lastCompletedReplyId) return;
+    let disposed = false;
+    const previousTitle = session.title;
+    const key = `${sessionId}:${lastCompletedReplyId}`;
+    let request = pendingTitles.get(key);
+    if (!request) {
+      request = requestCore<{ title?: string }>("session.generateTitle", { sessionId });
+      pendingTitles.set(key, request);
+      void request.finally(() => pendingTitles.delete(key)).catch(() => {});
+    }
+    void request.then(({ title }) => {
+      const current = useSessionsStore.getState().sessions.find(item => item.id === sessionId);
+      if (!disposed && title && current?.title === previousTitle && title !== current.title) useSessionsStore.getState()._configureSession(sessionId, { title });
+    }).catch(() => {});
+    return () => { disposed = true; };
+  }, [active, sessionId, lastCompletedReplyId]);
 
   // Relative file references in messages resolve against the project root.
   // The single workspace owns file resolution only while visible.
@@ -138,10 +171,9 @@ export function SessionWorkbench({
   // display instead of all at startup (memory); project sessions hydrate
   // their whole run on demand. Older views are evicted LRU, but anything
   // displayed by a mounted workbench is never evicted.
+  const projectRunId = session?.projectRunId;
   useEffect(() => {
     if (!active) return;
-    const current = useSessionsStore.getState().sessions.find((item) => item.id === sessionId);
-    const projectRunId = current?.projectRunId;
     if (projectRunId) {
       const unregister = registerProjectSessionView(sessionId, projectRunId);
       void ensureProjectRunHydrated(projectRunId);
@@ -150,7 +182,7 @@ export function SessionWorkbench({
     const unregister = registerStandaloneSessionView(sessionId);
     void ensureStandaloneSessionHydrated(sessionId);
     return unregister;
-  }, [active, sessionId]);
+  }, [active, sessionId, projectRunId]);
 
   // File the artifacts drawer should focus when opened via a "view diff" entry.
   const [diffFocusPath, setDiffFocusPath] = useState<string | null>(null);
@@ -172,7 +204,6 @@ export function SessionWorkbench({
 
   // Keep the provider's event order. A tool burst is expanded into its own
   // virtual rows instead of swallowing intermediate assistant messages.
-  const timelineEvents = useMemo(() => conversationTimeline(events), [events]);
 
   const handleEditMessage = useCallback(
     (messageId: string, text: string): void => startEditingMessage(sessionId, messageId, text),
@@ -217,25 +248,21 @@ export function SessionWorkbench({
   const shell = (key: string, node: ReactNode): TimelineRow => ({
     key,
     render: () => (
-      <div className="mx-auto w-full max-w-3xl px-5 py-2 sm:px-8">
+      <div className="conversation-message-row mx-auto w-full max-w-3xl px-5 py-2 sm:px-8">
         {node}
       </div>
     )
   });
   const timelineRows: TimelineRow[] = [];
   if (delegatedTask) timelineRows.push(shell("delegated", <DelegatedTaskCard task={delegatedTask} />));
-  timelineEvents.forEach((event) => timelineRows.push(shell(event.id, (
-    <TimelineEventView
-      event={event}
-      onEditMessage={handleEditMessage}
-      onViewDiff={handleViewDiff}
-      onOpenSession={onOpenSession}
-      onOpenSubagent={handleOpenSubagent}
-      onOpenLocalFile={onOpenLocalFile}
-    />
-  ))));
+  const timelineActions = { onEditMessage: handleEditMessage, onViewDiff: handleViewDiff, onOpenSession, onOpenSubagent: handleOpenSubagent, onOpenLocalFile };
+  conversationRows(visibleEvents, workbenchRunning).forEach((row) => {
+    timelineRows.push(row.kind === "event"
+      ? shell(row.event.id, <TimelineEventView event={row.event} {...timelineActions} />)
+      : shell(row.turn.id, <ConversationTurnView turn={row.turn} {...timelineActions} />));
+  });
   if (workbenchRunning) timelineRows.push(shell("live-activity", (
-    <RunActivityIndicator lifecycle={visibleLifecycle} events={events} waitingForDelegates={waitingForDelegates} />
+    <RunActivityIndicator lifecycle={visibleLifecycle} events={visibleEvents} waitingForDelegates={waitingForDelegates} />
   )));
   timelineRows.push(shell("interactions", <InteractionCards sessionId={sessionId} />));
   if (events.length === 0 && !workbenchRunning) {
@@ -248,7 +275,7 @@ export function SessionWorkbench({
 
   return (
     <div className="conversation-workspace relative flex h-full min-h-0 min-w-0 flex-1">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="workspace-conversation-header relative flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-3 sm:px-7">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -291,7 +318,7 @@ export function SessionWorkbench({
             </Button>
           )}
           {headerActions}
-          {onToggleAgents && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "团队" : "Team"} aria-label={locale === "zh-CN" ? "团队" : "Team"} aria-pressed={agentsOpen} onClick={onToggleAgents}>
+          {onToggleAgents && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} aria-label={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} aria-pressed={agentsOpen} aria-expanded={agentsOpen} aria-controls={agentsOpen ? "session-agent-inspector" : undefined} onClick={onToggleAgents}>
             <Users className="h-4 w-4" aria-hidden />
           </Button>}
         </div>
@@ -301,19 +328,24 @@ export function SessionWorkbench({
       <TimelineViewport
         rows={timelineRows}
         sessionKey={sessionId}
-        contentKey={events}
+        contentKey={visibleEvents}
         forceFollowKey={lastUserMessageId}
         active={active}
       />
       {todoGoal && showTodos && <TodoGoalCard todos={todoGoal} />}
       </div>
 
-      <QueuedFollowUpBar sessionId={sessionId} />
+      {(extensionUi.title || extensionUi.widgets.length > 0 || extensionUi.statuses.length > 0) && <div className="mx-auto w-full max-w-[1000px] shrink-0 px-5 pb-2 text-[13px] leading-5 text-ink-2" aria-label={extensionUi.title || "Extension status"} aria-live="polite">
+        {extensionUi.title && <div>{extensionUi.title}</div>}
+        {extensionUi.widgets.map((text, index) => <div key={`widget-${index}`} className="whitespace-pre-wrap">{text}</div>)}
+        {extensionUi.statuses.length > 0 && <div className="flex flex-wrap gap-x-4">{extensionUi.statuses.map((text, index) => <span key={index}>{text}</span>)}</div>}
+      </div>}
+      {nativeOwnsSession && <div className="mx-auto flex w-full max-w-[1000px] items-center justify-between gap-3 px-5 pb-2 text-[13px] text-ink-2"><span>{locale === "zh-CN" ? "会话正在原生终端中运行" : "Session is active in the native terminal"}</span><Button variant="ghost" size="sm" onClick={() => onOpenDrawer("terminal")}>{locale === "zh-CN" ? "返回终端" : "Open terminal"}</Button></div>}
       <Composer
         sessionId={sessionId}
         targetName={targetName}
         running={workbenchRunning}
-        disabled={session.status === "archived"}
+        disabled={session.status === "archived" || nativeOwnsSession}
       />
 
       {<TerminalDrawer open={drawer === "terminal"} onClose={onCloseDrawer} sessionId={sessionId} />}

@@ -1,21 +1,23 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { FileText, Folder, PanelLeftClose, Plus, Search, Settings } from "lucide-react";
+import { Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2 } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
-import { cn } from "../../lib/utils";
+import { NautiloMark } from "../ui/IdentityAvatar";
+import { cn, formatRelativeTime } from "../../lib/utils";
 import { searchSidebarSessions, sessionLocation } from "../../lib/sidebar-navigation";
 import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore } from "../../stores/sessions";
 import { deleteWorkbenchSession } from "../../lib/orchestration-runtime";
 import { toast } from "../../stores/toast";
 import type { UiSession } from "../../lib/types";
+
 import { SessionListPanel } from "../../features/sessions/SessionListPanel";
 import { AddProjectDialog } from "../../features/projects/AddProjectDialog";
 import { Dialog } from "../ui/Dialog";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 
-const rowClass = "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-lg px-3 text-left text-[13px] text-ink transition-colors hover:bg-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50";
+const rowClass = "sidebar-command flex h-9 w-full min-w-0 items-center gap-2.5 rounded-lg px-3 text-left text-[13px] text-ink transition-colors hover:bg-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50";
 
 /** One navigation surface: commands, projects, session history and settings. */
 export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean; onCollapse?: () => void }): JSX.Element {
@@ -124,25 +126,26 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
     <>
       <nav id="workspace-sidebar" aria-label={t("nav.section")} hidden={collapsed}
         className={cn("sidebar-rail relative z-20 min-w-0 shrink-0 flex-col border-r border-line/70 bg-panel", collapsed ? "hidden" : "flex w-[232px] max-[1100px]:w-[208px] max-[760px]:w-[184px]")}>
-        <div className="flex h-10 shrink-0 items-center justify-end px-3">
+        <div className="sidebar-brand-row">
+          <div className="sidebar-wordmark"><NautiloMark /><div><strong>Nautilo</strong><span>{zh ? "本地 Agent 工作台" : "Local agent workspace"}</span></div></div>
           {onCollapse && <button id="sidebar-collapse" type="button" onClick={onCollapse} aria-label={zh ? "收起侧栏" : "Collapse sidebar"} title={zh ? "收起侧栏" : "Collapse sidebar"} aria-expanded="true" aria-controls="workspace-sidebar"
             className="rounded-md p-1.5 text-ink-2 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"><PanelLeftClose className="h-4 w-4" aria-hidden /></button>}
         </div>
-        <div className="mx-3 space-y-1 border-b border-line/70 pb-4">
+        <div className="sidebar-primary-nav">
           <button className={cn(rowClass, new URLSearchParams(location.search).get("new") === "1" && "bg-card-hover")} onClick={() => newConversation()} data-tour="sessions-new" title={zh ? "新会话 · Ctrl/⌘ N" : "New chat · Ctrl/⌘ N"}>
-            <Plus className="h-4 w-4 shrink-0" aria-hidden />{zh ? "新会话" : "New chat"}
+            <Plus className="h-4 w-4 shrink-0" aria-hidden />{zh ? "新建任务" : "New task"}
           </button>
           <button ref={searchTrigger} className={rowClass} onClick={() => setSearchOpen(true)} title={zh ? "搜索 · Ctrl/⌘ K" : "Search · Ctrl/⌘ K"}>
             <Search className="h-4 w-4 shrink-0" aria-hidden />{zh ? "搜索" : "Search"}
           </button>
         </div>
-        <div className="min-h-0 flex flex-1 flex-col px-1 pt-3" data-nav="sessions">
-          <div className="flex items-center justify-between px-4 pb-2">
-            <NavLink to="/projects" data-nav="projects" className="rounded py-1 text-xs text-ink-3 outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50">{zh ? "项目" : "Projects"}</NavLink>
-            <button onClick={() => setAddProjectOpen(true)} className="rounded-md p-1.5 text-ink-3 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50" title={t("projects.addTitle")} aria-label={t("projects.addTitle")}><Plus className="h-3.5 w-3.5" aria-hidden /></button>
-          </div>
+        <div className="sidebar-feature-nav">
+          <NavLink to="/settings?section=agents" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Boxes size={16} />{zh ? "Harness 管理" : "Harnesses"}</NavLink>
+          <NavLink to="/settings?section=skills" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Puzzle size={16} />{zh ? "技能与连接器" : "Skills & connectors"}</NavLink>
+        </div>
+        <div className="sidebar-project-history" data-nav="sessions">
+          <div className="sidebar-section-heading"><span>{zh ? "项目与任务" : "Projects & tasks"}</span><button onClick={() => setAddProjectOpen(true)} aria-label={t("projects.addTitle")}><Plus size={15} /></button></div>
           <SessionListPanel embedded activeSessionId={new URLSearchParams(location.search).get("new") === "1" ? undefined : activeSessionId} onSelect={selectSession} onNew={newConversation} onDelete={setDeletingSession} />
-          {projects.length === 0 && sessions.length === 0 && <button onClick={() => setAddProjectOpen(true)} className={cn(rowClass, "mx-2 mb-4 w-auto text-ink-3")}><Folder className="h-4 w-4 shrink-0" aria-hidden />{zh ? "添加项目" : "Add project"}</button>}
         </div>
         <div className="mx-3 mt-2 border-t border-line/60 py-3">
           <NavLink to="/settings" state={{ returnTo: location.pathname + location.search }} data-nav="settings" className={rowClass}><Settings className="h-4 w-4 shrink-0" aria-hidden />{t("nav.settings")}</NavLink>

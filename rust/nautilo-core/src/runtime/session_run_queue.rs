@@ -2,7 +2,7 @@
 //! Turns of one session run sequentially; different sessions run in parallel.
 //! A keyed entry still waiting can be withdrawn via cancel_pending.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tokio::sync::watch;
@@ -13,10 +13,36 @@ pub type Completion = watch::Receiver<bool>;
 /// The launch result produced once a queued turn actually starts.
 pub type LaunchResult = Result<(String, Completion), String>;
 
+enum PendingTurn {
+    Queued,
+    Promoting(Completion),
+}
+
 #[derive(Default)]
 pub struct SessionRunQueue {
     tails: Mutex<HashMap<String, watch::Receiver<bool>>>,
-    pending_keys: Mutex<HashMap<String, HashSet<String>>>,
+    pending_keys: Mutex<HashMap<String, HashMap<String, PendingTurn>>>,
+}
+
+struct PromotionGuard<'a> {
+    queue: &'a SessionRunQueue,
+    session_id: &'a str,
+    key: &'a str,
+    accepted: bool,
+    _release: watch::Sender<bool>,
+}
+
+impl Drop for PromotionGuard<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.queue.pending_keys.lock().unwrap();
+        if let Some(keys) = pending.get_mut(self.session_id) {
+            if self.accepted { keys.remove(self.key); }
+            else { keys.insert(self.key.to_string(), PendingTurn::Queued); }
+            if keys.is_empty() { pending.remove(self.session_id); }
+        }
+        // Dropping the sender releases a waiting launch even if this future
+        // was cancelled. Failed guidance keeps the original queue position.
+    }
 }
 
 impl SessionRunQueue {
@@ -34,7 +60,7 @@ impl SessionRunQueue {
                 .unwrap()
                 .entry(session_id.to_string())
                 .or_default()
-                .insert(key.to_string());
+                .insert(key.to_string(), PendingTurn::Queued);
         }
         // Reserve this turn's place before waiting. Otherwise every follow-up
         // queued behind an active turn observes the same tail and they all
@@ -45,9 +71,15 @@ impl SessionRunQueue {
             let _ = previous.wait_for(|settled| *settled).await;
         }
         if let Some(key) = key {
-            if !self.cancel_pending(session_id, key) {
-                let _ = tail_sender.send(true);
-                return; // withdrawn while queued; never starts
+            loop {
+                match self.claim_pending(session_id, key) {
+                    Ok(None) => break,
+                    Ok(Some(mut held)) => { let _ = held.wait_for(|ready| *ready).await; }
+                    Err(()) => {
+                        let _ = tail_sender.send(true);
+                        return; // withdrawn or delivered as guidance; never starts
+                    }
+                }
             }
         }
         match start().await {
@@ -67,17 +99,42 @@ impl SessionRunQueue {
     /// Withdraws a keyed entry that has not started yet. Returns false when
     /// the key is unknown or its turn already began.
     pub fn cancel_pending(&self, session_id: &str, key: &str) -> bool {
+        matches!(self.claim_pending(session_id, key), Ok(None))
+    }
+
+    fn claim_pending(&self, session_id: &str, key: &str) -> Result<Option<Completion>, ()> {
         let mut pending = self.pending_keys.lock().unwrap();
         let Some(keys) = pending.get_mut(session_id) else {
-            return false;
+            return Err(());
         };
-        if !keys.remove(key) {
-            return false;
+        match keys.get(key) {
+            Some(PendingTurn::Queued) => {},
+            Some(PendingTurn::Promoting(held)) => return Ok(Some(held.clone())),
+            None => return Err(()),
         }
+        keys.remove(key);
         if keys.is_empty() {
             pending.remove(session_id);
         }
-        true
+        Ok(None)
+    }
+
+    pub async fn promote_pending<F, Fut, E>(&self, session_id: &str, key: &str, steer: F) -> Result<bool, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+    {
+        let (release, held) = watch::channel(false);
+        {
+            let mut pending = self.pending_keys.lock().unwrap();
+            let Some(keys) = pending.get_mut(session_id) else { return Ok(false); };
+            if !matches!(keys.get(key), Some(PendingTurn::Queued)) { return Ok(false); }
+            keys.insert(key.to_string(), PendingTurn::Promoting(held));
+        }
+        let mut guard = PromotionGuard { queue: self, session_id, key, accepted: false, _release: release };
+        steer().await?;
+        guard.accepted = true;
+        Ok(true)
     }
 
     pub fn busy(&self, session_id: &str) -> bool {
@@ -146,6 +203,46 @@ mod tests {
         finish_third.send(true).unwrap();
         second.await.unwrap();
         third.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn promotion_holds_launch_and_retains_the_original_turn_on_failure() {
+        for accepted in [true, false] {
+            let queue = Arc::new(SessionRunQueue::default());
+            let (finish_main, main_done) = watch::channel(false);
+            queue.enqueue_launch("main", None, || async { Ok(("main".into(), main_done)) }).await;
+            let (launched, mut launches) = mpsc::unbounded_channel();
+            let child_queue = queue.clone();
+            let queued = tokio::spawn(async move {
+                child_queue.enqueue_launch("main", Some("follow-up"), || async {
+                    launched.send(1).unwrap();
+                    let (_, done) = watch::channel(true);
+                    Ok(("follow-up".into(), done))
+                }).await;
+            });
+            tokio::task::yield_now().await;
+            let (steering, entered) = tokio::sync::oneshot::channel();
+            let (ack, response) = tokio::sync::oneshot::channel();
+            let promoting_queue = queue.clone();
+            let promotion = tokio::spawn(async move {
+                promoting_queue.promote_pending("main", "follow-up", || async {
+                    steering.send(()).unwrap();
+                    response.await.unwrap();
+                    if accepted { Ok(()) } else { Err("native rejection") }
+                }).await
+            });
+            entered.await.unwrap();
+            assert!(!queue.cancel_pending("main", "follow-up"));
+            finish_main.send(true).unwrap();
+            assert!(timeout(Duration::from_millis(25), launches.recv()).await.is_err());
+            ack.send(()).unwrap();
+            let result = promotion.await.unwrap();
+            if accepted { assert_eq!(result, Ok(true)); }
+            else { assert_eq!(result, Err("native rejection")); }
+            timeout(Duration::from_secs(2), queued).await.unwrap().unwrap();
+            if accepted { assert!(launches.try_recv().is_err()); }
+            else { assert_eq!(launches.try_recv().unwrap(), 1); }
+        }
     }
 
     #[tokio::test]

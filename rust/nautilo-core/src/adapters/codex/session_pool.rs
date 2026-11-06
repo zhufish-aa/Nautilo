@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::Notify;
 
-const IDLE_TTL: Duration = Duration::from_secs(60);
+const BOOTSTRAP_TTL: Duration = Duration::from_secs(60);
 static MANAGER: LazyLock<Mutex<HashMap<String, InstancePool>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static CHANGED: LazyLock<Notify> = LazyLock::new(Notify::new);
 // Only the first successful initialize for a shared HOME needs a bootstrap
@@ -20,6 +20,15 @@ static NEXT_WAITER: AtomicU64 = AtomicU64::new(0);
 struct Starting;
 impl Drop for Starting {
     fn drop(&mut self) { STARTING.fetch_sub(1, Ordering::SeqCst); CHANGED.notify_waiters(); }
+}
+struct Probe {instance:String,session:String,token:String}
+impl Drop for Probe {
+    fn drop(&mut self){
+        if let Some(slot)=MANAGER.lock().unwrap().get_mut(&self.instance).and_then(|pool|pool.slots.get_mut(&self.session)).filter(|slot|slot.token==self.token) {
+            slot.closing=false;slot.used=Instant::now();
+        }
+        CHANGED.notify_waiters();
+    }
 }
 fn bootstrap_for(request: &AdapterStartRequest) -> Arc<Bootstrap> {
     use std::hash::{Hash, Hasher};
@@ -36,7 +45,7 @@ fn bootstrap_for(request: &AdapterStartRequest) -> Arc<Bootstrap> {
     }
     let key = hash.finish();
     let mut cache = BOOTSTRAPS.lock().unwrap();
-    cache.retain(|_, (entry, used)| Arc::strong_count(entry) > 1 || used.elapsed() < IDLE_TTL);
+    cache.retain(|_, (entry, used)| Arc::strong_count(entry) > 1 || used.elapsed() < BOOTSTRAP_TTL);
     // The cache cap bounds only inert hash metadata, never active sessions or
     // bootstrap work. Eviction merely repeats a conservative first-init gate.
     while cache.len() >= BOOTSTRAP_CACHE_LIMIT && !cache.contains_key(&key) {
@@ -138,23 +147,19 @@ impl Lease {
             close_slot(&self.instance, &self.session, &self.token, Some(self.connection)).await;
         } else {
             CHANGED.notify_waiters();
-            let Lease { instance, session, token, .. } = self;
-            tokio::spawn(async move {
-                tokio::time::sleep(IDLE_TTL).await;
-                retire_if_idle(&instance, &session, &token).await;
-            });
         }
     }
 }
 
-async fn retire_if_idle(instance: &str, session: &str, token: &str) {
-    let retired = {
-        let mut pools = MANAGER.lock().unwrap();
-        pools.get_mut(instance).and_then(|pool| pool.slots.get_mut(session))
-            .filter(|slot| slot.token == token && !slot.busy && !slot.closing && slot.used.elapsed() >= IDLE_TTL)
-            .map(|slot| { slot.closing = true; slot.connection.clone() })
-    };
-    if let Some(connection) = retired { close_slot(instance, session, token, connection).await; }
+pub(super) fn background_changed(){CHANGED.notify_waiters();}
+pub(super) async fn release_session(request:&AdapterStartRequest)->CoreResult<()> {
+    let instance=instance_key(request);let session=request.local_session_id.as_deref().unwrap_or("");
+    let retired={let mut pools=MANAGER.lock().unwrap();
+        if let Some(slot)=pools.get_mut(&instance).and_then(|pool|pool.slots.get_mut(session)) {
+            if slot.busy{return Err(crate::errors::invalid("sessionId","Codex is still running"));}
+            slot.closing=true;Some((slot.token.clone(),slot.connection.clone()))
+        }else{None}};
+    if let Some((token,connection))=retired {close_slot(&instance,session,&token,connection).await;}Ok(())
 }
 
 async fn stopped(instance: &str) {
@@ -194,7 +199,7 @@ pub(super) async fn shutdown() {
     BOOTSTRAPS.lock().unwrap().clear();
 }
 
-enum Action { Wait, Reuse(Arc<PooledCodexAppServer>), Spawn, Close(String, String, Option<Arc<PooledCodexAppServer>>) }
+enum Action { Wait, Reuse(Arc<PooledCodexAppServer>), Spawn, Close(String, String, Option<Arc<PooledCodexAppServer>>), Check(String,String,Arc<PooledCodexAppServer>) }
 async fn acquire(
     request: &AdapterStartRequest, cancel: &mut watch::Receiver<bool>, deadline: tokio::time::Instant,
     sender: &mpsc::UnboundedSender<AdapterEvent>, transient: bool, independent: bool,
@@ -272,13 +277,40 @@ async fn acquire(
                 Action::Spawn
             } else if let Some((key, slot)) = pool.slots.iter_mut().filter(|(_, slot)| !slot.busy && !slot.closing).min_by_key(|(_, slot)| slot.used) {
                 slot.closing = true;
-                Action::Close(key.clone(), slot.token.clone(), slot.connection.clone())
+                match slot.connection.clone() {
+                    Some(connection)=>Action::Check(key.clone(),slot.token.clone(),connection),
+                    None=>Action::Close(key.clone(),slot.token.clone(),None),
+                }
             } else { Action::Wait }
         };
         match action {
             Action::Reuse(connection) => return Ok(Some(Lease { instance, session, token, connection, transient })),
             Action::Close(retired_session, retired_token, connection) => {
                 close_slot(&instance, &retired_session, &retired_token, connection).await;
+            }
+            Action::Check(retired_session,retired_token,connection)=>{
+                let probe=Probe{instance:instance.clone(),session:retired_session.clone(),token:retired_token.clone()};
+                let ready=tokio::select! {
+                    biased;
+                    _=cancel.changed()=>{remove_waiter(&instance,&token);return Ok(None);}
+                    _=tokio::time::sleep_until(deadline)=>{
+                        remove_waiter(&instance,&token);let _=sender.send(AdapterEvent::Timeout{reason:TimeoutKind::Timeout});return Ok(None);
+                    }
+                    ready=connection.events.retirement_ready(&connection.rpc)=>ready,
+                };
+                if ready {
+                    close_slot(&instance,&retired_session,&retired_token,Some(connection)).await;
+                } else {
+                    drop(probe);
+                    if !announced {
+                        announced=true;
+                        let _=sender.send(AdapterEvent::Status{phase:"provider_queued".into(),raw:Some(json!({"reason":"codex_native_background_work","capacity":capacity(&request.instance)}))});
+                    }
+                    // Native terminal jobs may end without another foreground
+                    // notification. Recheck only while admission is blocked.
+                    tokio::select!{_=cancel.changed()=>{remove_waiter(&instance,&token);return Ok(None);},_=tokio::time::sleep(Duration::from_millis(300))=>{}}
+                    CHANGED.notify_waiters();
+                }
             }
             Action::Spawn => {
                 let _starting = Starting;
@@ -523,6 +555,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warm_turn_skips_resume_but_updates_turn_settings_and_cold_process_restores_identity() {
+        let (base, root) = request("a", "fast-a", Some(1));
+        let mut first = start_codex_app_server(base.clone(), None).unwrap();
+        let events = collect(&mut first).await;
+        let thread_id = events.iter().find_map(|event| match event {
+            AdapterEvent::Session { provider_session_id, .. } => Some(provider_session_id.clone()), _ => None
+        }).unwrap();
+        let mut next = base.clone(); next.prompt = "fast-b".to_string();
+        next.permission_mode = Some("full-access".to_string());
+        next.reasoning_effort = Some("max".to_string());
+        let mut second = start_codex_app_server(next.clone(), Some(thread_id.clone())).unwrap();
+        assert!(!collect(&mut second).await.iter().any(|event| matches!(event, AdapterEvent::Error { .. })));
+        let recorded = logs(&root);
+        assert_eq!(recorded.iter().filter(|v| v["method"] == "initialize").count(), 1);
+        assert_eq!(recorded.iter().filter(|v| v["method"] == "thread/start").count(), 1);
+        assert_eq!(recorded.iter().filter(|v| v["method"] == "thread/resume").count(), 0);
+        let turns: Vec<_> = recorded.iter().filter(|v| v["method"] == "turn/start").collect();
+        assert_eq!(turns[1]["params"]["threadId"], thread_id);
+        assert_eq!(turns[1]["params"]["approvalPolicy"], "never");
+        assert_eq!(turns[1]["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
+        assert_eq!(turns[1]["params"]["effort"], "max");
+        let previous_pid = turns[0]["pid"].clone();
+        shutdown_instance(&instance_key(&base)).await;
+        next.prompt = "fast-c".to_string(); next.permission_mode = Some("ask".to_string());
+        let mut third = start_codex_app_server(next, Some(thread_id.clone())).unwrap();
+        assert!(!collect(&mut third).await.iter().any(|event| matches!(event, AdapterEvent::Error { .. })));
+        let recorded = logs(&root);
+        let resumed: Vec<_> = recorded.iter().filter(|v| v["method"] == "thread/resume").collect();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0]["params"]["threadId"], thread_id);
+        assert_eq!(resumed[0]["params"]["excludeTurns"], true);
+        assert_ne!(resumed[0]["pid"], previous_pid);
+        finish(&base, root).await;
+    }
+
+    #[tokio::test]
     async fn default_allows_parent_and_five_children_before_any_completion() {
         let (base, root) = request("parent", "hang", None);
         let mut runs = vec![];
@@ -613,7 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_bootstrap_releases_capacity_and_idle_expiration_closes_warm_process() {
+    async fn failed_bootstrap_releases_capacity_and_warm_process_requires_explicit_release() {
         let (base, root) = request("a", "forbidden", Some(1));
         let mut slow = base.clone(); slow.env.as_mut().unwrap().insert("INIT_DELAY".to_string(), "10000".to_string()); slow.timeout_ms = Some(50);
         let mut a = start_codex_app_server(slow, None).unwrap();
@@ -622,12 +690,13 @@ mod tests {
         assert!(collect(&mut a).await.iter().any(|event| matches!(event, AdapterEvent::Timeout { .. })));
         assert!(collect(&mut b).await.iter().any(|event| matches!(event, AdapterEvent::Message { text, .. } if text == "done:fast")));
         let key = instance_key(&base);
-        let (token, connection) = {
+        let connection = {
             let mut pools = MANAGER.lock().unwrap(); let slot = pools.get_mut(&key).unwrap().slots.get_mut("b").unwrap();
-            slot.used = Instant::now() - IDLE_TTL;
-            (slot.token.clone(), slot.connection.clone().unwrap())
+            slot.used = Instant::now() - Duration::from_secs(600);
+            slot.connection.clone().unwrap()
         };
-        retire_if_idle(&key, "b", &token).await;
+        assert!(connection.rpc.process_handle().is_alive());
+        let mut released=base.clone();released.local_session_id=Some("b".into());release_session(&released).await.unwrap();
         assert!(!connection.rpc.process_handle().is_alive());
         finish(&base, root).await;
     }
@@ -668,5 +737,27 @@ mod tests {
         collect(&mut a).await; collect(&mut b).await;
         assert!(MANAGER.lock().unwrap().get(&instance_key(&base)).map_or(true, |pool| pool.slots.is_empty()));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn process_capacity_preserves_native_background_terminal_until_it_finishes() {
+        let (base,root)=request("background","background-terminal",Some(1));
+        let connection=acquire_codex_app_server(&base).unwrap();let scenario=base.clone();let directory=root.clone();
+        let result=tokio::spawn(async move {
+            let mut first=start_codex_app_server(scenario.clone(),None).unwrap();collect(&mut first).await;
+            let mut next=scenario.clone();next.local_session_id=Some("next".into());next.prompt="fast".into();
+            let mut queued=start_codex_app_server(next,None).unwrap();phase(&mut queued,"provider_queued").await;
+            tokio::time::timeout(Duration::from_secs(2),async {
+                while !logs(&directory).iter().any(|event|event["method"]=="thread/backgroundTerminals/list") {tokio::time::sleep(Duration::from_millis(5)).await;}
+            }).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let old=acquire_codex_app_server(&scenario).unwrap();assert!(old.rpc.process_handle().is_alive());
+            assert_eq!(logs(&directory).iter().filter(|event|event["spawned"]==true).count(),1,"capacity retired a live native terminal");
+            old.rpc.request("test/finish-background",json!({})).await.unwrap();
+            assert!(collect(&mut queued).await.iter().any(|event|matches!(event,AdapterEvent::Message{text,..} if text=="done:fast")));
+            assert!(!old.rpc.process_handle().is_alive());
+        }).await;
+        connection.rpc.process_handle().cancel().await;discard_codex_app_server(&connection);
+        finish(&base,root).await;result.unwrap();
     }
 }

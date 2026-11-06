@@ -9,6 +9,7 @@ import type {
   DiscoveredMcpSource
 } from "@agenthub/schemas";
 import { requestCore } from "../lib/bridge";
+import { setCapabilityEnabledFor } from "../lib/capability-enablement";
 
 interface ProviderToolsState {
   tools: ProviderCapability[];
@@ -18,6 +19,7 @@ interface ProviderToolsState {
   load: () => Promise<void>;
   save: (capability: ProviderCapability) => Promise<ProviderCapability>;
   toggle: (id: string, enabled: boolean) => Promise<void>;
+  toggleForHarness: (id: string, providerId: string, enabled: boolean) => Promise<void>;
   remove: (id: string) => Promise<void>;
   parseImport: (input: { source: CapabilityImportSource; text: string; fileName?: string }) => Promise<CapabilityImportPreview>;
   discoverMcp: (projectRoot?: string) => Promise<DiscoveredMcpSource[]>;
@@ -28,6 +30,8 @@ interface ProviderToolsState {
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+const harnessUpdates = new Map<string, Promise<void>>();
 
 /**
  * Skills & MCP capabilities live in Core Daemon. The renderer never fabricates
@@ -71,6 +75,18 @@ export const useProviderToolsStore = create<ProviderToolsState>((set, get) => ({
   remove: async (id) => {
     await requestCore<{ removed: true }>("capability.remove", { capabilityId: id });
     set((state) => ({ tools: state.tools.filter((tool) => tool.id !== id) }));
+  },
+
+  toggleForHarness: async (id, providerId, enabled) => {
+    const previous = harnessUpdates.get(id) ?? Promise.resolve();
+    const update = previous.catch(() => undefined).then(async () => {
+      const current = get().tools.find((tool) => tool.id === id);
+      if (!current || !providerId) return;
+      await get().save(setCapabilityEnabledFor(current, providerId, enabled));
+    });
+    harnessUpdates.set(id, update);
+    try { await update; }
+    finally { if (harnessUpdates.get(id) === update) harnessUpdates.delete(id); }
   },
 
   // Parsing and file scanning live in Core Daemon so the renderer stays free of

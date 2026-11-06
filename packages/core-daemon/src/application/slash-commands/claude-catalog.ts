@@ -25,11 +25,10 @@ const CLAUDE_NATIVE_TITLES: Readonly<Record<string, string>> = {
  * against Claude Code CLI 2.1). Interactive-only commands (/login, /config,
  * /model UI, /clear …) are deliberately excluded.
  */
-const CLAUDE_PRINT_COMMANDS = new Set(["compact", "cost", "doctor", "export", "init", "mcp", "review", "security-review"]);
 
 export function claudeProviderCommand(input: { name: string; description: string; inputHint?: string }): SlashCommandDefinition | undefined {
   const name = input.name.replace(/^\//, "");
-  if (!CLAUDE_PRINT_COMMANDS.has(name)) return undefined;
+  if (!/^[\p{L}\p{N}_:.-]+$/u.test(name)) return undefined;
   return {
     id: `claude-code.native.${name}`,
     name: `/${name}`,

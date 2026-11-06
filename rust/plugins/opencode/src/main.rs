@@ -26,6 +26,7 @@ fn descriptor() -> Value {
         "capabilities": ["headless_text", "provider_server"],
         "defaultExecutable": "opencode",
         "credentialEnv": ["OPENCODE_API_KEY"],
+        "envPassthrough": ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"],
         "permissionModes": [
             { "value": "build", "name": { "zh-CN": "执行模式", "en-US": "Build mode" },
               "description": { "zh-CN": "正常执行，可修改文件", "en-US": "Normal execution with file edits" } },
@@ -104,60 +105,17 @@ fn build_opencode_mcp_config(servers: Option<&Value>) -> Option<Value> {
     Some(json!({ "mcp": Value::Object(mcp) }))
 }
 
-/// Injects Nautilo-managed MCP servers by writing `.opencode/opencode.json`
-/// in `cwd` (merged over any existing file; opencode loads and deep-merges
-/// this project-scoped config on top of the global one). Returns the previous
-/// state for restoration: `(cwd, previous_content_or_none, written_content)`.
-fn write_opencode_mcp_config(cwd: &str, servers: Option<&Value>) -> Option<(String, Option<String>, Option<String>)> {
-    let config = build_opencode_mcp_config(servers)?;
-    if cwd.is_empty() {
-        return None;
+/// Add run-scoped MCP entries through OpenCode's native config overlay.
+/// Native global/project files and their unknown fields remain untouched.
+fn runtime_environment(request: &Value) -> anyhow::Result<HashMap<String, String>> {
+    let mut env = agenthub_plugin_sdk::connection::prepare_request(request, env_of(request))?;
+    if let Some(config) = build_opencode_mcp_config(request.get("mcpServers")) {
+        let mut merged: Value = env.get("OPENCODE_CONFIG_CONTENT")
+            .map(|text| serde_json::from_str(text)).transpose()?.unwrap_or_else(||json!({}));
+        agenthub_plugin_sdk::native_config::merge(&mut merged, config);
+        env.insert("OPENCODE_CONFIG_CONTENT".into(), merged.to_string());
     }
-    let dir = std::path::Path::new(cwd).join(".opencode");
-    let path = dir.join("opencode.json");
-    let previous = std::fs::read_to_string(&path).ok();
-    let mut merged: Value = previous
-        .as_deref()
-        .and_then(|text| serde_json::from_str(text).ok())
-        .unwrap_or_else(|| json!({}));
-    if let Some(object) = merged.as_object_mut() {
-        if let Some(mcp) = config.get("mcp").cloned() {
-            object.insert("mcp".to_string(), mcp);
-        }
-    }
-    let written = serde_json::to_string_pretty(&merged).unwrap_or_default();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return None;
-    }
-    if std::fs::write(&path, &written).is_err() {
-        return None;
-    }
-    Some((cwd.to_string(), previous, Some(written)))
-}
-
-/// Restores (or removes) the injected `.opencode/opencode.json`. Only touches
-/// the file if it still contains exactly what we wrote, so a concurrent write
-/// from another server is never clobbered.
-fn restore_opencode_mcp_config(cleanup: Option<&(String, Option<String>, Option<String>)>) {
-    let Some((cwd, previous, written)) = cleanup else { return };
-    let path = std::path::Path::new(cwd).join(".opencode").join("opencode.json");
-    let owns = written
-        .as_deref()
-        .map(|content| std::fs::read_to_string(&path).ok().as_deref() == Some(content))
-        .unwrap_or(false);
-    if !owns {
-        return;
-    }
-    match previous {
-        Some(content) => {
-            let _ = std::fs::write(&path, content);
-        }
-        None => {
-            let _ = std::fs::remove_file(&path);
-            // Best-effort: drop the now-empty .opencode dir.
-            let _ = std::fs::remove_dir(path.parent().unwrap_or(std::path::Path::new("")));
-        }
-    }
+    Ok(env)
 }
 
 fn executable_of(instance: &Value) -> String {
@@ -202,9 +160,6 @@ struct ManagedServer {
     handle: agenthub_plugin_sdk::process::ProcessHandle,
     active_runs: usize,
     retire_when_idle: bool,
-    /// Injected `.opencode/opencode.json` state to restore when the server retires:
-    /// (cwd, previous content or None, written content).
-    config_cleanup: Option<(String, Option<String>, Option<String>)>,
 }
 
 #[derive(Default)]
@@ -214,12 +169,13 @@ struct ServerPool {
 
 struct OpenCodePlugin {
     pool: Mutex<ServerPool>,
+    opening: tokio::sync::Mutex<()>,
     interactions: Mutex<Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>>,
 }
 
 impl OpenCodePlugin {
     fn new() -> Self {
-        Self { pool: Mutex::new(ServerPool::default()), interactions: Mutex::new(None) }
+        Self { pool: Mutex::new(ServerPool::default()), opening: tokio::sync::Mutex::new(()), interactions: Mutex::new(None) }
     }
 
     fn server_key(request: &Value) -> String {
@@ -228,7 +184,9 @@ impl OpenCodePlugin {
         let mut pairs: Vec<(&String, &String)> = env.iter().collect();
         pairs.sort();
         let env_json = serde_json::to_string(&pairs).unwrap_or_default();
-        let hash = format!("{:x}", Sha256::digest(env_json.as_bytes()));
+        let config = json!({"env":env_json,"baseArgs":instance["baseArgs"],"providerOptions":instance["providerOptions"],
+            "models":instance["models"],"skills":request["skills"],"mcpServers":request["mcpServers"],"runtimeTools":request["runtimeTools"]});
+        let hash = format!("{:x}", Sha256::digest(config.to_string().as_bytes()));
         [
             instance.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
             std::fs::canonicalize(request.get("cwd").and_then(Value::as_str).unwrap_or(""))
@@ -241,9 +199,10 @@ impl OpenCodePlugin {
     }
 
     async fn server_for(&self, request: &Value) -> anyhow::Result<Arc<Mutex<ManagedServer>>> {
+        let _opening = self.opening.lock().await;
         let key = Self::server_key(request);
         if let Some(existing) = self.pool.lock().unwrap().servers.get(&key).cloned() {
-            return Ok(existing);
+            if existing.lock().unwrap().handle.is_alive() { return Ok(existing); }
         }
         let server = self.launch_server(request).await?;
         let server = Arc::new(Mutex::new(server));
@@ -254,22 +213,16 @@ impl OpenCodePlugin {
     async fn launch_server(&self, request: &Value) -> anyhow::Result<ManagedServer> {
         let instance = request.get("instance").cloned().unwrap_or(Value::Null);
         let cwd = request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
-        // Inject Nautilo-managed MCP servers via a project-scoped opencode
-        // config before the server starts (opencode reads it at startup).
-        let config_cleanup = write_opencode_mcp_config(&cwd, request.get("mcpServers"));
         let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let started = process::start(&ProcessRequest {
             command: executable_of(&instance),
             args: vec!["serve".to_string(), "--hostname".to_string(), "127.0.0.1".to_string(), "--port".to_string(), port.to_string()],
             cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
-            env: Some(env_of(request)),
+            env: Some(runtime_environment(request)?),
             idle_timeout_ms: None,
             ..Default::default()
         })
-        .map_err(|error| {
-            restore_opencode_mcp_config(config_cleanup.as_ref());
-            error
-        })?;
+        ?;
         let base_url = format!("http://127.0.0.1:{port}");
         let handle = started.handle.clone();
         // Keep the server output flowing so its buffers never fill.
@@ -278,9 +231,8 @@ impl OpenCodePlugin {
             while events.recv().await.is_some() {}
         });
         match wait_for_server(&base_url, &cwd).await {
-            Ok(()) => Ok(ManagedServer { base_url, handle, active_runs: 0, retire_when_idle: false, config_cleanup }),
+            Ok(()) => Ok(ManagedServer { base_url, handle, active_runs: 0, retire_when_idle: false }),
             Err(error) => {
-                restore_opencode_mcp_config(config_cleanup.as_ref());
                 handle.cancel().await;
                 Err(error)
             }
@@ -347,11 +299,63 @@ async fn api_json(base_url: &str, cwd: &str, path: &str, method: &str, body: Opt
 
 // ---------------------------------------------------------------- event parsing
 
+fn part_message_id(part: &Value) -> Option<&str> {
+    ["id", "partID", "messageID"].into_iter().find_map(|key| part.get(key).and_then(Value::as_str))
+}
+
+#[derive(Default)]
+struct PartStream {
+    usage: HashMap<String, agenthub_plugin_sdk::usage::TurnUsage>,
+    types: HashMap<String, String>,
+    pending: HashMap<String, Vec<(Value, Value)>>,
+}
+
+impl PartStream {
+    fn event(&mut self, value: &Value) -> Vec<Value> {
+        let mut events = parse_opencode_event(value);
+        let part = &value["part"];
+        if let (Some(id), Some(usage)) = (part_message_id(part), events.iter().find(|e|e["kind"] == "usage").cloned()) {
+            let session = part["sessionID"].as_str().or_else(||value["sessionID"].as_str()).unwrap_or("");
+            events.push(self.usage.entry(session.to_string()).or_default().update(id,&usage));
+        }
+        events
+    }
+
+    fn update(&mut self, part: &Value, raw: &Value, delta: Option<&str>) -> Vec<Value> {
+        let mut events = vec![];
+        if let (Some(id), Some(kind)) = (part_message_id(part), part["type"].as_str()) {
+            self.types.insert(id.to_string(), kind.to_string());
+            for (properties, raw) in self.pending.remove(id).unwrap_or_default() {
+                events.extend(self.delta(&properties, &raw));
+            }
+        }
+        events.extend(parse_opencode_part(part, raw, delta));
+        if let (Some(id), Some(usage)) = (part_message_id(part), events.iter().find(|e| e["kind"] == "usage").cloned()) {
+            let session = part["sessionID"].as_str().unwrap_or("");
+            events.push(self.usage.entry(session.to_string()).or_default().update(id, &usage));
+        }
+        events
+    }
+
+    fn delta(&mut self, properties: &Value, raw: &Value) -> Vec<Value> {
+        let Some(id) = properties["partID"].as_str().filter(|id| !id.is_empty()) else { return vec![] };
+        let Some(text) = properties["delta"].as_str().filter(|s| !s.is_empty()) else { return vec![] };
+        if properties["field"].as_str().is_some_and(|field| field != "text") { return vec![]; }
+        let Some(kind) = self.types.get(id) else {
+            self.pending.entry(id.to_string()).or_default().push((properties.clone(), raw.clone()));
+            return vec![];
+        };
+        if kind != "text" && kind != "reasoning" { return vec![]; }
+        vec![json!({"kind":if kind == "reasoning" {"thinking"} else {"message"},
+            "phase":"delta", "messageId":id, "text":text, "raw":raw})]
+    }
+}
+
 fn parse_opencode_part(part: &Value, raw: &Value, delta: Option<&str>) -> Vec<Value> {
     let part_type = part.get("type").and_then(Value::as_str).unwrap_or("");
     if part_type == "text" || part_type == "reasoning" {
         let kind = if part_type == "text" { "message" } else { "thinking" };
-        let message_id = part.get("messageID").and_then(Value::as_str);
+        let message_id = part_message_id(part);
         if let Some(delta) = delta {
             return vec![json!({
                 "kind": kind,
@@ -381,7 +385,7 @@ fn parse_opencode_event(value: &Value) -> Vec<Value> {
         events.push(json!({ "kind": "session", "providerSessionId": session_id, "raw": value }));
     }
     let part = value.get("part").cloned().unwrap_or(Value::Null);
-    let message_id = part.get("messageID").and_then(Value::as_str);
+    let message_id = part_message_id(&part);
     match value.get("type").and_then(Value::as_str).unwrap_or("") {
         "text" => {
             if let Some(text) = part.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) {
@@ -433,10 +437,13 @@ fn parse_opencode_event(value: &Value) -> Vec<Value> {
                 };
                 events.push(json!({
                     "kind": "usage",
+                    "usageScope": "context",
+                    "inputTokensIncludesCache": false,
                     "inputTokens": input.map(Value::from).unwrap_or(Value::Null),
                     "outputTokens": tokens.get("output").and_then(Value::as_i64).map(Value::from).unwrap_or(Value::Null),
                     "reasoningOutputTokens": tokens.get("reasoning").and_then(Value::as_i64).map(Value::from).unwrap_or(Value::Null),
                     "cachedInputTokens": cache_read.map(Value::from).unwrap_or(Value::Null),
+                    "cacheCreationInputTokens": cache_write.map(Value::from).unwrap_or(Value::Null),
                     "contextUsed": context_used.map(Value::from).unwrap_or(Value::Null),
                     "raw": value
                 }));
@@ -463,14 +470,16 @@ fn parse_opencode_event(value: &Value) -> Vec<Value> {
 fn with_subagent_dispatch(events: Vec<Value>, dispatch_id: &str) -> Vec<Value> {
     events
         .into_iter()
-        .map(|event| {
+        .filter_map(|event| {
             let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
             if ["message", "thinking", "tool", "command"].contains(&kind) {
                 let mut mapped = event.as_object().cloned().unwrap_or_default();
                 mapped.insert("subagentDispatchId".to_string(), json!(dispatch_id));
-                Value::Object(mapped)
+                Some(Value::Object(mapped))
             } else {
-                event
+                // Child lifecycle and usage belong to the child, not the parent run.
+                // In particular, a child session id must never replace the resume id.
+                None
             }
         })
         .collect()
@@ -636,6 +645,13 @@ async fn read_plan(cwd: &str, question: &Value) -> Value {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for OpenCodePlugin {
+    fn native_terminal_supported(&self)->bool {true}
+    async fn terminal_plan(&self,request:&Value,resume:Option<String>)->anyhow::Result<Value> {
+        let server=self.server_for(request).await?;
+        let base_url=server.lock().unwrap().base_url.clone();
+        let mut args=vec!["attach".to_string(),base_url];if let Some(resume)=resume{args.extend(["--session".into(),resume]);}
+        Ok(json!({"command":executable_of(&request["instance"]),"args":args,"env":runtime_environment(request)?}))
+    }
     fn descriptor(&self) -> Value {
         descriptor()
     }
@@ -702,10 +718,9 @@ impl ProviderPlugin for OpenCodePlugin {
             return self.spawn_run(request, args).await;
         }
         if has_base_args && provider_command.is_none() {
-            let mut args = base_args(&instance);
+            let mut args = start_args(&instance, &request);
             args.push("--session".to_string());
             args.push(resume.clone().unwrap_or_default());
-            args.push(request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string());
             return self.spawn_run(request, args).await;
         }
         let interactions = self.interactions.lock().unwrap().clone();
@@ -715,17 +730,16 @@ impl ProviderPlugin for OpenCodePlugin {
     async fn dispose(&self) {
         let servers: Vec<Arc<Mutex<ManagedServer>>> = self.pool.lock().unwrap().servers.drain().map(|(_, s)| s).collect();
         for server in servers {
-            let (handle, cleanup) = {
+            let handle = {
                 let mut server = server.lock().unwrap();
                 server.retire_when_idle = true;
                 if server.active_runs == 0 {
-                    (Some(server.handle.clone()), server.config_cleanup.clone())
+                    Some(server.handle.clone())
                 } else {
-                    (None, None)
+                    None
                 }
             };
             if let Some(handle) = handle {
-                restore_opencode_mcp_config(cleanup.as_ref());
                 handle.cancel().await;
             }
         }
@@ -734,12 +748,13 @@ impl ProviderPlugin for OpenCodePlugin {
 
 impl OpenCodePlugin {
     async fn spawn_run(&self, request: Value, args: Vec<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+        agenthub_plugin_sdk::images::read_request_images(&request)?;
         let instance = request.get("instance").cloned().unwrap_or(Value::Null);
         let started = process::start(&ProcessRequest {
             command: executable_of(&instance),
             args,
             cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
-            env: Some(env_of(&request)),
+            env: Some(runtime_environment(&request)?),
             timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
             idle_timeout_ms: request.get("idleTimeoutMs").and_then(Value::as_u64),
             max_output_bytes: Some(request.get("maxOutputBytes").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20 * 1024 * 1024)),
@@ -752,6 +767,7 @@ impl OpenCodePlugin {
             let mut pending_stdout = String::new();
             let mut pending_stderr = String::new();
             let mut events = started.events;
+            let mut parts = PartStream::default();
             while let Some(event) = events.recv().await {
                 let is_stdout = matches!(&event, ProcessEvent::Stdout(_));
                 match event {
@@ -765,7 +781,7 @@ impl OpenCodePlugin {
                             if line.trim().is_empty() {
                                 continue;
                             }
-                            let parsed = serde_json::from_str::<Value>(line).ok().map(|v| parse_opencode_event(&v)).unwrap_or_default();
+                            let parsed = serde_json::from_str::<Value>(line).ok().map(|v| parts.event(&v)).unwrap_or_default();
                             if parsed.is_empty() {
                                 let _ = sender.send(json!({ "kind": "raw", "stream": if is_stdout { "stdout" } else { "stderr" }, "text": line }));
                             } else {
@@ -778,6 +794,13 @@ impl OpenCodePlugin {
                         }
                     }
                     ProcessEvent::Exit { exit_code, .. } => {
+                        for (stream,buffer) in [("stdout",&mut pending_stdout),("stderr",&mut pending_stderr)] {
+                            let text = std::mem::take(buffer);
+                            if text.trim().is_empty() {continue;}
+                            let parsed=serde_json::from_str::<Value>(&text).ok().map(|value|parts.event(&value)).unwrap_or_default();
+                            if parsed.is_empty() { let _=sender.send(json!({"kind":"raw","stream":stream,"text":text})); }
+                            else {for event in parsed {let _=sender.send(event);}}
+                        }
                         let _ = sender.send(json!({ "kind": "exit", "exitCode": exit_code }));
                         return;
                     }
@@ -800,7 +823,13 @@ impl OpenCodePlugin {
         interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
     ) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
+        let attached = std::time::Instant::now();
+        let reused = self.pool.lock().unwrap().servers.get(&Self::server_key(&request)).is_some_and(|server|server.lock().unwrap().handle.is_alive());
         let server = self.server_for(&request).await?;
+        let _ = sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{
+            "providerId":"opencode","transport":"http-sse","reused":reused,"pid":server.lock().unwrap().handle.pid,"attachMs":attached.elapsed().as_millis()}}));
+        let _ = sender.send(json!({"kind":"status","phase":"runtime_capabilities","raw":{
+            "providerId":"opencode","source":"native-handshake","transport":"http-sse","reported":{"sessionStatusReady":true}}}));
         server.lock().unwrap().active_runs += 1;
         let server_for_task = server.clone();
         tokio::spawn(async move {
@@ -809,17 +838,16 @@ impl OpenCodePlugin {
                 let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
             }
-            let (handle, cleanup) = {
+            let handle = {
                 let mut server = server_for_task.lock().unwrap();
                 server.active_runs = server.active_runs.saturating_sub(1);
                 if server.retire_when_idle && server.active_runs == 0 {
-                    (Some(server.handle.clone()), server.config_cleanup.clone())
+                    Some(server.handle.clone())
                 } else {
-                    (None, None)
+                    None
                 }
             };
             if let Some(handle) = handle {
-                restore_opencode_mcp_config(cleanup.as_ref());
                 handle.cancel().await;
             }
         });
@@ -892,20 +920,22 @@ async fn server_run_loop(
                     .map(str::to_string)
             });
         let mut parts = vec![json!({ "type": "text", "text": request.get("prompt").and_then(Value::as_str).unwrap_or("") })];
-        for path in request.get("localImagePaths").and_then(Value::as_array).cloned().unwrap_or_default() {
-            if let Some(path) = path.as_str() {
-                let filename = path.split(['/', '\\']).next_back().unwrap_or("image");
-                parts.push(json!({
-                    "type": "file",
-                    "url": format!("file:///{path}"),
-                    "filename": filename,
-                    "mime": "application/octet-stream"
-                }));
-            }
+        for image in agenthub_plugin_sdk::images::read_request_images(&request)? {
+            let url = reqwest::Url::from_file_path(&image.path)
+                .map_err(|_| anyhow::anyhow!("Invalid absolute image path: {}", image.path.display()))?;
+            parts.push(json!({
+                "type": "file", "url": url.as_str(),
+                "filename": image.path.file_name().map(|s|s.to_string_lossy()),
+                "mime": image.mime_type
+            }));
         }
         let mut body = Map::new();
-        if let Some(model) = opencode_model(request.get("model").and_then(Value::as_str)) {
+        let selected = request.get("model").and_then(Value::as_str).map(|model| if instance.pointer("/providerOptions/runtimeConnectionId").is_some() { format!("nautilo/{model}") } else { model.to_string() });
+        if let Some(model) = opencode_model(selected.as_deref()) {
             body.insert("model".to_string(), model);
+        }
+        if let Some(effort) = request.get("reasoningEffort").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+            body.insert("variant".to_string(), json!(effort));
         }
         if let Some(mode) = mode.as_deref() {
             if mode == "plan" || mode == "build" {
@@ -931,10 +961,9 @@ async fn server_run_loop(
     // streams incremental output through `message.part.delta` events which only
     // carry a partID; we learn the part type from the preceding
     // `message.part.updated` events.
-    let mut part_types: HashMap<String, String> = HashMap::new();
+    let mut part_stream = PartStream::default();
     // Deltas that arrive before their part type is known (rare reordering) are
     // buffered here until the matching `message.part.updated` arrives.
-    let mut pending_deltas: HashMap<String, Vec<Value>> = HashMap::new();
 
     let mut stream = stream_response;
     let mut pending = String::new();
@@ -1025,32 +1054,8 @@ async fn server_run_loop(
                             continue;
                         }
                     }
-                    // Remember the part's type so later `message.part.delta`
-                    // events for the same part can be classified as
-                    // thinking/message, and flush any deltas that arrived
-                    // before this update (out-of-order frames).
-                    let part_id = part
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .or_else(|| part.get("partID").and_then(Value::as_str))
-                        .map(str::to_string);
-                    if let Some(part_id) = &part_id {
-                        if let Some(part_type) = part.get("type").and_then(Value::as_str) {
-                            part_types.insert(part_id.clone(), part_type.to_string());
-                            if let Some(pending) = pending_deltas.remove(part_id) {
-                                for event in match &dispatch_id {
-                                    Some(id) => with_subagent_dispatch(pending, id),
-                                    None => pending,
-                                } {
-                                    if sender.send(event).is_err() {
-                                        return Ok(());
-                                    }
-                                }
-                            }
-                        }
-                    }
                     let delta = properties.get("delta").and_then(Value::as_str);
-                    let events = parse_opencode_part(&part, &raw, delta);
+                    let events = part_stream.update(&part, &raw, delta);
                     for event in match dispatch_id {
                         Some(id) => with_subagent_dispatch(events, &id),
                         None => events,
@@ -1071,12 +1076,6 @@ async fn server_run_loop(
                     if part_id.is_empty() || delta_text.is_empty() {
                         continue;
                     }
-                    let message_id = properties
-                        .get("messageID")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .map(Value::String)
-                        .unwrap_or(Value::Null);
                     let mut dispatch_id: Option<String> = None;
                     if !event_session_id.is_empty() && event_session_id != session_id {
                         dispatch_id = child_sessions.get(&event_session_id).cloned();
@@ -1096,22 +1095,11 @@ async fn server_run_loop(
                             continue;
                         }
                     }
-                    let part_type = part_types.get(&part_id).map(|s| s.as_str()).unwrap_or("");
-                    let kind = if part_type == "reasoning" { "thinking" } else { "message" };
-                    let event = json!({
-                        "kind": kind,
-                        "phase": "delta",
-                        "messageId": message_id,
-                        "text": delta_text,
-                        "raw": raw
-                    });
-                    if part_type.is_empty() {
-                        pending_deltas.entry(part_id).or_default().push(event);
-                    } else {
-                        let event = match &dispatch_id {
-                            Some(id) => with_subagent_dispatch(vec![event], id).remove(0),
-                            None => event,
-                        };
+                    let events = part_stream.delta(&properties, &raw);
+                    for event in match &dispatch_id {
+                        Some(id) => with_subagent_dispatch(events, id),
+                        None => events,
+                    } {
                         if sender.send(event).is_err() {
                             return Ok(());
                         }
@@ -1415,25 +1403,83 @@ fn enrich_model(model: &mut Value, json_text: &str) {
 }
 
 fn start_args(instance: &Value, request: &Value) -> Vec<String> {
-    let custom = base_args(instance);
-    if !custom.is_empty() {
-        return custom.into_iter().chain(std::iter::once(request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string())).collect();
+    let mut args = base_args(instance);
+    if !args.iter().any(|arg|arg=="run") { args.push("run".into()); }
+    set_cli_flag(&mut args, "--format", "json", None);
+    if let Some(model) = request["model"].as_str().filter(|m|!m.is_empty()) { set_cli_flag(&mut args,"--model",model,Some("-m")); }
+    if let Some(effort) = request["reasoningEffort"].as_str().filter(|e|!e.is_empty()) { set_cli_flag(&mut args,"--variant",effort,None); }
+    if let Some(mode) = request["permissionMode"].as_str().filter(|mode|["build","plan"].contains(mode)) { set_cli_flag(&mut args,"--agent",mode,None); }
+    args.push(request["prompt"].as_str().unwrap_or("").to_string());
+    if let Some(paths) = request["localImagePaths"].as_array().filter(|paths|!paths.is_empty()) {
+        args.push("--file".into());
+        for path in paths.iter().filter_map(Value::as_str) {
+            args.push(std::path::Path::new(request["cwd"].as_str().unwrap_or(".")).join(path).to_string_lossy().into_owned());
+        }
     }
-    let mut args = vec!["run".to_string(), "--format".to_string(), "json".to_string()];
-    if let Some(model) = request.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()) {
-        args.push("--model".to_string());
-        args.push(model.to_string());
-    }
-    // OpenCode's reasoning effort is a model "variant" (run --variant).
-    if let Some(effort) = request.get("reasoningEffort").and_then(Value::as_str).filter(|e| !e.is_empty()) {
-        args.push("--variant".to_string());
-        args.push(effort.to_string());
-    }
-    args.push(request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string());
     args
+}
+
+fn set_cli_flag(args: &mut Vec<String>, flag: &str, value: &str, alias: Option<&str>) {
+    let mut index=0;
+    while index < args.len() {
+        if args[index] == flag || alias == Some(args[index].as_str()) {
+            args.remove(index); if index < args.len() { args.remove(index); }
+        } else if args[index].starts_with(&format!("{flag}=")) { args.remove(index); }
+        else {index+=1;}
+    }
+    args.extend([flag.into(),value.into()]);
 }
 
 #[tokio::main]
 async fn main() {
     agenthub_plugin_sdk::serve(OpenCodePlugin::new()).await;
+}
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn usage_is_cumulative_deduplicated_and_separate_for_child_sessions() {
+        let mut stream = PartStream::default();
+        for (session,id,input,total) in [("main","one",10,10),("child","child-one",99,99),("main","two",20,30),("main","two",20,30)] {
+            let events=stream.update(&json!({"id":id,"sessionID":session,"type":"step-finish","tokens":{"input":input,"output":1,"cache":{"read":0,"write":0}}}),&Value::Null,None);
+            assert_eq!(events.last().unwrap()["usageScope"],"turn");
+            assert_eq!(events.last().unwrap()["inputTokens"],total);
+        }
+    }
+    #[test]
+    fn stream_parts_remain_distinct_and_early_reasoning_is_preserved() {
+        let mut stream = PartStream::default();
+        assert!(stream.delta(&json!({"partID":"r","field":"text","delta":"thinking"}), &Value::Null).is_empty());
+        let events = stream.update(&json!({"id":"r","messageID":"m","type":"reasoning"}), &Value::Null, None);
+        assert_eq!(events[0]["kind"], "thinking");
+        assert_eq!(events[0]["messageId"], "r");
+        assert_eq!(events[0]["text"], "thinking");
+        for id in ["first", "second"] {
+            stream.update(&json!({"id":id,"messageID":"m","type":"text"}), &Value::Null, None);
+            let delta = stream.delta(&json!({"partID":id,"field":"text","delta":id}), &Value::Null);
+            let completed = stream.update(&json!({"id":id,"messageID":"m","type":"text","text":id,"time":{"end":1}}), &Value::Null, None);
+            assert_eq!(delta[0]["messageId"], id);
+            assert_eq!(completed.iter().find(|e| e["kind"] == "message").unwrap()["messageId"], id);
+        }
+        assert!(stream.delta(&json!({"partID":"first","field":"metadata","delta":"no"}), &Value::Null).is_empty());
+    }
+    #[test]
+    fn child_lifecycle_does_not_replace_parent_resume_or_usage() {
+        let mut events = parse_opencode_event(&json!({"type":"text","sessionID":"child","part":{"id":"p","text":"reply"}}));
+        events.extend([json!({"kind":"usage","inputTokens":99}), json!({"kind":"status","phase":"turn_completed"}),
+            json!({"kind":"error","message":"child failed"}), json!({"kind":"exit","exitCode":0})]);
+        let mapped = with_subagent_dispatch(events, "task-call");
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0]["subagentDispatchId"], "task-call");
+        assert_eq!(mapped[0]["kind"], "message");
+    }
+    #[test]
+    fn cache_creation_is_preserved_without_counting_output_in_context() {
+        let events = parse_opencode_event(&json!({"type":"step_finish","part":{"tokens":{"input":10,"output":7,"cache":{"read":20,"write":5}}}}));
+        let usage = events.iter().find(|e| e["kind"] == "usage").unwrap();
+        assert_eq!(usage["cacheCreationInputTokens"], 5);
+        assert_eq!(usage["contextUsed"], 35);
+        assert_eq!(usage["usageScope"], "context");
+        assert_eq!(usage["inputTokensIncludesCache"], false);
+    }
 }

@@ -9,11 +9,18 @@ pub struct KimiAcpTurnSegments {
     thinking_text: String,
     message_index: u32,
     thinking_index: u32,
+    identity: String,
 }
 
 impl KimiAcpTurnSegments {
     pub fn new() -> Self {
-        Self { message_text: String::new(), thinking_text: String::new(), message_index: 1, thinking_index: 1 }
+        Self { message_text: String::new(), thinking_text: String::new(), message_index: 1, thinking_index: 1,
+            identity: format!("kimi-{}", uuid::Uuid::new_v4().simple()) }
+    }
+
+    pub fn bind(&self, state: &mut KimiAcpParseState) {
+        state.message_id = format!("{}-message-{}", self.identity, self.message_index);
+        state.thinking_id = format!("{}-thinking-{}", self.identity, self.thinking_index);
     }
 
     pub fn flush_before(&mut self, events: &[AdapterEvent], state: &mut KimiAcpParseState) -> Vec<AdapterEvent> {
@@ -54,7 +61,7 @@ impl KimiAcpTurnSegments {
             raw: None,
         };
         self.message_index += 1;
-        state.message_id = format!("kimi-message-{}", self.message_index);
+        self.bind(state);
         vec![completed]
     }
 
@@ -70,7 +77,7 @@ impl KimiAcpTurnSegments {
             raw: None,
         };
         self.thinking_index += 1;
-        state.thinking_id = format!("kimi-thinking-{}", self.thinking_index);
+        self.bind(state);
         vec![completed]
     }
 }

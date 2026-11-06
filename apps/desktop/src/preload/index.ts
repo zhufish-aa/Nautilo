@@ -49,6 +49,7 @@ const bridge = {
       ipcRenderer.invoke("attachment:import-clipboard", input)
   },
   shell: {
+    openExternal: (url: string): Promise<void> => ipcRenderer.invoke("shell:open-external", url),
     openPath: (path: string): Promise<string> => ipcRenderer.invoke("shell:open-path", path),
     showItemInFolder: (path: string): Promise<void> => ipcRenderer.invoke("shell:show-item-in-folder", path)
   },

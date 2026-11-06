@@ -1,3 +1,4 @@
+import { TerminalService } from "../runtime/terminal-service.js";
 import { ConnectionService } from "./connection-service.js";
 import { projectPollHealIds, projectPollLastSequence, readProjectPoll } from "../database/project-poll.js";
 import { IpcGateway } from "../ipc-gateway.js";
@@ -29,6 +30,7 @@ export interface ApplicationServices {
   adapters: AdapterRegistry;
   events: EventService;
   runs: RunService;
+  terminals: TerminalService;
   projects: ProjectService;
   agents: AgentService;
   connections: ConnectionService;
@@ -51,6 +53,30 @@ export interface ApplicationServices {
   dataDir: string;
 }
 export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationServices): void {
+  gateway.register("terminal.open", async ({sessionId, projectId, cols, rows}) => {
+    const session = sessionId ? services.sessions.get(sessionId).session : undefined;
+    const project = services.database.projects.get(projectId ?? session?.projectId ?? "");
+    if (!project) throw new Error("Project not found");
+    return services.terminals.open(`shell:${sessionId ?? project.id}`, session?.nativeWorkingDirectory ?? project.rootPath, cols, rows);
+  });
+  gateway.register("terminal.read", async ({terminalId, cursor}) => services.terminals.read(terminalId, cursor));
+  gateway.register("terminal.write", async ({terminalId, data}) => services.terminals.write(terminalId, data));
+  gateway.register("terminal.resize", async ({terminalId, cols, rows}) => services.terminals.resize(terminalId, cols, rows));
+  gateway.register("terminal.close", async ({terminalId}) => services.terminals.close(terminalId));
+  gateway.register("terminal.status", async () => ({nativeActive:false}));
+  gateway.register("terminal.native", async () => { throw new Error("原生会话交接需要使用 Rust 核心运行项目。"); });
+  gateway.register("agent.runtimeCapabilities", async ({sessionId, agentInstanceId}) => {
+    const session = sessionId ? services.sessions.get(sessionId).session : undefined;
+    const agent = services.database.agents.get(agentInstanceId ?? session?.agentInstanceId ?? "");
+    if (!agent) throw new Error("Agent not found");
+    const adapter = services.adapters.find(agent.providerId);
+    const reusable = agent.providerId === "codex" && !agent.baseArgs.length || agent.providerId === "opencode" && !agent.baseArgs.length;
+    return {schemaVersion:1 as const,providerId:agent.providerId,evidence:{source:"adapter-contract" as const},
+      session:{transport:"legacy-host",processReuse:reusable,resume:adapter?.supportsResume ? "native" as const : "unknown" as const},
+      turn:{interrupt:"process" as const,steer:"queued" as const},interactions:{dialogs:[],nativeTerminal:false,unknownRequests:"visible-error" as const},
+      resources:{nativeConfig:"unknown" as const,managedMcp:"unknown" as const,managedSkills:"unknown" as const}};
+  });
+
   gateway.register("connection.list", async () => services.connections.list());
   gateway.register("connection.get", async ({ connectionId, revision }) => services.connections.get(connectionId, revision));
   gateway.register("connection.upsert", async (input) => services.connections.upsert(input));
@@ -136,12 +162,15 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("session.historyBatch", async ({ items }) => services.database.sessions.historyBatch(items));
   gateway.register("session.history", async ({ sessionId, cursor }) => services.database.sessions.history(sessionId, cursor));
   gateway.register("session.get", async ({ sessionId }) => services.sessions.get(sessionId));
+  gateway.register("session.generateTitle", async ({ sessionId }) => services.runs.generateSessionTitle(sessionId));
   gateway.register("session.create", async (input) => services.sessions.create(input));
   gateway.register("session.upsert", async (input) => services.sessions.upsert(input));
   gateway.register("session.delete", async (input) => services.sessions.delete(input));
   gateway.register("session.followUp", async (input) => services.sessions.followUp(input));
   gateway.register("session.followUp.list", async (input) => services.sessions.followUpList(input));
   gateway.register("session.followUp.cancel", async (input) => services.sessions.followUpCancel(input));
+  gateway.register("session.followUp.steer", async (input) => services.sessions.followUpSteer(input));
+  gateway.register("provider.modes", async (input) => services.agents.listModes(input.agentInstanceId));
   gateway.register("session.send", async (input) => services.sessions.send(input));
   gateway.register("slashCommand.list", async ({ sessionId }) => services.slashCommands.list(sessionId));
   gateway.register("slashCommand.execute", async (input) => services.slashCommands.execute(input.sessionId, input.commandId, input.argument));
@@ -160,7 +189,14 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("policy.upsert", async (policy) => services.commandPolicies.save(policy));
   gateway.register("policy.evaluate", async (input) => services.commandPolicies.evaluate(input));
   gateway.register("approval.list", async (input) => services.approvals.list(input));
-  gateway.register("approval.resolve", async ({ approvalId, decision, scope }) => services.approvals.resolve(approvalId, decision, scope));
+  gateway.register("approval.resolve", async ({ approvalId, decision, scope }) => {
+    const records = services.approvals.resolveMany(approvalId, decision, scope);
+    for (const record of records) {
+      const session = record.sessionId ? services.database.sessions.get(record.sessionId) : undefined;
+      if (session) services.events.appendForSession(session, { projectRunId: record.projectRunId, taskId: record.taskId }, "approval.resolved", { approvalId: record.id, decision, scope });
+    }
+    return records[0];
+  });
   gateway.register("interaction.list", async (input) => services.interactions.list(input));
   gateway.register("interaction.respond", async ({ interactionId, outcome, optionId, answers }) =>
     services.interactions.respond(interactionId, { outcome, optionId, answers }));

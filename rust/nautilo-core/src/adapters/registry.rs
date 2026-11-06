@@ -73,6 +73,10 @@ impl AdapterRegistry {
     pub fn find(&self, provider_id: &str) -> Option<Arc<dyn AgentCliAdapter>> {
         self.adapters.read().unwrap().get(provider_id).cloned()
     }
+    pub async fn dispose(&self) {
+        let adapters:Vec<_>=self.adapters.read().unwrap().values().cloned().collect();
+        for adapter in adapters {adapter.dispose().await;}
+    }
 
     pub fn get(&self, provider_id: &str) -> CoreResult<Arc<dyn AgentCliAdapter>> {
         self.adapters.read().unwrap().get(provider_id).cloned().ok_or_else(|| {

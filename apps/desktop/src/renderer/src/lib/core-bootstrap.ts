@@ -5,6 +5,7 @@ import { useAgentsStore } from "../stores/agents";
 import { useProjectsStore } from "../stores/projects";
 import { useProvidersStore } from "../stores/providers";
 import { useProviderToolsStore } from "../stores/provider-tools";
+import { useConnectionsStore } from "../stores/connections";
 import { useTeamsStore } from "../stores/teams";
 
 let initialization: Promise<void> | undefined;
@@ -21,7 +22,8 @@ export function initializeCoreState(): Promise<void> {
       // Project details inspect on demand; explicit rescans remain available.
       useProjectsStore.getState().hydrate(false),
       useAgentsStore.getState().hydrate(),
-      useTeamsStore.getState().hydrate()
+      useTeamsStore.getState().hydrate(),
+      useConnectionsStore.getState().hydrate()
     ]);
     // capability.list lazily seeds the built-in office skill pack daemon-side.
     await useProviderToolsStore.getState().load();

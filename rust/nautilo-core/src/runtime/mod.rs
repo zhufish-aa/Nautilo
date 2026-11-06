@@ -5,6 +5,7 @@ pub mod event_service;
 pub mod event_subscription_service;
 pub mod git_workflow_service;
 pub mod git;
+pub mod image_generation;
 pub mod message_attachment_service;
 pub mod observability;
 pub mod plugins;
@@ -16,7 +17,9 @@ pub mod run_service;
 pub mod run_workspace_snapshot;
 pub mod runtime_tool_provider;
 pub mod security;
+pub mod terminal_service;
 pub mod session_run_queue;
+pub mod session_title;
 pub mod subagent_detection;
 pub mod verification_engine;
 

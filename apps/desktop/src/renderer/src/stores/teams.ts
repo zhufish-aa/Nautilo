@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { TeamDefinition } from "@agenthub/domain";
+import type { RuntimeConnection, TeamDefinition } from "@agenthub/domain";
+import { connectionSupportsAgent } from "../lib/session-connections";
 import { requestCore } from "../lib/bridge";
 import { toDomainTeam, toUiTeam } from "../lib/core-mappers";
 import { newId } from "../lib/utils";
@@ -37,8 +38,8 @@ export const useTeamsStore = create<TeamsState>((set, get) => ({
   updateTeam: async (id, patch) => {
     const current = requireTeam(get().teams, id);
     const next = touch({ ...current, ...patch });
-    set((state) => ({ teams: state.teams.map((team) => team.id === id ? next : team) }));
-    await requestCore<TeamDefinition>("team.upsert", toDomainTeam(next));
+    const saved = toUiTeam(await requestCore<TeamDefinition>("team.upsert", toDomainTeam(next)));
+    set((state) => ({ teams: state.teams.map((team) => team.id === id ? saved : team) }));
   },
 
   deleteTeam: async (id) => {
@@ -49,23 +50,23 @@ export const useTeamsStore = create<TeamsState>((set, get) => ({
   addMember: async (teamId, member) => {
     const current = requireTeam(get().teams, teamId);
     const next = touch({ ...current, members: [...current.members, member] });
-    set((state) => ({ teams: state.teams.map((team) => team.id === teamId ? next : team) }));
-    await requestCore<TeamDefinition>("team.upsert", toDomainTeam(next));
+    const saved = toUiTeam(await requestCore<TeamDefinition>("team.upsert", toDomainTeam(next)));
+    set((state) => ({ teams: state.teams.map((team) => team.id === teamId ? saved : team) }));
   },
 
   updateMember: async (teamId, memberId, patch) => {
     const current = requireTeam(get().teams, teamId);
     const next = touch({ ...current, members: current.members.map((member) => member.id === memberId ? { ...member, ...patch } : member) });
-    set((state) => ({ teams: state.teams.map((team) => team.id === teamId ? next : team) }));
-    await requestCore<TeamDefinition>("team.upsert", toDomainTeam(next));
+    const saved = toUiTeam(await requestCore<TeamDefinition>("team.upsert", toDomainTeam(next)));
+    set((state) => ({ teams: state.teams.map((team) => team.id === teamId ? saved : team) }));
   },
 
   removeMember: async (teamId, memberId) => {
     const current = requireTeam(get().teams, teamId);
     const members = current.members.filter((member) => member.id !== memberId);
     const next = touch({ ...current, members });
-    set((state) => ({ teams: state.teams.map((team) => team.id === teamId ? next : team) }));
-    await requestCore<TeamDefinition>("team.upsert", toDomainTeam(next));
+    const saved = toUiTeam(await requestCore<TeamDefinition>("team.upsert", toDomainTeam(next)));
+    set((state) => ({ teams: state.teams.map((team) => team.id === teamId ? saved : team) }));
   }
 }));
 
@@ -76,16 +77,19 @@ function requireTeam(teams: UiTeam[], id: string): UiTeam {
 }
 
 /** Pure validation shared by the editor and run-start checks. */
-export function validateTeam(team: UiTeam, instances: AgentInstanceConfig[]): TeamIssue[] {
+export function validateTeam(team: UiTeam, instances: AgentInstanceConfig[], connections: RuntimeConnection[] = []): TeamIssue[] {
   const issues: TeamIssue[] = [];
   if (team.members.length === 0) issues.push({ id: "no-members", level: "critical", textKey: "teams.validation.noMembers" });
   const enabledMembers = team.members.filter((member) => member.enabled);
   if (team.members.length > 0 && enabledMembers.length === 0) issues.push({ id: "no-enabled", level: "critical", textKey: "teams.validation.noEnabled" });
   const seen = new Map<string, string[]>();
-  for (const member of team.members) seen.set(member.agentInstanceId, [...(seen.get(member.agentInstanceId) ?? []), member.displayName]);
+  for (const member of team.members) seen.set(`${member.agentInstanceId}:${member.connectionId ?? "legacy"}:${member.model ?? ""}`, [...(seen.get(`${member.agentInstanceId}:${member.connectionId ?? "legacy"}:${member.model ?? ""}`) ?? []), member.displayName]);
   for (const names of seen.values()) if (names.length > 1) issues.push({ id: `dup-${names.join("-")}`, level: "warning", textKey: "teams.validation.duplicateInstance", values: { names: names.join("、") } });
   for (const member of team.members) {
     const instance = instances.find((item) => item.id === member.agentInstanceId);
+    const connection = connections.find((item) => item.id === member.connectionId);
+    if (member.enabled && (!member.connectionId || instance?.configurationKind !== "harness")) issues.push({ id: `migration-${member.id}`, level: "critical", textKey: "teams.validation.needsMigration", values: { name: member.displayName } });
+    else if (member.enabled && instance && (!connection || !connectionSupportsAgent(connection, instance))) issues.push({ id: `connection-${member.id}`, level: "critical", textKey: "teams.validation.connectionUnavailable", values: { name: member.displayName } });
     if (!instance) issues.push({ id: `missing-${member.id}`, level: "warning", textKey: "teams.validation.instanceMissing", values: { name: member.displayName } });
     else if (!instance.enabled && member.enabled) issues.push({ id: `inst-disabled-${member.id}`, level: "info", textKey: "teams.validation.instanceDisabled", values: { name: member.displayName, instance: instance.displayName } });
     if (!member.enabled) issues.push({ id: `member-disabled-${member.id}`, level: "info", textKey: "teams.validation.memberDisabled", values: { name: member.displayName } });

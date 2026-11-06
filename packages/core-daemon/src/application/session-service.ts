@@ -68,7 +68,7 @@ export class SessionService {
     // so Enter behaves the same across providers instead of erroring out.
     if (input.mode === "steer" && this.runs.canSteer(session.id)) {
       await this.runs.steerSession(session.id, text);
-      this.database.sessions.saveMessage(followUpMessage(session, text));
+      this.database.sessions.saveMessage(followUpMessage(session, text, input.messageId));
       return { accepted: true, mode: "steer" };
     }
 
@@ -82,10 +82,10 @@ export class SessionService {
       messages: existingMessages,
       artifacts,
       fullHistory: session.connectionContextRebuildRequired,
-      recoverProviderContext: !!session.connectionContextRebuildRequired || !session.providerSessionId || !session.providerContextSyncedAt,
+      recoverProviderContext: !!session.connectionContextRebuildRequired || !session.providerSessionId || !session.providerContextSyncedAt || this.runs.requiresProviderRecovery(session, agent),
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
-    const message = followUpMessage(session, text);
+    const message = followUpMessage(session, text, input.messageId);
     this.database.sessions.saveMessage(message);
     this.trackPendingFollowUp(session.id, { messageId: message.id, text, queuedAt: message.createdAt });
     this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_queued", { messageId: message.id, text });
@@ -127,11 +127,26 @@ export class SessionService {
       this.database.sessions.deleteMessage(input.sessionId, input.messageId);
       return { cancelled: true };
     }
-    this.runs.cancelQueued(input.sessionId, input.messageId);
+    if (!this.runs.cancelQueued(input.sessionId, input.messageId)) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is already being sent." });
+    }
     this.untrackPendingFollowUp(input.sessionId, input.messageId);
     this.database.sessions.deleteMessage(input.sessionId, input.messageId);
     this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_cancelled", { messageId: input.messageId });
     return { cancelled: true };
+  }
+  async followUpSteer(input: IpcRequestMap["session.followUp.steer"]["input"]): Promise<{ accepted: true; mode: "steer" | "queue" }> {
+    const session = this.database.sessions.get(input.sessionId);
+    if (!session) throw new CoreError("IPC_NOT_FOUND", { resource: "session", id: input.sessionId });
+    const entry = this.pendingFollowUps.get(session.id)?.find((item) => item.messageId === input.messageId);
+    if (!entry) throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is no longer queued." });
+    if (!this.runs.canSteer(session.id)) return { accepted: true, mode: "queue" };
+    if (!await this.runs.steerQueued(session.id, entry.messageId, entry.text)) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is already being sent." });
+    }
+    this.untrackPendingFollowUp(session.id, entry.messageId);
+    this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_steered", { messageId: entry.messageId });
+    return { accepted: true, mode: "steer" };
   }
   /**
    * Journals session.follow_up_cancelled for every queued follow-up in this
@@ -149,7 +164,7 @@ export class SessionService {
       const rows = this.database.connection.raw
         .prepare(
           "SELECT data FROM runtime_events WHERE session_id = ? \
-           AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled') \
+           AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled', 'session.follow_up_steered') \
            ORDER BY sequence, rowid"
         )
         .all(sessionId) as Array<{ data: string }>;
@@ -215,8 +230,9 @@ export class SessionService {
       normalized = bindNewSession(this.database, normalized, this.members.resolveSession({ ...current, ...normalized }));
     }
     const connectionChanged = current.connectionId !== normalized.connectionId || current.connectionRevision !== normalized.connectionRevision;
+    const hasHistory = Boolean(current.providerSessionId) || this.database.runs.list().some((run) => run.sessionId === current.id) || this.database.sessions.messages(current.id).length > 0;
     if (connectionChanged) {
-      if (confirmConnectionChange !== true) throw new CoreError("IPC_INVALID_REQUEST", { field: "confirmConnectionChange", reason: "Confirm rebuilding text context when switching account or supplier" });
+      if ((hasHistory || current.connectionId) && confirmConnectionChange !== true) throw new CoreError("IPC_INVALID_REQUEST", { field: "confirmConnectionChange", reason: "Confirm rebuilding text context when switching account or supplier" });
       const active = this.database.runs.list().some((run) => run.sessionId === current.id && !["completed", "failed", "cancelled", "crashed", "timed_out"].includes(run.status));
       if (active || (this.pendingFollowUps.get(current.id)?.length ?? 0) > 0) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "Wait for active and queued turns before changing connection" });
       const bytes = Buffer.byteLength(this.database.sessions.messages(current.id).map((message) => message.text).join("\n"), "utf8");
@@ -243,7 +259,7 @@ export class SessionService {
       runtimeToolVersion: sameProviderBinding
         ? current.runtimeToolVersion ?? normalized.runtimeToolVersion
         : connectionChanged ? undefined : normalized.runtimeToolVersion,
-      connectionContextRebuildRequired: connectionChanged || current.connectionContextRebuildRequired,
+      connectionContextRebuildRequired: (connectionChanged && hasHistory) || current.connectionContextRebuildRequired,
       providerContextWindow: connectionChanged ? undefined : current.providerContextWindow
     };
     this.database.sessions.save(updated);
@@ -276,12 +292,12 @@ export class SessionService {
       artifacts,
       currentAttachments,
       fullHistory: session.connectionContextRebuildRequired,
-      recoverProviderContext: !!session.connectionContextRebuildRequired || !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration,
+      recoverProviderContext: !!session.connectionContextRebuildRequired || !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration || this.runs.requiresProviderRecovery(session, agent),
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
     const message: Message = editedMessage
       ? { ...editedMessage, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), editedAt: new Date().toISOString() }
-      : { id: randomUUID(), sessionId: session.id, sender: "user", kind: "chat", projectRunId: session.projectRunId, taskId: session.taskId, toMemberId: session.memberId, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), createdAt: new Date().toISOString() };
+      : { id: input.messageId || randomUUID(), sessionId: session.id, sender: "user", kind: "chat", projectRunId: session.projectRunId, taskId: session.taskId, toMemberId: session.memberId, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), createdAt: new Date().toISOString() };
     this.database.sessions.saveMessage(message);
     const runId = await this.runs.start(session, agent, turnContext.prompt, {
       projectRunId: session.projectRunId,
@@ -309,9 +325,9 @@ function descendantSessionIds(sessions: Session[], rootId: string): string[] {
   return [...ids];
 }
 
-function followUpMessage(session: Session, text: string): Message {
+function followUpMessage(session: Session, text: string, messageId?: string): Message {
   return {
-    id: randomUUID(),
+    id: messageId || randomUUID(),
     sessionId: session.id,
     sender: "user",
     kind: "chat",

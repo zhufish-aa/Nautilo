@@ -1,19 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import type { SlashCommandDefinition } from "@agenthub/domain";
-import { ArrowUp, FileText, ListPlus, Loader2, Plus, SendHorizontal, Square, X } from "lucide-react";
+import { ArrowUp, FileText, Loader2, Plus, SendHorizontal, Square, X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { sendWorkbenchFollowUp, sendWorkbenchMessage, stopWorkbenchRun } from "../../lib/orchestration-runtime";
 import { getBridge } from "../../lib/bridge";
+import { connectionSendError } from "../../lib/session-connections";
 import { artifactUrlForPath } from "../timeline/media-actions";
 import type { DesktopAttachment } from "../../types/bridge";
 import { deliverComposerSubmission, EMPTY_COMPOSER_DRAFT, useComposerDraftsStore, type ComposerSubmission } from "../../stores/composer-drafts";
 import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
-import { useIconOverrides } from "../../lib/use-icon-overrides";
 import { filterSnippets, snippetQuery } from "../../lib/snippets";
 import { toast } from "../../stores/toast";
+import { SessionPermissionControl } from "./PermissionModeSelect";
 import { SessionModelControl } from "./SessionModelControl";
 import { ContextUsageIndicator, useContextUsage } from "./ContextUsageIndicator";
 import { CommandResultDialog } from "./slash-commands/CommandResultDialog";
@@ -21,6 +22,8 @@ import { SlashCommandMenu } from "./slash-commands/SlashCommandMenu";
 import { SnippetMenu } from "./slash-commands/SnippetMenu";
 import { filterSlashCommands, parseSlashCommand, slashCommandQuery } from "./slash-commands/slash-command-utils";
 import { useSlashCommands } from "./slash-commands/useSlashCommands";
+import { QueuedFollowUpBar } from "./QueuedFollowUpBar";
+import { SessionHarnessModeControl } from "./HarnessModeControl";
 
 
 /** Chat composer plus per-session model/effort controls, matching the Codex interaction model. */
@@ -29,24 +32,26 @@ export function Composer({
   targetName,
   running,
   disabled,
+  submissionDisabledReason,
   onCreateSession,
   starterControls,
+  trailingControls,
   draftId
 }: {
   sessionId?: string;
   targetName?: string;
   running: boolean;
   disabled?: boolean;
+  /** Configuration can block sending while the user continues writing a draft. */
+  submissionDisabledReason?: string;
   /** The landing creates a real session only when its first message is sent. */
   onCreateSession?: (text: string) => string | undefined;
   starterControls?: ReactNode;
+  trailingControls?: ReactNode;
   /** Distinguishes independent new Code and Work drafts. */
   draftId?: string;
 }): JSX.Element {
   const { t, locale } = useI18n();
-  const iconOverrides = useIconOverrides();
-  const QueueIcon = iconOverrides?.["composer.queue"] ?? ListPlus;
-  const SteerIcon = iconOverrides?.["composer.steer"] ?? SendHorizontal;
   const draftKey = sessionId ?? draftId ?? "new";
   const draft = useComposerDraftsStore((state) => state.drafts[draftKey] ?? EMPTY_COMPOSER_DRAFT);
   const value = draft.text;
@@ -107,8 +112,6 @@ export function Composer({
     [compactCommand, slash.execute, sessionId, t]
   );
 
-  const queuedCount = useSessionsStore((state) => (sessionId ? state.queuedFollowUps[sessionId]?.length ?? 0 : 0));
-
   useEffect(() => setActiveCommandIndex(0), [commandQuery, snippetQ, sessionId]);
   useEffect(() => {
     setAttachmentError(undefined);
@@ -122,7 +125,7 @@ export function Composer({
   // Queued follow-ups live in the sessions store (daemon queue + events).
 
   const canCompose = !!sessionId || !!onCreateSession;
-  const canSend = canCompose && !submitting && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled;
+  const canSend = canCompose && !submitting && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled && !submissionDisabledReason;
   const canFollowUp = !!sessionId && !submitting && running && !importing && !disabled && !editingMessage && attachments.length === 0 && value.trim().length > 0;
 
   const appendAttachments = (next: DesktopAttachment[]): void => {
@@ -188,6 +191,7 @@ export function Composer({
     return false;
   };
   const dispatchSubmission = (kind: ComposerSubmission["kind"], retryToken?: number): void => {
+    if (disabled || submissionDisabledReason) return;
     const store = useComposerDraftsStore.getState();
     let submission = store.begin(draftKey, kind, editingMessage?.messageId, retryToken);
     if (!submission) return; // Atomic across double-clicks and mounted composers.
@@ -217,7 +221,8 @@ export function Composer({
   const submit = (): void => {
     if (submitting) return;
     if (sessionId && tryRunSlashCommand()) return;
-    if (canSend) dispatchSubmission("message");
+    if (running) submitFollowUp("steer");
+    else if (canSend) dispatchSubmission("message");
   };
   const submitFollowUp = (mode: "steer" | "queue"): void => {
     if (sessionId && canFollowUp) dispatchSubmission(mode);
@@ -277,11 +282,6 @@ export function Composer({
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (running) {
-        if (tryRunSlashCommand()) return;
-        submitFollowUp("steer");
-        return;
-      }
       submit();
     }
   };
@@ -293,6 +293,7 @@ export function Composer({
   };
   return (
     <div data-tour="sessions-composer" className={sessionId ? "composer shrink-0 bg-card px-4 pb-5 pt-3 sm:px-7" : "composer w-full shrink-0 bg-card"}>
+      {sessionId && <QueuedFollowUpBar sessionId={sessionId} disabled={disabled} />}
       <div
         className={cn(
           "composer-box relative mx-auto w-full max-w-3xl rounded-2xl border border-line-strong bg-card shadow-[0_2px_10px_rgba(0,0,0,0.045)] transition-[border-color,box-shadow] duration-150 focus-within:border-ink-3/50 focus-within:shadow-[0_2px_14px_rgba(0,0,0,0.06)]"
@@ -374,25 +375,23 @@ export function Composer({
           onPaste={onPaste}
           rows={2}
           disabled={!canCompose || disabled}
-          placeholder={locale === "zh-CN" ? "描述你的任务" : "Describe your task"}
+          placeholder={locale === "zh-CN" ? "今天帮你做些什么？输入任务，或添加文件" : "What can I help with? Describe a task, or add files"}
           aria-label={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
           className="block max-h-48 min-h-[76px] w-full resize-none rounded-t-2xl bg-transparent px-4 pb-2 pt-4 text-[14px] leading-6 text-ink outline-none placeholder:text-ink-3/70 disabled:opacity-50"
         />
         {failedSubmissions?.map((failedSubmission) => <div key={failedSubmission.submission.token} role="alert" className="flex flex-wrap items-center gap-2 px-4 pb-2 text-xs text-danger">
-          <span className="min-w-0 flex-1" title={failedSubmission.submission.draft.text}>{failedSubmission.error} · {failedSubmission.submission.draft.text.slice(0, 48) || (locale === "zh-CN" ? "附件" : "Attachments")}</span>
-          <button type="button" disabled={submitting || disabled || (failedSubmission.submission.kind === "message" && running)} onClick={() => dispatchSubmission(failedSubmission.submission.kind, failedSubmission.submission.token)} className="rounded px-2 py-1 text-ink-2 underline disabled:opacity-40">{failedSubmission.submission.kind !== "message" && !running ? (locale === "zh-CN" ? "作为新消息重试" : "Retry as new message") : (locale === "zh-CN" ? "重试未发送内容" : "Retry unsent content")}</button>
+          <span className="min-w-0 flex-1" title={failedSubmission.submission.draft.text}>{connectionSendError(failedSubmission.error, locale === "zh-CN")} · {failedSubmission.submission.draft.text.slice(0, 48) || (locale === "zh-CN" ? "附件" : "Attachments")}</span>
+          <button type="button" disabled={submitting || disabled || !!submissionDisabledReason || (failedSubmission.submission.kind === "message" && running)} onClick={() => dispatchSubmission(failedSubmission.submission.kind, failedSubmission.submission.token)} className="rounded px-2 py-1 text-ink-2 underline disabled:opacity-40">{failedSubmission.submission.kind !== "message" && !running ? (locale === "zh-CN" ? "作为新消息重试" : "Retry as new message") : (locale === "zh-CN" ? "重试未发送内容" : "Retry unsent content")}</button>
         </div>)}
         {attachmentError && <p className="px-4 pb-1 text-[11px] text-danger">{attachmentError}</p>}
-        <div className="flex min-h-11 flex-wrap items-center gap-1.5 px-2.5 pb-2.5">
+        <div className="composer-toolbar flex min-h-11 flex-wrap items-center gap-1.5 px-2.5 pb-2.5">
           <button type="button" onClick={() => void pickFiles()} disabled={!canCompose || disabled || importing || running} className="composer-attach flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
             {importing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-[18px] w-[18px]" aria-hidden />}
           </button>
-          {sessionId ? (
-            <>
-              <SessionModelControl sessionId={sessionId} disabled={running || disabled} />
-            </>
-          ) : starterControls}
+          {sessionId ? <SessionPermissionControl sessionId={sessionId} disabled={running || disabled} /> : starterControls}
+          {sessionId && <SessionHarnessModeControl sessionId={sessionId} disabled={running || disabled} />}
           <span className="min-w-0 flex-1" />
+          {sessionId ? <SessionModelControl sessionId={sessionId} disabled={running || disabled} /> : trailingControls}
           <ContextUsageIndicator
             sessionId={sessionId}
             compactCommand={compactCommand}
@@ -400,55 +399,27 @@ export function Composer({
             compactDisabled={!sessionId || disabled || running || slash.loading}
             compactLoading={slash.loading}
           />
-          {running ? (
-            <>
-              <button
-                type="button"
-                onClick={() => submitFollowUp("queue")}
-                disabled={!canFollowUp}
-                aria-label={t("sessions.composer.queue")}
-                title={t("sessions.composer.queueTitle")}
-                className="composer-queue relative flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-line-strong bg-card px-3 text-xs font-medium text-ink-2 transition-colors hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <QueueIcon className="h-3.5 w-3.5" aria-hidden />
-                {t("sessions.composer.queue")}
-                {queuedCount > 0 && (
-                  <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-info px-1 text-[10px] font-semibold text-white">
-                    {queuedCount}
-                  </span>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => submitFollowUp("steer")}
-                disabled={!canFollowUp}
-                aria-label={t("sessions.composer.steer")}
-                title={t("sessions.composer.steerTitle")}
-                className="composer-steer flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 text-xs font-medium text-canvas shadow-sm transition-[transform,opacity,background-color] hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
-              >
-                <SteerIcon className="h-3.5 w-3.5 stroke-[2.4]" aria-hidden />
-                {t("sessions.composer.steer")}
-              </button>
-              <button
-                type="button"
-                onClick={() => sessionId && void stopWorkbenchRun(sessionId)}
-                aria-label={t("sessions.composer.stop")}
-                title={t("sessions.composer.stop")}
-                className="composer-stop flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-line-strong bg-ink text-canvas transition-colors hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-3/50"
-              >
-                <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
-              </button>
-            </>
-          ) : (
+          {(!running || value.trim().length > 0 || attachments.length > 0 || submitting) && (
             <button
               type="button"
               onClick={submit}
-              disabled={!canSend}
-              aria-label={t("sessions.composer.send")}
-              title={t("sessions.composer.send")}
+              disabled={running ? !canFollowUp : !canSend}
+              aria-label={t(running ? "sessions.composer.steer" : "sessions.composer.send")}
+              title={submissionDisabledReason ?? t(running ? "sessions.composer.runningHint" : "sessions.composer.send")}
               className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:bg-ink-2 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
             >
-              {submitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden />}
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : sessionId ? <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden /> : <SendHorizontal className="h-5 w-5" aria-hidden />}
+            </button>
+          )}
+          {running && (
+            <button
+              type="button"
+              onClick={() => sessionId && void stopWorkbenchRun(sessionId)}
+              aria-label={t("sessions.composer.stop")}
+              title={t("sessions.composer.stop")}
+              className="composer-stop flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-line-strong bg-ink text-canvas transition-colors hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-3/50"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
             </button>
           )}
         </div>

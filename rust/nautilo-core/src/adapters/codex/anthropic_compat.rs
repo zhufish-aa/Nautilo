@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{bail, ensure, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
+use base64::Engine;
 use super::chat_compat::{chat_tools, response_tool_types, write_sse};
+const THINKING_PREFIX: &str = "nautilo-anthropic-v1:";
 
 pub(super) fn endpoint(base: &str) -> Result<String> {
     let mut url = reqwest::Url::parse(base)?;
@@ -48,7 +50,6 @@ pub(super) fn request(input: &Value) -> Result<Value> {
     ensure!(input.get("stream").is_none_or(|v| v == true), "Anthropic bridge requires stream=true");
     ensure!(input.get("background").is_none_or(|v| v != true), "Background responses are unsupported");
     ensure!(input.pointer("/text/format/type").and_then(Value::as_str).is_none_or(|v| v == "text"), "Structured response formats are unsupported by the Anthropic bridge");
-    ensure!(input.pointer("/reasoning/effort").and_then(Value::as_str).is_none_or(|v| v == "none"), "Disable Codex reasoning effort for the Anthropic bridge; thinking conversion is unsupported");
     validate_tools(&input["tools"])?;
     let tools = chat_tools(input.get("tools"));
     let mut names = std::collections::HashSet::new();
@@ -85,6 +86,13 @@ pub(super) fn request(input: &Value) -> Result<Value> {
                     let content = text_blocks(&item["output"])?;
                     push_message(&mut messages, "user", vec![json!({"type":"tool_result","tool_use_id":id,"content":content})]);
                 }
+                "reasoning" => {
+                    let encoded = item["encrypted_content"].as_str().and_then(|v|v.strip_prefix(THINKING_PREFIX)).ok_or_else(||anyhow::anyhow!("Foreign reasoning history cannot be replayed to Anthropic"))?;
+                    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+                    let block: Value = serde_json::from_slice(&bytes)?;
+                    ensure!(matches!(block["type"].as_str(),Some("thinking"|"redacted_thinking")), "Invalid Anthropic reasoning history");
+                    push_message(&mut messages, "assistant", vec![block]);
+                }
                 _ => bail!("Unsupported Responses history item; start a new text-only session"),
             }
         }
@@ -93,6 +101,9 @@ pub(super) fn request(input: &Value) -> Result<Value> {
     let model = input["model"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Missing model"))?;
     let max = input.get("max_output_tokens").map(|v| v.as_u64().filter(|v| *v > 0).ok_or_else(|| anyhow::anyhow!("Invalid max_output_tokens"))).transpose()?.unwrap_or(4096);
     let mut output = json!({"model":model,"messages":messages,"max_tokens":max,"stream":true});
+    if let Some(effort) = input.pointer("/reasoning/effort").and_then(Value::as_str).filter(|v|!v.is_empty() && *v!="none") {
+        output["output_config"] = json!({"effort":effort});
+    }
     if !system.is_empty() { output["system"] = json!(system); }
     if !tools.is_empty() {
         output["tools"] = Value::Array(tools.iter().map(|t| { let f = &t["function"]; json!({"name":f["name"],"description":f["description"].as_str().unwrap_or(""),"input_schema":f["parameters"]}) }).collect());
@@ -116,7 +127,7 @@ pub(super) fn request(input: &Value) -> Result<Value> {
     Ok(output)
 }
 
-struct Block { item: Value, arguments: String, stopped: bool, output_index: usize }
+struct Block { item: Value, arguments: String, stopped: bool, output_index: usize, native: Option<Value> }
 struct Translator {
     response_id: String, created_at: u64, model: Value, blocks: BTreeMap<u64, Block>,
     tool_types: HashMap<String, (String, String, String)>, input_tokens: u64, output_tokens: u64,
@@ -152,6 +163,7 @@ impl Translator {
                 let output_index = self.blocks.len();
                 let mut item = match block["type"].as_str() {
                     Some("text") => json!({"id":id,"type":"message","role":"assistant","status":"in_progress","content":[]}),
+                    Some("thinking" | "redacted_thinking") => json!({"id":id,"type":"reasoning","status":"in_progress","summary":if block["type"]=="thinking" {json!([{"type":"summary_text","text":block["thinking"].as_str().unwrap_or("")}])} else {json!([])}}),
                     Some("tool_use") => {
                         let name = block["name"].as_str().unwrap_or("");
                         let (ns, name, kind) = self.tool_types.get(name).ok_or_else(|| anyhow::anyhow!("Upstream called an unknown tool"))?;
@@ -160,7 +172,7 @@ impl Translator {
                         if !ns.is_empty() { item["namespace"] = json!(ns); }
                         item[if kind == "custom" {"input"} else {"arguments"}] = json!(""); item
                     },
-                    _ => bail!("Unsupported Anthropic content block (thinking and server tools are not converted)"),
+                    _ => bail!("Unsupported Anthropic server content block"),
                 };
                 events.push(json!({"type":"response.output_item.added","output_index":output_index,"item":item}));
                 if item["type"] == "message" {
@@ -168,7 +180,11 @@ impl Translator {
                     item["content"] = json!([{"type":"output_text","text":"","annotations":[]}]);
                     events.push(json!({"type":"response.content_part.added","output_index":output_index,"item_id":id,"content_index":0,"part":item["content"][0]}));
                 }
-                self.blocks.insert(index, Block { item, arguments: String::new(), stopped: false, output_index });
+                if item["type"] == "reasoning" && item["summary"].as_array().is_some_and(|a|!a.is_empty()) {
+                    events.push(json!({"type":"response.reasoning_summary_part.added","output_index":output_index,"item_id":id,"summary_index":0,"part":item["summary"][0]}));
+                }
+                let native = (item["type"]=="reasoning").then(||block.clone());
+                self.blocks.insert(index, Block { item, arguments: String::new(), stopped: false, output_index, native });
             }
             "content_block_delta" | "content_block_stop" => {
                 let index = value["index"].as_u64().ok_or_else(|| anyhow::anyhow!("Missing block index"))?;
@@ -180,6 +196,12 @@ impl Translator {
                     if b.item["type"] == "message" {
                         events.push(json!({"type":"response.output_text.done","output_index":oi,"item_id":id,"content_index":0,"text":b.item["content"][0]["text"]}));
                         events.push(json!({"type":"response.content_part.done","output_index":oi,"item_id":id,"content_index":0,"part":b.item["content"][0]}));
+                    } else if let Some(native) = &b.native {
+                        b.item["encrypted_content"] = json!(format!("{THINKING_PREFIX}{}",base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(native)?)));
+                        if b.item["summary"].as_array().is_some_and(|a|!a.is_empty()) {
+                            events.push(json!({"type":"response.reasoning_summary_text.done","output_index":oi,"item_id":id,"summary_index":0,"text":b.item["summary"][0]["text"]}));
+                            events.push(json!({"type":"response.reasoning_summary_part.done","output_index":oi,"item_id":id,"summary_index":0,"part":b.item["summary"][0]}));
+                        }
                     } else {
                         let args: Value = serde_json::from_str(if b.arguments.is_empty() {"{}"} else {&b.arguments})?;
                         ensure!(args.is_object(), "Tool arguments are not an object");
@@ -204,7 +226,19 @@ impl Translator {
                             b.item["content"][0]["text"] = json!(all);
                             events.push(json!({"type":"response.output_text.delta","output_index":oi,"item_id":id,"content_index":0,"delta":text}));
                         },
-                        Some("input_json_delta") if b.item["type"] != "message" => {
+                        Some("thinking_delta") if b.native.as_ref().is_some_and(|n|n["type"]=="thinking") => {
+                            let text = delta["thinking"].as_str().ok_or_else(||anyhow::anyhow!("Invalid thinking delta"))?;
+                            let native = b.native.as_mut().unwrap();
+                            native["thinking"] = json!(format!("{}{text}",native["thinking"].as_str().unwrap_or("")));
+                            b.item["summary"][0]["text"] = native["thinking"].clone();
+                            events.push(json!({"type":"response.reasoning_summary_text.delta","output_index":oi,"item_id":id,"summary_index":0,"delta":text}));
+                        },
+                        Some("signature_delta") if b.native.as_ref().is_some_and(|n|n["type"]=="thinking") => {
+                            let signature = delta["signature"].as_str().ok_or_else(||anyhow::anyhow!("Invalid thinking signature"))?;
+                            let native = b.native.as_mut().unwrap();
+                            native["signature"] = json!(format!("{}{signature}",native["signature"].as_str().unwrap_or("")));
+                        },
+                        Some("input_json_delta") if matches!(b.item["type"].as_str(),Some("function_call"|"custom_tool_call")) => {
                             let text = delta["partial_json"].as_str().ok_or_else(|| anyhow::anyhow!("Missing JSON delta"))?;
                             b.arguments.push_str(text); ensure!(b.arguments.len() <= 20 * 1024 * 1024, "Tool input too large");
                             if b.item["type"] == "function_call" { events.push(json!({"type":"response.function_call_arguments.delta","output_index":oi,"item_id":id,"delta":text})); }
@@ -297,9 +331,28 @@ mod tests {
         assert_eq!(r["max_tokens"], 4096);
     }
     #[test] fn rejects_lossy_features() {
-        for extra in [json!({"previous_response_id":"r"}), json!({"tools":[{"type":"web_search"}]}), json!({"reasoning":{"effort":"high"}}), json!({"input":[{"role":"user","content":[{"type":"input_image","image_url":"secret"}]}]})] {
+        for extra in [json!({"previous_response_id":"r"}), json!({"tools":[{"type":"web_search"}]}), json!({"input":[{"type":"reasoning","summary":[]}]}), json!({"input":[{"role":"user","content":[{"type":"input_image","image_url":"secret"}]}]})] {
             let mut i = json!({"model":"m","input":"hi"}); i.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone()); assert!(request(&i).is_err());
         }
+    }
+    #[test] fn configured_effort_is_forwarded_without_enabling_unsigned_thinking() {
+        let r = request(&json!({"model":"custom","input":"hello","reasoning":{"effort":"max"}})).unwrap();
+        assert_eq!(r["output_config"]["effort"], "max");
+        assert!(r.get("thinking").is_none());
+    }
+    #[test] fn signed_thinking_stream_roundtrips_without_changing_the_signature() {
+        let mut state = Translator::new(&json!({"model":"custom"}));
+        for event in [
+            json!({"type":"message_start","message":{"usage":{}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Read the file first."}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque-provider-signature"}}),
+            json!({"type":"content_block_stop","index":0}),
+        ] { state.consume(event).unwrap(); }
+        let item = state.blocks.get(&0).unwrap().item.clone();
+        assert_eq!(item["summary"][0]["text"], "Read the file first.");
+        let replay = request(&json!({"model":"custom","input":[{"role":"user","content":"hello"},item,{"role":"assistant","content":"done"},{"role":"user","content":"continue"}]})).unwrap();
+        assert_eq!(replay["messages"][1]["content"][0], json!({"type":"thinking","thinking":"Read the file first.","signature":"opaque-provider-signature"}));
     }
     #[test] fn endpoint_security_and_paths() {
         assert_eq!(endpoint("https://example.com").unwrap(), "https://example.com/v1/messages");

@@ -10,6 +10,7 @@ import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
 import { SessionModelControl, type ComposerConfiguration } from "./SessionModelControl";
+import { HarnessModeControl } from "./HarnessModeControl";
 
 const NO_TEAM = "no-team";
 
@@ -117,6 +118,7 @@ export function NewSessionDialog({
           <SelectField aria-label={t("sessions.cliLabel")} value={providerId || undefined} onValueChange={id => { setProviderId(id); setInstanceId(""); setConfiguration({}); }} options={providerOptions} placeholder={t("sessions.cliPlaceholder")} />
         </Field>
         {defaultInstance && <Field label="Agent"><SelectField aria-label="Agent" value={defaultInstance.id} onValueChange={id => { setInstanceId(id); setConfiguration({}); }} options={eligibleInstances.map(instance => ({ value: instance.id, label: instance.displayName }))} /><SessionModelControl draft={{ instanceId: defaultInstance.id, configuration, onChange: patch => setConfiguration(current => ({ ...current, ...patch })) }} /></Field>}
+        {defaultInstance && <HarnessModeControl instanceId={defaultInstance.id} value={configuration.agentMode} onChange={agentMode => setConfiguration(current => ({ ...current, agentMode }))} />}
         <Field label={t("sessions.delegateTeamLabel")} hint={t("sessions.delegateTeamHint")}>
           <SelectField aria-label={t("sessions.delegateTeamLabel")} value={teamId} onValueChange={setTeamId} options={teamOptions} />
         </Field>

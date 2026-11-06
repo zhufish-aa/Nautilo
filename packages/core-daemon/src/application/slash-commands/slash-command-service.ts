@@ -344,7 +344,7 @@ export class SlashCommandService {
     return this.database.events.replay({ sessionId }).filter((event): event is Extract<RuntimeEvent, { type: "usage.updated" }> => event.type === "usage.updated").at(-1);
   }
 
-  private latestProviderCommands(sessionId: string, providerId: string): Array<{ name: string; description: string; inputHint?: string; providerCommand?: "compact" }> {
+  private latestProviderCommands(sessionId: string, providerId: string): Array<{ name: string; description: string; inputHint?: string; providerCommand?: string }> {
     return this.database.events.replay({ sessionId })
       .filter((event): event is Extract<RuntimeEvent, { type: "provider.commands_updated" }> => event.type === "provider.commands_updated" && event.payload.providerId === providerId)
       .at(-1)?.payload.commands ?? [];

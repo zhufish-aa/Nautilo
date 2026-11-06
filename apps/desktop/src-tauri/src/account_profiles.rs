@@ -387,8 +387,8 @@ if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttribut
 $old = Get-Acl -LiteralPath $env:NAUTILO_ACCOUNT_DIR
 if ($old.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $env:NAUTILO_OWNER_SID) { throw 'Foreign owner rejected' }
 $acl = New-Object System.Security.AccessControl.DirectorySecurity
-$acl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;' + $env:NAUTILO_OWNER_SID + ')')
-Set-Acl -LiteralPath $env:NAUTILO_ACCOUNT_DIR -AclObject $acl
+$acl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;' + $env:NAUTILO_OWNER_SID + ')', [System.Security.AccessControl.AccessControlSections]::Access)
+[System.IO.Directory]::SetAccessControl($env:NAUTILO_ACCOUNT_DIR, $acl)
 $item = Get-Item -LiteralPath $env:NAUTILO_ACCOUNT_DIR -Force
 if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse point or non-directory rejected' }
 $verified = Get-Acl -LiteralPath $env:NAUTILO_ACCOUNT_DIR

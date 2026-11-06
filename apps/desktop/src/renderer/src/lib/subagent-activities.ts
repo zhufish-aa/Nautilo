@@ -1,5 +1,6 @@
 import type { RuntimeEvent } from "@agenthub/event-protocol";
 import type { TimelinePayload } from "./types";
+import { mergeCodeExecution } from "./process-display";
 
 /**
  * Collects provider-native sub-agent activity into per-dispatch buckets.
@@ -58,15 +59,19 @@ export function collectSubagentActivities(events: RuntimeEvent[]): Map<string, T
         put(dispatchId, `think:${event.payload.messageId ?? "default"}`, { kind: "reasoning", text: event.payload.text, streaming: false, messageId: event.payload.messageId }, (current, next) =>
           current.kind === "reasoning" && next.kind === "reasoning" ? { ...next, text: next.text || current.text } : next);
         break;
+      case "tool.updated":
+        put(dispatchId, event.payload.callId ? `tool:${event.payload.callId}` : undefined, { kind:"tool_activity", toolName:event.payload.toolName, status:"running", input:event.payload.inputSummary, output:event.payload.outputSummary, codeExecution:event.payload.codeExecution }, (current, next) => current.kind === "tool_activity" && next.kind === "tool_activity" ? { ...current, input:next.input ?? current.input, output:current.status === "running" ? next.output ?? current.output : current.output, codeExecution:mergeCodeExecution(current.codeExecution, next.codeExecution) } : next);
+        break;
       case "tool.started":
         put(dispatchId, event.payload.callId ? `tool:${event.payload.callId}` : undefined, {
           kind: "tool_activity",
           toolName: event.payload.toolName,
           status: "running",
           input: event.payload.inputSummary,
+          codeExecution: event.payload.codeExecution,
           fileDiff: event.payload.fileDiff
         }, (current, next) => current.kind === "tool_activity" && next.kind === "tool_activity"
-          ? { ...next, status: current.status, input: next.input ?? current.input, fileDiff: next.fileDiff ?? current.fileDiff }
+          ? { ...next, status: current.status, input: next.input ?? current.input, fileDiff: next.fileDiff ?? current.fileDiff, codeExecution:mergeCodeExecution(current.codeExecution, next.codeExecution) }
           : next);
         break;
       case "tool.finished":
@@ -76,6 +81,7 @@ export function collectSubagentActivities(events: RuntimeEvent[]): Map<string, T
           status: event.payload.success ? "done" : "failed",
           input: event.payload.inputSummary,
           output: event.payload.outputSummary,
+          codeExecution: event.payload.codeExecution,
           fileDiff: event.payload.fileDiff
         }, (current, next) => current.kind === "tool_activity" && next.kind === "tool_activity"
           ? {
@@ -84,9 +90,13 @@ export function collectSubagentActivities(events: RuntimeEvent[]): Map<string, T
               status: next.status,
               input: next.input ?? current.input,
               output: next.output ?? current.output,
+              codeExecution: mergeCodeExecution(current.codeExecution, next.codeExecution),
               fileDiff: next.fileDiff ?? current.fileDiff
             }
           : next);
+        break;
+      case "command.updated":
+        put(dispatchId, event.payload.callId ? `cmd:${event.payload.callId}` : `cmd:${event.payload.command}`, { kind:"command", command:event.payload.command, status:"running", output:event.payload.outputSummary ?? "" }, (current, next) => current.kind === "command" && next.kind === "command" ? current.status === "running" ? { ...current, output:next.output } : current : next);
         break;
       case "command.started":
         put(dispatchId, event.payload.callId ? `cmd:${event.payload.callId}` : `cmd:${event.payload.command}`, {

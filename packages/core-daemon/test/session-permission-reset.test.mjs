@@ -58,3 +58,45 @@ test('new sessions accept explicit inheritance and store no nullable domain perm
     assert.equal(Object.hasOwn(daemon.database.sessions.get(session.id), 'permissionMode'), false);
   } finally { await cleanup(); }
 });
+
+
+test('each resumed Codex turn sends the selected permission policy, including reset', async () => {
+  const { buildCodexTurnStartParams } = await import('../dist/adapters/codex/app-server-run.js');
+  const request = { instance: { providerId: 'codex', baseArgs: [], permissionMode: 'ask', providerOptions: { permissionMode: 'ask' } }, cwd: process.cwd(), prompt: 'test' };
+  for (const [permissionMode, approvalPolicy, type] of [['ask', 'on-request', 'workspaceWrite'], ['full-access', 'never', 'dangerFullAccess'], ['auto', 'on-failure', 'workspaceWrite']]) {
+    const params = buildCodexTurnStartParams({ ...request, permissionMode }, 'existing-thread');
+    assert.equal(params.threadId, 'existing-thread');
+    assert.equal(params.approvalPolicy, approvalPolicy);
+    assert.deepEqual(params.sandboxPolicy, { type });
+  }
+  assert.equal(buildCodexTurnStartParams(request, 'existing-thread').approvalPolicy, 'on-request');
+});
+
+
+test('Kimi applies permission mode on each connection and propagates rejected changes', async () => {
+  const { applyConfig } = await import('../dist/adapters/kimi/acp-run.js');
+  const calls = [];
+  const rpc = { request: async (method, input) => { calls.push({ method, input }); return {}; } };
+  const response = { configOptions: [{ id: 'model', name: 'model' }, { id: 'mode', name: 'mode' }] };
+  const instance = { providerId: 'kimi-code', providerOptions: { permissionMode: 'yolo' } };
+  await applyConfig(rpc, 'resumed', response, { instance });
+  assert.deepEqual(calls[0], { method: 'session/set_config_option', input: { sessionId: 'resumed', configId: 'mode', value: 'yolo' } });
+  await applyConfig(rpc, 'resumed', response, { instance, permissionMode: 'default' });
+  assert.equal(calls[1].input.value, 'default');
+  const failed = { request: async () => { throw new Error('mode rejected'); } };
+  await assert.rejects(applyConfig(failed, 'resumed', response, { instance }), /mode rejected/);
+  await assert.rejects(applyConfig(rpc, 'resumed', {}, { instance }), /does not advertise/);
+  await applyConfig(rpc, 'old-cli', { modes: { availableModes: [{ id: 'yolo' }] } }, { instance });
+  assert.equal(calls.at(-1).method, 'session/set_mode');
+});
+
+test('Kimi does not silently ignore rejected model or reasoning selection', async () => {
+  const { applyConfig } = await import('../dist/adapters/kimi/acp-run.js');
+  const response = { configOptions: [{ id: 'model', name: 'model' }, { id: 'thinking', name: 'thinking' }] };
+  for (const selection of [{ model: 'chosen-model' }, { reasoningEffort: 'high' }]) {
+    let attempted;
+    const rpc = { request: async (_method, params) => { attempted = params; throw new Error('selection rejected'); } };
+    await assert.rejects(applyConfig(rpc, 'session', response, { instance: { providerId: 'kimi-code' }, ...selection }), /selection rejected/);
+    assert.equal(attempted.value, selection.model ?? selection.reasoningEffort);
+  }
+});

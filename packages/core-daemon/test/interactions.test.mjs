@@ -177,3 +177,21 @@ test("claude permission prompt tool flag requires bridge and interaction handler
   assert.deepEqual(claudePermissionPromptToolArgs(request, undefined), []);
   assert.deepEqual(claudePermissionPromptToolArgs({}, withBridge), []);
 });
+
+
+test("native timeout, out-of-order cancellation and closed-run requests settle once", async () => {
+  const { database, events, interactions } = setup();
+  const session = seedSession(database);
+  try {
+    const timeout = interactions.request(session, "timed", "pi", { kind: "question", nativeRequestId: "timed-dialog", timeoutMs: 15, title: "Input", questions: [] });
+    assert.deepEqual(await timeout, { outcome: "cancelled" });
+    interactions.cancelNative("before", "select");
+    assert.deepEqual(await interactions.request(session, "before", "omp", { kind: "question", nativeRequestId: "select", title: "Select", questions: [] }), { outcome: "cancelled" });
+    interactions.cancelForRun("closed");
+    assert.deepEqual(await interactions.request(session, "closed", "pi", { kind: "question", title: "Too late", questions: [] }), { outcome: "cancelled" });
+    assert.equal(interactions.list({ status: "pending" }).length, 0);
+    const journal = events.replay({ sessionId: session.id });
+    assert.equal(journal.filter(event => event.type === "interaction.requested").length, 1);
+    assert.equal(journal.filter(event => event.type === "interaction.resolved").length, 1);
+  } finally { database.close(); }
+});

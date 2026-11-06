@@ -55,6 +55,7 @@ impl EventService {
         }
         event.insert("sessionId".to_string(), json!(session_id));
         event.insert("type".to_string(), json!(event_type));
+        if context["background"] == true { event.insert("background".into(), json!(true)); }
         event.insert("timestamp".to_string(), json!(now_iso()));
         event.insert("payload".to_string(), self.redaction.value(&payload));
         let mut event = Value::Object(event);
@@ -157,7 +158,8 @@ impl EventService {
             &json!({
                 "runId": run.get("id").cloned().unwrap_or(Value::Null),
                 "projectRunId": run.get("projectRunId").cloned().unwrap_or(Value::Null),
-                "taskId": run.get("taskId").cloned().unwrap_or(Value::Null)
+                "taskId": run.get("taskId").cloned().unwrap_or(Value::Null),
+                "background": run["backgroundEvent"]
             }),
             event_type,
             payload,

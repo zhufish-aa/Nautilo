@@ -11,6 +11,34 @@ use crate::ipc_gateway::Router;
 
 pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
     router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION })) });
+    reg(router,daemon,"terminal.open",|d,input| {
+        let session=input["sessionId"].as_str().map(|id|Repositories::new(&d.db.lock().unwrap().raw).sessions().get(id)).transpose()?.flatten();
+        let project_id=input["projectId"].as_str().or_else(||session.as_ref().and_then(|session|session["projectId"].as_str())).unwrap_or("");
+        let project=Repositories::new(&d.db.lock().unwrap().raw).projects().get(project_id)?.ok_or_else(||not_found("project",project_id))?;
+        let key=format!("shell:{}",input["sessionId"].as_str().unwrap_or(project_id));
+        let command=if cfg!(windows){"powershell.exe".to_string()}else{std::env::var("SHELL").unwrap_or_else(|_|"/bin/sh".into())};
+        let cwd=session.as_ref().and_then(|session|session["nativeWorkingDirectory"].as_str()).unwrap_or_else(||project["rootPath"].as_str().unwrap_or(""));
+        d.terminals.open(key,None,crate::runtime::terminal_service::TerminalPlan{command,args:if cfg!(windows){vec!["-NoLogo".into()]}else{vec![]},env:None,cwd:cwd.into(),resources:vec![]},input["cols"].as_u64().unwrap_or(100).min(1000) as u16,input["rows"].as_u64().unwrap_or(24).min(500) as u16)
+    });
+    reg(router,daemon,"terminal.read",|d,input|d.terminals.read(input["terminalId"].as_str().unwrap_or(""),input["cursor"].as_u64().unwrap_or(0)));
+    reg(router,daemon,"terminal.write",|d,input|d.terminals.write(input["terminalId"].as_str().unwrap_or(""),input["data"].as_str().unwrap_or("")));
+    reg(router,daemon,"terminal.resize",|d,input|d.terminals.resize(input["terminalId"].as_str().unwrap_or(""),input["cols"].as_u64().unwrap_or(80).min(1000) as u16,input["rows"].as_u64().unwrap_or(24).min(500) as u16));
+    reg_str(router,daemon,"terminal.close","terminalId",|d,id|d.terminals.close(id));
+    reg_str(router,daemon,"terminal.status","sessionId",|d,id|Ok(d.terminals.status(id)));
+    {
+        let daemon=daemon.clone();
+        router.register("terminal.native",move |input|{let daemon=daemon.clone();async move {
+            let session_id=input["sessionId"].as_str().unwrap_or("");
+            let _ownership=daemon.terminals.lock_session(session_id).await;
+            let key=format!("harness:{session_id}");if let Some(existing)=daemon.terminals.existing(&key){return Ok(existing);}
+            if daemon.runs.session_busy(session_id){anyhow::bail!("请先等待或停止当前一轮，再交接到原生终端。");}
+            let(session,request)=daemon.runs.native_request(session_id)?;
+            let adapter=daemon.adapters.get(request.instance["providerId"].as_str().unwrap_or(""))?;
+            adapter.release_session(&request).await?;
+            let plan=adapter.native_terminal(request,session["providerSessionId"].as_str().map(str::to_string)).await?;
+            daemon.terminals.open(key,Some(session_id.into()),plan,input["cols"].as_u64().unwrap_or(100).min(1000) as u16,input["rows"].as_u64().unwrap_or(24).min(500) as u16).map_err(anyhow::Error::new)
+        }});
+    }
 
     // ---- projects
     reg(router, daemon, "project.list", |d, _| d.projects.list().map(Value::Array));
@@ -28,6 +56,21 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         Repositories::new(&d.db.lock().unwrap().raw).agents().list_default().map(Value::Array)
     });
     reg(router, daemon, "agent.upsert", |d, input| d.agents.upsert(&input));
+    reg(router,daemon,"agent.runtimeCapabilities",|d,input|{
+        let db=d.db.lock().unwrap();let repos=Repositories::new(&db.raw);
+        let agent=if let Some(session_id)=input["sessionId"].as_str(){let session=repos.sessions().get(session_id)?.ok_or_else(||not_found("session",session_id))?;let id=crate::application::session_service::effective_agent_id(&db.raw,&session)?;
+            let agent=repos.agents().get(&id)?.ok_or_else(||not_found("agent",&id))?;crate::application::connection_service::resolve_session_connection(&db.raw,&session,&agent)?.0
+        }else{let id=input["agentInstanceId"].as_str().unwrap_or("");repos.agents().get(id)?.ok_or_else(||not_found("agent",id))?};
+        let mut profile=d.adapters.get(agent["providerId"].as_str().unwrap_or(""))?.native_capabilities(&agent);
+        if let Some(session)=input["sessionId"].as_str(){
+            for (event_type,key) in [("provider.runtime_capabilities","negotiated"),("provider.runtime_ready","lastRuntime")] {
+                if let Some(event)=repos.events().latest_type(session,event_type)? {
+                    if event["payload"]["providerId"]==agent["providerId"] {profile[key]=event["payload"].clone();profile[key]["observedAt"]=event["timestamp"].clone();}
+                }
+            }
+        }
+        Ok(profile)
+    });
 
     // ---- versioned, harness-independent runtime connections
     reg(router, daemon, "connection.list", |d, _| d.connections.list().map(Value::Array));
@@ -67,11 +110,19 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         .map(Value::Array)
     });
     reg(router, daemon, "approval.resolve", |d, input| {
-        d.approvals.resolve(
+        let records = d.approvals.resolve_many(
             input.get("approvalId").and_then(Value::as_str).unwrap_or(""),
             input.get("decision").and_then(Value::as_str).unwrap_or(""),
             input.get("scope").unwrap_or(&Value::Null),
-        )
+        )?;
+        for record in &records {
+            let session = record["sessionId"].as_str().map(|id| Repositories::new(&d.db.lock().unwrap().raw).sessions().get(id)).transpose()?.flatten();
+            if let Some(session) = session {
+                d.events.append_for_session(&session, &json!({"projectRunId":record["projectRunId"],"taskId":record["taskId"]}), "approval.resolved",
+                    json!({"approvalId":record["id"],"decision":record["status"],"scope":record["scope"]}))?;
+            }
+        }
+        Ok(records.into_iter().next().unwrap())
     });
 
     // ---- credentials
@@ -123,9 +174,29 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         )
     });
     reg_str(router, daemon, "session.get", "sessionId", |d, id| d.sessions.get(id));
+    {
+        let daemon = daemon.clone();
+        router.register("session.generateTitle", move |input| {
+            let daemon = daemon.clone();
+            async move { daemon.runs.generate_session_title(input["sessionId"].as_str().unwrap_or("")).await.map_err(anyhow::Error::new) }
+        });
+    }
     reg(router, daemon, "session.create", |d, input| d.sessions.create(&input));
     reg(router, daemon, "session.upsert", |d, input| d.sessions.upsert(&input));
-    reg_str(router, daemon, "session.delete", "sessionId", |d, id| d.sessions.delete(id));
+    {
+        let daemon=daemon.clone();
+        router.register("session.delete",move |input| {let daemon=daemon.clone();async move {
+            let snapshots=Repositories::new(&daemon.db.lock().unwrap().raw).sessions().list_all()?;
+            let result=daemon.sessions.delete(input["sessionId"].as_str().unwrap_or(""))?;
+            for id in result["sessionIds"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if let Some(session)=snapshots.iter().find(|session|session["id"]==id) {
+                    if let Err(error)=daemon.runs.release_native_session(session).await {eprintln!("Native session release failed: {error}");}
+                    if let Some(terminal)=daemon.terminals.status(id)["terminalId"].as_str() {let _=daemon.terminals.close(terminal);}
+                }
+            }
+            Ok(result)
+        }});
+    }
     reg_str(router, daemon, "session.followUp.list", "sessionId", |d, id| d.sessions.follow_up_list(id));
 
     // ---- runs / tasks / artifacts / verifications (read side)
@@ -290,6 +361,14 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         });
     }
 
+    {
+        let daemon = daemon.clone();
+        router.register("provider.modes", move |input| {
+            let daemon = daemon.clone();
+            async move { daemon.agents.list_modes(input["agentInstanceId"].as_str().unwrap_or(""),input["cwd"].as_str()).await.map_err(anyhow::Error::new) }
+        });
+    }
+
     // ---- run lifecycle / messaging (async)
     {
         let daemon = daemon.clone();
@@ -306,6 +385,13 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         });
     }
     reg(router, daemon, "session.followUp.cancel", |d, input| d.sessions.follow_up_cancel(&input));
+    {
+        let daemon = daemon.clone();
+        router.register("session.followUp.steer", move |input| {
+            let daemon = daemon.clone();
+            async move { daemon.sessions.follow_up_steer(&input).await.map_err(anyhow::Error::new) }
+        });
+    }
     {
         let daemon = daemon.clone();
         router.register("run.cancel", move |input| {

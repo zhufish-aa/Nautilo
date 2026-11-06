@@ -27,12 +27,28 @@ export function subagentMeta(toolName: string, input: unknown): SubagentDispatch
   const record = input as Record<string, unknown>;
   // A dispatch always carries some task text or an agent type; a bare name hit
   // without either is more likely a same-named unrelated tool.
-  const agentType = textField(record, ["subagent_type", "subagentType", "agent_type", "agentType", "agent"]);
-  const description = textField(record, ["description", "task", "title"]);
+  const batch = Array.isArray(record.tasks) ? record.tasks : Array.isArray(record.chain) ? record.chain : [];
+  const agentType = textField(record, ["subagent_type", "subagentType", "agent_type", "agentType", "agent"])
+    ?? (batch.map(item=>item?.agent).filter(value=>typeof value === 'string' && value).join(' / ') || undefined);
+  const description = textField(record, ["description", "task", "title"])
+    ?? (batch.map(item=>item?.task).filter(value=>typeof value === 'string' && value).join('; ') || undefined);
   const prompt = textField(record, ["prompt", "instruction", "instructions", "message", "goal"]);
   if (!agentType && !description && !prompt) return undefined;
   const task = description ?? (prompt && prompt.length > TASK_TRUNCATE ? `${prompt.slice(0, TASK_TRUNCATE)}…` : prompt);
   // Kimi's Agent tool uses run_in_background, opencode's task uses background.
   const background = record.run_in_background === true || record.runInBackground === true || record.background === true;
-  return { agentType, task, ...(background ? { background: true } : {}) };
+  const meta: SubagentDispatch = { agentType, task, ...(background ? { background: true } : {}) };
+  if (normalized === "spawnagent" || Array.isArray(record.receiverThreadIds)) {
+    const model = textField(record, ["model"]);
+    if (model) meta.model = model;
+    const ids = Array.isArray(record.receiverThreadIds) ? record.receiverThreadIds.filter((id): id is string => typeof id === "string") : [];
+    if (ids.length) {
+      const states = record.agentsStates as Record<string, { status?: string }> | undefined;
+      const statuses = ids.map((id) => states?.[id]?.status ?? "pendingInit");
+      meta.nativeAgentIds = ids;
+      meta.status = statuses.some((status) => ["errored", "failed", "notFound"].includes(status)) ? "failed"
+        : statuses.every((status) => ["completed", "shutdown"].includes(status)) ? "done" : "running";
+    }
+  }
+  return meta;
 }

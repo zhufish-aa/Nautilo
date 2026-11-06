@@ -22,6 +22,19 @@ test('pool uses unlimited default and honors only explicit positive integer limi
   for (const value of [undefined, '3', NaN, Infinity, 0, -1, 2.5]) assert.equal(codexPoolSize(value), Infinity);
   for (const value of [1, 2, 3, 4, 5, 12]) assert.equal(codexPoolSize(value), value);
 });
+
+test('a failed Codex terminal notification reports the provider error and a retry notice can still recover', async t => {
+  const f = await setup(t);
+  const failed = await consume(f.run('failed', 'failed-turn'));
+  assert.ok(failed.some(event => event.kind === 'error' && /Selected API rejected/.test(event.error.message)));
+  assert.ok(failed.some(event => event.kind === 'status' && event.phase === 'turn_failed'));
+  assert.equal(failed.at(-1).exitCode, 1);
+  assert.ok(!failed.some(event => event.kind === 'status' && event.phase === 'turn_completed'));
+  const recovered = await consume(f.run('retry', 'retry-turn'));
+  assert.ok(!recovered.some(event => event.kind === 'error'));
+  assert.ok(recovered.some(event => event.kind === 'message' && event.text.includes('done:retry-turn')));
+  assert.equal(recovered.at(-1).exitCode, 0);
+});
 test('same instance/config different sessions overlap, third queues and idle LRU closes before replacement', async (t) => {
   const f = await setup(t);
   const a = f.run('a', 'slow-a'), b = f.run('b', 'slow-b'), c = f.run('c', 'fast-c');
@@ -33,7 +46,7 @@ test('same instance/config different sessions overlap, third queues and idle LRU
   const results = await Promise.all(all);
   log = await f.log();
   const third = log.findIndex((x) => x.spawned && x.pid === c.process.pid);
-  assert.ok(log.slice(0, third).some((x) => x.stopped));
+  assert.ok([a.process.pid, b.process.pid].some(pid => !log[third].livePids.includes(pid)), 'an idle process exits before its replacement starts');
   assert.equal(new Set([a.process.pid, b.process.pid, c.process.pid]).size, 3);
   for (const events of results) assert.equal(events.filter((e) => e.kind === 'error').length, 0);
 });
@@ -47,8 +60,34 @@ test('same session serializes and resume reuses initialized process and provider
   const log = await f.log();
   assert.equal(a.process.pid, b.process.pid);
   assert.equal(log.filter((x) => x.method === 'initialize').length, 1);
-  assert.equal(log.find((x) => x.method === 'thread/resume').params.threadId, threadId);
+  assert.equal(log.filter((x) => x.method === 'thread/start').length, 1);
+  assert.equal(log.filter((x) => x.method === 'thread/resume').length, 0, 'loaded threads start their next turn directly');
+  assert.equal(log.filter((x) => x.method === 'turn/start')[1].params.threadId, threadId);
   assert.ok(log.findIndex((x) => x.done === 'slow-a') < log.findIndex((x) => x.method === 'turn/start' && x.params.input[0].text === 'fast-b'));
+});
+test('warm turns apply changed permissions and effort; replacement process resumes native identity without replaying history', async (t) => {
+  const f = await setup(t);
+  const a = f.run('a', 'fast-a'); await consume(a);
+  const threadId = `thread-${a.process.pid}`;
+  const b = f.run('a', 'fast-b', { providerSessionId: threadId, permissionMode: 'full-access', reasoningEffort: 'max' }, true);
+  await consume(b);
+  let log = await f.log();
+  const turn = log.filter(x => x.method === 'turn/start')[1].params;
+  assert.equal(log.filter(x => x.method === 'thread/resume').length, 0);
+  assert.equal(turn.threadId, threadId);
+  assert.equal(turn.approvalPolicy, 'never');
+  assert.deepEqual(turn.sandboxPolicy, { type: 'dangerFullAccess' });
+  assert.equal(turn.effort, 'max');
+  await closeCodexAppServerPool(f.base.instance.id);
+  const c = f.run('a', 'fast-c', { providerSessionId: threadId, permissionMode: 'ask' }, true);
+  await consume(c);
+  log = await f.log();
+  assert.notEqual(a.process.pid, c.process.pid);
+  const resumed = log.filter(x => x.method === 'thread/resume');
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0].params.threadId, threadId);
+  assert.equal(resumed[0].params.excludeTurns, true);
+  assert.equal(log.filter(x => x.method === 'turn/start')[2].params.approvalPolicy, 'on-request');
 });
 test('queued cancel and absolute timeout never execute or spawn; head removal admits follower', async (t) => {
   const f = await setup(t, 1);
@@ -198,8 +237,7 @@ test('configured capacity four admits four independent sessions but never a fift
   await until(async () => (await f.log()).filter((x) => x.method === 'turn/start').length === 4);
   assert.equal((await f.log()).filter((x) => x.spawned).length, 4);
   await Promise.all(results);
-  let live = 0, peak = 0;
-  for (const row of await f.log()) { if (row.spawned) live++; if (row.stopped) live--; peak = Math.max(peak, live); }
+  const peak = Math.max(...(await f.log()).filter(row => row.spawned).map(row => row.livePids.length));
   assert.equal(peak, 4);
 });
 

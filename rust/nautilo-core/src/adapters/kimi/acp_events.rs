@@ -286,13 +286,15 @@ fn parse_tool_call(update: &Value, state: &mut KimiAcpParseState) -> Vec<Adapter
         let gained_agent_prompt = agent_prompt(previous.as_ref().and_then(|p| p.input.as_ref()))
             != agent_prompt(next.input.as_ref())
             && agent_prompt(next.input.as_ref()).is_some();
+        let changed_output = previous.as_ref().and_then(|p|p.output.as_ref()) != next.output.as_ref();
         let duplicate = previous.as_ref().is_some_and(|p| p.phase == "completed")
             || (!completed
                 && previous.as_ref().is_some_and(|p| p.phase == "started")
                 && previous.as_ref().and_then(|p| p.input_identity.clone()) == next.input_identity
                 && !gained_input
-                && !gained_agent_prompt);
-        let phase = next.phase.clone();
+                && !gained_agent_prompt
+                && !changed_output);
+        let phase = if !completed && previous.is_some() { "updated".to_string() } else { next.phase.clone() };
         let event_input = next.input.clone();
         let event_output = next.output.clone();
         state.tool_calls.insert(call_id.clone(), next);

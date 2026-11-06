@@ -43,6 +43,7 @@ pub struct Daemon {
     pub sessions: SessionService,
     pub adapters: AdapterRegistry,
     pub runs: std::sync::Arc<RunService>,
+    pub terminals: Arc<crate::runtime::terminal_service::TerminalService>,
     pub agents: AgentService,
     pub connections: crate::application::ConnectionService,
     pub interactions: std::sync::Arc<InteractionService>,
@@ -78,6 +79,8 @@ impl Daemon {
         );
         let interactions = std::sync::Arc::new(InteractionService::new(db.clone(), events.clone()));
         runs.set_interaction_service(interactions.clone());
+        let terminals=Arc::new(crate::runtime::terminal_service::TerminalService::default());
+        runs.set_terminal_service(terminals.clone());
         let sessions = SessionService::new(db.clone());
         sessions.set_run_pipeline(runs.clone(), events.clone());
         let agents = AgentService::new(db.clone(), adapters.clone(), credentials.clone());
@@ -91,6 +94,7 @@ impl Daemon {
         let diagnostics = DiagnosticsService::new(db.clone(), audit.clone(), std::sync::Arc::new(MetricsService::new(db.clone())), redaction.clone(), &data_dir);
         let daemon = Arc::new(Self {
             data_dir: data_dir.clone(),
+            terminals,
             projects: ProjectService::new(db.clone()),
             teams: TeamService::new(db.clone()),
             capabilities: CapabilityService::new(db.clone()),
@@ -156,6 +160,7 @@ impl Daemon {
         // ballooned the database. Only failures and mutations keep a trail.
         const READ_ONLY_IPC: &[&str] = &[
             "health.get",
+            "terminal.read", "terminal.list", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities",
             "project.list",
             "agent.list",
             "connection.list", "connection.get", "connection.models",

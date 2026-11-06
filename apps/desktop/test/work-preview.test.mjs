@@ -250,7 +250,8 @@ test("unified workspace click wiring reaches the preview pane and office rendere
   assert.match(workPage, /requestedWorkspaceFile\(preview, session\?\.id\)/);
   assert.match(workspacePreview, /requestedPath=\{path\}/);
 
-  assert.match(sessionWorkbench, /onOpenLocalFile=\{onOpenLocalFile\}/);
+  assert.match(sessionWorkbench, /timelineActions = \{[^}]*onOpenLocalFile \}/);
+  assert.match(sessionWorkbench, /ConversationTurnView[^>]*\{\.\.\.timelineActions\}/);
   assert.match(timeline, /<MarkdownContent[\s\S]*onOpenLocalFile=\{onOpenLocalFile\}/);
   assert.match(timeline, /openTimelineFile\(attachment\.path, t, onOpenLocalFile/);
   assert.match(timeline, /openTimelineFile\(path, t, onOpenLocalFile/);

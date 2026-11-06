@@ -1,6 +1,6 @@
 import { assertCodexAppServerRunning, trackLegacyCodexProcess, codexAppServerPool, codexPoolSize, type CodexAppServerOwner, type CodexPoolLease, type CodexPoolSlot } from "./app-server-pool.js";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AgentInstance } from "@agenthub/domain";
@@ -8,11 +8,12 @@ import { ProcessRuntime, type ProcessEvent } from "../../process-runtime.js";
 import { JsonRpcProcessClient } from "../json-rpc-process.js";
 import type { AdapterEvent, AdapterMcpServer, AdapterResumeRequest, AdapterRun, AdapterStartRequest } from "../types.js";
 import type { RuntimeToolSpec } from "../runtime-tools.js";
-import { isCurrentCodexTurnDiff, parseCodexAppServerNotification, withSubagentDispatch } from "./app-server-events.js";
+import { isCurrentCodexTurnDiff, nativeChildHistory, parseCodexAppServerNotification, updateNativeChild, withSubagentDispatch } from "./app-server-events.js";
 import { codexPermissionConfig } from "./commands.js";
 import { resolveCodexInvocation } from "./executable.js";
 import { buildCodexMcpConfigArgs } from "./mcp-config.js";
 import { buildCodexProviderConfigArgs } from "./provider-config.js";
+import { handleCodexElicitation } from "./elicitation.js";
 import {
   CODEX_IMAGE_GENERATION_TOOL,
   CODEX_IMAGE_GENERATION_TOOL_NAME,
@@ -43,7 +44,7 @@ function codexWebSearchEnabled(instance: AgentInstance): boolean {
 
 export const CODEX_APP_SERVER_INITIALIZE_PARAMS = {
   clientInfo: { name: "Nautilo", version: "0.1.0" },
-  capabilities: { experimentalApi: true }
+  capabilities: { experimentalApi: true, mcpServerOpenaiFormElicitation: true }
 } as const;
 
 function transportEvent(event: ProcessEvent): AdapterEvent | undefined {
@@ -84,6 +85,23 @@ function threadOptions(request: AdapterStartRequest | AdapterResumeRequest, incl
     dynamicTools: includeDynamicTools
       ? buildCodexDynamicTools(request.runtimeTools, isCodexImageGenerationConfigured(request))
       : undefined
+  };
+}
+
+export function buildCodexTurnStartParams(request: AdapterStartRequest | AdapterResumeRequest, threadId: string): RecordValue {
+  const permission = codexPermissionConfig(request.instance, request) ?? { approvalPolicy: "never" as const, sandbox: "workspace-write" as const };
+  return {
+    threadId,
+    input: buildCodexTurnInput(request.prompt, request.localImagePaths),
+    cwd: request.cwd,
+    model: request.model || undefined,
+    serviceTier: request.serviceTier || undefined,
+    effort: request.reasoningEffort || undefined,
+    outputSchema: request.outputSchemaPath || request.instance.providerOptions?.outputSchemaPath
+      ? JSON.parse(readFileSync(resolve(request.cwd, String(request.outputSchemaPath ?? request.instance.providerOptions?.outputSchemaPath)), "utf8")) : undefined,
+    summary: "auto",
+    approvalPolicy: permission.approvalPolicy,
+    sandboxPolicy: { type: permission.sandbox === "danger-full-access" ? "dangerFullAccess" : permission.sandbox === "read-only" ? "readOnly" : "workspaceWrite" }
   };
 }
 
@@ -306,7 +324,7 @@ export function buildCodexCustomModelCatalog(instance: AgentInstance, requestedM
   return {
     models: [...configured.entries()].map(([id, model]) => {
       const anthropicBridge = instance.providerOptions?.anthropicCompat === true;
-      const efforts = anthropicBridge ? ["none"] : normalizeReasoningEfforts(model.reasoningEfforts);
+      const efforts = normalizeReasoningEfforts(model.reasoningEfforts);
       const contextWindow = Number.isFinite(model.contextWindow) && (model.contextWindow ?? 0) > 0
         ? Math.floor(model.contextWindow!)
         : CODEX_MODEL_CATALOG_CONTEXT_WINDOW;
@@ -410,16 +428,8 @@ export function buildCodexAppServerArgs(
     "--stdio",
     instance.providerOptions?.anthropicCompat === true ? "--disable" : "--enable",
     "image_generation",
-    // Headless runs never touch Codex desktop apps (browser/calendar/slack/…
-    // plugins served by the built-in `codex_apps` MCP). Worse: when that MCP
-    // fails to start it blocks every turn until a ~30s timeout fires, adding
-    // 40s+ to each message. Nautilo pays per-turn process startup, so disable
-    // the apps feature outright.
-    "--disable",
-    "apps",
-    ...(codexWebSearchEnabled(instance)
-      ? ["--config", `web_search=${JSON.stringify(CODEX_WEB_SEARCH_MODE)}`]
-      : []),
+    ...(instance.providerOptions?.imageGenerationDelegate === true ? ["--disable", "shell_tool"] : []),
+    "--config", `web_search=${JSON.stringify(codexWebSearchEnabled(instance) ? CODEX_WEB_SEARCH_MODE : "disabled")}`,
     ...(modelCatalogPath ? ["--config", `model_catalog_json=${JSON.stringify(modelCatalogPath)}`] : []),
     // Codex 0.146 only accepts Responses in app-server. Chat mode is handled
     // by chat-completions-run.ts before this path is reached; keep discovery
@@ -543,6 +553,7 @@ export function startCodexAppServer(
   let finished = false;
   /** Child agent thread id → the collab tool call item that spawned it. */
   const childThreads = new Map<string, string>();
+  const nativeDispatches = new Map<string, Record<string, unknown>>();
 
   async function* events(): AsyncGenerator<AdapterEvent> {
     try {
@@ -556,13 +567,20 @@ export function startCodexAppServer(
         rpc.notify("initialized", {});
         if (lease) lease.slot.initialized = true;
       }
-      const threadResponse = record(await rpc.request(resume ? "thread/resume" : "thread/start", resume
-        ? { threadId: (request as AdapterResumeRequest).providerSessionId, ...threadOptions(request, true) }
-        : threadOptions(request, true)));
+      const resumeId = resume ? (request as AdapterResumeRequest).providerSessionId : undefined;
+      // A loaded thread accepts the next turn directly. Rejoining it on every
+      // message needlessly reads and serializes its history. A replacement
+      // process has no loadedThreadId and still performs a native resume.
+      const threadResponse = resumeId && lease?.slot.loadedThreadId === resumeId
+        ? { thread: { id: resumeId } }
+        : record(await rpc.request(resume ? "thread/resume" : "thread/start", resume
+          ? { threadId: resumeId, excludeTurns: true, ...threadOptions(request, true) }
+          : threadOptions(request, true)));
       if (cancelled || finished) { if (timedOut) yield { kind: "timeout", reason: timedOut }; return; }
       const thread = record(threadResponse.thread);
       threadId = String(thread.id ?? (resume ? (request as AdapterResumeRequest).providerSessionId : ""));
       if (!threadId) throw new Error("Codex app-server did not return a thread id");
+      if (lease) lease.slot.loadedThreadId = threadId;
       yield { kind: "session", providerSessionId: threadId };
       if (cancelled || finished) { if (timedOut) yield { kind: "timeout", reason: timedOut }; return; }
       const compact = request.providerCommand === "compact";
@@ -571,15 +589,7 @@ export function startCodexAppServer(
         // Manual compaction is a dedicated app-server RPC, not a chat turn.
         await rpc.request("thread/compact/start", { threadId });
       } else {
-        const turnResponse = record(await rpc.request("turn/start", {
-          threadId,
-          input: buildCodexTurnInput(request.prompt, request.localImagePaths),
-          cwd: request.cwd,
-          model: request.model || undefined,
-          serviceTier: request.serviceTier || undefined,
-          effort: request.reasoningEffort || undefined,
-          summary: "auto"
-        }));
+        const turnResponse = record(await rpc.request("turn/start", buildCodexTurnStartParams(request, threadId)));
         turnId = String(record(turnResponse.turn).id ?? "");
       }
 
@@ -590,7 +600,19 @@ export function startCodexAppServer(
           const params = record(event.params);
           const scopedThreadId = text(params.threadId);
           if (scopedThreadId && scopedThreadId !== threadId && !childThreads.has(scopedThreadId)) continue;
-          if (scopedThreadId === threadId && text(params.turnId) && params.turnId !== turnId) continue;
+          if (scopedThreadId && scopedThreadId !== threadId && (event.method === "turn/completed" || event.method === "error" && params.willRetry !== true)) {
+            const dispatch = nativeDispatches.get(childThreads.get(scopedThreadId) ?? "");
+            if (dispatch) {
+              const turn = record(params.turn);
+              const result = (Array.isArray(turn.items) ? [...turn.items].reverse() : []).map(record).find((item) => item.type === "agentMessage");
+              yield* updateNativeChild(dispatch, scopedThreadId, event.method === "error" || ["failed", "interrupted"].includes(String(turn.status)) ? "errored" : "completed", text(result?.text));
+            }
+            continue;
+          }
+          if (compact && scopedThreadId === threadId && !turnId && (event.method === "turn/started" || record(params.item).type === "contextCompaction")) {
+            turnId = text(record(params.turn).id) ?? text(params.turnId);
+          }
+          if (scopedThreadId === threadId && text(params.turnId) && params.turnId !== turnId && !(compact && !turnId && event.method === "error")) continue;
           if (event.method === "turn/diff/updated" && !isCurrentCodexTurnDiff(params, threadId, turnId)) continue;
           // A child/stale turn must never terminate this main run.
           if (event.method === "turn/completed" && (
@@ -599,23 +621,44 @@ export function startCodexAppServer(
             (text(record(params.turn).id) && record(params.turn).id !== turnId)
           )) continue;
           const item = record(params.item);
+          const joinChildren: Array<{ childId: string; dispatchId: string }> = [];
           if ((event.method === "item/started" || event.method === "item/completed") && item.type === "collabAgentToolCall") {
-            // A collab spawn names its child threads; subscribe so their items
-            // arrive, and correlate them back to the dispatch item id.
             const dispatchId = text(item.id);
             const receivers = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : [];
+            const isSpawn = item.tool === "spawnAgent";
+            if (isSpawn && dispatchId) nativeDispatches.set(dispatchId, item);
             for (const receiver of receivers) {
               const childId = text(receiver);
               if (!childId || !dispatchId) continue;
-              if (!childThreads.has(childId)) void rpc.request("thread/subscribe", { threadId: childId }).catch(() => undefined);
-              childThreads.set(childId, dispatchId);
+              if (isSpawn && !childThreads.has(childId)) {
+                childThreads.set(childId, dispatchId);
+                joinChildren.push({ childId, dispatchId });
+              }
+              if (!isSpawn) {
+                const original = nativeDispatches.get(childThreads.get(childId) ?? "");
+                const childState = record(record(item.agentsStates)[childId]);
+                if (original && typeof childState.status === "string") yield* updateNativeChild(original, childId, childState.status, text(childState.message));
+              }
             }
           }
           const events = parseCodexAppServerNotification(event.method, event.params);
           const eventThreadId = text(params.threadId);
           const subagentDispatchId = eventThreadId && eventThreadId !== threadId ? childThreads.get(eventThreadId) : undefined;
           yield* (subagentDispatchId ? withSubagentDispatch(events, subagentDispatchId) : events);
-          if (compact && event.method === "thread/compacted") {
+          for (const { childId, dispatchId } of joinChildren) {
+            // Joining a live native child does not start a new turn.
+            const joined = await rpc.request("thread/resume", { threadId: childId }).catch(() => undefined);
+            const thread = record(record(joined).thread);
+            yield* nativeChildHistory(thread, dispatchId);
+            const turns = Array.isArray(thread.turns) ? thread.turns : [];
+            const turn = record(turns.at(-1));
+            const dispatch = nativeDispatches.get(dispatchId);
+            if (dispatch && ["completed", "failed", "interrupted"].includes(String(turn.status))) {
+              const result = (Array.isArray(turn.items) ? [...turn.items].reverse() : []).map(record).find((item) => item.type === "agentMessage");
+              yield* updateNativeChild(dispatch, childId, turn.status === "completed" ? "completed" : "errored", text(result?.text));
+            }
+          }
+          if (compact && scopedThreadId === threadId && (event.method === "thread/compacted" || (event.method === "item/completed" && item.type === "contextCompaction"))) {
             finished = true;
             yield { kind: "message", text: "Codex 上下文已压缩" };
             healthy = !cancelled;
@@ -626,14 +669,19 @@ export function startCodexAppServer(
             yield { kind: "exit", exitCode: cancelled ? null : 0 };
             return;
           }
+          if (compact && event.method === "error" && params.willRetry !== true && scopedThreadId === threadId) {
+            finished = true; resolveTurnDone(); await release(false);
+            yield { kind: "exit", exitCode: 1 }; return;
+          }
           if (event.method === "turn/completed") {
             finished = true;
-            healthy = !cancelled;
+            const failed = record(params.turn).status === "failed" || record(params.turn).error != null;
+            healthy = !cancelled && !failed;
             resolveTurnDone();
             if (cancelled && cancellation) await cancellation;
             await release(pooled && healthy);
             if (timedOut) yield { kind: "timeout", reason: timedOut };
-            yield { kind: "exit", exitCode: cancelled ? null : 0 };
+            yield { kind: "exit", exitCode: cancelled ? null : failed ? 1 : 0 };
             return;
           }
         } else if (event.kind === "request" && cancelled) {
@@ -647,6 +695,13 @@ export function startCodexAppServer(
           for (const emitted of await handleDynamicToolCall(rpc, request, event)) yield emitted;
         } else if (event.kind === "request" && event.method === "item/tool/requestUserInput") {
           await handleRequestUserInput(rpc, request, event);
+        } else if (event.kind === "request" && event.method === "mcpServer/elicitation/request") {
+          try { rpc.respond(event.id, await handleCodexElicitation(rpc, request, record(event.params))); }
+          catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            rpc.respondError(event.id, -32000, message);
+            yield { kind: "tool", callId: `mcp-authorization-${event.id}`, name: "插件授权", phase: "completed", output: message, success: false };
+          }
         } else if (event.kind === "request" && (event.method === "item/commandExecution/requestApproval" || event.method === "item/fileChange/requestApproval")) {
           await handleCodexApproval(rpc, request, event);
         } else if (event.kind === "request") {

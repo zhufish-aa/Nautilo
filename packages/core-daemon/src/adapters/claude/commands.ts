@@ -1,3 +1,4 @@
+import { mergeCliArgs } from "../process-adapter.js";
 import type { AgentInstance } from "@agenthub/domain";
 import type { AdapterMcpServer, AdapterResumeRequest, AdapterStartRequest } from "../types.js";
 import { resolvePermissionMode } from "../permission-mode.js";
@@ -25,7 +26,7 @@ function effortArgs(request?: AdapterStartRequest): string[] {
   return effort && (CLAUDE_EFFORT_LEVELS as readonly string[]).includes(effort) ? ["--effort", effort] : [];
 }
 
-const CLAUDE_ENV_OVERRIDE_KEYS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"] as const;
+const CLAUDE_ENV_OVERRIDE_KEYS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"] as const;
 
 /**
  * ~/.claude/settings.json `env` wins over the inherited process environment,
@@ -87,7 +88,7 @@ export function claudePermissionPromptToolArgs(request: AdapterStartRequest | Ad
 }
 
 export function buildClaudeStartArgs(instance: AgentInstance, prompt: string, request?: AdapterStartRequest): string[] {
-  if (instance.baseArgs.length) return [...instance.baseArgs, prompt];
+  if (instance.baseArgs.length) return [...mergeCliArgs(instance.baseArgs, buildClaudeStartArgs({...instance,baseArgs:[]},prompt,request).slice(0,-1)),prompt];
   return [
     "-p",
     "--output-format", "stream-json",
@@ -104,7 +105,7 @@ export function buildClaudeStartArgs(instance: AgentInstance, prompt: string, re
 }
 
 export function buildClaudeResumeArgs(instance: AgentInstance, sessionId: string, prompt: string, request?: AdapterResumeRequest): string[] {
-  if (instance.baseArgs.length) return [...instance.baseArgs, "--resume", sessionId, prompt];
+  if (instance.baseArgs.length) return [...mergeCliArgs(instance.baseArgs, buildClaudeResumeArgs({...instance,baseArgs:[]},sessionId,prompt,request).slice(0,-1)),prompt];
   return [
     "-p",
     "--resume", sessionId,

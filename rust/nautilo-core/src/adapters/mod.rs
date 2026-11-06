@@ -13,6 +13,7 @@ use crate::errors::{CoreResult, CoreError, ErrorCode};
 use crate::process_runtime::ProcessHandle;
 
 pub mod claude;
+pub mod images;
 pub mod custom;
 pub mod registry;
 pub mod codex;
@@ -24,6 +25,8 @@ pub mod normalize;
 pub mod plan_interaction;
 pub mod process_adapter;
 pub mod runtime_mcp_bridge;
+pub mod api_stream_observer;
+#[cfg(test)] mod resident_tests;
 
 pub use normalize::normalize_json;
 pub use process_adapter::stream_events;
@@ -105,6 +108,12 @@ impl TimeoutKind {
 }
 
 /// Everything a run needs to launch a provider turn (AdapterStartRequest).
+#[derive(Clone)]
+pub struct ImageGenerationExecutor {
+    pub generate: Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>,
+    pub cancel: Arc<dyn Fn() + Send + Sync>,
+}
+
 #[derive(Clone, Default)]
 pub struct AdapterStartRequest {
     pub instance: Value,
@@ -114,6 +123,7 @@ pub struct AdapterStartRequest {
     pub cwd: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub agent_mode: Option<String>,
     pub service_tier: Option<String>,
     pub permission_mode: Option<String>,
     pub context_window: Option<i64>,
@@ -126,8 +136,12 @@ pub struct AdapterStartRequest {
     pub runtime_tools: Option<Value>,
     /// Tools supplied by Nautilo for this provider session (delegation etc.).
     pub execute_runtime_tool: Option<Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>>,
+    pub image_generation: Option<ImageGenerationExecutor>,
     /// Provider-initiated user interaction; blocks until the user responds.
     pub request_interaction: Option<Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>>,
+    pub session_events: Option<Arc<dyn Fn(AdapterEvent) + Send + Sync>>,
+    pub session_interaction: Option<Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>>,
+    pub session_tool: Option<Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>>,
     pub skills: Option<Vec<Value>>,
     pub mcp_servers: Option<Vec<Value>>,
     pub provider_command: Option<String>,
@@ -228,10 +242,17 @@ pub struct AdapterDetectionResult {
 
 #[async_trait::async_trait]
 pub trait AgentCliAdapter: Send + Sync {
+    async fn list_modes(&self, _instance: &Value, _context: Option<&Value>) -> CoreResult<Value> {
+        Ok(serde_json::json!({"modes":[]}))
+    }
     fn provider_id(&self) -> &str;
     /// The ProviderDescriptor JSON served to the renderer via provider.catalog.
     fn descriptor(&self) -> Value;
     fn capabilities(&self) -> AdapterCapabilities;
+    fn native_capabilities(&self,instance:&Value)->Value {
+        let caps=self.capabilities();
+        agenthub_plugin_sdk::capabilities::describe(self.provider_id(),instance,&serde_json::json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty}))
+    }
     fn supports_structured_output(&self) -> bool {
         self.capabilities().structured_output
     }
@@ -251,6 +272,10 @@ pub trait AgentCliAdapter: Send + Sync {
         ))
     }
     async fn dispose(&self) {}
+    async fn release_session(&self, _request:&AdapterStartRequest) -> CoreResult<()> {Ok(())}
+    async fn native_terminal(&self,_request:AdapterStartRequest,_resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
+        Err(crate::errors::invalid("providerId","This adapter has not declared a native terminal launch plan"))
+    }
 }
 
 
@@ -311,6 +336,7 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
             raw,
         },
         "session" => AdapterEvent::Session { provider_session_id: opt_str("providerSessionId").unwrap_or_default(), raw },
+        "extension_ui" => AdapterEvent::Status { phase: "extension_ui".into(), raw: Some(value.clone()) },
         "status" => AdapterEvent::Status { phase: opt_str("phase").unwrap_or_default(), raw },
         "usage" => AdapterEvent::Usage {
             usage_scope: opt_str("usageScope"),
@@ -358,6 +384,8 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
 /// not serializable; interactions/tools travel over reverse channels).
 pub fn start_request_to_json(request: &AdapterStartRequest) -> Value {
     let mut map = serde_json::Map::new();
+    if let Some(mode)=&request.agent_mode { map.insert("agentMode".into(),Value::String(mode.clone())); }
+    if let Some(id)=&request.local_session_id {map.insert("localSessionId".into(),Value::String(id.clone()));}
     map.insert("instance".to_string(), request.instance.clone());
     map.insert("prompt".to_string(), Value::String(request.prompt.clone()));
     map.insert("cwd".to_string(), Value::String(request.cwd.clone()));

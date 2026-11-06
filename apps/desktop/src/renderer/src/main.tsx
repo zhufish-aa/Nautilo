@@ -7,6 +7,7 @@ import { HashRouter } from "react-router-dom";
 import App from "./App";
 import { I18nProvider } from "./lib/i18n";
 import "./styles/global.css";
+import "./styles/management.css";
 
 // A renderer crash must never leave a silent white window: surface the error
 // as plain DOM so it can be reported (and so the pattern background is not

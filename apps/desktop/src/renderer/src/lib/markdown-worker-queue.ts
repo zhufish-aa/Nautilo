@@ -34,7 +34,14 @@ export class MarkdownWorkerQueue {
       else listener?.result(request.source, data.fragments);
       this.drain();
     };
-    worker.onerror = worker.onmessageerror = () => this.fail();
+    const failed = (event: Event): void => {
+      // Parsing already has a synchronous fallback. Prevent a handled worker
+      // failure from bubbling to the window's fatal renderer overlay.
+      event.preventDefault?.();
+      this.fail();
+    };
+    worker.onerror = failed;
+    worker.onmessageerror = failed;
   }
 
   subscribe(result: Listener["result"], error: Listener["error"]): { update: (source: string) => void; dispose: () => void } {

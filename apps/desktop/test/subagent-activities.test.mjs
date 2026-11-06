@@ -6,7 +6,9 @@ import ts from "typescript";
 const sourceUrl = new URL("../src/renderer/src/lib/subagent-activities.ts", import.meta.url);
 
 async function loadModule() {
-  const source = await readFile(sourceUrl, "utf8");
+  const dependency = ts.transpileModule(await readFile(new URL('../src/renderer/src/lib/process-display.ts', import.meta.url), 'utf8'), {compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;
+  const dependencyUrl = `data:text/javascript,${encodeURIComponent(dependency)}`;
+  const source = (await readFile(sourceUrl, "utf8")).replace('"./process-display"', JSON.stringify(dependencyUrl));
   const transpiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
   }).outputText;
@@ -14,6 +16,25 @@ async function loadModule() {
 }
 
 let seq = 0;
+
+test("native tool and command progress update one row without finishing it", async () => {
+  const { collectSubagentActivities } = await loadModule();
+  const events = [
+    runtimeEvent("tool.started",{callId:"t",toolName:"read",subagentDispatchId:"d"}),
+    runtimeEvent("tool.updated",{callId:"t",toolName:"read",outputSummary:"loading",subagentDispatchId:"d"}),
+    runtimeEvent("command.started",{callId:"c",command:"fixture",cwd:"/",subagentDispatchId:"d"}),
+    runtimeEvent("command.updated",{callId:"c",command:"fixture",outputSummary:"one line",subagentDispatchId:"d"})
+  ];
+  let bucket=collectSubagentActivities(events).get("d");
+  assert.equal(bucket.length,2);
+  assert.deepEqual(bucket.map(row=>row.status),["running","running"]);
+  assert.deepEqual(bucket.map(row=>row.output),["loading","one line"]);
+  events.push(runtimeEvent("tool.finished",{callId:"t",toolName:"read",success:true,outputSummary:"complete",subagentDispatchId:"d"}));
+  events.push(runtimeEvent("tool.updated",{callId:"t",toolName:"read",outputSummary:"stale progress",subagentDispatchId:"d"}));
+  bucket=collectSubagentActivities(events).get("d");
+  assert.equal(bucket[0].status,"done");
+  assert.equal(bucket[0].output,"complete");
+});
 function runtimeEvent(type, payload) {
   seq += 1;
   return {
@@ -28,6 +49,21 @@ function runtimeEvent(type, payload) {
     payload
   };
 }
+
+test('native sub-agents retain PTC dispatch patches through updates and final completion', async () => {
+  const {collectSubagentActivities} = await loadModule();
+  const base = {callId:'code',toolName:'run_code',subagentDispatchId:'child'};
+  const events = [runtimeEvent('tool.started',{...base,inputSummary:'{"description":"Inspect files","code":"fixture"}'}),
+    runtimeEvent('tool.updated',{...base,codeExecution:{partial:true,calls:[{callId:'read',name:'read',input:{path:'main.ts'},status:'running'}]}}),
+    runtimeEvent('tool.updated',{...base,codeExecution:{partial:true,calls:[{callId:'shell',name:'pwsh',status:'done'}]}}),
+    runtimeEvent('tool.updated',{...base,codeExecution:{partial:true,calls:[{callId:'read',name:'read',status:'done',output:'contents'}]}}),
+    runtimeEvent('tool.finished',{...base,success:true,codeExecution:{partial:true,calls:[]}})];
+  const rows = collectSubagentActivities(events).get('child');
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].status,'done');
+  assert.equal(rows[0].input,events[0].payload.inputSummary);
+  assert.deepEqual(rows[0].codeExecution.calls.map(call=>[call.callId,call.status]),[['read','done'],['shell','done']]);
+});
 
 test("sub-agent events are bucketed by dispatch id and merged per call", async () => {
   const { collectSubagentActivities, subagentDispatchIdOf } = await loadModule();

@@ -26,6 +26,12 @@ export interface InteractionQuestion {
   isOther?: boolean;
   /** The answer is a secret and should be masked in the UI. */
   isSecret?: boolean;
+  /** Native editor/input semantics, including an intentionally empty answer. */
+  inputType?: "text" | "multiline";
+  initialValue?: string;
+  placeholder?: string;
+  allowEmpty?: boolean;
+  preserveWhitespace?: boolean;
 }
 
 export interface InteractionPlan {
@@ -49,12 +55,17 @@ export interface InteractionRequest {
   id: string;
   sessionId: string;
   runId?: string;
+  nativeRequestId?: string;
+  timeoutMs?: number;
   providerId: string;
   kind: InteractionKind;
   /** Short summary, e.g. the tool name or "运行命令". */
   title: string;
   /** Long detail, e.g. the command line or the provider's reason. */
   detail?: string;
+  /** Provider-supplied web authorization links; opening a link never resolves the request. */
+  links?: Array<{ label: string; url: string }>;
+  presentation?: { type: "plugin_install" | "plugin_authorization"; name: string; pluginId?: string };
   /** kind "question": the questions to answer. */
   questions?: InteractionQuestion[];
   /** kind "approval": the decisions the user may pick. */

@@ -76,3 +76,6 @@ apps/desktop/src-tauri/dist/
 
 # Native plugin executables synced into source dirs by scripts/sync-rust-plugins.mjs
 rust/plugins/*/agenthub-plugin-*.exe
+
+# Machine-local development toolchain/cache paths
+.nautilo-dev.local.json

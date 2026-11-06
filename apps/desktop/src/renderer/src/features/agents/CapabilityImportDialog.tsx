@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
+  ShieldCheck,
   FileUp,
   FolderOpen,
   RefreshCw,
@@ -174,10 +176,12 @@ export function CapabilityImportDialog({
   open,
   onOpenChange,
   seed,
+  defaultProviderId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   seed?: CapabilityImportSeed;
+  defaultProviderId?: string;
 }): JSX.Element {
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
@@ -294,8 +298,9 @@ export function CapabilityImportDialog({
     setScanDir("");
     setDeselected([]);
     setConflict("skip");
+    setProviderIds(defaultProviderId ? [defaultProviderId] : []);
     setBusy(false);
-  }, [open, seed]);
+  }, [open, seed, defaultProviderId]);
 
   // Only these sources parse free text; templates and scans produce rows directly.
   const parseSource =
@@ -575,7 +580,7 @@ export function CapabilityImportDialog({
     try {
       const results = await importMany(
         selectedRows.map((row) =>
-          prepareImportedCapability(row.build(daemonIds, now)),
+          prepareImportedCapability({ ...row.build(daemonIds, now), ...(defaultProviderId ? { providerIds: daemonIds } : {}) }),
         ),
         conflict,
       );
@@ -619,10 +624,12 @@ export function CapabilityImportDialog({
         if (!next) sourceRevision.current += 1;
         onOpenChange(next);
       }}
-      title={t("agents.tools.import.title")}
-      widthClass="max-w-4xl"
+      title={tab === "mcp" ? (zh ? "导入 MCP" : "Import MCP") : (zh ? "导入技能" : "Import skills")}
+      presentation="workspace"
+      widthClass="capability-import-dialog"
       footer={
         <>
+          <span className="import-selection-count">{zh ? `已选择 ${selectedRows.length} 项` : `${selectedRows.length} selected`}</span>
           <Button
             variant="ghost"
             onClick={() =>
@@ -667,7 +674,7 @@ export function CapabilityImportDialog({
     >
       <div className="capability-form space-y-6">
         <ol
-          className="mb-8 flex items-center gap-8 border-b border-line pb-6 text-sm"
+          className="import-steps"
           aria-label={zh ? "导入步骤" : "Import steps"}
         >
           {(["source", "preview", "result"] as const).map((step, index) => (
@@ -680,7 +687,7 @@ export function CapabilityImportDialog({
               )}
             >
               <span className="grid h-6 w-6 place-items-center rounded-full border border-line">
-                {index + 1}
+                {(["source", "preview", "result"].indexOf(stage) > index) ? <Check size={18} /> : index + 1}
               </span>
               {zh
                 ? ["来源", "预览", "完成"][index]
@@ -1112,76 +1119,19 @@ export function CapabilityImportDialog({
                 {t("agents.tools.import.previewEmpty")}
               </p>
             ) : (
-              <ul className="divide-y divide-line border-y border-line">
+              <ul className="import-preview-list">
                 {rows.map((row) => {
                   const checked = !deselected.includes(row.key);
                   return (
-                    <li key={row.key}>
-                      <button
-                        type="button"
-                        role="checkbox"
-                        aria-checked={checked}
-                        onClick={() => toggleRow(row.key)}
-                        className={cn(
-                          "flex w-full items-start gap-3 px-1 py-4 text-left transition-colors",
-                          checked ? "bg-card" : "bg-card/40 opacity-60",
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            "mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded border",
-                            checked
-                              ? "border-accent bg-accent text-on-accent"
-                              : "border-line-strong",
-                          )}
-                        >
-                          {checked && <Check className="h-3 w-3" aria-hidden />}
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-[13px] font-medium text-ink">
-                              {row.name}
-                            </span>
-                            {row.exists && (
-                              <Tag
-                                label={t("agents.tools.import.badgeExists")}
-                                className="border-warn/25 bg-warn/10 text-warn"
-                              />
-                            )}
-                            {row.origin && <Tag label={row.origin} />}
-                          </span>
-                          {row.detail && (
-                            <span
-                              className="mt-0.5 block truncate font-mono text-[11px] text-ink-3"
-                              title={row.detail}
-                            >
-                              {row.detail}
-                            </span>
-                          )}
-                          {row.warnings.map((warning) => (
-                            <span
-                              key={warning.replace(/"[^"\n]*"/g, "••••")}
-                              className="mt-1 flex items-start gap-1.5 text-[11px] leading-relaxed text-warn"
-                            >
-                              <AlertTriangle
-                                className="mt-0.5 h-3 w-3 shrink-0"
-                                aria-hidden
-                              />
-                              {warning.replace(/"[^"\n]*"/g, "••••")}
-                            </span>
-                          ))}
-                        </span>
-                      </button>
-                      {row.config && (
-                        <details className="border-b border-line px-3 py-3">
-                          <summary className="cursor-pointer text-sm text-ink-2">
-                            {zh ? "配置详情" : "Configuration"}
-                          </summary>
-                          <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words text-xs leading-6 text-ink-2">
-                            {JSON.stringify(redactConfig(row.config), null, 2)}
-                          </pre>
+                    <li key={row.key} className="import-preview-card">
+                      <div className="import-preview-heading">
+                        <button type="button" role="checkbox" aria-label={row.name} aria-checked={checked} onClick={() => toggleRow(row.key)} className={cn("import-checkbox", checked && "is-checked")}>{checked && <Check size={16} />}</button>
+                        <details className="import-server-details" open={rows[0]?.key === row.key}>
+                          <summary><ChevronDown size={21} /><span>{row.name}</span>{row.config && <Tag label={row.config.transport} />}{row.exists && <Tag label={zh ? "同名冲突" : "Name conflict"} className="border-warn/25 bg-warn/10 text-warn" />}</summary>
+                          {row.config ? <McpConfigurationTable config={row.config} zh={zh} /> : <p className="model-help">{row.detail}</p>}
+                          {row.warnings.map((warning) => <p key={warning} className="flex items-center gap-2 px-4 pb-3 text-sm text-warn"><AlertTriangle size={16} />{warning.replace(/"[^"\n]*"/g, "••••")}</p>)}
                         </details>
-                      )}
+                      </div>
                     </li>
                   );
                 })}
@@ -1189,6 +1139,7 @@ export function CapabilityImportDialog({
             )}
           </div>
 
+          <div className="import-destination">
           <Field
             label={t("agents.tools.import.providersLabel")}
             hint={
@@ -1230,28 +1181,14 @@ export function CapabilityImportDialog({
 
           <Field
             label={t("agents.tools.import.conflictLabel")}
-            className="max-w-56"
+            className="import-conflicts"
           >
-            <SelectField
-              value={conflict}
-              onValueChange={(value) =>
-                setConflict(value as CapabilityImportConflictPolicy)
-              }
-              aria-label={t("agents.tools.import.conflictLabel")}
-              options={[
-                { value: "skip", label: t("agents.tools.import.conflictSkip") },
-                {
-                  value: "overwrite",
-                  label: t("agents.tools.import.conflictOverwrite"),
-                },
-                {
-                  value: "rename",
-                  label: t("agents.tools.import.conflictRename"),
-                },
-              ]}
-            />
+            <div className="import-conflict-options" role="group" aria-label={t("agents.tools.import.conflictLabel")}>
+              {(["skip", "overwrite", "rename"] as const).map((value) => <button key={value} type="button" aria-pressed={conflict === value} onClick={() => setConflict(value)}>{t(`agents.tools.import.conflict${value === "skip" ? "Skip" : value === "overwrite" ? "Overwrite" : "Rename"}`)}</button>)}
+            </div>
           </Field>
-          <p className="flex items-center gap-2 border-t border-line pt-5 text-sm text-ink-3">
+          </div>
+          <p className="import-safety-note flex items-center gap-2 text-ink-3"><ShieldCheck size={20} />
             {zh
               ? "仅导入配置，MCP 保持停用，不会自动启动服务器。"
               : "MCP configurations import disabled. No server is started."}
@@ -1260,4 +1197,14 @@ export function CapabilityImportDialog({
       </div>
     </Dialog>
   );
+}
+
+function McpConfigurationTable({ config, zh }: { config: NonNullable<PreviewRow["config"]>; zh: boolean }): JSX.Element {
+  const safe = redactConfig(config) as NonNullable<PreviewRow["config"]>;
+  const entries = Object.entries(safe.env ?? {});
+  return <dl className="import-config-table">
+    {safe.transport === "http" ? <div><dt>URL</dt><dd>{safe.url}</dd></div> : <><div><dt>{zh ? "命令" : "Command"}</dt><dd>{safe.command}</dd></div><div><dt>{zh ? "参数" : "Arguments"}</dt><dd>{safe.args?.join(" ") || "—"}</dd></div></>}
+    {entries.length > 0 && <div><dt>{zh ? "环境变量" : "Environment"}</dt><dd>{entries.map(([key, value]) => <div className="import-env-row" key={key}><span>{key}</span><span>{value}</span></div>)}</dd></div>}
+    {safe.headers && <div><dt>{zh ? "请求头" : "Headers"}</dt><dd>{Object.entries(safe.headers).map(([key, value]) => <div className="import-env-row" key={key}><span>{key}</span><span>{value}</span></div>)}</dd></div>}
+  </dl>;
 }

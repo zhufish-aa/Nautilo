@@ -122,7 +122,7 @@ test("Codex commands match the official exec JSONL and resume surface", () => {
     "exec", "--json", "--model", "gpt-test", "--config", 'model_reasoning_effort="max"', "--config", 'service_tier="priority"', "--profile", "work", "--output-schema", "result.schema.json", "hello"
   ]);
   assert.deepEqual(buildCodexResumeArgs(configured, "thread-1", "continue", { ...request, prompt: "continue", providerSessionId: "thread-1" }), [
-    "exec", "resume", "--json", "--model", "gpt-test", "--config", 'model_reasoning_effort="max"', "--config", 'service_tier="priority"', "thread-1", "continue"
+    "exec", "resume", "--json", "--model", "gpt-test", "--config", 'model_reasoning_effort="max"', "--config", 'service_tier="priority"', "--output-schema", "result.schema.json", "thread-1", "continue"
   ]);
 });
 
@@ -138,7 +138,7 @@ test("Codex permission mode maps to approval policy and sandbox flags", () => {
     "exec", "--json", "--ask-for-approval", "never", "--sandbox", "danger-full-access"
   ]);
   const customBase = { ...withMode("ask"), baseArgs: ["exec", "--json"] };
-  assert.ok(!buildCodexStartArgs(customBase, "hello").includes("--ask-for-approval"));
+  assert.ok(buildCodexStartArgs(customBase, "hello").includes("--ask-for-approval"));
 });
 
 test("empty session permission mode falls back to the instance setting", () => {
@@ -205,6 +205,7 @@ test("Codex custom API base URL is applied as an invocation-scoped model provide
   assert.deepEqual(appServerArgs.slice(0, 2), ["app-server", "--stdio"]);
   assert.ok(appServerArgs.includes("--enable"));
   assert.ok(appServerArgs.includes("image_generation"));
+  assert.equal(appServerArgs.some((arg, index) => arg === "--disable" && appServerArgs[index + 1] === "apps"), false, "Codex's native Apps and connectors must remain enabled by its own configuration");
   assert.ok(appServerArgs.includes('web_search="live"'));
 
   const customCatalog = buildCodexCustomModelCatalog({
@@ -406,6 +407,19 @@ test("Codex app-server parser preserves deltas, call ids, input, and output", ()
     type: "imageGeneration", id: "image-1", result: "aGVsbG8=", savedPath: "C:/tmp/generated.png", status: "completed"
   } });
   assert.ok(image.some((event) => event.kind === "artifact" && event.artifactType === "image"));
+});
+
+test("Codex tool receipts retain dynamic content and distinguish pending, success and failure", () => {
+  const item = { type: "dynamicToolCall", id: "delegate-1", tool: "agenthub_delegate", status: "completed",
+    result: null, contentItems: [{ type: "inputText", text: "child-session-1" }], success: false };
+  const event = parseCodexAppServerNotification("item/completed", { item })[0];
+  assert.match(event.output, /child-session-1/);
+  assert.equal(event.success, false);
+  assert.equal(parseCodexAppServerNotification("item/started", { item })[0].success, undefined);
+  const mcp = { type: "mcpToolCall", status: "completed", result: { content: [] }, error: null };
+  assert.equal(parseCodexAppServerNotification("item/completed", { item: mcp })[0].success, true);
+  mcp.result.isError = true;
+  assert.equal(parseCodexAppServerNotification("item/completed", { item: mcp })[0].success, false);
 });
 
 test("Codex app-server opts into native experimental provider capabilities", () => {
@@ -857,6 +871,9 @@ test("Kimi commands match prompt stream-json and session resume", () => {
 
 test("Kimi stream-json parser exposes messages, tools, and resume hints", () => {
   const tool = parseKimiJsonEvent({ role: "assistant", tool_calls: [{ id: "tool-1", type: "function", function: { name: "Bash", arguments: "{\"command\":\"pwd\"}" } }] })[0];
+  assert.equal(tool.callId, "tool-1");
+  const receipt = parseKimiJsonEvent({ role: "tool", tool_call_id: "tool-1", content: "workspace" })[0];
+  assert.equal(receipt.callId, tool.callId);
   assert.equal(tool?.kind, "tool");
   assert.deepEqual(tool?.input, { command: "pwd" });
   assert.equal(parseKimiJsonEvent({ role: "assistant", content: "done" })[0]?.kind, "message");
@@ -1223,10 +1240,10 @@ test("Claude commands match headless stream-json, resume, and effort surface", (
   // A non-empty session value still overrides the instance setting.
   const overridden = buildClaudeStartArgs(configured, "hello", { ...request, permissionMode: "default" });
   assert.deepEqual(overridden.slice(-3), ["--permission-mode", "default", "hello"]);
-  // Custom baseArgs own the whole CLI surface.
+  // Custom prefixes retain selected native model, effort, permissions and streaming.
   const custom = { ...configured, baseArgs: ["-p", "--output-format", "stream-json"] };
-  assert.deepEqual(buildClaudeStartArgs(custom, "hello", request), ["-p", "--output-format", "stream-json", "hello"]);
-  assert.deepEqual(buildClaudeResumeArgs(custom, "session-1", "continue", request), ["-p", "--output-format", "stream-json", "--resume", "session-1", "continue"]);
+  assert.deepEqual(buildClaudeStartArgs(custom, "hello", request), buildClaudeStartArgs(configured, "hello", request));
+  assert.deepEqual(buildClaudeResumeArgs(custom, "session-1", "continue", request), buildClaudeResumeArgs(configured, "session-1", "continue", request));
   // Unknown permission modes are ignored rather than passed through.
   const weird = { ...instance, baseArgs: [], providerOptions: { permissionMode: "not-a-mode" } };
   assert.ok(!buildClaudeStartArgs(weird, "hello").includes("--permission-mode"));
@@ -1327,6 +1344,18 @@ test("Claude stream-json parser exposes session, commands, messages, tools, and 
   ] } }, state);
   assert.deepEqual(write[0].fileDiff, { operation: "write", path: "src/new.ts", before: "", after: "export {};\n" });
   assert.deepEqual(write[1].fileDiff, { operation: "edit", path: "src/a.ts", before: "a\nc", after: "b\nd" });
+});
+
+test("Codex summary and raw reasoning preserve whitespace and use independent stream identities", () => {
+  const params = { itemId: "thought", delta: " \n" };
+  const summary = parseCodexAppServerNotification("item/reasoning/summaryTextDelta", params)[0];
+  const content = parseCodexAppServerNotification("item/reasoning/textDelta", params)[0];
+  assert.equal(summary.text, " \n");
+  assert.equal(content.text, " \n");
+  assert.equal(summary.messageId, "thought");
+  assert.equal(content.messageId, "thought:content");
+  const completed = parseCodexAppServerNotification("item/completed", { item: { id: "thought", type: "reasoning", summary: ["Summary"], content: ["Raw content"] } });
+  assert.deepEqual(completed.map(event => [event.messageId, event.text, event.phase]), [["thought", "Summary", "completed"], ["thought:content", "Raw content", "completed"]]);
 });
 
 test("Claude stream_event partial messages emit text/thinking deltas", () => {

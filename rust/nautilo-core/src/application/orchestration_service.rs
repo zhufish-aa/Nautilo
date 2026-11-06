@@ -119,7 +119,7 @@ impl OrchestrationService {
             .unwrap()
             .insert("mainSessionId".to_string(), main_session.get("id").cloned().unwrap_or(Value::Null));
         Repositories::new(&self.db.lock().unwrap().raw).project_runs().save(&project_run)?;
-        let user_message = self.messages().user_goal(&main_session, &project_run)?;
+        let user_message = self.messages().user_goal(&main_session, &project_run, input.get("messageId").and_then(Value::as_str))?;
 
         let service = self.clone_arc();
         let attachments_input = input.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -294,6 +294,8 @@ impl OrchestrationService {
         }
         let team = self.require_team(project_run.get("teamId").and_then(Value::as_str).unwrap_or(""))?;
         let previous_session = self.require_main_session(&project_run)?;
+        let native_runtime_tools = team.get("mainMemberId").is_none()
+            && project_run.get("mainAgentInstanceId").and_then(Value::as_str).is_some();
         if mode == "resume" && member_id != project_run.get("mainMemberId").and_then(Value::as_str).unwrap_or("") {
             let mut details = Map::new();
             details.insert("reason".to_string(), json!("resume_requires_same_member"));
@@ -330,7 +332,7 @@ impl OrchestrationService {
                 .unwrap_or_else(|| project_run.get("mainAgentInstanceId").cloned().unwrap_or(Value::Null)),
         );
         recovered.insert("mainSessionId".to_string(), main_session.get("id").cloned().unwrap_or(Value::Null));
-        recovered.insert("status".to_string(), json!("planning"));
+        recovered.insert("status".to_string(), json!(if native_runtime_tools { "executing" } else { "planning" }));
         recovered.insert(
             "recoveryReason".to_string(),
             json!(if mode == "resume" { "provider_session_resume" } else { "main_agent_replaced" }),
@@ -348,7 +350,11 @@ impl OrchestrationService {
         self.messages().system(
             &main_session,
             &recovered,
-            if mode == "resume" {
+            if native_runtime_tools && mode == "resume" {
+                "已恢复原主 Agent 会话，将继续未完成目标。"
+            } else if native_runtime_tools {
+                "主 Agent 已切换，将继续未完成目标。"
+            } else if mode == "resume" {
                 "已恢复原主 Agent 会话，将重新规划未完成目标。"
             } else {
                 "主 Agent 已切换，将重新规划未完成目标。"
@@ -357,7 +363,10 @@ impl OrchestrationService {
         )?;
         let service = self.clone_arc();
         let id = project_run_id.to_string();
-        self.schedule(project_run_id, async move { service.plan(&id).await });
+        self.schedule(project_run_id, async move {
+            if native_runtime_tools { service.execute_main_turn(&id).await }
+            else { service.plan(&id).await }
+        });
         Ok(recovered)
     }
 
@@ -539,15 +548,22 @@ impl OrchestrationService {
             .into_iter()
             .filter(|session| session.get("parentSessionId").and_then(Value::as_str) == main_session.get("id").and_then(Value::as_str))
             .collect();
+        // Read both collections under one short-lived guard. Borrowing two
+        // repository results from temporary guards in the same build(...) call
+        // keeps the first mutex locked while the second tries to acquire it.
+        let (messages, artifacts) = {
+            let db = self.db.lock().unwrap();
+            let repos = Repositories::new(&db.raw);
+            (
+                repos.sessions().messages(main_session.get("id").and_then(Value::as_str).unwrap_or(""))?,
+                repos.artifacts().list(Some(project_run_id), None, None)?,
+            )
+        };
         let continuity = ConversationContinuityBuilder::build(ContinuityInput {
             current_project_run_id: project_run_id,
             current_text: project_run.get("goal").and_then(Value::as_str).unwrap_or(""),
-            messages: &Repositories::new(&self.db.lock().unwrap().raw)
-                .sessions()
-                .messages(main_session.get("id").and_then(Value::as_str).unwrap_or(""))?,
-            artifacts: &Repositories::new(&self.db.lock().unwrap().raw)
-                .artifacts()
-                .list(Some(project_run_id), None, None)?,
+            messages: &messages,
+            artifacts: &artifacts,
             recover_provider_context: main_session.get("providerSessionId").is_none()
                 || main_session.get("providerContextSyncedAt").is_none(),
         });

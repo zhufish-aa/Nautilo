@@ -81,6 +81,14 @@ export interface ProjectPollSnapshot {
 export type ProjectPollResult = ProjectPollSnapshot | { fallback: true; projectRun: ProjectRun };
 
 export interface IpcRequestMap {
+  "terminal.open": { input: { sessionId?: string; projectId?: string; cols?: number; rows?: number }; output: { id: string; cwd: string; pid?: number; kind: "shell" | "harness" } };
+  "terminal.native": { input: { sessionId: string; cols?: number; rows?: number }; output: { id: string; cwd: string; pid?: number; kind: "harness" } };
+  "terminal.read": { input: { terminalId: string; cursor: number }; output: { data: string; cursor: number; reset: boolean; exited: boolean; exitCode?: number } };
+  "terminal.write": { input: { terminalId: string; data: string }; output: { ok: true } };
+  "terminal.resize": { input: { terminalId: string; cols: number; rows: number }; output: { ok: true } };
+  "terminal.close": { input: { terminalId: string }; output: { ok: true } };
+  "terminal.status": { input: { sessionId: string }; output: { nativeActive: boolean; terminalId?: string } };
+  "agent.runtimeCapabilities": { input: { sessionId?: string; agentInstanceId?: string }; output: import("@agenthub/provider-sdk").NativeRuntimeCapabilities };
   "connection.list": { input: Record<string, never>; output: RuntimeConnection[] };
   "connection.get": { input: { connectionId: string; revision?: number }; output: RuntimeConnection };
   "connection.upsert": { input: { connection: RuntimeConnectionInput; expectedRevision?: number; apiKey?: string; clearApiKey?: boolean }; output: RuntimeConnection };
@@ -110,6 +118,7 @@ export interface IpcRequestMap {
   "capability.scanSkills": { input: { dir: string }; output: CapabilityScanResult };
   "capability.importMany": { input: { items: ProviderCapability[]; onConflict?: CapabilityImportConflictPolicy }; output: { results: CapabilityImportOutcome[] } };
   "provider.models": { input: { providerId: string; agentInstanceId?: string; executable?: string; baseUrl?: string; apiKey?: string; apiType?: string }; output: ProviderModelCatalog };
+  "provider.modes": { input: { agentInstanceId: string; cwd?: string }; output: { modes: Array<{ id: string; name?: string; broken?: string; order?: number }>; defaultMode?: string } };
   "team.list": { input: undefined; output: TeamDefinition[] };
   "team.get": { input: { teamId: string }; output: TeamDefinition };
   "team.upsert": { input: TeamDefinition; output: TeamDefinition };
@@ -117,7 +126,7 @@ export interface IpcRequestMap {
   "projectRun.list": { input: { projectId: string }; output: ProjectRun[] };
   "projectRun.poll": { input: ProjectPollInput; output: ProjectPollResult };
   "projectRun.get": { input: { projectRunId: string }; output: { projectRun: ProjectRun; mainSession: Session } };
-  "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string; attachments?: MessageAttachmentInput[] }; output: { projectRun: ProjectRun; mainSession: Session } };
+  "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string; messageId?: string; attachments?: MessageAttachmentInput[] }; output: { projectRun: ProjectRun; mainSession: Session } };
   "orchestration.resolveDelegation": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.resolveMerge": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.recover": { input: { projectRunId: string; memberId: string; mode: "resume" | "replace" }; output: ProjectRun };
@@ -126,13 +135,15 @@ export interface IpcRequestMap {
   "session.history": { input: SessionHistoryInput; output: SessionHistory };
   "session.historyBatch": { input: { items: SessionHistoryInput[] }; output: { items: SessionHistory[] } };
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
+  "session.generateTitle": { input: { sessionId: string }; output: { title?: string } };
   "session.create": { input: { projectId: string; memberId: string; title?: string; connectionId?: string; connectionRevision?: number }; output: Session };
   "session.upsert": { input: SessionUpsertInput; output: Session };
   "session.delete": { input: { sessionId: string }; output: { removed: true; sessionIds: string[] } };
-  "session.followUp": { input: { sessionId: string; text: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };
+  "session.followUp": { input: { sessionId: string; text: string; messageId?: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };
   "session.followUp.list": { input: { sessionId: string }; output: { items: Array<{ messageId: string; text: string; queuedAt: string }> } };
   "session.followUp.cancel": { input: { sessionId: string; messageId: string }; output: { cancelled: true } };
-  "session.send": { input: { sessionId: string; text: string; attachments?: MessageAttachmentInput[]; editMessageId?: string }; output: { accepted: true; runId: string } };
+  "session.followUp.steer": { input: { sessionId: string; messageId: string }; output: { accepted: true; mode: "steer" | "queue" } };
+  "session.send": { input: { sessionId: string; text: string; messageId?: string; attachments?: MessageAttachmentInput[]; editMessageId?: string }; output: { accepted: true; runId: string } };
   "slashCommand.list": { input: { sessionId: string }; output: SlashCommandDefinition[] };
   "slashCommand.execute": { input: { sessionId: string; commandId: string; argument?: string }; output: SlashCommandResult };
   "slashCommand.continue": { input: { sessionId: string; commandId: string; actionId: string; selectedOptionIds?: string[] }; output: SlashCommandResult };

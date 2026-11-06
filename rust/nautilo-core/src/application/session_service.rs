@@ -94,7 +94,7 @@ impl SessionService {
             "createdAt": now,
             "updatedAt": now,
         });
-        for field in ["agentInstanceId","connectionId","connectionRevision","model","reasoningEffort","serviceTier","permissionMode","parentSessionId"] {
+        for field in ["agentInstanceId","connectionId","connectionRevision","model","agentMode","reasoningEffort","serviceTier","permissionMode","parentSessionId"] {
             if let Some(value) = input.get(field) { session[field] = value.clone(); }
         }
         let db = self.db.lock().unwrap();
@@ -166,9 +166,9 @@ impl SessionService {
         let active = session_runs.iter().any(|run| !TERMINAL_RUN_STATUSES.contains(&run["status"].as_str().unwrap_or("")))
             || self.runs.read().unwrap().as_ref().is_some_and(|runs| runs.session_busy(id))
             || self.pending_follow_ups.lock().unwrap().get(id).is_some_and(|items| !items.is_empty());
-        let settings_changed = connection_changed || ["model","reasoningEffort","serviceTier"].iter().any(|key| current.get(*key) != candidate.get(*key));
+        let settings_changed = connection_changed || ["model","agentMode","reasoningEffort","serviceTier"].iter().any(|key| current.get(*key) != candidate.get(*key));
         if active && settings_changed { return Err(invalid("sessionId","Wait for active and queued requests before changing provider, account or model settings")); }
-        if connection_changed && input["confirmConnectionChange"] != true {
+        if connection_changed && (started || current.get("connectionId").and_then(Value::as_str).is_some()) && input["confirmConnectionChange"] != true {
             return Err(invalid("confirmConnectionChange","Confirm provider/account switch: text history is rebuilt; native reasoning, cache and old image context are not transferred"));
         }
         if !connection_changed && current.get("connectionId").is_some() {
@@ -241,7 +241,7 @@ impl SessionService {
         if connection_changed {
             if input.get("connectionId").is_none() { updated.as_object_mut().unwrap().remove("connectionId"); updated.as_object_mut().unwrap().remove("connectionRevision"); }
             for field in ["providerSessionId","providerContextSyncedAt","providerContextWindow","runtimeToolVersion"] { updated.as_object_mut().unwrap().remove(field); }
-            updated["connectionContextRebuildRequired"] = json!(true);
+            updated["connectionContextRebuildRequired"] = json!(started);
         } else if let Some(value) = current.get("connectionContextRebuildRequired") { updated["connectionContextRebuildRequired"] = value.clone(); }
         normalize_session_permission(&mut updated);
         repos.sessions().save(&updated)?;
@@ -355,6 +355,7 @@ impl SessionService {
             current_attachments: &attachments,
             recover_provider_context: session.get("providerSessionId").is_none()
                 || session.get("providerContextSyncedAt").is_none()
+                || self.runs()?.requires_provider_recovery(&session,&agent)
                 || needs_runtime_tool_migration,
             workspace_root: project_root.as_deref(),
         })?;
@@ -369,7 +370,7 @@ impl SessionService {
             }
             None => {
                 let mut message = serde_json::Map::new();
-                message.insert("id".to_string(), json!(uuid::Uuid::new_v4().to_string()));
+                message.insert("id".to_string(), input.get("messageId").filter(|id| id.as_str().is_some_and(|id| !id.is_empty())).cloned().unwrap_or_else(|| json!(uuid::Uuid::new_v4().to_string())));
                 message.insert("sessionId".to_string(), json!(session_id));
                 message.insert("sender".to_string(), json!("user"));
                 message.insert("kind".to_string(), json!("chat"));
@@ -434,7 +435,8 @@ impl SessionService {
         // every other CLI takes the queue path.
         if mode == "steer" && runs.can_steer(session_id) {
             runs.steer_session(session_id, &text).await?;
-            let message = follow_up_message(&session, &text);
+            let mut message = follow_up_message(&session, &text);
+            if let Some(id) = input.get("messageId").and_then(Value::as_str).filter(|id| !id.is_empty()) { message["id"] = json!(id); }
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().save_message(&message)?;
             return Ok(json!({ "accepted": true, "mode": "steer" }));
@@ -467,10 +469,12 @@ impl SessionService {
             artifacts: &artifacts,
             current_attachments: &[],
             recover_provider_context: session.get("providerSessionId").is_none()
-                || session.get("providerContextSyncedAt").is_none(),
+                || session.get("providerContextSyncedAt").is_none()
+                || self.runs()?.requires_provider_recovery(&session,&agent),
             workspace_root: project_root.as_deref(),
         })?;
-        let message = follow_up_message(&session, &text);
+        let mut message = follow_up_message(&session, &text);
+        if let Some(id) = input.get("messageId").and_then(Value::as_str).filter(|id| !id.is_empty()) { message["id"] = json!(id); }
         {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().save_message(&message)?;
@@ -546,7 +550,7 @@ impl SessionService {
             let db = self.db.lock().unwrap();
             let mut statement = match db.raw.prepare(
                 "SELECT data FROM runtime_events WHERE session_id = ?1 \
-                 AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled') \
+                 AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled', 'session.follow_up_steered') \
                  ORDER BY sequence, rowid",
             ) {
                 Ok(statement) => statement,
@@ -645,7 +649,9 @@ impl SessionService {
             let _ = Repositories::new(&db.raw).sessions().delete_message(session_id, message_id);
             return Ok(json!({ "cancelled": true }));
         }
-        self.runs()?.cancel_queued(session_id, message_id);
+        if !self.runs()?.cancel_queued(session_id, message_id) {
+            return Err(invalid("messageId", "Follow-up is already being sent."));
+        }
         self.untrack_pending_follow_up(session_id, message_id);
         {
             let db = self.db.lock().unwrap();
@@ -663,6 +669,30 @@ impl SessionService {
             );
         }
         Ok(json!({ "cancelled": true }))
+    }
+
+    pub async fn follow_up_steer(&self, input: &Value) -> CoreResult<Value> {
+        let session_id = input.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        let message_id = input.get("messageId").and_then(Value::as_str).unwrap_or("");
+        let session = {
+            let db = self.db.lock().unwrap();
+            Repositories::new(&db.raw).sessions().get(session_id)?.ok_or_else(|| not_found("session", session_id))?
+        };
+        let entry = self.pending_follow_up(session_id, message_id)
+            .ok_or_else(|| invalid("messageId", "Follow-up is no longer queued."))?;
+        let runs = self.runs()?;
+        if !runs.can_steer(session_id) { return Ok(json!({ "accepted": true, "mode": "queue" })); }
+        if !runs.steer_queued(session_id, message_id, entry["text"].as_str().unwrap_or("")).await? {
+            return Err(invalid("messageId", "Follow-up is already being sent."));
+        }
+        self.untrack_pending_follow_up(session_id, message_id);
+        if let Some(events) = self.events.read().unwrap().clone() {
+            let _ = events.append_for_session(&session, &json!({
+                "projectRunId": session.get("projectRunId").cloned().unwrap_or(Value::Null),
+                "taskId": session.get("taskId").cloned().unwrap_or(Value::Null)
+            }), "session.follow_up_steered", json!({ "messageId": message_id }));
+        }
+        Ok(json!({ "accepted": true, "mode": "steer" }))
     }
 }
 

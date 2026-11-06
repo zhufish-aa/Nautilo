@@ -321,10 +321,14 @@ export function CapabilityEditorDialog({
   open,
   onOpenChange,
   capability,
+  defaultKind,
+  defaultProviderId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   capability?: ProviderCapability;
+  defaultKind?: CapabilityKind;
+  defaultProviderId?: string;
 }): JSX.Element {
   const { t } = useI18n();
   const providers = useProviderMetas();
@@ -342,14 +346,14 @@ export function CapabilityEditorDialog({
 
   useEffect(() => {
     if (open) {
-      setForm(capability ? formFromCapability(capability) : emptyForm());
+      setForm(capability ? formFromCapability(capability) : { ...emptyForm(), kind: defaultKind ?? "skill", providerIds: defaultProviderId ? [defaultProviderId] : [] });
       setErrors({});
       setSaving(false);
       setImportedFileName(undefined);
       setQuickText("");
       setQuickNote(undefined);
     }
-  }, [open, capability]);
+  }, [open, capability, defaultKind, defaultProviderId]);
 
   const patch = (changes: Partial<FormState>): void =>
     setForm((prev) => ({ ...prev, ...changes }));
@@ -575,7 +579,7 @@ export function CapabilityEditorDialog({
       }
     >
       <div className="space-y-6">
-        <Field label={t("agents.tools.editor.kindLabel")}>
+        {!defaultKind && <Field label={t("agents.tools.editor.kindLabel")}>
           <Segmented<CapabilityKind>
             ariaLabel={t("agents.tools.editor.kindLabel")}
             value={form.kind}
@@ -585,7 +589,7 @@ export function CapabilityEditorDialog({
               { value: "mcp", label: t("agents.tools.typeMcp") },
             ]}
           />
-        </Field>
+        </Field>}
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field
@@ -629,7 +633,7 @@ export function CapabilityEditorDialog({
             </Field>
           </div>
         </details>
-        <Field
+        {!defaultProviderId && <Field
           label={t("agents.tools.editor.providers")}
           hint={t("agents.tools.editor.providersHint")}
         >
@@ -661,7 +665,7 @@ export function CapabilityEditorDialog({
               );
             })}
           </div>
-        </Field>
+        </Field>}
 
         {form.kind === "mcp" ? (
           <div className="space-y-6 border-t border-line pt-6">
@@ -911,7 +915,7 @@ export function CapabilityEditorDialog({
           </div>
         )}
 
-        <div className="flex items-center justify-between gap-3 border-t border-line py-5">
+        {!defaultProviderId && <div className="flex items-center justify-between gap-3 border-t border-line py-5">
           <div>
             <p className="text-[13px] font-medium text-ink-2">
               {t("agents.tools.editor.enabled")}
@@ -922,7 +926,7 @@ export function CapabilityEditorDialog({
             onCheckedChange={(enabled) => patch({ enabled })}
             aria-label={t("agents.tools.editor.enabled")}
           />
-        </div>
+        </div>}
 
         {errors.form && (
           <p

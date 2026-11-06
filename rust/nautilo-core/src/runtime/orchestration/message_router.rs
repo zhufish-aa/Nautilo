@@ -17,10 +17,11 @@ impl MessageRouter {
         Self { db }
     }
 
-    pub fn user_goal(&self, session: &Value, project_run: &Value) -> CoreResult<Value> {
+    pub fn user_goal(&self, session: &Value, project_run: &Value, message_id: Option<&str>) -> CoreResult<Value> {
         self.save(
             session,
             &json!({
+                "id": message_id.filter(|id| !id.is_empty()),
                 "sender": "user",
                 "kind": "chat",
                 "projectRunId": project_run.get("id").cloned().unwrap_or(Value::Null),

@@ -42,8 +42,9 @@ pub fn resolve_spawn_command(
 
 /// Case-insensitive env lookup: Windows typically spells it "Path".
 fn env_value(env: Option<&HashMap<String, String>>, key: &str) -> Option<String> {
+    if let Some(value) = env.and_then(|values|values.get(key)) { return Some(value.clone()); }
     let merged_process: HashMap<String, String> = std::env::vars().collect();
-    for (name, value) in merged_process.iter().chain(env.into_iter().flatten()) {
+    for (name, value) in env.into_iter().flatten().chain(merged_process.iter()) {
         if name.eq_ignore_ascii_case(key) {
             return Some(value.clone());
         }

@@ -13,6 +13,7 @@ use crate::process_runtime::{ProcessEvent, ProcessRequest, ProcessRuntime};
 use crate::errors::now_iso;
 
 pub mod acp_events;
+mod connection;
 pub mod acp_run;
 pub mod acp_segments;
 pub mod session_usage;
@@ -39,7 +40,7 @@ fn default_args(request: Option<&AdapterStartRequest>) -> Vec<String> {
 
 pub fn build_kimi_start_args(instance: &Value, prompt: &str, request: Option<&AdapterStartRequest>) -> Vec<String> {
     let custom = base_args(instance);
-    let mut args = if custom.is_empty() { default_args(request) } else { custom };
+    let mut args = crate::adapters::process_adapter::merge_cli_args(custom, default_args(request));
     args.extend(["--prompt".to_string(), prompt.to_string(), "--output-format".to_string(), "stream-json".to_string()]);
     args
 }
@@ -51,7 +52,7 @@ pub fn build_kimi_resume_args(
     request: Option<&AdapterStartRequest>,
 ) -> Vec<String> {
     let custom = base_args(instance);
-    let mut args = if custom.is_empty() { default_args(request) } else { custom };
+    let mut args = crate::adapters::process_adapter::merge_cli_args(custom, default_args(request));
     args.extend([
         "--session".to_string(),
         session_id.to_string(),
@@ -91,7 +92,7 @@ pub fn parse_kimi_json_event(value: &Value) -> Vec<AdapterEvent> {
                 for call in calls {
                     if let Some(name) = call.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) {
                         events.push(AdapterEvent::Tool {
-                            call_id: None,
+                            call_id: call.get("id").and_then(Value::as_str).map(str::to_string),
                             name: name.to_string(),
                             phase: Some("started".to_string()),
                             input: call.get("function").and_then(|f| f.get("arguments")).map(parse_arguments),
@@ -107,7 +108,7 @@ pub fn parse_kimi_json_event(value: &Value) -> Vec<AdapterEvent> {
             events
         }
         "tool" => vec![AdapterEvent::Tool {
-            call_id: None,
+            call_id: value.get("tool_call_id").and_then(Value::as_str).map(str::to_string),
             name: value.get("tool_call_id").and_then(Value::as_str).unwrap_or("tool").to_string(),
             phase: Some("completed".to_string()),
             input: None,
@@ -393,6 +394,7 @@ impl AgentCliAdapter for KimiCodeAdapter {
             "capabilities": ["headless_structured", "pty_interactive"],
             "defaultExecutable": "kimi",
             "credentialEnv": ["KIMI_API_KEY"],
+            "envPassthrough": ["KIMI_CODE_HOME"],
             "contextWindowDiscovery": true,
             "permissionModes": [
                 { "value": "default", "name": { "zh-CN": "逐个询问", "en-US": "Ask every time" },
@@ -494,31 +496,62 @@ impl AgentCliAdapter for KimiCodeAdapter {
         Some(discover_kimi_models(instance, env.as_ref()).await)
     }
 
-    fn start(&self, request: AdapterStartRequest) -> CoreResult<AdapterRun> {
-        if !base_args(&request.instance).is_empty() {
+    fn start(&self, mut request: AdapterStartRequest) -> CoreResult<AdapterRun> {
+        let observer=crate::adapters::api_stream_observer::ApiStreamObserver::prepare(&mut request)?;
+        let proxy=connection::prepare_protocol(&mut request)?;
+        connection::prepare(&request.instance, request.env.get_or_insert_with(HashMap::new))?;
+        // Kimi's older ACP server requires an OAuth login even when a custom
+        // model has its own credentials. Prompt mode honors the native config
+        // directly, so an API connection must never fall back to that login.
+        if request.instance.pointer("/providerOptions/runtimeConnectionId").is_some() || !base_args(&request.instance).is_empty() {
+            request.prompt = crate::adapters::images::prompt_with_image_files(&request)
+                .map_err(|error|CoreError::reason(ErrorCode::RunStartFailed,error.to_string()))?;
             let args = build_kimi_start_args(&request.instance, &request.prompt, Some(&request));
-            return start_simple(request, args);
+            return start_simple(request, args).map(|run|{let run=connection::keep_protocol(run,proxy);match observer {Some(observer)=>observer.wrap(run),None=>run}});
         }
         acp_run::start_kimi_acp(request, None)
     }
 
-    fn resume(&self, request: AdapterResumeRequest) -> CoreResult<AdapterRun> {
-        if !base_args(&request.start.instance).is_empty() {
+    fn resume(&self, mut request: AdapterResumeRequest) -> CoreResult<AdapterRun> {
+        let observer=crate::adapters::api_stream_observer::ApiStreamObserver::prepare(&mut request.start)?;
+        let proxy=connection::prepare_protocol(&mut request.start)?;
+        connection::prepare(&request.start.instance, request.start.env.get_or_insert_with(HashMap::new))?;
+        if request.start.instance.pointer("/providerOptions/runtimeConnectionId").is_some() || !base_args(&request.start.instance).is_empty() {
+            request.start.prompt = crate::adapters::images::prompt_with_image_files(&request.start)
+                .map_err(|error|CoreError::reason(ErrorCode::RunStartFailed,error.to_string()))?;
             let args = build_kimi_resume_args(
                 &request.start.instance,
                 &request.provider_session_id,
                 &request.start.prompt,
                 Some(&request.start),
             );
-            return start_simple(request.start, args);
+            return start_simple(request.start, args).map(|run|{let run=connection::keep_protocol(run,proxy);match observer {Some(observer)=>observer.wrap(run),None=>run}});
         }
         acp_run::start_kimi_acp(request.start, Some(request.provider_session_id))
     }
+
+    async fn dispose(&self) {acp_run::dispose().await;}
+    async fn release_session(&self,request:&AdapterStartRequest)->CoreResult<()> {acp_run::release_session(request.local_session_id.as_deref().unwrap_or("")).await;Ok(())}
+    async fn native_terminal(&self,mut request:AdapterStartRequest,resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
+        let proxy=connection::prepare_protocol(&mut request)?;
+        connection::prepare(&request.instance,request.env.get_or_insert_with(HashMap::new))?;
+        let mut args=base_args(&request.instance);args.extend(default_args(Some(&request)));
+        if let Some(resume)=resume {args.extend(["--session".into(),resume]);}
+        if let Some(effort)=request.reasoning_effort {request.env.get_or_insert_with(HashMap::new).insert("KIMI_MODEL_THINKING_EFFORT".into(),effort);}
+        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("kimi").into(),args,env:request.env,cwd:request.cwd,resources:vec![Box::new(proxy)]})
+    }
 }
 
-/// Custom-baseArgs path: plain stream-json process, no ACP.
+/// Native prompt mode for API connections and custom CLI invocations.
 fn start_simple(request: AdapterStartRequest, args: Vec<String>) -> CoreResult<AdapterRun> {
     let mut env = request.env.clone().unwrap_or_default();
+    if request.instance.pointer("/providerOptions/runtimeConnectionId").is_some() {
+        if let Some(home) = env.get("KIMI_CODE_HOME") {
+            agenthub_plugin_sdk::native_config::merge_mcp_file(&std::path::PathBuf::from(home).join("mcp.json"),
+                Some(&json!(request.mcp_servers.as_deref().unwrap_or(&[]))))
+                .map_err(|error| CoreError::reason(ErrorCode::RunStartFailed, error.to_string()))?;
+        }
+    }
     // KIMI_MODEL_THINKING_EFFORT carries the session's reasoning effort.
     if let Some(effort) = request.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
         env.insert("KIMI_MODEL_THINKING_EFFORT".to_string(), effort.to_string());

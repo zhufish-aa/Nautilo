@@ -10,13 +10,11 @@ test('account connections require exact supported harness',()=>{
  assert.equal(connectionSupportsAgent({kind:'login',enabled:true,harness:'codex'},agent('codex')),true);
  assert.equal(connectionSupportsAgent({kind:'login',enabled:true,harness:'codex'},agent('claude-code')),false);
 });
-test('API options only expose established protocol compatibility',()=>{
- assert.equal(connectionSupportsAgent(api('responses'),agent('codex')),true);
- assert.equal(connectionSupportsAgent(api('chat'),agent('codex')),true);
- assert.equal(connectionSupportsAgent(api('anthropic'),agent('claude-code')),true);
- assert.equal(connectionSupportsAgent(api('responses'),agent('claude-code')),false);
- assert.equal(connectionSupportsAgent(api('anthropic'),agent('codex')),false);
- assert.equal(connectionSupportsAgent(api('chat'),agent('custom-cli')),false);
+test('every built-in harness exposes the saved API connections for each supported wire',()=>{
+ for(const harness of ['codex','claude-code','kimi-code','pi','omp','opencode','commandcode','trae']) {
+  for(const protocol of ['responses','chat','anthropic']) assert.equal(connectionSupportsAgent(api(protocol),agent(harness)),true,`${harness}: ${protocol}`);
+ }
+ assert.equal(connectionSupportsAgent(api('chat'),agent('new-provider-plugin')),true,'a new plugin needs no frontend allowlist edit');
 });
 test('disabled sources and custom routing do not appear eligible',()=>{
  assert.equal(connectionSupportsAgent({...api('chat'),enabled:false},agent('codex')),false);

@@ -6,6 +6,13 @@ import { CoreError } from "../errors.js";
 import { CredentialService, EnvironmentPolicyService, providerEnvironmentPassthrough, isolateLoginProfile, loginProfileDirectory } from "../runtime/security/index.js";
 
 export class AgentService {
+  async listModes(agentInstanceId: string) {
+    const instance = this.database.agents.get(agentInstanceId);
+    if (!instance) throw new CoreError("IPC_NOT_FOUND", { resource: "agent", id: agentInstanceId });
+    const adapter = this.adapters.find(instance.providerId);
+    if (!adapter?.descriptor.modeDiscovery || !adapter.listModes) return { modes: [] };
+    return adapter.listModes(instance, { env: this.environment.build(undefined, providerEnvironmentPassthrough(instance, process.env, adapter.descriptor)) });
+  }
   constructor(
     private readonly database: Database,
     private readonly adapters: AdapterRegistry,

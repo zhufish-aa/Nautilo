@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Link,
   useLocation,
@@ -14,6 +14,8 @@ import {
   Folder,
   HelpCircle,
   Layers,
+  Server,
+  Puzzle,
   Monitor,
   Plus,
   RotateCcw,
@@ -36,7 +38,9 @@ import { useSessionsStore } from "../../stores/sessions";
 import { cn, newId } from "../../lib/utils";
 import { NAV_ENTRIES } from "../../components/layout/nav";
 import { listThemes, SYSTEM_THEME_ID } from "../../lib/themes";
-import { InstancesPanel } from "../agents/InstancesPanel";
+import { HarnessPanel } from "../agents/HarnessPanel";
+import { TeamsPage } from "../teams/TeamsPage";
+import { TeamEditorPage } from "../teams/TeamEditorPage";
 import { ProvidersPanel } from "../agents/ProvidersPanel";
 import { ProviderToolsPanel } from "../agents/ProviderToolsPanel";
 import { PluginMarketPanel } from "../agents/PluginMarketPanel";
@@ -46,12 +50,14 @@ import { UsagePanel } from "./UsagePanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
 
 type SettingsSection =
+  | "teams"
   | "accounts"
   | "usage"
   | "general"
   | "appearance"
   | "agents"
   | "skills"
+  | "mcp"
   | "plugins"
   | "permissions"
   | "notifications"
@@ -64,10 +70,13 @@ const SECTIONS: Array<{
 }> = [
   { id: "general", zh: "通用", en: "General", icon: Settings2 },
   { id: "appearance", zh: "外观", en: "Appearance", icon: Monitor },
-  { id: "agents", zh: "模型与 Agent", en: "Models & agents", icon: Box },
+  { id: "agents", zh: "Harness 管理", en: "Harnesses", icon: Box },
   { id: "accounts", zh: "供应商与账号", en: "Providers & accounts", icon: Users },
   { id: "usage", zh: "用量与费用", en: "Usage & costs", icon: BarChart3 },
-  { id: "skills", zh: "技能与插件", en: "Skills & plugins", icon: Layers },
+  { id: "teams", zh: "团队管理", en: "Teams", icon: Users },
+  { id: "skills", zh: "Skills 技能", en: "Skills", icon: Layers },
+  { id: "mcp", zh: "MCP 服务", en: "MCP servers", icon: Server },
+  { id: "plugins", zh: "插件", en: "Plugins", icon: Puzzle },
   { id: "permissions", zh: "权限与安全", en: "Permissions", icon: Shield },
   {
     id: "notifications",
@@ -88,22 +97,12 @@ function Row({
   children: ReactNode;
 }): JSX.Element {
   return (
-    <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-x-8 gap-y-3 border-b border-line py-5">
-      <span className="flex items-center gap-2 text-sm text-ink">
-        {label}
-        {help && (
-          <Tooltip content={help}>
-            <button
-              type="button"
-              aria-label={help}
-              className="rounded text-ink-3 outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
-            >
-              <HelpCircle className="h-3.5 w-3.5" />
-            </button>
-          </Tooltip>
-        )}
-      </span>
-      <div className="max-w-full shrink-0">{children}</div>
+    <div className="settings-row">
+      <div className="settings-row-copy">
+        <span className="settings-row-label">{label}</span>
+        {help && <p className="settings-row-description">{help}</p>}
+      </div>
+      <div className="settings-row-control">{children}</div>
     </div>
   );
 }
@@ -120,7 +119,7 @@ function SettingsLink({
   return (
     <Link
       to={to}
-      className="flex min-h-14 items-center gap-3 border-b border-line py-4 text-sm text-ink outline-none hover:text-ink-2 focus-visible:ring-2 focus-visible:ring-accent"
+      className="settings-link flex items-center gap-3 text-sm text-ink outline-none hover:text-ink-2 focus-visible:ring-2 focus-visible:ring-accent"
     >
       <Icon className="h-4 w-4 text-ink-3" aria-hidden />
       <span className="flex-1">{label}</span>
@@ -156,7 +155,7 @@ export function SettingsPage(): JSX.Element {
     requested === "plugins" || SECTIONS.some((item) => item.id === requested)
       ? (requested as SettingsSection)
       : "general";
-  const activeGroup = section === "plugins" ? "skills" : section;
+  const activeGroup = section;
   const settings = useSettingsStore();
   const {
     theme,
@@ -221,17 +220,17 @@ export function SettingsPage(): JSX.Element {
   const isCustomTheme = !basicThemes.some((item) => item.id === theme);
 
   return (
-    <div className="settings-layout flex h-full min-h-0 w-full overflow-hidden bg-panel">
+    <div className="settings-layout flex h-full min-h-0 w-full overflow-hidden bg-panel" data-section={section}>
       <aside className="settings-sidebar flex w-[220px] shrink-0 flex-col border-r border-line px-3 py-4 max-[760px]:w-[176px] max-[560px]:w-[60px] max-[560px]:px-2">
         <button
           type="button"
           onClick={() => navigate(returnTo)}
           className="mb-6 flex h-10 items-center gap-2.5 rounded-lg px-3 text-sm text-ink-2 outline-none hover:bg-card-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent max-[560px]:justify-center max-[560px]:px-0"
-          aria-label={zh ? "返回对话" : "Back to chat"}
+          aria-label={zh ? "返回工作台" : "Back to chat"}
         >
           <ArrowLeft className="h-4 w-4 shrink-0" aria-hidden />
           <span className="max-[560px]:hidden">
-            {zh ? "返回对话" : "Back to chat"}
+            {zh ? "返回工作台" : "Back to chat"}
           </span>
         </button>
         <nav
@@ -239,7 +238,11 @@ export function SettingsPage(): JSX.Element {
           className="min-h-0 flex-1 space-y-1 overflow-y-auto"
         >
           {SECTIONS.map(({ id, zh: chinese, en, icon: Icon }) => (
-            <Tooltip key={id} content={zh ? chinese : en} side="right">
+            <Fragment key={id}>
+              {id === "general" && <p className="settings-nav-group">{zh ? "设置" : "Settings"}</p>}
+              {id === "agents" && <p className="settings-nav-group">{zh ? "功能" : "Features"}</p>}
+              {id === "permissions" && <p className="settings-nav-group">{zh ? "系统与安全" : "System & security"}</p>}
+              <Tooltip content={zh ? chinese : en} side="right">
               <button
                 type="button"
                 onClick={() => chooseSection(id)}
@@ -259,18 +262,19 @@ export function SettingsPage(): JSX.Element {
                 />
                 <span className="max-[560px]:hidden">{zh ? chinese : en}</span>
               </button>
-            </Tooltip>
+              </Tooltip>
+            </Fragment>
           ))}
         </nav>
       </aside>
       <div
         ref={contentRef}
-        className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain bg-card px-8 py-10 max-[760px]:px-5 max-[560px]:px-4"
+        className="settings-content min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain bg-card px-8 py-10 max-[760px]:px-5 max-[560px]:px-4"
       >
         <div
           className={cn(
-            "mx-auto w-full",
-            ["agents", "accounts", "skills", "plugins", "permissions", "advanced", "usage"].includes(
+            "settings-content-inner mx-auto w-full",
+            ["agents", "accounts", "skills", "mcp", "plugins", "permissions", "advanced", "usage", "teams"].includes(
               section,
             )
               ? "max-w-[1000px]"
@@ -281,10 +285,11 @@ export function SettingsPage(): JSX.Element {
             {zh ? activeItem.zh : activeItem.en}
           </h1>
 
-          {section === "usage" && <UsagePanel />}
+          {section === "usage" && <div className="settings-panel-card"><UsagePanel /></div>}
 
           {section === "general" && (
             <>
+              <div className="settings-card">
               <Row label={t("settings.language.title")}>
                 <div className="w-44">
                   <SelectField
@@ -305,6 +310,9 @@ export function SettingsPage(): JSX.Element {
                 label={zh ? "项目管理" : "Projects"}
                 icon={Folder}
               />
+              </div>
+              <h2 className="settings-group-heading">{zh ? "应用" : "Application"}</h2>
+              <div className="settings-card">
               <Row label={t("settings.about.appVersion")}>
                 <span className="text-sm tabular-nums text-ink-2">
                   {appInfo?.version ?? "—"}
@@ -323,7 +331,8 @@ export function SettingsPage(): JSX.Element {
                   {zh ? "重新开始" : "Restart"}
                 </Button>
               </Row>
-              <details className="mt-8 border-b border-line pb-4">
+              </div>
+              <details className="settings-card settings-disclosure">
                 <summary className="cursor-pointer text-sm font-medium text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent">
                   {t("settings.nav.title")}
                 </summary>
@@ -352,6 +361,7 @@ export function SettingsPage(): JSX.Element {
 
           {section === "appearance" && (
             <>
+              <div className="settings-card">
               <Row label={zh ? "主题" : "Theme"}>
                 <div
                   className="flex rounded-lg bg-panel p-1"
@@ -386,10 +396,11 @@ export function SettingsPage(): JSX.Element {
                   aria-label={t("settings.motion.reduce")}
                 />
               </Row>
+              </div>
               {advancedThemes.length > 0 && (
                 <details
                   open={isCustomTheme || undefined}
-                  className="mt-8 border-b border-line pb-5"
+                  className="settings-card settings-disclosure"
                 >
                   <summary className="cursor-pointer text-sm font-medium text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent">
                     {zh ? "更多主题" : "More themes"}
@@ -439,63 +450,27 @@ export function SettingsPage(): JSX.Element {
             </>
           )}
 
-          {section === "accounts" && <ConnectionsPanel />}
+          {section === "accounts" && <div className="settings-panel-card"><ConnectionsPanel /></div>}
 
-          {section === "agents" && (
-            <>
-              <div className="mb-6 flex items-center justify-between gap-3">
-                <p className="text-sm text-muted">{zh ? "管理已安装的 CLI 与 Agent 团队。供应商、账号与模型价格在「供应商与账号」中配置。" : "Manage installed CLIs and agent teams. Configure provider accounts and model prices in Providers & accounts."}</p>
-                <Button size="sm" variant="outline" onClick={() => navigate("/teams")}><Users className="h-4 w-4" aria-hidden />{zh ? "团队" : "Teams"}</Button>
-              </div>
-              <div data-tour="agents-page" className="space-y-8"><InstancesPanel /><details className="rounded-lg border border-line p-4"><summary className="cursor-pointer text-sm text-muted">{zh ? "CLI 安装与检测" : "CLI installation & detection"}</summary><div className="mt-4"><ProvidersPanel /></div></details></div>
-            </>
-          )}
+          {section === "agents" && <div className="settings-panel-card"><HarnessPanel /></div>}
+          {section === "teams" && <div className="settings-panel-card">{searchParams.get("team") ? <TeamEditorPage teamIdOverride={searchParams.get("team")!} backTo="/settings?section=teams" /> : <TeamsPage embedded />}</div>}
 
-          {(section === "skills" || section === "plugins") && (
-            <>
-              <div
-                className="mb-6 flex gap-5 border-b border-line"
-                role="group"
-                aria-label={zh ? "技能与插件" : "Skills & plugins"}
-              >
-                {(
-                  [
-                    { id: "skills", label: zh ? "技能与 MCP" : "Skills & MCP" },
-                    { id: "plugins", label: zh ? "插件" : "Plugins" },
-                  ] as const
-                ).map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    aria-pressed={section === item.id}
-                    onClick={() => chooseSection(item.id)}
-                    className={cn(
-                      "border-b-2 px-1 py-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent",
-                      section === item.id
-                        ? "border-ink font-medium text-ink"
-                        : "border-transparent text-ink-2 hover:text-ink",
-                    )}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-              {section === "skills" ? (
-                <ProviderToolsPanel />
-              ) : (
-                <PluginMarketPanel />
-              )}
-            </>
+          {(section === "skills" || section === "mcp") && (
+            <div className="settings-panel-card">
+              <ProviderToolsPanel kind={section === "skills" ? "skill" : "mcp"} />
+            </div>
           )}
+          {section === "plugins" && <PluginMarketPanel />}
 
           {permissionsVisited.current && (
-            <div hidden={section !== "permissions"}>
+            <div className="settings-panel-card" hidden={section !== "permissions"}>
               <PermissionPolicyCard />
             </div>
           )}
 
           {section === "notifications" && (
             <>
+              <div className="settings-card">
               <Row
                 label={t("settings.notifications.enabled")}
                 help={t("settings.notifications.desc")}
@@ -514,7 +489,8 @@ export function SettingsPage(): JSX.Element {
                   aria-label={t("settings.notifications.sound")}
                 />
               </Row>
-              <div className="mt-10">
+              </div>
+              <div className="settings-card settings-snippets">
                 <h2 className="mb-5 flex items-center justify-between text-sm font-medium text-ink">
                   <span className="flex items-center gap-2">
                     {t("settings.snippets.title")}
@@ -584,7 +560,7 @@ export function SettingsPage(): JSX.Element {
 
           {section === "advanced" && (
             <>
-              <div className="mb-10">
+              <div className="settings-card">
                 <SettingsLink to="/tasks" label={zh ? "任务" : "Tasks"} />
                 <SettingsLink
                   to="/runs"
@@ -596,8 +572,8 @@ export function SettingsPage(): JSX.Element {
                   icon={Users}
                 />
               </div>
-              <RuntimeOperationsCard />
-              <details className="mt-8 border-b border-line pb-5">
+              <div className="settings-panel-card settings-runtime"><RuntimeOperationsCard /></div>
+              <details className="settings-card settings-disclosure">
                 <summary className="cursor-pointer text-sm font-medium text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent">
                   {t("settings.about.title")}
                 </summary>

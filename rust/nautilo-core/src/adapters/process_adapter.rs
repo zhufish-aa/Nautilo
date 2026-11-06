@@ -13,6 +13,39 @@ use crate::process_runtime::ProcessEvent;
 
 pub type StructuredEventParser = Arc<dyn Fn(&Value, &str) -> Vec<AdapterEvent> + Send + Sync>;
 
+pub fn merge_cli_args(mut base: Vec<String>, managed: Vec<String>) -> Vec<String> {
+    let mut index = 0;
+    while index < managed.len() {
+        let name = &managed[index];
+        let takes_value = managed.get(index+1).is_some_and(|value| !value.starts_with('-'));
+        if !["--settings", "--config", "-c"].contains(&name.as_str()) {
+            let mut cursor = 0;
+            while cursor < base.len() {
+                let alias = match name.as_str() { "--model"=>Some("-m"),"--profile"=>Some("-p"),"--sandbox"=>Some("-s"),"--ask-for-approval"=>Some("-a"),"--resume"=>Some("-r"),"-p"=>Some("--print"),_=>None };
+                let exact = base[cursor] == *name || alias == Some(base[cursor].as_str());
+                if exact || base[cursor].starts_with(&format!("{name}=")) {
+                    base.remove(cursor);
+                    if exact && takes_value && cursor < base.len() { base.remove(cursor); }
+                } else { cursor += 1; }
+            }
+        }
+        base.push(name.clone());
+        if takes_value { base.push(managed[index+1].clone()); }
+        index += if takes_value {2} else {1};
+    }
+    base
+}
+
+fn flush_pending(pending: &mut [(&str, String)], parse: &StructuredEventParser, sender: &mpsc::UnboundedSender<AdapterEvent>) {
+    for (stream, buffer) in pending {
+        let text = std::mem::take(buffer);
+        if text.trim().is_empty() { continue; }
+        let events = serde_json::from_str::<Value>(&text).ok().map(|value|parse(&value,stream)).unwrap_or_default();
+        if events.is_empty() { let _ = sender.send(AdapterEvent::Raw {stream:stream.to_string(),text}); }
+        else { for event in events { let _ = sender.send(event); } }
+    }
+}
+
 /// Port of streamEvents: lines a structured process's stdout/stderr into
 /// AdapterEvents; raw mode forwards chunks untouched. Unparsed lines fall
 /// back to raw events, and buffered tails flush when the stream closes.
@@ -29,6 +62,7 @@ pub fn stream_events(
                 ProcessEvent::Stdout(text) => ("stdout", text),
                 ProcessEvent::Stderr(text) => ("stderr", text),
                 ProcessEvent::Exit { exit_code, signal } => {
+                    flush_pending(&mut pending, &parse, &sender);
                     let _ = sender.send(AdapterEvent::Exit { exit_code, signal });
                     continue;
                 }
@@ -79,11 +113,7 @@ pub fn stream_events(
                 }
             }
         }
-        for (stream, buffer) in pending.iter_mut() {
-            if !buffer.trim().is_empty() {
-                let _ = sender.send(AdapterEvent::Raw { stream: stream.to_string(), text: std::mem::take(buffer) });
-            }
-        }
+        flush_pending(&mut pending, &parse, &sender);
     });
     receiver
 }

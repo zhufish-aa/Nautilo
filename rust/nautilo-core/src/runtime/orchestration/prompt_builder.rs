@@ -7,16 +7,26 @@ pub struct OrchestrationPromptBuilder;
 
 impl OrchestrationPromptBuilder {
     pub fn main_turn(goal: &str, team: &Value, child_sessions: &[Value], continuity: Option<&str>) -> String {
+        let can_delegate = team.get("delegationPolicy").and_then(Value::as_str) != Some("direct_only")
+            && team.get("members").and_then(Value::as_array).is_some_and(|members| members.iter().any(|member|
+                member.get("enabled").and_then(Value::as_bool) == Some(true) && member.get("id") != team.get("mainMemberId")));
+        let delegation = if can_delegate {
+            [
+                "Use agenthub_delegate or agenthub_plan with the exact configured member IDs below to dispatch Nautilo team tasks. Honor an explicit user request to use a configured member even for a small task.",
+                "Default to delegating substantial, well-scoped work matching a configured member's role or strengths. Respect role descriptions and limitations; do not take over work assigned to that role.",
+                "Order before parallel: research and exploration must finish before implementation that depends on it. Use dependsOn for dependent tasks and serialize overlapping files. Parallelize only independent work.",
+                "Give implementation members concrete files, decisions, and acceptance checks. Use an exploration member first when facts are missing.",
+                "Do trivial work and central coordination yourself unless the user or a member's configured role explicitly assigns it to a member.",
+                "If the Nautilo delegation tools are unavailable in this turn, report that the configured member was not dispatched. Never substitute a provider-native child and claim that it is the configured member.",
+            ].join("\n\n")
+        } else {
+            "Configured-member delegation is disabled for this turn (direct_only policy or no enabled child members). The Nautilo delegate and plan tools are not available. Do not claim a configured member was dispatched; if the user asks for one, explain that the team policy or enabled members need to change.".to_string()
+        };
         [
             "[AGENTHUB_MAIN_TURN]".to_string(),
             "Work on the user's request normally. You are not required to classify it or emit routing JSON.".to_string(),
-            "Delegation policy for this turn:".to_string(),
-            "- Default to delegating any substantial, well-scoped task that matches a configured member's role or strengths. The team exists to be used; doing everything yourself when a member fits is a failure mode.".to_string(),
-            "- Order before parallel: research and exploration must finish before you dispatch implementation that depends on it. Chain dependent tasks with dependsOn or dispatch them in separate turns after the prerequisite result arrives. Parallel dispatch is only for tasks with disjoint files and no data dependency — when in doubt, serialize.".to_string(),
-            "- Write implementation tasks with your decisions baked in: concrete files, the chosen approach, and acceptance checks. Never hand an implementation member open-ended 'investigate and decide' work — deciding is your job; use an exploration member when facts are missing, then plan from its result.".to_string(),
-            "- Do the work yourself only when it is trivial (a quick lookup or a small edit), when it is central coordination (merging or verifying child output), or when no enabled member fits.".to_string(),
-            "- Respect each member's role description and limitations; when a role assigns a category of work to a member, do not take that work over.".to_string(),
-            "You may call the Nautilo delegate or plan tool at any point in this turn.".to_string(),
+            delegation,
+            "Provider-native subagents (spawn_agent, Task, and similar tools) belong to the current Harness. They are distinct from Nautilo's configured members, connections, and models. Do not describe one as the other. Only report a configured dispatch after a successful Nautilo tool receipt; use its actual taskId and sessionId when asked where it ran.".to_string(),
             "Every delegated task must be self-contained. A child receives the task text and its own provider session; it cannot inspect the parent session, a sibling Agent session, or another Agent's pending result.".to_string(),
             "Never ask one child Agent to obtain status, context, or output from another child Agent. Use plan dependencies when ordering matters; Nautilo supplies completed dependency outcomes to the dependent child.".to_string(),
             "Delegation tools do not forward chat-only attachments or inline images. Do not tell a child to inspect 'the attached image' or other unseen conversation content. Handle the visual analysis yourself, or provide a verified child-readable workspace path plus all essential textual observations in the task.".to_string(),

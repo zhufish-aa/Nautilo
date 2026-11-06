@@ -98,7 +98,7 @@ export default function App(): JSX.Element {
               <Route path="/work" element={null} />
               <Route path="/projects" element={<ProjectsPage />} />
               <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
-              <Route path="/agents" element={<AgentsPage />} />
+              <Route path="/agents" element={<Navigate to="/settings?section=agents" replace />} />
               <Route path="/teams" element={<TeamsPage />} />
               <Route path="/teams/:teamId" element={<TeamEditorPage />} />
               <Route path="/tasks" element={<TasksPage />} />

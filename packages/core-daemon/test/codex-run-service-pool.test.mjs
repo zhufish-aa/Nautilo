@@ -63,8 +63,8 @@ test('RunService launches same-instance Codex child sessions into parallel real 
     assert.equal(rightResult.finalMessage, 'done:slow-right');
     log = await readLog();
     assert.ok(log.some((row) => row.pid === leftPid && row.method === 'turn/interrupt' && row.id !== undefined));
-    assert.ok(log.some((row) => row.pid === leftPid && row.stopped));
-    assert.equal(log.some((row) => row.pid === rightPid && row.stopped), false);
+    assert.throws(() => process.kill(leftPid, 0), 'cancelled process exits on Windows as well as POSIX');
+    assert.doesNotThrow(() => process.kill(rightPid, 0), 'the sibling process stays warm');
     assert.equal(database.sessions.get(children[0].id).providerSessionId, `thread-${leftPid}`);
     assert.equal(database.sessions.get(children[1].id).providerSessionId, `thread-${rightPid}`);
 
@@ -72,7 +72,8 @@ test('RunService launches same-instance Codex child sessions into parallel real 
     handles.push(resumed);
     assert.equal((await resumed.completion).finalMessage, 'done:fast-resumed');
     log = await readLog();
-    assert.ok(log.some((row) => row.pid === rightPid && row.method === 'thread/resume' && row.params.threadId === `thread-${rightPid}`));
+    assert.equal(log.filter(row => row.method === 'thread/resume').length, 0, 'a warm native thread needs no repeated resume');
+    assert.ok(log.some(row => row.pid === rightPid && row.method === 'turn/start' && row.params.threadId === `thread-${rightPid}` && row.params.input[0].text === 'fast-resumed'));
     assert.equal(log.filter((row) => row.spawned).length, 2, 'RunService resume reuses the warm child process');
   } finally {
     await Promise.all(handles.map((handle) => service.cancel(handle.runId)));

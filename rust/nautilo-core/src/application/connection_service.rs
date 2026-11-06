@@ -109,13 +109,29 @@ impl ConnectionService {
             catalog["providerId"] = json!(format!("connection:{id}"));
             return Ok(merge_instance_model_config(&catalog, connection.get("models")));
         }
-        let Some(agent_id) = input["agentInstanceId"].as_str() else {
-            return Ok(json!({"providerId":connection["harness"],"models":[],"source":"unavailable","warning":"Select a matching installed harness to discover login-account models","fetchedAt":now_iso()}));
+        let harness = connection["harness"].as_str().ok_or_else(|| invalid("harness", "Missing login harness"))?;
+        let configured = {
+            let db = self.db.lock().unwrap();
+            let agents = Repositories::new(&db.raw).agents();
+            if let Some(id) = input["agentInstanceId"].as_str() {
+                let agent = agents.get(id)?.ok_or_else(|| not_found("harness", id))?;
+                if agent["providerId"] != harness { return Err(invalid("harness", "Account and harness must match")); }
+                Some(agent)
+            } else {
+                let mut matching = agents.list_default()?.into_iter().filter(|agent| agent["providerId"] == harness && agent["enabled"] != false).collect::<Vec<_>>();
+                matching.sort_by_key(|agent| agent.pointer("/providerOptions/configurationKind").and_then(Value::as_str) != Some("harness"));
+                matching.into_iter().find(|agent| agent["executable"].as_str().is_some_and(|command| !command.trim().is_empty()))
+            }
         };
-        let agent = Repositories::new(&self.db.lock().unwrap().raw).agents().get(agent_id)?.ok_or_else(|| not_found("agent",agent_id))?;
-        let agent = apply_connection(&agent,&connection)?;
-        let env = isolate_login_profile(&agent, build_environment(None,HashMap::new()))?;
-        self.adapters.list_models(&agent,Some(&json!({"env":env}))).await
+        let descriptor = self.adapters.get(harness)?.descriptor();
+        let executable = configured.as_ref().and_then(|agent| agent["executable"].as_str())
+            .or_else(|| descriptor["defaultExecutable"].as_str())
+            .ok_or_else(|| invalid("executable", "Install the account's harness to discover models"))?;
+        let probe = json!({"id":format!("connection-models:{id}"),"providerId":harness,"displayName":harness,
+            "executable":executable,"baseArgs":[],"enabled":true,"capabilities":[]});
+        let agent = apply_connection(&probe, &connection)?;
+        let env = isolate_login_profile(&agent, build_environment(None, HashMap::new()))?;
+        self.adapters.list_models_with_refresh(&agent, Some(&json!({"env":env})), true).await
     }
 }
 fn public_connection(db: &Connection, mut value: Value) -> CoreResult<Value> {
@@ -156,6 +172,10 @@ fn validate_connection(value: &Value) -> CoreResult<Value> {
             let efforts = model.get("reasoningEfforts").cloned().unwrap_or_else(|| json!([]));
             if !efforts.as_array().is_some_and(|a| a.iter().all(Value::is_string)) { return Err(invalid("models","Invalid reasoning values")); }
             let mut item = json!({"id":id,"reasoningEfforts":efforts});
+            if let Some(modalities) = model.get("inputModalities").filter(|v| !v.is_null()) {
+                if !modalities.as_array().is_some_and(|a| !a.is_empty() && a.iter().all(|v| v == "text" || v == "image")) { return Err(invalid("models","Invalid input modalities")); }
+                item["inputModalities"] = modalities.clone();
+            }
             for field in ["displayName","defaultReasoningEffort"] { if let Some(v) = model.get(field).filter(|v| v.is_string()) { item[field] = v.clone(); } }
             if let Some(v) = model.get("enabled").filter(|v| v.is_boolean()) { item["enabled"] = v.clone(); }
             if let Some(v) = model.get("contextWindow").filter(|v| v.as_u64().is_some_and(|v| v > 0 && v <= 9_007_199_254_740_991)) { item["contextWindow"] = v.clone(); }
@@ -221,9 +241,15 @@ pub fn bind_session(db: &Connection, session: &mut Value, current: Option<&Value
         return Err(invalid("providerSessionId","A new connection-bound session cannot import a provider thread"));
     }
     Ok(())
+}
 
 pub fn resolve_session_connection(db: &Connection, session: &Value, agent: &Value) -> CoreResult<(Value,Option<Value>)> {
-    let Some(id) = session.get("connectionId").and_then(Value::as_str) else { return Ok((agent.clone(),None)); };
+    let Some(id) = session.get("connectionId").and_then(Value::as_str) else {
+        if agent.pointer("/providerOptions/configurationKind").and_then(Value::as_str) == Some("harness") {
+            return Err(invalid("connectionId", "Select a provider or login account for this harness"));
+        }
+        return Ok((agent.clone(),None));
+    };
     let h = head(db,id)?;
     if h["enabled"] != true { return Err(invalid("connectionId","Connection is disabled")); }
     let revision = session["connectionRevision"].as_u64().ok_or_else(|| invalid("connectionRevision","Session has no pinned revision"))?;
@@ -244,7 +270,6 @@ pub fn apply_connection(agent: &Value, connection: &Value) -> CoreResult<Value> 
         let protocol = connection["protocol"].as_str().unwrap_or("");
         if !matches!(protocol,"responses"|"chat"|"anthropic") { return Err(invalid("protocol","Unsupported API protocol")); }
         validated_model_endpoint(connection["baseUrl"].as_str().unwrap_or(""))?;
-        if !(harness == "codex" || (harness == "claude-code" && protocol == "anthropic")) { return Err(invalid("connectionId","This harness/protocol combination is not supported")); }
         if agent.get("profile").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) || agent.get("baseArgs").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
             return Err(invalid("baseArgs","Bound API providers require default harness arguments and no CLI profile"));
         }
@@ -254,6 +279,7 @@ pub fn apply_connection(agent: &Value, connection: &Value) -> CoreResult<Value> 
     }
     options.insert("runtimeConnectionId".into(),connection["id"].clone());
     options.insert("runtimeConnectionRevision".into(),connection["revision"].clone());
+    options.insert("runtimeConnectionName".into(),connection["name"].clone());
     result["providerOptions"] = json!(options);
     result["models"] = connection.get("models").cloned().unwrap_or_else(|| if connection["kind"] == "login" { agent.get("models").cloned().unwrap_or_else(|| json!([])) } else { json!([]) });
     login_profile_directory(&result)?;
@@ -261,23 +287,53 @@ pub fn apply_connection(agent: &Value, connection: &Value) -> CoreResult<Value> 
 }
 
 /// Call after all allowlist/passthrough merges: no inherited credential can override a binding.
-pub fn connection_environment(agent: &Value, connection: &Value, credentials: &CredentialService, mut env: HashMap<String,String>) -> CoreResult<HashMap<String,String>> {
+pub fn connection_environment(agent: &Value, connection: &Value, credentials: &CredentialService, env: HashMap<String,String>) -> CoreResult<HashMap<String,String>> {
+    connection_environment_with_descriptor(agent, connection, credentials, env, None)
+}
+pub fn connection_environment_with_descriptor(agent: &Value, connection: &Value, credentials: &CredentialService, mut env: HashMap<String,String>, descriptor: Option<&Value>) -> CoreResult<HashMap<String,String>> {
     env.retain(|key,_| {
         let key = key.to_ascii_uppercase();
-        !["OPENAI_","CODEX_","ANTHROPIC_","CLAUDE_CODE_OAUTH","CLAUDE_CODE_API","CLAUDE_CODE_USE_","CLAUDE_CODE_SESSION_ACCESS"].iter().any(|p| key.starts_with(p)) && key != "CLAUDE_CONFIG_DIR" && !key.starts_with("AGENTHUB_API")
+        if ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "TRAE_CONFIG_FILE"].contains(&key.as_str()) { return true; }
+        !["OPENAI_","CODEX_","ANTHROPIC_","KIMI_","DEEPSEEK_","GEMINI_","GOOGLE_","OPENROUTER_","OPENCODE_","AGENTHUB_PI_","AGENTHUB_OMP_","OMP_AUTH_","COMMAND_CODE_","CMD_","TRAECLI_","TRAE_CLI_","CLAUDE_CODE_OAUTH","CLAUDE_CODE_API","CLAUDE_CODE_USE_","CLAUDE_CODE_SESSION_ACCESS"].iter().any(|p| key.starts_with(p)) && key != "CLAUDE_CONFIG_DIR" && !key.starts_with("AGENTHUB_API")
     });
     if connection["kind"] == "login" { return isolate_login_profile(agent,env); }
     let id = connection["id"].as_str().unwrap(); let revision = connection["revision"].as_u64().unwrap();
     let key = credentials.read(&credential_key(id,revision))?.and_then(|v| v["apiKey"].as_str().map(str::to_string)).filter(|s| !s.is_empty())
         .ok_or_else(|| invalid("connectionId","The pinned API provider has no credential; create a new revision and session"))?;
-    if agent["providerId"] == "codex" { env.insert("OPENAI_API_KEY".into(),key); env.insert("OPENAI_BASE_URL".into(),connection["baseUrl"].as_str().unwrap().into()); }
-    else { env.insert("ANTHROPIC_API_KEY".into(),key); env.insert("ANTHROPIC_BASE_URL".into(),connection["baseUrl"].as_str().unwrap().into()); }
+    env.insert("NAUTILO_CONNECTION_API_KEY".into(), key.clone());
+    env.insert("AGENTHUB_API_KEY".into(), key.clone());
+    env.insert("NAUTILO_CONNECTION_DIRECTORY".into(), credentials.connection_directory(id, revision).to_string_lossy().into_owned());
+    let base = connection["baseUrl"].as_str().unwrap_or("");
+    if connection["protocol"] == "anthropic" {
+        env.insert("ANTHROPIC_API_KEY".into(), key.clone()); env.insert("ANTHROPIC_BASE_URL".into(), base.into());
+    } else {
+        env.insert("OPENAI_API_KEY".into(), key.clone()); env.insert("OPENAI_BASE_URL".into(), base.into());
+    }
+    for name in descriptor.and_then(|d| d["credentialEnv"].as_array()).into_iter().flatten().filter_map(Value::as_str) { env.insert(name.to_string(), key.clone()); }
+    if let Some(name) = descriptor.and_then(|d| d["baseUrlEnv"].as_str()) { env.insert(name.into(), base.into()); }
     Ok(env)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::{AdapterCapabilities, AdapterDetectionResult, AdapterRun, AdapterStartRequest, AgentCliAdapter};
+
+    struct ModelProbe(Arc<Mutex<Vec<(Value, Value)>>>);
+    #[async_trait::async_trait]
+    impl AgentCliAdapter for ModelProbe {
+        fn provider_id(&self) -> &str { "codex" }
+        fn descriptor(&self) -> Value { json!({"providerId":"codex","defaultExecutable":"default-codex"}) }
+        fn capabilities(&self) -> AdapterCapabilities {
+            AdapterCapabilities { structured_output: true, text_output: true, interactive_stdin: false, native_resume: false, pty: false }
+        }
+        async fn detect(&self, _: &Value) -> AdapterDetectionResult { AdapterDetectionResult::default() }
+        async fn list_models(&self, instance: &Value, context: Option<&Value>) -> Option<CoreResult<Value>> {
+            self.0.lock().unwrap().push((instance.clone(), context.cloned().unwrap_or(Value::Null)));
+            Some(Ok(json!({"providerId":"codex","models":[{"id":"account-model","displayName":"Account model"}],"source":"provider_cli","fetchedAt":now_iso()})))
+        }
+        fn start(&self, _: AdapterStartRequest) -> CoreResult<AdapterRun> { panic!("model discovery must not start a run") }
+    }
     fn fixture() -> (ConnectionService, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("nautilo-connections-{}",uuid::Uuid::new_v4()));
         let db = Arc::new(Mutex::new(Database::open(&dir.join("test.sqlite")).unwrap()));
@@ -285,6 +341,76 @@ mod tests {
         (ConnectionService::new(db,credentials,AdapterRegistry::with_builtins()),dir)
     }
     fn provider(id: &str) -> Value { json!({"id":id,"name":"Provider","kind":"api","enabled":true,"protocol":"anthropic","baseUrl":"https://provider.example/v1","models":[{"id":"claude-test","reasoningEfforts":["none"],"pricing":{"input":2.0}}]}) }
+    #[test]
+    fn image_input_capability_is_preserved_and_validated() {
+        let mut connection = provider("vision");
+        for modalities in [json!(["text","image"]),json!(["text"])] {
+            connection["models"][0]["inputModalities"] = modalities.clone();
+            assert_eq!(validate_connection(&connection).unwrap()["models"][0]["inputModalities"],modalities);
+        }
+        connection["models"][0]["inputModalities"] = json!(["invalid"]);
+        assert!(validate_connection(&connection).is_err());
+    }
+    #[tokio::test]
+    async fn login_models_use_clean_probe_and_account_profile_without_agent_selection() {
+        let (service, dir) = fixture();
+        let probes = Arc::new(Mutex::new(Vec::new()));
+        service.adapters.register(Arc::new(ModelProbe(probes.clone())));
+        let legacy = json!({"id":"legacy","providerId":"codex","enabled":true,"executable":"local-codex","profile":"old-profile","baseArgs":["--config","old"],"models":[{"id":"legacy-model"}],"providerOptions":{"baseUrl":"https://old.example"}});
+        Repositories::new(&service.db.lock().unwrap().raw).agents().save(&legacy, "now").unwrap();
+        for id in ["account-one", "account-two"] {
+            let profile = dir.join(id).to_string_lossy().into_owned();
+            service.upsert(&json!({"connection":{"id":id,"name":id,"kind":"login","enabled":true,"harness":"codex","loginProfileDirectory":profile}})).unwrap();
+            let catalog = service.models(&json!({"connectionId":id})).await.unwrap();
+            assert_eq!(catalog["models"][0]["id"], "account-model");
+            let captured = probes.lock().unwrap();
+            let (instance, context) = captured.last().unwrap();
+            assert_eq!(instance["baseArgs"], json!([]));
+            assert!(instance["profile"].is_null());
+            assert!(instance["providerOptions"]["baseUrl"].is_null());
+            assert_eq!(context["env"]["CODEX_HOME"], profile);
+            assert!(context["env"]["OPENAI_API_KEY"].is_null());
+        }
+        Repositories::new(&service.db.lock().unwrap().raw).agents().remove("legacy").unwrap();
+        service.models(&json!({"connectionId":"account-one"})).await.unwrap();
+        assert_eq!(probes.lock().unwrap().last().unwrap().0["executable"], "default-codex");
+    }
+
+    #[test]
+    fn team_delegation_and_recovery_preserve_member_connection_and_harness() {
+        let (service, _) = fixture();
+        for id in ["parent-provider", "worker-provider"] {
+            service.upsert(&json!({"connection":provider(id),"apiKey":id})).unwrap();
+        }
+        let harness = json!({"id":"harness","providerId":"claude-code","enabled":true,"baseArgs":[],"providerOptions":{"configurationKind":"harness"}});
+        Repositories::new(&service.db.lock().unwrap().raw).agents().save(&harness,"now").unwrap();
+        let teams = crate::application::team_service::TeamService::new(service.db.clone());
+        let team = teams.upsert(&json!({"id":"team","members":[{"id":"worker","agentInstanceId":"harness","connectionId":"worker-provider","model":"worker-model","enabled":true}],"updatedAt":"now"})).unwrap();
+        let member = &team["members"][0];
+        assert_eq!(member["connectionRevision"], 1);
+        service.upsert(&json!({"connection":provider("worker-provider"),"expectedRevision":1,"apiKey":"new-worker-key"})).unwrap();
+        let parent = json!({"id":"parent","projectId":"project","connectionId":"parent-provider","connectionRevision":1});
+        let run = json!({"id":"run","projectId":"project","teamId":"team","mainMemberId":"worker","mainAgentInstanceId":"harness","goal":"task"});
+        let router = crate::runtime::orchestration::session_router::SessionRouter::new(service.db.clone());
+        let child = router.delegated(&run,&team,member,&parent,"task","Child",None).unwrap();
+        assert_eq!(child["agentInstanceId"], "harness");
+        assert_eq!(child["connectionId"], "worker-provider");
+        assert_eq!(child["connectionRevision"], 1);
+        assert_eq!(child["model"], "worker-model");
+        let (resolved, connection) = resolve_session_connection(&service.db.lock().unwrap().raw,&child,&harness).unwrap();
+        let env = connection_environment(&resolved,&connection.unwrap(),&service.credentials,HashMap::new()).unwrap();
+        assert_eq!(env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("worker-provider"));
+        let mut changed = member.clone(); changed["connectionRevision"] = json!(2);
+        assert!(router.delegated(&run,&team,&changed,&parent,"task","Changed",None).is_err());
+        assert!(router.delegated(&run,&team,&changed,&parent,"task-2","Changed",child["id"].as_str()).is_err());
+        let recovered = router.replacement_main(&run,&team,"worker",&parent).unwrap();
+        assert_eq!(recovered["connectionId"], "worker-provider");
+        assert_eq!(recovered["connectionRevision"], 1);
+        let main = router.main(&run,&team,None).unwrap();
+        assert_eq!(main["connectionId"], "worker-provider");
+        assert_eq!(main["model"], "worker-model");
+        assert!(resolve_session_connection(&service.db.lock().unwrap().raw,&json!({}),&harness).is_err());
+    }
     #[test]
     fn revisions_preserve_encrypted_credentials_and_no_plaintext_metadata() {
         let (service,_) = fixture();
@@ -303,9 +429,26 @@ mod tests {
         assert!(service.upsert(&json!({"connection":provider("p"),"expectedRevision":1})).is_err());
     }
     #[test]
+    fn first_source_binding_on_empty_draft_is_not_a_history_transfer() {
+        let (service, _) = fixture();
+        service.upsert(&json!({"connection":provider("p"),"apiKey":"key"})).unwrap();
+        let sessions = crate::application::SessionService::new(service.db.clone());
+        let draft = json!({"id":"draft","projectId":"project","agentInstanceId":"a","memberId":"a","status":"idle","createdAt":"now","updatedAt":"now"});
+        sessions.upsert(&draft).unwrap();
+        let bound = sessions.upsert(&json!({"id":"draft","connectionId":"p","connectionRevision":1})).unwrap();
+        assert_eq!(bound["connectionId"],"p");
+        assert_eq!(bound["connectionContextRebuildRequired"],false);
+        // The full renderer metadata is resent just before sending the message.
+        let resent = sessions.upsert(&bound).unwrap();
+        assert_eq!(resent["connectionRevision"],1);
+        let mut historical = draft; historical["id"] = json!("historical"); historical["providerSessionId"] = json!("native-thread");
+        sessions.upsert(&historical).unwrap();
+        assert!(sessions.upsert(&json!({"id":"historical","connectionId":"p","connectionRevision":1})).is_err());
+    }
+    #[test]
     fn one_api_provider_supports_multiple_harnesses_without_mutating_them() {
         let mut connection = provider("p"); connection["revision"] = json!(1);
-        for harness in ["codex","claude-code"] {
+        for harness in ["codex","claude-code","pi","omp","opencode","kimi-code","commandcode","trae","new-provider-plugin"] {
             let agent = json!({"id":"a","providerId":harness,"executable":"my-cli","baseArgs":[],"providerOptions":{"baseUrl":"https://old.example","loginProfileDirectory":"/old"}});
             let resolved = apply_connection(&agent,&connection).unwrap();
             assert_eq!(resolved["id"],"a"); assert_eq!(resolved["executable"],"my-cli");
@@ -313,15 +456,17 @@ mod tests {
             assert_eq!(resolved["providerOptions"]["runtimeConnectionRevision"],1);
             assert_eq!(agent["providerOptions"]["baseUrl"],"https://old.example");
         }
-        assert!(apply_connection(&json!({"providerId":"kimi","baseArgs":[]}),&connection).is_err());
+        assert!(apply_connection(&json!({"providerId":"pi","baseArgs":["--custom-endpoint"]}),&connection).is_err());
     }
     #[test]
     fn pinned_credentials_override_all_inherited_auth_and_disabled_head_blocks_old_revision() {
         let (service,_) = fixture(); service.upsert(&json!({"connection":provider("p"),"apiKey":"own-key"})).unwrap();
         let session = json!({"connectionId":"p","connectionRevision":1});
         let (agent,connection) = resolve_session_connection(&service.db.lock().unwrap().raw,&session,&json!({"id":"a","providerId":"codex","baseArgs":[]})).unwrap();
-        let env = connection_environment(&agent,&connection.unwrap(),&service.credentials,HashMap::from([("openai_api_key".into(),"other-key".into()),("ANTHROPIC_AUTH_TOKEN".into(),"wrong".into()),("CODEX_HOME".into(),"/other".into()),("PATH".into(),"bin".into())])).unwrap();
-        assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str),Some("own-key")); assert_eq!(env.len(),3);
+        let env = connection_environment_with_descriptor(&agent,&connection.unwrap(),&service.credentials,HashMap::from([("openai_api_key".into(),"other-key".into()),("ANTHROPIC_AUTH_TOKEN".into(),"wrong".into()),("CODEX_HOME".into(),"/other".into()),("PATH".into(),"bin".into())]),Some(&json!({"credentialEnv":["OPENAI_API_KEY","CODEX_API_KEY"]}))).unwrap();
+        assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str),Some("own-key"));
+        assert_eq!(env.get("NAUTILO_CONNECTION_API_KEY").map(String::as_str),Some("own-key"));
+        assert!(!env.contains_key("openai_api_key")); assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN")); assert!(!env.contains_key("CODEX_HOME"));
         let mut disabled = provider("p"); disabled["enabled"] = json!(false);
         service.upsert(&json!({"connection":disabled,"expectedRevision":1})).unwrap();
         assert!(resolve_session_connection(&service.db.lock().unwrap().raw,&session,&agent).is_err());

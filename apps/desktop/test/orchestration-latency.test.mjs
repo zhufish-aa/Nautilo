@@ -76,6 +76,32 @@ test("later new segments remain coalesced, terminal event finalizes the stream",
   assert.ok(h.state.events.s.filter((row) => row.data.kind === "message").every((row) => row.data.streaming === false));
 });
 
+test("interleaved reasoning channels stream independently and each final snapshot replaces its own prefix", async () => {
+  const h = createHarness();
+  h.runtime.standaloneHydrated.add("s");
+  const thought = (sequence, messageId, text, type = "agent.thinking_delta") => delta(sequence, text, { type, payload: { messageId, text } });
+  h.runtime.mergeStandaloneEvents("s", [thought(1, "reason", "Summary prefix")]);
+  h.runtime.mergeStandaloneEvents("s", [thought(2, "reason:content", "Raw prefix")]);
+  await h.advance(200);
+  const rows = () => Array.from(h.state.events.s)
+    .flatMap(row => row.data.kind === "tool_group" ? Array.from(row.data.items) : [row])
+    .filter(row => row.data.kind === "reasoning");
+  assert.equal(rows().length, 2);
+  h.runtime.mergeStandaloneEvents("s", [thought(3, "reason", "Summary prefix continued")]);
+  h.runtime.mergeStandaloneEvents("s", [thought(4, "reason:content", "Raw prefix continued")]);
+  await h.advance(200);
+  assert.deepEqual(rows().map(row => row.data.text), ["Summary prefix continued", "Raw prefix continued"]);
+  h.runtime.mergeStandaloneEvents("s", [thought(5, "reason", "Complete summary", "agent.thinking_summary")]);
+  await h.advance(200);
+  assert.equal(rows()[0].data.text, "Complete summary");
+  assert.equal(rows()[0].data.streaming, false);
+  assert.equal(rows()[1].data.streaming, true);
+  h.runtime.mergeStandaloneEvents("s", [thought(6, "reason:content", "Complete raw content", "agent.thinking_summary")]);
+  await h.advance(200);
+  assert.deepEqual(rows().map(row => row.data.text), ["Complete summary", "Complete raw content"]);
+  assert.ok(rows().every(row => row.data.streaming === false));
+});
+
 test("first-token priority retains queue events and cancellation clears pending renders", async () => {
   const h = createHarness();
   h.runtime.standaloneHydrated.add("s");

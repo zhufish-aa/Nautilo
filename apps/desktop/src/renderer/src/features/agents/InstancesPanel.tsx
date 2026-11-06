@@ -42,22 +42,22 @@ export function InstancesPanel(): JSX.Element {
     catch (error) { toast.error(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   };
-  return <div className="space-y-6">
-    <div className="flex gap-6 border-b border-line" role="tablist" aria-label={zh ? "连接类型" : "Connection type"}>
+  return <div className="instances-panel">
+    <div className="instance-type-tabs flex gap-6 border-b border-line" role="tablist" aria-label={zh ? "连接类型" : "Connection type"}>
       {([{ id: "api", name: zh ? "API 连接" : "API connections" }, { id: "account", name: zh ? "登录账号" : "Login accounts" }] as const).map((item) => <button type="button" key={item.id} role="tab" aria-selected={source === item.id} onClick={() => { setSource(item.id); setQuery(""); }} className={`border-b-2 px-1 pb-3 text-sm ${source === item.id ? "border-ink font-medium text-ink" : "border-transparent text-ink-3"}`}>{item.name}</button>)}
     </div>
-    <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
-      <aside className="space-y-3 lg:border-r lg:border-line lg:pr-5">
+    <div className="instance-layout">
+      <aside className="instance-navigation">
         <div className="relative"><Search className="absolute left-3 top-3 h-4 w-4 text-ink-3" aria-hidden /><Input className="pl-9" aria-label={zh ? "搜索连接" : "Search connections"} placeholder={zh ? "搜索连接" : "Search connections"} value={query} onChange={(event) => setQuery(event.target.value)} /></div>
         <Button variant="outline" className="w-full" onClick={openCreate}><Plus className="h-4 w-4" aria-hidden />{zh ? "添加连接" : "Add connection"}</Button>
-        <div className="space-y-1 pt-2">{visible.map((instance) => <button key={instance.id} type="button" onClick={() => setSelectedId(instance.id)} aria-pressed={selected?.id === instance.id} className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left transition-colors hover:bg-hover ${selected?.id === instance.id ? "bg-hover" : ""}`}>
+        <div className="instance-list space-y-1">{visible.map((instance) => <button key={instance.id} type="button" onClick={() => setSelectedId(instance.id)} aria-pressed={selected?.id === instance.id} className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left transition-colors hover:bg-hover ${selected?.id === instance.id ? "bg-hover" : ""}`}>
           {source === "account" ? <UserRound className="h-5 w-5 shrink-0 text-ink-2" /> : <Server className="h-5 w-5 shrink-0 text-ink-2" />}
           <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-ink">{instance.displayName}</span><span className="mt-1 block truncate text-xs text-ink-3">{protocolName(instance)}</span></span>
           {!instance.enabled && <span className="h-1.5 w-1.5 rounded-full bg-ink-3/40" aria-label={zh ? "已停用" : "Disabled"} />}
         </button>)}</div>
         {visible.length === 0 && <p className="px-2 py-3 text-xs text-ink-3">{query ? (zh ? "没有匹配的连接" : "No matching connections") : (zh ? "尚无连接" : "No connections yet")}</p>}
       </aside>
-      {selected ? <section className="min-w-0 space-y-5">
+      {selected ? <section className="instance-detail min-w-0 space-y-5">
         <header className="flex items-start justify-between gap-3"><div><h2 className="text-lg font-semibold text-ink">{selected.displayName}</h2><p className="mt-1 text-sm text-ink-3">{protocolName(selected)}</p></div><Button variant="outline" size="sm" onClick={openEdit}><Pencil className="h-3.5 w-3.5" />{zh ? "编辑连接" : "Edit connection"}</Button></header>
         <div className="flex gap-6 border-b border-line">{([{ id: "connection", name: zh ? "连接设置" : "Connection" }, { id: "models", name: zh ? "模型配置" : "Models" }] as const).map((item) => <button type="button" key={item.id} aria-pressed={tab === item.id} onClick={() => setTab(item.id)} className={`border-b-2 px-1 pb-3 text-sm ${tab === item.id ? "border-ink font-medium text-ink" : "border-transparent text-ink-3"}`}>{item.name}</button>)}</div>
         {tab === "connection" ? <div className="space-y-5">

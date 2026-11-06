@@ -46,7 +46,7 @@ fn skill_targets() -> Vec<SkillTarget> {
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".kimi-code"));
-    vec![
+    let mut targets = vec![
         SkillTarget {
             provider_id: "claude-code",
             file_path: home.join(".claude").join("skills").join("{slug}").join("SKILL.md"),
@@ -71,7 +71,17 @@ fn skill_targets() -> Vec<SkillTarget> {
             skill_dir: Some(home.join(".codex").join("skills").join("{slug}")),
             frontmatter: true,
         },
-    ]
+    ];
+    let pi = std::env::var("PI_CODING_AGENT_DIR").ok().filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(||home.join(".pi/agent"));
+    let omp = std::env::var("OMP_PROFILE").ok().or_else(||std::env::var("PI_PROFILE").ok()).filter(|v|!v.is_empty() && v!="default")
+        .map(|profile| home.join(std::env::var("PI_CONFIG_DIR").unwrap_or_else(|_|".omp".into())).join("profiles").join(profile).join("agent"))
+        .unwrap_or_else(||std::env::var("PI_CODING_AGENT_DIR").map(PathBuf::from).unwrap_or_else(|_|home.join(".omp/agent")));
+    let opencode = std::env::var("OPENCODE_CONFIG_DIR").ok().filter(|v|!v.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(||std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_|home.join(".config")).join("opencode"));
+    for (provider_id, root) in [("pi",pi), ("omp",omp), ("opencode",opencode), ("commandcode",home.join(".commandcode"))] {
+        targets.push(SkillTarget {provider_id, file_path:root.join("skills/{slug}/SKILL.md"),skill_dir:Some(root.join("skills/{slug}")),frontmatter:true});
+    }
+    targets
 }
 
 fn materialize(path: &Path, slug: &str) -> PathBuf {
@@ -140,7 +150,7 @@ fn install_skill(target: &SkillTarget, capability: &Value, slug: &str) {
         if file_path.exists() {
             if let Ok(existing) = std::fs::read_to_string(&file_path) {
                 // Never overwrite user-owned skills.
-                if !existing.contains(SKILL_FILE_MARKER) {
+                if !existing.contains(&format!("{SKILL_FILE_MARKER}{}", capability["id"].as_str().unwrap_or(""))) {
                     return;
                 }
             }
@@ -217,6 +227,8 @@ pub struct CapabilityService {
 
 impl CapabilityService {
     pub fn new(db: Arc<Mutex<Database>>) -> Self {
+        let capabilities = Repositories::new(&lock(&db).raw).capabilities().list_default().unwrap_or_default();
+        for capability in capabilities { sync_skill_files(&capability); }
         Self { db }
     }
 

@@ -44,7 +44,7 @@ pub fn merge_instance_model_config(catalog: &Value, models: Option<&Value>) -> V
         });
         entry.remove("defaultReasoningEffort");
         if let Some(default) = default { entry.insert("defaultReasoningEffort".to_string(), json!(default)); }
-        for field in ["contextWindow", "pricing"] {
+        for field in ["contextWindow", "pricing", "inputModalities"] {
             if let Some(value) = config.get(field).filter(|v| !v.is_null()) {
                 entry.insert(field.to_string(), value.clone());
             }

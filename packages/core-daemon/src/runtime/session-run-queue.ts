@@ -11,6 +11,7 @@
 export class SessionRunQueue {
   private readonly tails = new Map<string, Promise<void>>();
   private readonly pendingKeys = new Map<string, Set<string>>();
+  private readonly promotions = new Map<string, Map<string, Promise<void>>>();
 
   enqueue<THandle extends { completion: Promise<unknown> }>(
     sessionId: string,
@@ -33,6 +34,9 @@ export class SessionRunQueue {
     const tail = previous
       .catch(() => undefined)
       .then(async () => {
+        while (key && this.promotions.get(sessionId)?.has(key)) {
+          await this.promotions.get(sessionId)!.get(key);
+        }
         if (key && !this.cancelPending(sessionId, key)) {
           rejectStarted(new Error("Queued turn was withdrawn before it started"));
           return;
@@ -58,11 +62,34 @@ export class SessionRunQueue {
    * key is unknown or its turn already began.
    */
   cancelPending(sessionId: string, key: string): boolean {
+    if (this.promotions.get(sessionId)?.has(key)) return false;
     const pending = this.pendingKeys.get(sessionId);
     if (!pending?.has(key)) return false;
     pending.delete(key);
     if (!pending.size) this.pendingKeys.delete(sessionId);
     return true;
+  }
+
+  /** Keep the queue slot until the native steer is acknowledged. A rejected
+   * steer leaves the original entry queued, without recreating its message. */
+  async promotePending(sessionId: string, key: string, steer: () => Promise<void>): Promise<boolean> {
+    if (!this.pendingKeys.get(sessionId)?.has(key) || this.promotions.get(sessionId)?.has(key)) return false;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const promotions = this.promotions.get(sessionId) ?? new Map<string, Promise<void>>();
+    promotions.set(key, held);
+    this.promotions.set(sessionId, promotions);
+    try {
+      await steer();
+      const pending = this.pendingKeys.get(sessionId)!;
+      pending.delete(key);
+      if (!pending.size) this.pendingKeys.delete(sessionId);
+      return true;
+    } finally {
+      promotions.delete(key);
+      if (!promotions.size) this.promotions.delete(sessionId);
+      release();
+    }
   }
 
   busy(sessionId: string): boolean {

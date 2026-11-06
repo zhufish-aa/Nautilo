@@ -68,6 +68,10 @@ impl CredentialService {
         Repositories::new(&self.db.lock().unwrap().raw).credentials().has(agent_instance_id)
     }
 
+    pub fn connection_directory(&self, id: &str, revision: u64) -> PathBuf {
+        self.key_path.parent().unwrap().join("runtime-connections").join(id).join(revision.to_string())
+    }
+
     pub fn read(&self, agent_instance_id: &str) -> CoreResult<Option<Value>> {
         let encrypted = Repositories::new(&self.db.lock().unwrap().raw).credentials().get(agent_instance_id)?;
         let Some(encrypted) = encrypted else { return Ok(None) };

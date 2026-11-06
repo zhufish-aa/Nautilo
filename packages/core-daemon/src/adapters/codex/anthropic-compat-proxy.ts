@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 
 type Obj = Record<string, any>;
 const LIMIT = 20 * 1024 * 1024;
+const THINKING_PREFIX = "nautilo-anthropic-v1:";
 const obj = (v: unknown): Obj => {
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("Expected an object");
   return v as Obj;
@@ -18,7 +19,6 @@ export function responsesToAnthropicRequest(input: Obj): { request: Obj; tools: 
   if (input.truncation && input.truncation !== "disabled") unsupported("automatic truncation");
   if (input.service_tier && input.service_tier !== "auto") unsupported("service tier");
   if (input.previous_response_id) unsupported("previous_response_id; send full conversation history");
-  if (input.reasoning?.effort && input.reasoning.effort !== "none") unsupported("reasoning effort; disable reasoning for this bridge");
   if (input.text?.format && input.text.format.type !== "text") unsupported("structured output");
   if (input.store === true || input.background === true) unsupported("stored/background responses");
   const registry = new Map<string, Tool>();
@@ -72,6 +72,10 @@ export function responsesToAnthropicRequest(input: Obj): { request: Obj; tools: 
     } else if (i.type === "function_call_output" || i.type === "custom_tool_call_output") {
       if (typeof i.call_id !== "string") throw new Error("Tool result call ID is required");
       append("user", [{ type: "tool_result", tool_use_id: i.call_id, content: content(i.output), ...(i.is_error === true ? { is_error: true } : {}) }]);
+    } else if (i.type === "reasoning" && typeof i.encrypted_content === "string" && i.encrypted_content.startsWith(THINKING_PREFIX)) {
+      const block = obj(JSON.parse(Buffer.from(i.encrypted_content.slice(THINKING_PREFIX.length), "base64").toString("utf8")));
+      if (block.type !== "thinking" && block.type !== "redacted_thinking") unsupported("foreign reasoning history");
+      append("assistant", [block]);
     } else if (i.role && (!i.type || i.type === "message")) append(i.role, content(i.content));
     else unsupported(`input item ${i.type}`);
   }
@@ -79,6 +83,7 @@ export function responsesToAnthropicRequest(input: Obj): { request: Obj; tools: 
   const max = input.max_output_tokens ?? 4096;
   if (!Number.isInteger(max) || max <= 0) throw new Error("max_output_tokens must be positive");
   const request: Obj = { model: input.model, messages, max_tokens: max, stream: true };
+  if (input.reasoning?.effort && input.reasoning.effort !== "none") request.output_config = { effort: input.reasoning.effort };
   if (system.length) request.system = system;
   if (tools.length) request.tools = tools;
   for (const k of ["temperature", "top_p"]) if (input[k] !== undefined) request[k] = input[k];
@@ -158,7 +163,7 @@ function emit(res: ServerResponse, type: string, fields: Obj) { res.write(`event
 
 async function translateStream(body: ReadableStream<Uint8Array>, res: ServerResponse, tools: Map<string, Tool>, model: string) {
   const response: Obj = { id: `resp_${randomUUID()}`, object: "response", model, created_at: Math.floor(Date.now() / 1000), status: "in_progress", output: [], usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }, error: null, incomplete_details: null };
-  const blocks = new Map<number, { item: Obj; index: number; args: string; custom: boolean; stopped: boolean }>();
+  const blocks = new Map<number, { item: Obj; index: number; args: string; custom: boolean; stopped: boolean; native?: Obj }>();
   let started = false, stopped = false, stopReason = "";
   emit(res, "response.created", { response });
   for await (const event of sse(body)) {
@@ -180,6 +185,7 @@ async function translateStream(body: ReadableStream<Uint8Array>, res: ServerResp
       let item!: Obj;
       let custom = false;
       if (b.type === "text") item = { id: `msg_${randomUUID()}`, type: "message", role: "assistant", status: "in_progress", content: [{ type: "output_text", text: b.text ?? "", annotations: [] }] };
+      else if (b.type === "thinking" || b.type === "redacted_thinking") item = { id: `rs_${randomUUID()}`, type: "reasoning", status: "in_progress", summary: b.type === "thinking" ? [{ type: "summary_text", text: b.thinking ?? "" }] : [] };
       else if (b.type === "tool_use") {
         const tool = tools.get(b.name);
         if (!tool) throw new Error("Upstream called unknown tool");
@@ -187,9 +193,10 @@ async function translateStream(body: ReadableStream<Uint8Array>, res: ServerResp
         item = { id: `fc_${randomUUID()}`, type: custom ? "custom_tool_call" : "function_call", call_id: b.id, name: tool.name, ...(tool.namespace ? { namespace: tool.namespace } : {}), status: "in_progress", ...(custom ? { input: "" } : { arguments: "" }) };
       } else unsupported(`upstream block ${b.type}`);
       response.output.push(item);
-      blocks.set(event.index, { item, index, args: b.type === "tool_use" && Object.keys(b.input ?? {}).length ? JSON.stringify(b.input) : "", custom, stopped: false });
+      blocks.set(event.index, { item, index, args: b.type === "tool_use" && Object.keys(b.input ?? {}).length ? JSON.stringify(b.input) : "", custom, stopped: false, ...(item.type === "reasoning" ? { native: { ...b } } : {}) });
       emit(res, "response.output_item.added", { output_index: index, item });
       if (item.type === "message") emit(res, "response.content_part.added", { output_index: index, item_id: item.id, content_index: 0, part: item.content[0] });
+      if (item.type === "reasoning" && item.summary.length) emit(res, "response.reasoning_summary_part.added", { output_index: index, item_id: item.id, summary_index: 0, part: item.summary[0] });
     } else if (event.type === "content_block_delta") {
       const b = blocks.get(event.index);
       if (!b || b.stopped) throw new Error("Invalid block delta");
@@ -198,7 +205,15 @@ async function translateStream(body: ReadableStream<Uint8Array>, res: ServerResp
         if (typeof d.text !== "string") throw new Error("Invalid text delta");
         b.item.content[0].text += d.text;
         emit(res, "response.output_text.delta", { output_index: b.index, item_id: b.item.id, content_index: 0, delta: d.text });
-      } else if (d.type === "input_json_delta" && b.item.type !== "message") {
+      } else if (d.type === "thinking_delta" && b.native?.type === "thinking") {
+        if (typeof d.thinking !== "string") throw new Error("Invalid thinking delta");
+        b.native.thinking = (b.native.thinking ?? "") + d.thinking;
+        b.item.summary[0].text = b.native.thinking;
+        emit(res, "response.reasoning_summary_text.delta", { output_index: b.index, item_id: b.item.id, summary_index: 0, delta: d.thinking });
+      } else if (d.type === "signature_delta" && b.native?.type === "thinking") {
+        if (typeof d.signature !== "string") throw new Error("Invalid thinking signature");
+        b.native.signature = (b.native.signature ?? "") + d.signature;
+      } else if (d.type === "input_json_delta" && ["function_call", "custom_tool_call"].includes(b.item.type)) {
         if (typeof d.partial_json !== "string") throw new Error("Invalid argument delta");
         b.args += d.partial_json;
         if (b.args.length > LIMIT) throw new Error("Tool arguments exceed limit");
@@ -213,6 +228,14 @@ async function translateStream(body: ReadableStream<Uint8Array>, res: ServerResp
       if (b.item.type === "message") {
         emit(res, "response.output_text.done", { ...fields, content_index: 0, text: b.item.content[0].text });
         emit(res, "response.content_part.done", { ...fields, content_index: 0, part: b.item.content[0] });
+      } else if (b.native) {
+        // Keep the provider's signed block opaque so a later tool-result turn
+        // can replay it byte-for-byte rather than forge a thinking signature.
+        b.item.encrypted_content = THINKING_PREFIX + Buffer.from(JSON.stringify(b.native)).toString("base64");
+        if (b.item.summary.length) {
+          emit(res, "response.reasoning_summary_text.done", { ...fields, summary_index: 0, text: b.item.summary[0].text });
+          emit(res, "response.reasoning_summary_part.done", { ...fields, summary_index: 0, part: b.item.summary[0] });
+        }
       } else {
         const args = obj(JSON.parse(b.args || "{}"));
         if (b.custom) {

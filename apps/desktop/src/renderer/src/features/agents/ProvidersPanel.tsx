@@ -20,19 +20,14 @@ import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { useAgentsStore } from "../../stores/agents";
 import { toast } from "../../stores/toast";
+import { providerUpdateCommand } from "../../lib/provider-update-command";
 
-/** Self-update subcommand each bundled CLI exposes; custom CLIs have none. */
-const PROVIDER_UPDATE_ARGS: Partial<Record<string, string[]>> = {
-  codex: ["update"],
-  "kimi-code": ["update"],
-  "claude-code": ["update"],
-  opencode: ["upgrade"],
-};
-
-function ProviderCard({
+export function ProviderCard({
   installation,
+  actionsOnly = false,
 }: {
   installation: ProviderInstallation;
+  actionsOnly?: boolean;
 }): JSX.Element {
   const { t, locale } = useI18n();
   const redetect = useAgentsStore((state) => state.redetect);
@@ -40,7 +35,8 @@ function ProviderCard({
     (state) => !!state.detecting[installation.providerId],
   );
   const meta = providerMeta(installation.providerId);
-  const updateArgs = PROVIDER_UPDATE_ARGS[installation.providerId];
+  const updateCommand = providerUpdateCommand(installation.providerId, installation.executable ?? "");
+  const updateArgs = updateCommand?.args;
   const [expanded, setExpanded] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [updateState, setUpdateState] = useState<"running" | "done" | "failed">(
@@ -66,7 +62,7 @@ function ProviderCard({
 
   const handleUpdate = async (): Promise<void> => {
     const bridge = window.agenthub;
-    if (!bridge || !updateArgs || !installation.executable) return;
+    if (!bridge || !updateCommand) return;
     const updateId = crypto.randomUUID();
     updateIdRef.current = updateId;
     setUpdateOutput("");
@@ -94,8 +90,8 @@ function ProviderCard({
     try {
       const started = await bridge.providers.startUpdate({
         updateId,
-        executable: installation.executable,
-        args: updateArgs,
+        executable: updateCommand.executable,
+        args: updateCommand.args,
       });
       if (!started.ok) {
         offOutput();
@@ -125,9 +121,11 @@ function ProviderCard({
     error: "agents.providers.errorHint",
   };
 
+  const Wrapper = actionsOnly ? "div" : "li";
   return (
-    <li className="border-b border-line last:border-b-0">
-      <div className="flex min-h-[76px] flex-wrap items-center gap-x-4 gap-y-3 px-5 py-4">
+    <Wrapper className={actionsOnly ? "harness-maintenance-actions" : "border-b border-line last:border-b-0"}>
+      <div className={actionsOnly ? "flex items-center gap-2" : "flex min-h-[76px] flex-wrap items-center gap-x-4 gap-y-3 px-5 py-4"}>
+        {!actionsOnly && <>
         <div className="min-w-32 flex-1">
           <h3 className="text-sm font-medium text-ink">{meta.name}</h3>
         </div>
@@ -144,6 +142,7 @@ function ProviderCard({
           />
           {t(`status.provider.${installation.status}`)}
         </span>
+        </>}
         {updateArgs &&
           installation.executable &&
           installation.status !== "missing" && (
@@ -171,7 +170,7 @@ function ProviderCard({
             />
           </Button>
         </Tooltip>
-        <Button
+        {!actionsOnly && <Button
           variant="ghost"
           size="icon"
           onClick={() => setExpanded(!expanded)}
@@ -183,9 +182,9 @@ function ProviderCard({
             className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`}
             aria-hidden
           />
-        </Button>
+        </Button>}
       </div>
-      {expanded && (
+      {!actionsOnly && expanded && (
         <dl
           id={`cli-details-${installation.providerId}`}
           className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-3 border-t border-line bg-panel/40 px-5 py-5 text-[13px]"
@@ -226,7 +225,7 @@ function ProviderCard({
         onOpenChange={handleUpdateOpenChange}
         title={t("agents.providers.updateTitle", { name: meta.name })}
         description={t("agents.providers.updateDesc", {
-          command: `${installation.executable} ${(updateArgs ?? []).join(" ")}`,
+          command: installation.providerId === "codex" && updateCommand?.executable === "node" ? "Codex · npm / pnpm / bun" : `${meta.name} ${(updateArgs ?? []).join(" ")}`,
         })}
         footer={
           updateState === "running" ? (
@@ -286,7 +285,7 @@ function ProviderCard({
           </pre>
         </div>
       </Dialog>
-    </li>
+    </Wrapper>
   );
 }
 

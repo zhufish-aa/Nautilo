@@ -114,6 +114,8 @@ async fn main() -> anyhow::Result<()> {
     };
     accept_task.abort();
     gateway.cleanup();
+    daemon.terminals.close_all();
+    daemon.adapters.dispose().await;
     adapters::codex::app_server::shutdown_codex_app_server_pools().await;
     heartbeat.abort();
     let _ = daemon.audit.flush();

@@ -1,3 +1,4 @@
+import { TerminalService } from "../runtime/terminal-service.js";
 import { ConnectionService } from "./connection-service.js";
 import { CodexAdapter } from "../adapters/codex/adapter.js";
 import { homedir } from "node:os";
@@ -43,6 +44,7 @@ export class CoreDaemon {
   readonly gateway: IpcGateway;
   readonly events: EventService;
   readonly runs: RunService;
+  readonly terminals = new TerminalService();
   readonly projects: ProjectService;
   readonly agents: AgentService;
   readonly connections: ConnectionService;
@@ -117,6 +119,7 @@ export class CoreDaemon {
     this.plugins = new PluginService(dataDir, this.adapters);
     this.recovery.recoverInterrupted();
     this.gateway.setObserver((request, response) => {
+      if (["terminal.read", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities"].includes(request.method)) return;
       this.audit.ipc(
         request.method,
         request.input,
@@ -138,6 +141,7 @@ export class CoreDaemon {
       try { this.audit.flush(); } catch { /* database may already be unavailable */ }
       this.database.close();
     })();
+    this.terminals.closeAll();
     return this.stopPromise;
   }
 }

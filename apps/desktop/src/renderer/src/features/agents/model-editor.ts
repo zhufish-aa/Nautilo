@@ -1,6 +1,7 @@
 import type { InstanceModelConfig, ModelPricing } from "@agenthub/domain";
 
 export interface ModelRow {
+  inputModalities?: Array<"text" | "image">;
   key: string;
   id: string;
   displayName: string;
@@ -16,6 +17,7 @@ export interface ModelRow {
 export const priceKeys = ["input", "output", "cacheRead", "cacheWrite"] as const;
 export function modelRow(model: InstanceModelConfig, key: string): ModelRow {
   return { key, id: model.id, displayName: model.displayName ?? "", contextWindow: model.contextWindow ? String(model.contextWindow) : "",
+    inputModalities: model.inputModalities ? [...model.inputModalities] : ["text"],
     efforts: model.reasoningEfforts.join(", "), defaultReasoningEffort: model.defaultReasoningEffort ?? model.reasoningEfforts[0] ?? "", enabled: model.enabled !== false,
     input: model.pricing?.input?.toString() ?? "", output: model.pricing?.output?.toString() ?? "", cacheRead: model.pricing?.cacheRead?.toString() ?? "", cacheWrite: model.pricing?.cacheWrite?.toString() ?? "" };
 }
@@ -39,6 +41,6 @@ export function serializeModels(rows: ModelRow[]): InstanceModelConfig[] {
       if (!Number.isFinite(value) || value < 0) throw new Error("价格必须是非负数字 / Prices must be non-negative numbers");
       pricing[key] = value;
     }
-    return { id, displayName: row.displayName.trim() || undefined, enabled: row.enabled, contextWindow, reasoningEfforts, defaultReasoningEffort, pricing: Object.keys(pricing).length ? pricing : undefined };
+    return { id, displayName: row.displayName.trim() || undefined, enabled: row.enabled, contextWindow, inputModalities: row.inputModalities ? [...row.inputModalities] : undefined, reasoningEfforts, defaultReasoningEffort, pricing: Object.keys(pricing).length ? pricing : undefined };
   });
 }

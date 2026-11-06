@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, Fragment, lazy, Suspense } from "react";
-import { Bot, Loader2, Pencil, RotateCcw, TerminalSquare } from "lucide-react";
+import { Bot, FileText, Loader2, Pencil, RotateCcw, SquareTerminal, TerminalSquare } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { collectChangedFiles, type ChangedFileEntry } from "../../lib/changed-files";
 import { patchFileImages, reverseApplyUnifiedPatch, revertFileDiffs, sameContent } from "../../lib/revert-change";
@@ -21,13 +21,17 @@ import { useAgentsStore } from "../../stores/agents";
 import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore, SESSION_EMPTY } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
+import { NativeTerminal } from "./NativeTerminal";
+import { requestCore } from "../../lib/bridge";
+import type { NativeRuntimeCapabilities } from "@agenthub/provider-sdk";
+import { useNativeTerminalStatus } from "../../lib/use-native-terminal";
 import { toast } from "../../stores/toast";
 
 // Monaco is heavy; it only loads when the user actually opens the file editor.
 const DiffCodeEditor = lazy(() => import("../../components/ui/DiffCodeEditor"));
 
 /* ---------------------------------------------------------------------------
- * F-033: raw terminal drawer — debug fallback only, never replaces chat.
+ * Terminal workspace: native CLI, shell and runtime logs share one toolbar.
  * ------------------------------------------------------------------------ */
 export function TerminalDrawer({
   open,
@@ -38,11 +42,22 @@ export function TerminalDrawer({
   onClose: () => void;
   sessionId?: string;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const lines = useSessionsStore((state) => (sessionId ? (state.rawLog[sessionId] ?? SESSION_EMPTY.lines) : SESSION_EMPTY.lines));
   const bottomRef = useRef<HTMLDivElement>(null);
   const followOutput = useRef(true);
   const [lineLimit, setLineLimit] = useState(500);
+  const [view, setView] = useState<"terminal" | "native" | "logs">("terminal");
+  const [nativeAvailable, setNativeAvailable] = useState(false);
+  const [toolbarTarget, setToolbarTarget] = useState<HTMLDivElement | null>(null);
+  const nativeActive = useNativeTerminalStatus(sessionId, open);
+  useEffect(() => { if (open && nativeActive) setView("native"); }, [open, sessionId, nativeActive]);
+  useEffect(() => {
+    if (!open || !sessionId) return;
+    let disposed = false;
+    void requestCore<NativeRuntimeCapabilities>("agent.runtimeCapabilities", { sessionId }).then((capabilities) => { if (!disposed) setNativeAvailable(capabilities.interactions.nativeTerminal); }).catch(() => { if (!disposed) setNativeAvailable(false); });
+    return () => { disposed = true; };
+  }, [open, sessionId]);
   useEffect(() => { setLineLimit(500); followOutput.current = true; }, [sessionId]);
 
   useEffect(() => {
@@ -52,8 +67,14 @@ export function TerminalDrawer({
   if (!open) return <></>;
   const startLine = terminalWindowStart(lines.length, lineLimit);
   return (
-    <Drawer placement="bottom" open={open} onClose={onClose} title={t("sessions.drawers.terminal")} subtitle={t("sessions.drawers.terminalNote")}>
-      <div className="h-full overflow-y-auto bg-canvas px-5 py-4" onScroll={(event) => { const node = event.currentTarget; followOutput.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }}>
+    <Drawer placement="bottom" open={open} onClose={onClose} title={locale === "zh-CN" ? "终端" : "Terminal"} resizable defaultHeight={320} storageKey="nautilo.terminal.height"
+      headerContent={<div className="terminal-tabs" role="tablist" aria-label={locale === "zh-CN" ? "终端视图" : "Terminal views"}>
+        <button type="button" className="terminal-tab" role="tab" aria-selected={view === "terminal"} onClick={() => setView("terminal")}><SquareTerminal size={14} aria-hidden />{locale === "zh-CN" ? "终端" : "Terminal"}</button>
+        {nativeAvailable && <button type="button" className="terminal-tab" role="tab" aria-selected={view === "native"} onClick={() => setView("native")}><TerminalSquare size={14} aria-hidden />{locale === "zh-CN" ? "原生 CLI" : "Native CLI"}</button>}
+        <button type="button" className="terminal-tab" role="tab" aria-selected={view === "logs"} onClick={() => setView("logs")}><FileText size={14} aria-hidden />{locale === "zh-CN" ? "运行日志" : "Logs"}</button>
+      </div>}
+      headerActions={<div ref={setToolbarTarget} className="workspace-panel-actions" />}>
+      {view !== "logs" && sessionId ? <NativeTerminal key={`${sessionId}:${view}`} sessionId={sessionId} kind={view === "native" ? "harness" : "shell"} toolbarTarget={toolbarTarget} /> : <div className="h-full overflow-y-auto bg-canvas px-5 py-4" onScroll={(event) => { const node = event.currentTarget; followOutput.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }}>
         {startLine > 0 && <button type="button" className="mb-3 rounded px-2 py-1 text-xs text-ink-3 hover:bg-card-hover" onClick={() => setLineLimit((limit) => limit + 500)}>{t("sessions.interactions.showMore")} ({startLine})</button>}
         {lines.length === 0 ? (
           <div className="flex h-40 flex-col items-center justify-center gap-2 text-ink-3">
@@ -70,7 +91,7 @@ export function TerminalDrawer({
             <div ref={bottomRef} />
           </pre>
         )}
-      </div>
+      </div>}
     </Drawer>
   );
 }
@@ -747,10 +768,11 @@ export function SubagentDrawer({
     (sessionId ? state.events[sessionId] ?? [] : []).find((item) => item.id === eventId));
   const data = event?.data.kind === "tool_activity" ? event.data : undefined;
   const subagent = data?.subagent;
-  const tone = data?.status === "running" ? "accent" : data?.status === "done" ? "ok" : "danger";
-  const statusLabel = data?.status === "running"
+  const status = data?.status === "failed" ? "failed" : subagent?.status ?? data?.status;
+  const tone = status === "running" ? "accent" : status === "done" ? "ok" : "danger";
+  const statusLabel = status === "running"
     ? subagent?.background ? t("sessions.cards.subagentBackgroundRunning") : t("sessions.cards.running")
-    : data?.status === "done"
+    : status === "done"
       ? t("sessions.status.completed")
       : t("sessions.cards.failed");
   const activities: TimelineEvent[] = (subagent?.activities ?? []).map((payload, index) => ({
@@ -772,8 +794,10 @@ export function SubagentDrawer({
             <Bot className="h-4 w-4" />
           </span>
           {subagent?.agentType && <Tag label={subagent.agentType} />}
+          {subagent?.model && <Tag label={subagent.model} />}
+          {subagent?.nativeAgentIds?.map((id) => <span key={id} title={id} className="font-mono text-xs">{id.slice(0, 8)}</span>)}
           {subagent?.background && <Tag label={t("sessions.cards.subagentBackground")} />}
-          {data && <StatusChip tone={tone} label={statusLabel} pulse={data.status === "running"} className="h-5 px-1.5 text-[10px]" />}
+          {data && <StatusChip tone={tone} label={statusLabel} pulse={status === "running"} className="h-5 px-1.5 text-[10px]" />}
           <SubagentUsageChips usage={resultView?.usage} agentId={resultView?.agentId} />
         </div>
         {subagent?.task && (

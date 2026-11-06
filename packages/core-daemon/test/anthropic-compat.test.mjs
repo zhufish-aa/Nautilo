@@ -27,8 +27,26 @@ test('Anthropic request translates tools, namespace history and system instructi
  assert.equal(r.tool_choice.disable_parallel_tool_use,true);
 });
 test('Anthropic converter rejects unsupported features explicitly',()=>{
- for(const extra of [{previous_response_id:'r'},{reasoning:{effort:'high'}},{text:{format:{type:'json_schema'}}},{tools:[{type:'web_search'}]},{input:[{type:'reasoning',summary:[]}]},{input:[{role:'user',content:[{type:'input_image',image_url:'https://example.test/a.png'}]}]},{tool_choice:{type:'function',name:'missing'}},{background:true}]) assert.throws(()=>responsesToAnthropicRequest({...request,...extra}));
+ for(const extra of [{previous_response_id:'r'},{text:{format:{type:'json_schema'}}},{tools:[{type:'web_search'}]},{input:[{type:'reasoning',summary:[]}]},{input:[{role:'user',content:[{type:'input_image',image_url:'https://example.test/a.png'}]}]},{tool_choice:{type:'function',name:'missing'}},{background:true}]) assert.throws(()=>responsesToAnthropicRequest({...request,...extra}));
  assert.throws(()=>responsesToAnthropicRequest({...request,tools:[...tools,{type:'function',name:'mcp__run'}]}),/colliding/);
+});
+
+test('Anthropic effort and signed thinking survive the stream and the next tool-result turn', async t => {
+ let received;
+ const stream = [start,
+  {type:'content_block_start',index:0,content_block:{type:'thinking',thinking:'',signature:''}},
+  {type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'Check the saved file.'}},
+  {type:'content_block_delta',index:0,delta:{type:'signature_delta',signature:'provider-signed-opaque-value'}},
+  {type:'content_block_stop',index:0},
+  ...textEvents.slice(1,4).map(event=>({...event,index:1})), ...stop('end_turn')];
+ const {send}=await setup(t,async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;received=JSON.parse(body);res.writeHead(200,{'content-type':'text/event-stream'}).end(stream.map(frame).join(''));});
+ const result=events(await(await send({...request,reasoning:{effort:'max'}})).text());
+ assert.deepEqual(received.output_config,{effort:'max'});
+ assert.equal(result.at(-1).type,'response.completed');
+ const thinking=result.at(-1).response.output[0];
+ assert.equal(thinking.summary[0].text,'Check the saved file.');
+ const replay=responsesToAnthropicRequest({...request,input:[{role:'user',content:'hello'},thinking,{role:'assistant',content:'done'},{role:'user',content:'continue'}]}).request;
+ assert.deepEqual(replay.messages[1].content[0],{type:'thinking',thinking:'Check the saved file.',signature:'provider-signed-opaque-value'});
 });
 test('Anthropic endpoint validation requires remote TLS and preserves explicit paths',()=>{
  assert.equal(anthropicEndpoint('https://api.anthropic.com'),'https://api.anthropic.com/v1/messages');
@@ -86,7 +104,7 @@ test('Anthropic bridge rejects unsupported invocation before launching CLI',asyn
  const {startCodexChatCompatAppServer}=await import('../dist/adapters/codex/chat-compat-proxy.js');
  const {buildCodexAppServerArgs}=await import('../dist/adapters/codex/app-server-run.js');
  const instance={providerId:'codex',executable:'missing-codex',baseArgs:[],providerOptions:{wireApi:'anthropic',baseUrl:'https://api.anthropic.com'}};
- for(const extra of [{reasoningEffort:'high'},{localImagePaths:['a.png']},{serviceTier:'priority'}]) {
+ for(const extra of [{localImagePaths:['a.png']},{serviceTier:'priority'}]) {
    const run=startCodexChatCompatAppServer({instance,...extra},false,{anthropic:true});
    const received=[]; for await(const event of run.events)received.push(event);
    assert.equal(received[0].kind,'error');assert.match(received[0].error.message,/does not support/);
@@ -129,5 +147,5 @@ test('Anthropic rejects oversized bodies and unknown routes before upstream',asy
 test('Anthropic model catalog advertises only supported transient capabilities',async()=>{
  const {buildCodexCustomModelCatalog}=await import('../dist/adapters/codex/app-server-run.js');
  const catalog=buildCodexCustomModelCatalog({providerOptions:{baseUrl:'http://127.0.0.1:123/v1',anthropicCompat:true,webSearch:false},models:[{id:'claude-test',reasoningEfforts:['high']}]},'claude-test');
- assert.deepEqual(catalog.models[0].supported_reasoning_levels.map(x=>x.effort),['none']);assert.deepEqual(catalog.models[0].input_modalities,['text']);assert.equal(catalog.models[0].supports_reasoning_summaries,false);
+ assert.deepEqual(catalog.models[0].supported_reasoning_levels.map(x=>x.effort),['high']);assert.deepEqual(catalog.models[0].input_modalities,['text']);assert.equal(catalog.models[0].supports_reasoning_summaries,false);
 });

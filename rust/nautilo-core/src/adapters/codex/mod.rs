@@ -15,6 +15,7 @@ use crate::process_runtime::{ProcessEvent, ProcessRequest, ProcessRuntime};
 use crate::errors::now_iso;
 
 pub mod app_server;
+mod elicitation;
 pub mod chat_compat;
 mod anthropic_compat;
 pub mod events;
@@ -151,6 +152,9 @@ pub fn build_codex_mcp_config_args(servers: &[Value]) -> Vec<String> {
 
 /// Maps the CLI-native permission mode onto Codex approval policy + sandbox.
 pub fn codex_permission_config(instance: &Value, request: Option<&AdapterStartRequest>) -> Option<(&'static str, &'static str)> {
+    if instance.pointer("/providerOptions/imageGenerationDelegate").and_then(Value::as_bool) == Some(true) {
+        return Some(("untrusted", "read-only"));
+    }
     let normalize = |value: Option<&str>| value.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     let mode = normalize(request.and_then(|r| r.permission_mode.as_deref()))
         .or_else(|| normalize(provider_option(instance, "permissionMode")));
@@ -220,7 +224,7 @@ fn default_resume_args(instance: &Value, request: Option<&AdapterStartRequest>) 
 
 pub fn build_codex_start_args(instance: &Value, prompt: &str, request: Option<&AdapterStartRequest>) -> CoreResult<Vec<String>> {
     let custom = base_args(instance);
-    let mut args = if custom.is_empty() { default_start_args(instance, request) } else { custom };
+    let mut args = if custom.is_empty() { default_start_args(instance, request) } else { crate::adapters::process_adapter::merge_cli_args(custom, default_start_args(instance,request).into_iter().skip(1).collect()) };
     args.extend(build_codex_provider_config_args(instance, request.and_then(|r| r.env.as_ref()), None)?);
     let schema = request
         .and_then(|r| r.output_schema_path.clone())
@@ -230,6 +234,9 @@ pub fn build_codex_start_args(instance: &Value, prompt: &str, request: Option<&A
             args.push("--output-schema".to_string());
             args.push(schema);
         }
+    }
+    if let Some(images) = request.and_then(|request|request.local_image_paths.as_ref()) {
+        for path in images {args.extend(["--image".into(),path.clone()]);}
     }
     args.push(prompt.to_string());
     Ok(args)
@@ -245,9 +252,17 @@ pub fn build_codex_resume_args(
     let mut args = if custom.is_empty() {
         default_resume_args(instance, request)
     } else {
-        custom.into_iter().chain(std::iter::once("resume".to_string())).collect()
+        let mut args = custom;
+        if !args.iter().any(|arg|arg=="resume") {args.push("resume".into());}
+        crate::adapters::process_adapter::merge_cli_args(args, default_resume_args(instance,request).into_iter().skip(2).collect())
     };
     args.extend(build_codex_provider_config_args(instance, request.and_then(|r| r.env.as_ref()), None)?);
+    if let Some(path) = request.and_then(|request|request.output_schema_path.as_ref()) {
+        args.extend(["--output-schema".into(),path.clone()]);
+    }
+    if let Some(images) = request.and_then(|request|request.local_image_paths.as_ref()) {
+        for path in images {args.extend(["--image".into(),path.clone()]);}
+    }
     args.push(session_id.to_string());
     args.push(prompt.to_string());
     Ok(args)
@@ -256,7 +271,8 @@ pub fn build_codex_resume_args(
 /// Windows: npm codex shims resolve to the bundled node + codex.js when the
 /// package layout is the official one (port of executable.ts).
 pub fn resolve_codex_invocation(executable: &str, args: &[String], path_value: Option<&str>) -> (String, Vec<String>) {
-    if !cfg!(windows) || executable.to_lowercase().ends_with(".exe") {
+    let name = Path::new(executable).file_name().and_then(|name|name.to_str()).unwrap_or(executable).to_lowercase();
+    if !cfg!(windows) || !["codex","codex.cmd","codex.bat","codex.ps1"].contains(&name.as_str()) {
         return (executable.to_string(), args.to_vec());
     }
     let bin_directory = npm_bin_directory(executable, path_value);
@@ -670,6 +686,25 @@ impl AgentCliAdapter for CodexAdapter {
             return start_exec_process(request, args);
         }
         app_server::start_codex_app_server(request, None)
+    }
+    async fn release_session(&self,request:&AdapterStartRequest)->CoreResult<()> {app_server::release_session(request).await}
+    async fn native_terminal(&self,mut request:AdapterStartRequest,resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
+        let mut resources:Vec<Box<dyn Send>>=vec![];
+        if matches!(resolve_codex_wire_api(&request.instance),"chat"|"anthropic") {
+            let anthropic=resolve_codex_wire_api(&request.instance)=="anthropic";
+            let proxy=chat_compat::ChatCompatProxy::start_protocol(configured_base_url(&request.instance)?.unwrap_or_default(),request.env.clone().unwrap_or_default(),false,anthropic)
+                .map_err(|error|crate::errors::invalid("connectionId",&error.to_string()))?;
+            request.instance["providerOptions"]["baseUrl"]=json!(proxy.base_url());request.instance["providerOptions"]["wireApi"]=json!("responses");resources.push(Box::new(proxy));
+        }
+        let mut args=base_args(&request.instance);
+        if let Some(profile)=request.instance["profile"].as_str(){args.extend(["--profile".into(),profile.into()]);}
+        args.extend(permission_args(&request.instance,Some(&request)));
+        args.extend(build_codex_provider_config_args(&request.instance,request.env.as_ref(),Some("responses"))?);
+        args.extend(build_codex_mcp_config_args(request.mcp_servers.as_deref().unwrap_or(&[])));
+        if let Some(model)=request.model {args.extend(["--model".into(),model]);}
+        if let Some(effort)=request.reasoning_effort{args.extend(["--config".into(),format!("model_reasoning_effort={}",json!(effort))]);}
+        if let Some(resume)=resume{args.extend(["resume".into(),resume]);}
+        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("codex").into(),args,env:request.env,cwd:request.cwd,resources})
     }
 
     fn resume(&self, request: AdapterResumeRequest) -> CoreResult<AdapterRun> {

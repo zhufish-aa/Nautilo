@@ -15,7 +15,7 @@ interface SessionTreeNode {
 }
 
 function activityTime(session: UiSession): number {
-  const parsed = Date.parse(session.lastMessageAt ?? session.updatedAt ?? session.createdAt);
+  const parsed = Date.parse(session.lastMessageAt ?? session.createdAt);
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 

@@ -174,6 +174,28 @@ test("B-046 enforces once, run, task, project and global approval scopes", () =>
   database.close();
 });
 
+test("launch approval coalesces pending duplicates and standalone grants stay in their session", () => {
+  const database = new Database(":memory:");
+  const approvals = new ApprovalService(database);
+  const input = {category: "command", operation: "agent.launch:pi", summary: "Launch Pi", projectId: "p", sessionId: "s", requestedBy: "user"};
+  try {
+    const first = approvals.request(input);
+    assert.equal(approvals.request(input).id, first.id);
+    database.approvals.save({...first, id: "legacy-2"});
+    database.approvals.save({...first, id: "legacy-3"});
+    assert.equal(approvals.resolveMany(first.id, "approved", "once").length, 3);
+    assert.equal(approvals.authorize(input.operation, {projectId: "p", sessionId: "other"}), false);
+    assert.equal(approvals.authorize(input.operation, {projectId: "p", sessionId: "s"}), true);
+    assert.equal(approvals.authorize(input.operation, {projectId: "p", sessionId: "s"}), false);
+    const next = approvals.request(input);
+    approvals.resolve(next.id, "approved", "run");
+    assert.equal(approvals.authorize(input.operation, {projectId: "p", sessionId: "s"}), true);
+    assert.equal(approvals.authorize(input.operation, {projectId: "p", sessionId: "other"}), false);
+    assert.equal(approvals.resolve(next.id, "approved", "run").scope, "run");
+    assert.throws(() => approvals.resolve(next.id, "approved", "global"));
+  } finally { database.close(); }
+});
+
 test("B-047 marks interrupted persisted work as recoverable after daemon restart", async (t) => {
   const dataDir = temporaryDirectory(t, "agenthub-restart-");
   const databasePath = join(dataDir, "agenthub.sqlite");

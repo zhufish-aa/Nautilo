@@ -68,6 +68,19 @@ pub fn build_environment(policy: Option<&Value>, additions: HashMap<String, Stri
     for (key, value) in additions {
         environment.insert(key, value);
     }
+    // Respect the explicitly selected CLI runtime in both desktop shells and
+    // headless daemons, without changing the machine's global PATH or adding
+    // PATH when the permission policy excluded it.
+    if let Ok(runtime)=std::env::var("AGENTHUB_NODE_PATH") {
+        let runtime=std::path::PathBuf::from(runtime);
+        if runtime.is_absolute() && runtime.is_file() {
+            if let (Some(directory),Some(path_key))=(runtime.parent(),environment.keys().find(|key|key.eq_ignore_ascii_case("PATH")).cloned()) {
+                let mut paths=vec![directory.to_path_buf()];
+                paths.extend(std::env::split_paths(&environment[&path_key]).filter(|path|path!=directory));
+                if let Ok(path)=std::env::join_paths(paths) {environment.insert(path_key,path.to_string_lossy().into_owned());}
+            }
+        }
+    }
     environment
 }
 

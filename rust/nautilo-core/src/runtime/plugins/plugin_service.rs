@@ -318,9 +318,21 @@ impl PluginService {
         }
         self.unload(plugin_id).await;
         validate_plugin_target(&self.plugins_dir, &dir)?;
-        let main = manifest.get("main").and_then(Value::as_str).unwrap_or("");
-        let executable = resolve_executable(&dir, main);
-        match launch_plugin(plugin_id, &executable, &dir).await {
+        let mut runtime_dir=dir.clone();let mut runtime_manifest=manifest.clone();
+        if cfg!(debug_assertions) {
+            if let Some(root)=std::env::var_os("AGENTHUB_DEV_PLUGIN_DIR").map(PathBuf::from) {
+                let candidate=root.join(plugin_id);
+                if candidate.is_dir() {
+                    validate_plugin_target(&root,&candidate)?;
+                    let overlay=self.read_manifest(&candidate)?;validate_manifest(&overlay,&candidate.to_string_lossy())?;
+                    if overlay["id"]!=plugin_id {return Err(plugin_fail(ErrorCode::PluginInvalid,&candidate.to_string_lossy(),"Development plugin id does not match its directory"));}
+                    runtime_dir=candidate;runtime_manifest=overlay;
+                }
+            }
+        }
+        let main = runtime_manifest.get("main").and_then(Value::as_str).unwrap_or("");
+        let executable = resolve_executable(&runtime_dir, main);
+        match launch_plugin(plugin_id, &executable, &runtime_dir).await {
             Ok(client) => {
                 let adapter_id = client.provider_id().to_string();
                 if adapter_id != plugin_id {

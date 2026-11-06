@@ -42,6 +42,7 @@ export function mergeInstanceModelConfig(
       reasoningEfforts,
       defaultReasoningEffort,
       contextWindow: config.contextWindow ?? existing?.contextWindow,
+      inputModalities: config.inputModalities ?? existing?.inputModalities,
       pricing: config.pricing ? { ...config.pricing } : existing?.pricing
     };
     if (index >= 0) merged[index] = entry;

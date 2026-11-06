@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profile = process.argv.includes("--release") ? "release" : "debug";
-const targetDir = join(root, "rust", "target", "x86_64-pc-windows-gnu", profile);
-const plugins = ["opencode", "trae", "pi", "omp"];
+const targetDir = join(process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : join(root, "rust", "target"), "x86_64-pc-windows-gnu", profile);
+const plugins = ["opencode", "trae", "pi", "omp", "commandcode", "deepseek"];
 
 let copied = 0;
 for (const id of plugins) {

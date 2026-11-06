@@ -14,6 +14,8 @@ import { ScoreDots } from "../../components/ui/ScoreDots";
 import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { TagInput } from "../../components/ui/TagInput";
+import { connectionModelKey, useConnectionsStore } from "../../stores/connections";
+import { connectionSupportsAgent } from "../../lib/session-connections";
 import { useAgentsStore } from "../../stores/agents";
 import { toast } from "../../stores/toast";
 
@@ -26,6 +28,8 @@ interface StrengthRow {
 interface MemberForm {
   displayName: string;
   agentInstanceId: string;
+  connectionId: string;
+  connectionRevision?: number;
   model: string;
   reasoningEffort: string;
   serviceTier: string;
@@ -46,6 +50,7 @@ function formFromMember(member?: UiTeamMember): { form: MemberForm; strengths: S
       form: {
         displayName: "",
         agentInstanceId: "",
+        connectionId: "",
         model: "",
         reasoningEffort: "",
         serviceTier: "",
@@ -66,6 +71,8 @@ function formFromMember(member?: UiTeamMember): { form: MemberForm; strengths: S
     form: {
       displayName: member.displayName,
       agentInstanceId: member.agentInstanceId,
+      connectionId: member.connectionId ?? "",
+      connectionRevision: member.connectionRevision,
       model: member.model ?? "",
       reasoningEffort: member.reasoningEffort ?? "",
       serviceTier: member.serviceTier ?? "",
@@ -101,9 +108,11 @@ export function MemberEditorDialog({
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
   const instances = useAgentsStore((state) => state.instances);
-  const modelCatalogs = useAgentsStore((state) => state.modelCatalogs);
-  const loadingModels = useAgentsStore((state) => state.loadingModels);
-  const loadModels = useAgentsStore((state) => state.loadModels);
+  const connections = useConnectionsStore((state) => state.connections);
+  const hydrateConnections = useConnectionsStore((state) => state.hydrate);
+  const modelCatalogs = useConnectionsStore((state) => state.modelCatalogs);
+  const loadingModels = useConnectionsStore((state) => state.loadingModels);
+  const loadModels = useConnectionsStore((state) => state.loadModels);
 
   const tabId = useId();
   const inFlight = useRef(false);
@@ -113,7 +122,7 @@ export function MemberEditorDialog({
   const [form, setForm] = useState<MemberForm>(() => formFromMember(undefined).form);
   const [strengthRows, setStrengthRows] = useState<StrengthRow[]>([]);
   const [customTaskDraft, setCustomTaskDraft] = useState("");
-  const [errors, setErrors] = useState<{ name?: string; instance?: string; concurrency?: string }>({});
+  const [errors, setErrors] = useState<{ name?: string; instance?: string; connection?: string; model?: string; concurrency?: string }>({});
   const [policies, setPolicies] = useState<PermissionPolicy[]>([]);
   const [policyError, setPolicyError] = useState("");
   const [policyLoading, setPolicyLoading] = useState(false);
@@ -154,8 +163,12 @@ export function MemberEditorDialog({
 
   const patch = (changes: Partial<MemberForm>): void =>
     setForm((prev) => ({ ...prev, ...changes }));
+  useEffect(() => { if (open) void hydrateConnections(); }, [open, hydrateConnections]);
   const selectedInstance = instances.find((instance) => instance.id === form.agentInstanceId);
-  const modelCatalog = selectedInstance ? modelCatalogs[selectedInstance.id] : undefined;
+  const selectedConnection = connections.find((item) => item.id === form.connectionId);
+  const modelKey = selectedConnection ? connectionModelKey(selectedConnection.id, form.connectionRevision ?? selectedConnection.revision) : "";
+  const modelCatalog = modelCatalogs[modelKey];
+  const compatibleConnections = selectedInstance ? connections.filter((item) => connectionSupportsAgent(item, selectedInstance)) : [];
   const selectedModel = modelCatalog?.models.find((model) => model.id === form.model);
   const modelOptions = useMemo(
     () =>
@@ -173,9 +186,9 @@ export function MemberEditorDialog({
   }));
 
   useEffect(() => {
-    if (!open || !selectedInstance || modelCatalog) return;
-    void loadModels(selectedInstance.id);
-  }, [loadModels, modelCatalog, open, selectedInstance]);
+    if (!open || !selectedConnection || !selectedConnection.enabled) return;
+    void loadModels(selectedConnection.id, form.connectionRevision ?? selectedConnection.revision);
+  }, [loadModels, open, selectedConnection?.id, selectedConnection?.revision, form.connectionRevision]);
 
   const presetTaskTypes = TASK_TYPE_KEYS as readonly string[];
   const customTaskTypes = form.allowedTaskTypes.filter((type) => !presetTaskTypes.includes(type));
@@ -207,11 +220,13 @@ export function MemberEditorDialog({
     if (inFlight.current) return;
     const nextErrors: typeof errors = {};
     if (!form.displayName.trim()) nextErrors.name = t("agents.editor.nameRequired");
-    if (!form.agentInstanceId) nextErrors.instance = t("agents.editor.providerRequired");
+    if (!selectedInstance || selectedInstance.configurationKind !== "harness") nextErrors.instance = zh ? "请选择 Harness，迁移旧 Agent 配置" : "Select a harness to replace the legacy agent configuration";
+    if (!selectedConnection || !compatibleConnections.some((item) => item.id === selectedConnection.id)) nextErrors.connection = zh ? "请选择兼容的供应商或登录账号" : "Choose a compatible provider or login account";
+    if (selectedConnection?.kind === "api" && !form.model.trim() && !modelCatalog?.defaultModel && !modelCatalog?.models.length) nextErrors.model = zh ? "请选择或填写模型" : "Choose or enter a model";
     if (form.maxConcurrentTasks.trim() && (!Number.isSafeInteger(Number(form.maxConcurrentTasks)) || Number(form.maxConcurrentTasks) < 1))
       nextErrors.concurrency = locale === "zh-CN" ? "请输入正整数，或留空表示不限。" : "Enter a positive integer, or leave blank for no limit.";
     setErrors(nextErrors);
-    if (nextErrors.name || nextErrors.instance || nextErrors.concurrency) {
+    if (Object.keys(nextErrors).length) {
       setTab("basic");
       return;
     }
@@ -229,8 +244,10 @@ export function MemberEditorDialog({
       await onSave({
         displayName: form.displayName.trim(),
         agentInstanceId: form.agentInstanceId,
-        model: form.model.trim() || undefined,
-        reasoningEffort: form.reasoningEffort.trim() || undefined,
+        connectionId: form.connectionId,
+        connectionRevision: form.connectionRevision ?? selectedConnection?.revision,
+        model: form.model.trim() || modelCatalog?.defaultModel || modelCatalog?.models[0]?.id,
+        reasoningEffort: form.reasoningEffort.trim() || selectedModel?.defaultReasoningEffort || modelCatalog?.models.find((model) => model.id === (modelCatalog.defaultModel ?? modelCatalog.models[0]?.id))?.defaultReasoningEffort,
         serviceTier: form.serviceTier || undefined,
         maxConcurrentTasks: form.maxConcurrentTasks.trim() ? Number(form.maxConcurrentTasks) : undefined,
         allowedTaskTypes: form.allowedTaskTypes,
@@ -348,29 +365,41 @@ export function MemberEditorDialog({
               />
             </Field>
 
-            <Field label={t("teams.member.instanceLabel")} error={errors.instance}>
+            <Field label="Harness" error={errors.instance}>
               <SelectField
-                aria-label={t("teams.member.instanceLabel")}
+                aria-label="Harness"
                 value={form.agentInstanceId || undefined}
                 onValueChange={(value) =>
                   patch({
                     agentInstanceId: value,
+                    connectionId: "",
+                    connectionRevision: undefined,
                     model: "",
                     reasoningEffort: "",
                     serviceTier: ""
                   })
                 }
-                options={instances.map((instance) => ({
+                options={instances.filter((instance) => instance.configurationKind === "harness" || instance.id === form.agentInstanceId).map((instance) => ({
                   value: instance.id,
-                  label: instance.displayName,
-                  hint: instance.providerId
+                  label: instance.configurationKind === "harness" ? instance.displayName : `${instance.displayName} · ${zh ? "旧配置，待迁移" : "Legacy configuration"}`,
+                  hint: instance.providerId,
+                  disabled: !instance.enabled || instance.configurationKind !== "harness"
                 }))}
-                placeholder={t("teams.member.instancePlaceholder")}
+                placeholder={zh ? "选择 Harness" : "Choose a harness"}
               />
+            </Field>
+
+            <Field label={zh ? "供应商 / 登录账号" : "Provider / login account"} error={errors.connection}>
+              <SelectField value={form.connectionId || undefined} aria-label={zh ? "供应商或账号" : "Provider or account"} placeholder={zh ? "选择供应商或账号" : "Choose a provider or account"}
+                options={compatibleConnections.map((connection) => ({ value: connection.id, label: connection.name, hint: connection.kind === "login" ? (zh ? "登录账号 · 自动获取模型" : "Login account · automatic models") : connection.protocol }))}
+                onValueChange={(connectionId) => { const connection = connections.find((item) => item.id === connectionId); patch({ connectionId, connectionRevision: connection?.revision, model: "", reasoningEffort: "", serviceTier: "" }); }} />
+              {selectedConnection && <p className="mt-2 text-xs text-ink-3">{zh ? `固定使用连接版本 v${form.connectionRevision ?? selectedConnection.revision}` : `Pinned connection revision v${form.connectionRevision ?? selectedConnection.revision}`}</p>}
+              {selectedConnection && form.connectionRevision && form.connectionRevision !== selectedConnection.revision && <Button variant="outline" size="sm" onClick={() => patch({ connectionRevision: selectedConnection.revision, model: "", reasoningEffort: "", serviceTier: "" })}>{zh ? `改用最新版本 v${selectedConnection.revision}` : `Use latest revision v${selectedConnection.revision}`}</Button>}
             </Field>
 
             <Field
               label={t("agents.editor.basic.model")}
+              error={errors.model}
               hint={
                 form.model.trim() && !selectedModel
                   ? t("agents.editor.basic.modelCustom")
@@ -401,7 +430,7 @@ export function MemberEditorDialog({
                     });
                   }}
                   options={modelOptions}
-                  loading={!!selectedInstance && loadingModels[selectedInstance.id]}
+                  loading={!!modelKey && loadingModels[modelKey]}
                   customOptionLabel={t("agents.editor.basic.modelUseCustom")}
                   customOptionDescription={t("agents.editor.basic.modelCustom")}
                   placeholder={
@@ -417,11 +446,11 @@ export function MemberEditorDialog({
                   variant="outline"
                   size="icon"
                   aria-label={t("agents.editor.basic.refreshModels")}
-                  disabled={!selectedInstance || loadingModels[selectedInstance.id]}
-                  onClick={() => selectedInstance && void loadModels(selectedInstance.id)}
+                  disabled={!selectedConnection || loadingModels[modelKey]}
+                  onClick={() => selectedConnection && void loadModels(selectedConnection.id, form.connectionRevision ?? selectedConnection.revision, true)}
                 >
                   <RefreshCw
-                    className={`h-4 w-4 ${selectedInstance && loadingModels[selectedInstance.id] ? "animate-spin" : ""}`}
+                    className={`h-4 w-4 ${modelKey && loadingModels[modelKey] ? "animate-spin" : ""}`}
                     aria-hidden
                   />
                 </Button>

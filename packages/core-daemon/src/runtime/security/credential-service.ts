@@ -43,6 +43,7 @@ export class CredentialService {
 
   remove(agentInstanceId: string): boolean { return this.database.credentials.remove(agentInstanceId); }
   has(agentInstanceId: string): boolean { return this.database.credentials.has(agentInstanceId); }
+  connectionDirectory(id: string, revision: number): string { return join(dirname(this.keyPath), "runtime-connections", id, String(revision)); }
 
   environment(agentInstanceId: string, providerId: string): Record<string, string> {
     const credential = this.read(agentInstanceId);

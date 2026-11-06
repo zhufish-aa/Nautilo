@@ -61,6 +61,7 @@ interface SessionsState {
     title: string;
     model?: string;
     reasoningEffort?: string;
+    agentMode?: string;
     serviceTier?: string;
     permissionMode?: string;
     parentSessionId?: string;
@@ -73,7 +74,7 @@ interface SessionsState {
   _setRunning: (sessionId: string, run: RunLifecycle | undefined) => void;
   _setForeground: (sessionId: string, run: RunLifecycle | undefined) => void;
   _setActiveAgentRun: (sessionId: string, runId: string | undefined) => void;
-  _configureSession: (sessionId: string, patch: Pick<Partial<UiSession>, "title" | "model" | "reasoningEffort" | "serviceTier" | "permissionMode" | "connectionId" | "connectionRevision">) => UiSession | undefined;
+  _configureSession: (sessionId: string, patch: Pick<Partial<UiSession>, "title" | "model" | "agentMode" | "reasoningEffort" | "serviceTier" | "permissionMode" | "connectionId" | "connectionRevision">) => UiSession | undefined;
   /** Compatibility guard: Agent identity cannot be rebound in an existing session. */
   _setSessionInstance: (sessionId: string, instanceId: string) => UiSession | undefined;
   _upsertTask: (sessionId: string, task: SessionTask) => void;
@@ -143,7 +144,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             Object.fromEntries(Object.entries(values).filter(([id]) => !deleted.has(id))) as Record<string, T>;
           const nextActive = state.activeSessionId && !deleted.has(state.activeSessionId)
             ? state.activeSessionId
-            : [...sessions].sort((a, b) => (b.lastMessageAt ?? b.updatedAt).localeCompare(a.lastMessageAt ?? a.updatedAt))[0]?.id;
+            : [...sessions].sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt))[0]?.id;
           return {
             sessions,
             activeSessionId: nextActive,
@@ -164,7 +165,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       startEditingMessage: (sessionId, messageId, text) => set({ editingMessage: { sessionId, messageId, text } }),
       cancelEditingMessage: () => set({ editingMessage: undefined }),
 
-      createSession: ({ connectionId, connectionRevision, projectId, target, title, model, reasoningEffort, serviceTier, permissionMode, parentSessionId, runId, mode }) => {
+      createSession: ({ connectionId, connectionRevision, projectId, target, title, model, agentMode, reasoningEffort, serviceTier, permissionMode, parentSessionId, runId, mode }) => {
         const now = new Date().toISOString();
         const session: UiSession = {
           id: newId("sess"),
@@ -175,6 +176,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           title,
           model,
           reasoningEffort,
+          agentMode,
           serviceTier,
           permissionMode,
           mode,
@@ -197,6 +199,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           const memberId = target.type === "member" ? target.memberId : target.type === "agent" ? target.instanceId : "";
           const domainSession: DomainSession = {
             id: session.id,
+            connectionId,
+            connectionRevision,
             projectId,
             memberId,
             teamId: target.teamId,
@@ -206,6 +210,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             title,
             model,
             reasoningEffort,
+          agentMode,
             serviceTier,
             permissionMode,
             status: "idle",
@@ -222,7 +227,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         const state = get();
         const log = state.events[sessionId] ?? [];
         const event: TimelineEvent = {
-          id: newId("ev"),
+          id: payload.kind === "message" && payload.messageId ? `message-${payload.messageId}` : newId("ev"),
           sessionId,
           sequence: (log[log.length - 1]?.sequence ?? 0) + 1,
           timestamp: new Date().toISOString(),

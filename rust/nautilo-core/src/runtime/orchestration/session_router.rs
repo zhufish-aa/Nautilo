@@ -44,6 +44,7 @@ impl SessionRouter {
             }
         }
         let goal = project_run.get("goal").and_then(Value::as_str).unwrap_or("");
+        let member = team["members"].as_array().and_then(|members| members.iter().find(|member| member["id"] == project_run["mainMemberId"]));
         self.create(
             project_run,
             project_run.get("mainMemberId").and_then(Value::as_str).unwrap_or(""),
@@ -51,8 +52,11 @@ impl SessionRouter {
             &json!({
                 "teamId": team.get("id").cloned().unwrap_or(Value::Null),
                 "agentInstanceId": project_run.get("mainAgentInstanceId").cloned().unwrap_or(Value::Null),
-                "connectionId": project_run.get("connectionId").cloned().unwrap_or(Value::Null),
-                "connectionRevision": project_run.get("connectionRevision").cloned().unwrap_or(Value::Null)
+                "connectionId": member.and_then(|m| m.get("connectionId")).filter(|v| !v.is_null()).or_else(|| project_run.get("connectionId")).cloned().unwrap_or(Value::Null),
+                "connectionRevision": if member.and_then(|m| m["connectionId"].as_str()).is_some() { member.map(|m| m["connectionRevision"].clone()).unwrap_or(Value::Null) } else { project_run.get("connectionRevision").cloned().unwrap_or(Value::Null) },
+                "model": member.map(|m| m["model"].clone()).unwrap_or(Value::Null),
+                "reasoningEffort": member.map(|m| m["reasoningEffort"].clone()).unwrap_or(Value::Null),
+                "serviceTier": member.map(|m| m["serviceTier"].clone()).unwrap_or(Value::Null)
             }),
         )
     }
@@ -86,9 +90,9 @@ impl SessionRouter {
                 details.insert("memberId".to_string(), json!(member_id));
                 return Err(CoreError::details(ErrorCode::PlanSchemaInvalid, details));
             };
-            let expected_id = member.get("connectionId").or_else(|| parent.get("connectionId"));
-            let expected_revision = if member.get("connectionId").is_some() { member.get("connectionRevision") } else { parent.get("connectionRevision") };
-            if target.get("connectionId") != expected_id || (expected_revision.is_some() && target.get("connectionRevision") != expected_revision) {
+            let expected_id = member.get("connectionId").filter(|value| !value.is_null()).or_else(|| parent.get("connectionId").filter(|value| !value.is_null()));
+            let expected_revision = if member.get("connectionId").and_then(Value::as_str).is_some() { member.get("connectionRevision") } else { parent.get("connectionRevision") };
+            if target.get("agentInstanceId").and_then(Value::as_str).is_some_and(|id| member["agentInstanceId"].as_str() != Some(id)) || target.get("connectionId").filter(|value| !value.is_null()) != expected_id || (expected_revision.is_some() && target.get("connectionRevision") != expected_revision) {
                 return Err(crate::errors::invalid("connectionId","Continued delegated session uses a different provider/account; create a new delegated session"));
             }
             let mut continued = target.as_object().cloned().unwrap_or_default();
@@ -112,9 +116,9 @@ impl SessionRouter {
                     && session.get("taskId").and_then(Value::as_str) == Some(task_id)
             });
         if let Some(existing) = existing {
-            let expected_id = member.get("connectionId").or_else(|| parent.get("connectionId"));
-            let expected_revision = if member.get("connectionId").is_some() { member.get("connectionRevision") } else { parent.get("connectionRevision") };
-            if existing.get("connectionId") != expected_id || (expected_revision.is_some() && existing.get("connectionRevision") != expected_revision) {
+            let expected_id = member.get("connectionId").filter(|value| !value.is_null()).or_else(|| parent.get("connectionId").filter(|value| !value.is_null()));
+            let expected_revision = if member.get("connectionId").and_then(Value::as_str).is_some() { member.get("connectionRevision") } else { parent.get("connectionRevision") };
+            if existing.get("agentInstanceId").and_then(Value::as_str).is_some_and(|id| member["agentInstanceId"].as_str() != Some(id)) || existing.get("connectionId").filter(|value| !value.is_null()) != expected_id || (expected_revision.is_some() && existing.get("connectionRevision") != expected_revision) {
                 return Err(crate::errors::invalid("connectionId","Existing delegated task belongs to a different provider/account; create a new task session"));
             }
             return Ok(existing);
@@ -127,8 +131,9 @@ impl SessionRouter {
                 "teamId": team.get("id").cloned().unwrap_or(Value::Null),
                 "parentSessionId": parent.get("id").cloned().unwrap_or(Value::Null),
                 "taskId": task_id,
-                "connectionId": member.get("connectionId").or_else(|| parent.get("connectionId")).cloned().unwrap_or(Value::Null),
-                "connectionRevision": if member.get("connectionId").is_some() { member.get("connectionRevision").cloned().unwrap_or(Value::Null) } else { parent.get("connectionRevision").cloned().unwrap_or(Value::Null) },
+                "agentInstanceId": member["agentInstanceId"],
+                "connectionId": member.get("connectionId").filter(|value| !value.is_null()).or_else(|| parent.get("connectionId").filter(|value| !value.is_null())).cloned().unwrap_or(Value::Null),
+                "connectionRevision": if member.get("connectionId").and_then(Value::as_str).is_some() { member.get("connectionRevision").cloned().unwrap_or(Value::Null) } else { parent.get("connectionRevision").cloned().unwrap_or(Value::Null) },
                 "model": member.get("model").cloned().unwrap_or(Value::Null),
                 "reasoningEffort": member.get("reasoningEffort").cloned().unwrap_or(Value::Null),
                 "serviceTier": member.get("serviceTier").cloned().unwrap_or(Value::Null)
@@ -149,8 +154,8 @@ impl SessionRouter {
             &json!({
                 "teamId": team.get("id").cloned().unwrap_or(Value::Null),
                 "parentSessionId": previous.get("id").cloned().unwrap_or(Value::Null),
-                "connectionId": previous.get("connectionId").cloned().unwrap_or(Value::Null),
-                "connectionRevision": previous.get("connectionRevision").cloned().unwrap_or(Value::Null),
+                "connectionId": member.as_ref().and_then(|m| m.get("connectionId")).filter(|v| !v.is_null()).or_else(|| previous.get("connectionId")).cloned().unwrap_or(Value::Null),
+                "connectionRevision": if member.as_ref().and_then(|m| m["connectionId"].as_str()).is_some() { member.as_ref().map(|m| m["connectionRevision"].clone()).unwrap_or(Value::Null) } else { previous.get("connectionRevision").cloned().unwrap_or(Value::Null) },
                 "agentInstanceId": member.as_ref().and_then(|m| m.get("agentInstanceId").cloned()).unwrap_or(Value::Null),
                 "model": member.as_ref().and_then(|m| m.get("model").cloned()).unwrap_or(Value::Null),
                 "reasoningEffort": member.as_ref().and_then(|m| m.get("reasoningEffort").cloned()).unwrap_or(Value::Null),

@@ -7,6 +7,7 @@ import { Database, AdapterRegistry, EventService, RunService, CredentialService 
 import { ConnectionService } from '../dist/application/connection-service.js';
 import { SessionService } from '../dist/application/session-service.js';
 import { SessionRouter } from '../dist/runtime/orchestration/session-router.js';
+import { TeamService } from '../dist/application/team-service.js';
 import { IpcGateway } from '../dist/ipc-gateway.js';
 import { registerIpcHandlers } from '../dist/application/ipc-handlers.js';
 import { buildSessionTurnContext } from '../dist/application/session-context.js';
@@ -45,7 +46,7 @@ async function fixture(t) {
   const input = (id = 'supplier', patch = {}) => ({ id, name: id, kind: 'api', enabled: true, protocol: 'responses', baseUrl: 'https://one.example/v1', models: [{ id: 'model-a', reasoningEfforts: ['low', 'high'], pricing: { input: 1, output: 2 } }], ...patch });
   const session = (id = 's', extra = {}) => sessions.upsert({ id, projectId: 'p', memberId: 'a', agentInstanceId: 'a', title: id, status: 'idle', unreadCount: 0, createdAt: now, updatedAt: now, ...extra });
   t.after(async () => { await runs.stop(); db.close(); await rm(root, { recursive: true, force: true }); });
-  return { root, db, credentials, connections, sessions, runs, events, requests, agent, input, session, setGate: (value) => { gate = value; }, setExit: (value) => { exitCode = value; } };
+  return { root, db, credentials, connections, sessions, runs, events, requests, agent, adapter, adapters, input, session, setGate: (value) => { gate = value; }, setExit: (value) => { exitCode = value; } };
 }
 
 test('connections are independent, revisioned and secret-free; stale writes are rejected', async (t) => {
@@ -63,6 +64,24 @@ test('connections are independent, revisioned and secret-free; stale writes are 
   assert.equal(f.connections.get('supplier').revision, 2);
   assert.equal(f.db.credentials.has('connection:supplier:3'), false);
   assert.ok(f.credentials.secretValues().includes('key-one'));
+});
+
+test('an unknown plugin receives its declared native endpoint and key without host registration rules', async t => {
+  const f = await fixture(t);
+  f.adapters.register({ ...f.adapter, providerId: 'third-party-fixture', descriptor: { providerId: 'third-party-fixture', credentialEnv: ['CUSTOM_FIXTURE_KEY'], baseUrlEnv: 'CUSTOM_FIXTURE_URL' } });
+  const plugin = { ...f.agent, id: 'plugin-harness', providerId: 'third-party-fixture', providerOptions: { configurationKind: 'harness' } };
+  f.db.agents.save(plugin, plugin.updatedAt);
+  f.connections.upsert({ connection: f.input('plugin-api', { protocol: 'chat', models: [{ id: 'only-model', reasoningEfforts: ['max'] }] }), apiKey: 'plugin-owned-key' });
+  const session = f.session('plugin-session', { memberId: plugin.id, agentInstanceId: plugin.id, connectionId: 'plugin-api', model: 'only-model', reasoningEffort: 'max' });
+  await (await f.runs.launch(session, plugin, 'Hello from a new plugin')).completion;
+  const request = f.requests[0].request;
+  assert.equal(request.instance.providerId, 'third-party-fixture');
+  assert.equal(request.instance.providerOptions.apiType, 'openai-completions');
+  assert.equal(request.env.CUSTOM_FIXTURE_URL, 'https://one.example/v1');
+  assert.equal(request.env.CUSTOM_FIXTURE_KEY, 'plugin-owned-key');
+  assert.equal(request.env.NAUTILO_CONNECTION_API_KEY, 'plugin-owned-key');
+  assert.equal(request.model, 'only-model'); assert.equal(request.reasoningEffort, 'max');
+  assert.deepEqual(f.db.agents.get(plugin.id).providerOptions, { configurationKind: 'harness' });
 });
 
 test('real RunService uses pinned connection endpoint/key/model and per-run pricing without mutating CLI', async (t) => {
@@ -122,7 +141,7 @@ test('busy switching, unsupported protocol, missing credentials and disabled con
   assert.equal(f.requests.length, 1);
   f.connections.upsert({ connection: f.input('one', { enabled: false }), expectedRevision: 1 });
   f.db.agents.save({ ...f.agent, id: 'unsupported', providerId: 'pi' }, f.agent.updatedAt);
-  assert.throws(() => f.session('unsupported', { agentInstanceId: 'unsupported', memberId: 'unsupported', connectionId: 'two' }));
+  assert.equal(f.session('plugin-api', { agentInstanceId: 'unsupported', memberId: 'unsupported', connectionId: 'two' }).connectionId, 'two', 'plugins use the same generic API binding contract');
   assert.throws(() => f.session('disabled', { connectionId: 'one', connectionRevision: 1 }));
 });
 
@@ -183,7 +202,7 @@ test('team child inherits an immutable connection and cannot silently use an inc
   assert.equal(child.connectionId, 'supplier'); assert.equal(child.connectionRevision, 1);
   await (await f.runs.launch(child, f.agent, 'child')).completion;
   assert.equal(f.requests[0].request.env.OPENAI_API_KEY, 'team-key');
-  f.db.agents.save({ ...f.agent, id: 'pi', providerId: 'pi' }, f.agent.updatedAt);
+  f.db.agents.save({ ...f.agent, id: 'pi', providerId: 'pi', baseArgs: ['--custom-routing'] }, f.agent.updatedAt);
   assert.throws(() => router.delegated(projectRun, team, { id: 'pi-worker', agentInstanceId: 'pi' }, parent, 'other', 'Unsupported'));
   f.db.sessions.saveMessage({ id: 'started', sessionId: parent.id, sender: 'user', text: 'hi', createdAt: f.agent.createdAt });
   assert.throws(() => router.main({ ...projectRun, mainAgentInstanceId: 'pi' }, team, parent.id));
@@ -206,4 +225,99 @@ test('failed switched-source turn keeps full-context rebuild pending and retry n
   await (await f.runs.launch(f.db.sessions.get('s'), f.agent, 'manual retry')).completion;
   assert.deepEqual(f.requests.map((r) => r.resumed), [false, false, false]);
   assert.equal(f.db.sessions.get('s').connectionContextRebuildRequired, false);
+});
+
+
+test('login discovers models with a clean harness and account directory without agent selection', async (t) => {
+  const f = await fixture(t);
+  f.adapter.descriptor.defaultExecutable = 'default-codex';
+  const probes = [];
+  f.adapter.listModels = async (instance, context) => {
+    probes.push({ instance, context });
+    return { providerId: 'codex', models: [{ id: 'account-model', displayName: 'Account model' }], source: 'provider_cli', fetchedAt: new Date().toISOString() };
+  };
+  f.db.agents.save({ ...f.agent, baseArgs: ['--config', 'old'], profile: 'old-profile', models: [{ id: 'legacy-model' }] }, f.agent.updatedAt);
+  for (const id of ['account-one', 'account-two']) {
+    f.connections.upsert({ connection: f.input(id, { kind: 'login', harness: 'codex', loginProfileDirectory: join(f.root, id), protocol: undefined, baseUrl: undefined, models: undefined }) });
+    const catalog = await f.connections.discover({ connectionId: id });
+    assert.equal(catalog.models[0].id, 'account-model');
+    const { instance, context } = probes.at(-1);
+    assert.deepEqual(instance.baseArgs, []);
+    assert.equal(instance.profile, undefined);
+    assert.equal(instance.providerOptions.baseUrl, undefined);
+    assert.equal(context.env.CODEX_HOME, join(f.root, id));
+    assert.equal(context.env.OPENAI_API_KEY, undefined);
+    assert.equal((instance.models ?? []).some(model => model.id === 'legacy-model'), false);
+  }
+  f.db.agents.remove('a');
+  await f.connections.discover({ connectionId: 'account-one' });
+  assert.equal(probes.at(-1).instance.executable, 'default-codex');
+});
+
+test('team members use their own pinned connection during delegation and recovery', async (t) => {
+  const f = await fixture(t);
+  f.connections.upsert({ connection: f.input('parent-account'), apiKey: 'parent-key' });
+  f.connections.upsert({ connection: f.input('worker-account'), apiKey: 'worker-key' });
+  const teams = new TeamService(f.db);
+  const team = teams.upsert({ id: 'team', name: 'Team', members: [{ id: 'worker', agentInstanceId: 'a', connectionId: 'worker-account', model: 'worker-model', enabled: true }], roles: [], createdAt: f.agent.createdAt, updatedAt: f.agent.updatedAt });
+  const member = team.members[0];
+  assert.equal(member.connectionRevision, 1);
+  f.connections.upsert({ connection: f.input('worker-account'), expectedRevision: 1, apiKey: 'new-worker-key' });
+  const parent = f.session('parent', { connectionId: 'parent-account' });
+  const run = { id: 'team-run', projectId: 'p', teamId: 'team', mainMemberId: 'worker', mainAgentInstanceId: 'a', goal: 'task' };
+  const router = new SessionRouter(f.db);
+  const child = router.delegated(run, team, member, parent, 'task', 'Child');
+  assert.equal(child.agentInstanceId, 'a');
+  assert.equal(child.connectionId, 'worker-account');
+  assert.equal(child.connectionRevision, 1);
+  assert.equal(child.model, 'worker-model');
+  await (await f.runs.launch(child, f.agent, 'child')).completion;
+  assert.equal(f.requests[0].request.env.OPENAI_API_KEY, 'worker-key');
+  assert.throws(() => router.delegated(run, team, { ...member, connectionId: 'parent-account' }, parent, 'task', 'Changed'));
+  assert.throws(() => router.delegated(run, team, { ...member, connectionRevision: 2 }, parent, 'task-2', 'Changed', child.id));
+  const recovery = router.replacementMain(run, team, 'worker', parent);
+  assert.equal(recovery.connectionId, 'worker-account');
+  assert.equal(recovery.connectionRevision, 1);
+  const main = router.main({ ...run, id: 'new-team-run' }, team);
+  assert.equal(main.connectionId, 'worker-account');
+  assert.equal(main.model, 'worker-model');
+});
+
+test('runtime-only harness requires an explicit source before launch', async (t) => {
+  const f = await fixture(t);
+  const harness = { ...f.agent, providerOptions: { configurationKind: 'harness' } };
+  f.db.agents.save(harness, f.agent.updatedAt);
+  await assert.rejects(f.runs.launch(f.session(), harness, 'without a source'));
+  assert.equal(f.requests.length, 0);
+});
+
+
+test('initial source binding on a blank persisted draft needs no history-transfer confirmation', async (t) => {
+  const f = await fixture(t);
+  f.connections.upsert({ connection: f.input(), apiKey: 'key' });
+  const blank = f.session('blank');
+  const bound = f.sessions.upsert({ ...blank, connectionId: 'supplier', connectionRevision: 1 });
+  assert.equal(bound.connectionId, 'supplier');
+  assert.equal(Boolean(bound.connectionContextRebuildRequired), false);
+  const resent = f.sessions.upsert(bound);
+  await (await f.runs.launch(resent, f.agent, 'hi')).completion;
+  assert.equal(f.requests[0].request.env.OPENAI_API_KEY, 'key');
+  const history = f.session('history');
+  f.db.sessions.saveMessage({ id: 'old-text', sessionId: history.id, sender: 'user', text: 'previous message', createdAt: f.agent.createdAt });
+  assert.throws(() => f.sessions.upsert({ ...history, connectionId: 'supplier', connectionRevision: 1 }));
+});
+
+
+test('runtime forwards inherited Harness permissions and per-session overrides to adapters', async (t) => {
+  const f = await fixture(t);
+  f.connections.upsert({ connection: f.input(), apiKey: 'key' });
+  for (const mode of ['full-access', 'bypassPermissions', 'yolo', 'auto', 'build', 'plan']) {
+    const harness = { ...f.agent, providerOptions: { permissionMode: mode } };
+    const session = f.session('permission-' + mode, { connectionId: 'supplier' });
+    await (await f.runs.launch(session, harness, 'check permissions')).completion;
+    assert.equal(f.requests.at(-1).request.permissionMode, mode);
+    const overridden = f.sessions.upsert({ ...session, permissionMode: 'ask' });
+    await (await f.runs.launch(overridden, harness, 'override permissions')).completion;
+    assert.equal(f.requests.at(-1).request.permissionMode, 'ask');
+  }
 });

@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
-use crate::adapters::codex::events::{is_current_codex_turn_diff, parse_codex_app_server_notification, with_subagent_dispatch};
+use crate::adapters::codex::events::{is_current_codex_turn_diff, native_child_history, parse_codex_app_server_notification, update_native_child, with_subagent_dispatch};
 use crate::adapters::codex::image_gen::{
     codex_image_generation_tool, execute_codex_image_generation, is_codex_image_generation_configured,
     CODEX_IMAGE_GENERATION_TOOL_NAME,
@@ -25,6 +25,8 @@ use crate::process_runtime::{ProcessEvent, ProcessRequest, ProcessRuntime, Timeo
 
 #[path = "session_pool.rs"]
 mod session_pool;
+#[path = "session_events.rs"]
+mod session_events;
 
 const CODEX_WEB_SEARCH_MODE: &str = "live";
 const CODEX_MODEL_CATALOG_PREFIX: &str = "agenthub-codex-model-";
@@ -35,7 +37,7 @@ const CODEX_APPROVAL_DECISIONS: [&str; 4] = ["accept", "acceptForSession", "decl
 pub fn codex_app_server_initialize_params() -> Value {
     json!({
         "clientInfo": { "name": "Nautilo", "version": "0.1.0" },
-        "capabilities": { "experimentalApi": true }
+        "capabilities": { "experimentalApi": true, "mcpServerOpenaiFormElicitation": true }
     })
 }
 
@@ -61,7 +63,7 @@ fn thread_options(request: &AdapterStartRequest, include_dynamic_tools: bool) ->
     options.insert("approvalPolicy".to_string(), json!(approval));
     options.insert("sandbox".to_string(), json!(sandbox));
     if include_dynamic_tools {
-        if let Some(tools) = build_codex_dynamic_tools(request.runtime_tools.as_ref(), request.instance.pointer("/providerOptions/anthropicCompat").and_then(Value::as_bool) != Some(true) && is_codex_image_generation_configured(request))? {
+        if let Some(tools) = build_codex_dynamic_tools(request.runtime_tools.as_ref(), is_codex_image_generation_configured(request))? {
             options.insert("dynamicTools".to_string(), tools);
         }
     }
@@ -101,6 +103,35 @@ pub fn build_codex_turn_input(prompt: &str, local_image_paths: &[String]) -> Val
     Value::Array(input)
 }
 
+fn turn_start_params(request: &AdapterStartRequest, thread_id: &str) -> anyhow::Result<Value> {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": build_codex_turn_input(&request.prompt, request.local_image_paths.as_deref().unwrap_or(&[])),
+        "cwd": request.cwd,
+        "model": request.model.as_deref().filter(|m| !m.is_empty()),
+        "serviceTier": request.service_tier.as_deref().filter(|t| !t.is_empty()),
+        "effort": request.reasoning_effort.as_deref().filter(|e| !e.is_empty()),
+        "summary": "auto"
+    });
+    // A resumed, already-loaded thread keeps its prior turn settings unless
+    // turn/start explicitly overrides them. Match the user's current selection.
+    let (approval, sandbox) = codex_permission_config(&request.instance, Some(request)).unwrap_or(("never", "workspace-write"));
+    params["approvalPolicy"] = json!(approval);
+    params["sandboxPolicy"] = if sandbox == "danger-full-access" {
+        json!({"type":"dangerFullAccess"})
+    } else if sandbox == "read-only" {
+        json!({"type":"readOnly"})
+    } else {
+        json!({"type":"workspaceWrite"})
+    };
+    if let Some(path) = request.output_schema_path.as_deref().or_else(||request.instance.pointer("/providerOptions/outputSchemaPath").and_then(Value::as_str)) {
+        let path = std::path::Path::new(&request.cwd).join(path);
+        params["outputSchema"] = serde_json::from_slice(&std::fs::read(&path)
+            .map_err(|error|anyhow::anyhow!("Unable to read output schema {}: {error}",path.display()))?)?;
+    }
+    Ok(params)
+}
+
 /// Supplies a short-lived catalog for custom endpoints so the selected model
 /// is described as search-capable (see the TS docstring).
 pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Option<&str>) -> Option<Value> {
@@ -130,7 +161,7 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
     let models: Vec<Value> = configured
         .iter()
         .map(|(id, model)| {
-            let mut efforts: Vec<String> = model
+            let efforts: Vec<String> = model
                 .get("reasoningEfforts")
                 .and_then(Value::as_array)
                 .map(|efforts| {
@@ -146,7 +177,6 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
                 })
                 .filter(|e: &Vec<String>| !e.is_empty())
                 .unwrap_or_else(|| CODEX_MODEL_REASONING_EFFORTS.iter().map(|e| e.to_string()).collect());
-            if anthropic_compat { efforts = vec!["none".to_string()]; }
             let context_window = model
                 .get("contextWindow")
                 .and_then(Value::as_i64)
@@ -246,16 +276,12 @@ pub fn build_codex_app_server_args(
         "--stdio".to_string(),
         if instance.pointer("/providerOptions/anthropicCompat").and_then(Value::as_bool) == Some(true) { "--disable" } else { "--enable" }.to_string(),
         "image_generation".to_string(),
-        // Headless runs never touch Codex desktop apps (the built-in
-        // `codex_apps` MCP); when it fails to start it blocks every turn until
-        // a ~30s timeout fires. Disable the feature outright.
-        "--disable".to_string(),
-        "apps".to_string(),
     ]);
-    if codex_web_search_enabled(instance) {
-        args.push("--config".to_string());
-        args.push(format!("web_search={}", json!(CODEX_WEB_SEARCH_MODE)));
+    if instance.pointer("/providerOptions/imageGenerationDelegate").and_then(Value::as_bool) == Some(true) {
+        args.extend(["--disable".into(), "shell_tool".into()]);
     }
+    args.push("--config".to_string());
+    args.push(format!("web_search={}", json!(if codex_web_search_enabled(instance) {CODEX_WEB_SEARCH_MODE} else {"disabled"})));
     if let Some(path) = model_catalog_path {
         args.push("--config".to_string());
         args.push(format!("model_catalog_json={}", json!(path)));
@@ -279,6 +305,10 @@ pub struct PooledCodexAppServer {
     /// collide on the same RPC stream.
     pub turn_lock: tokio::sync::Mutex<()>,
     initialized: AtomicBool,
+    /// Only valid for this exact process generation. A warm turn can use the
+    /// loaded thread directly instead of asking Codex to read/replay its history.
+    loaded_thread_id: Mutex<Option<String>>,
+    events: Arc<session_events::SessionEvents>,
     instance_key: String,
     /// Hash of the instance/credentials/executable the process was started
     /// with; a config edit evicts the stale connection so the next turn
@@ -412,7 +442,7 @@ fn acquire_codex_app_server_matching(
         env: request.env.clone(),
         timeout_ms: None,
         idle_timeout_ms: None,
-        max_output_bytes: Some(request.max_output_bytes.unwrap_or(20 * 1024 * 1024)),
+        max_output_bytes: None,
     })
     .map_err(|e| CoreError::reason(ErrorCode::RunStartFailed, e.to_string()))?;
     let rpc = Arc::new(JsonRpcProcessClient::new(started.handle, started.events));
@@ -420,6 +450,8 @@ fn acquire_codex_app_server_matching(
         rpc,
         turn_lock: tokio::sync::Mutex::new(()),
         initialized: AtomicBool::new(false),
+        loaded_thread_id: Mutex::new(None),
+        events: Arc::new(session_events::SessionEvents::default()),
         catalog_cleanup: Mutex::new(model_catalog.map(|(_, cleanup)| cleanup)),
         config_fingerprint: fingerprint,
         generation,
@@ -435,7 +467,6 @@ fn codex_config_fingerprint(request: &AdapterStartRequest) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     request.cwd.hash(&mut hasher);
-    request.max_output_bytes.hash(&mut hasher);
     let mut hash_str = |value: &str| value.hash(&mut hasher);
     hash_str(request.instance.get("executable").and_then(Value::as_str).unwrap_or(""));
     hash_str(request.instance.get("profile").and_then(Value::as_str).unwrap_or(""));
@@ -478,8 +509,9 @@ pub fn discard_codex_app_server(pooled: &Arc<PooledCodexAppServer>) {
 
 /// Starts (or reuses) `codex app-server --stdio` and drives one thread turn
 /// over JSON-RPC. On normal completion the resident process stays alive for
-/// the next turn; errors and per-turn timeouts retire the connection so a
-/// not-yet-submitted queued run can cold-start one safe replacement.
+/// the next turn. A timed-out turn first tries native interruption; a settled
+/// interrupt preserves the session and its background work. An unresponsive
+/// or failed transport can cold-start one safe replacement for queued work.
 pub fn start_codex_app_server(request: AdapterStartRequest, resume_session: Option<String>) -> CoreResult<AdapterRun> {
     session_pool::start(request, resume_session, false)
 }
@@ -489,6 +521,7 @@ pub fn start_codex_app_server_transient(request: AdapterStartRequest, resume_ses
 }
 
 pub async fn shutdown_codex_app_server_pools() { session_pool::shutdown().await; }
+pub async fn release_session(request:&AdapterStartRequest)->CoreResult<()> {session_pool::release_session(request).await}
 
 fn start_single_connection(request: AdapterStartRequest, resume_session: Option<String>) -> CoreResult<AdapterRun> {
     let pooled = acquire_codex_app_server(&request)?;
@@ -516,8 +549,10 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
             let mut reconnects = 0;
             let queued_at = std::time::Instant::now();
             loop {
-                let turn_guard = wait_for_codex_turn(&connection.turn_lock, &mut cancel_receiver, deadline, &sender).await;
-                let Ok(turn_guard) = turn_guard else { break; };
+                let turn_guard = match wait_for_codex_turn(&connection.turn_lock, &mut cancel_receiver, deadline, &sender).await {
+                    Ok(guard) => guard,
+                    Err(_) => break,
+                };
                 if !connection.rpc.process_handle().is_alive() {
                     discard_codex_app_server(&connection);
                     drop(turn_guard);
@@ -553,6 +588,11 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                     }
                 }
                 let rpc = connection.rpc.clone();
+                if let Err(error)=connection.events.listen(&rpc).await {
+                    let _=sender.send(AdapterEvent::Error{message:error.to_string()});
+                    rpc.process_handle().cancel().await;discard_codex_app_server(&connection);break;
+                }
+                let context=connection.events.begin(request.clone(),state.clone(),sender.clone());
                 let _ = sender.send(AdapterEvent::Status {
                     phase: "provider_starting".to_string(),
                     raw: Some(json!({ "queueWaitMs": queued_at.elapsed().as_millis() as u64, "connectionRestarts": reconnects })),
@@ -563,7 +603,8 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                     state.active_rpc = Some(rpc.clone());
                 }
                 let already_initialized = connection.initialized.load(Ordering::SeqCst);
-                let turn = run_turn(rpc.clone(), &request, resume_session.clone(), state.clone(), sender.clone(), already_initialized);
+                let loaded_thread_id = connection.loaded_thread_id.lock().unwrap().clone();
+                let turn = run_turn(rpc.clone(), &request, resume_session.clone(), state.clone(), sender.clone(), already_initialized, loaded_thread_id,context.clone());
                 tokio::pin!(turn);
                 let mut timed_out = false;
                 let result = tokio::select! {
@@ -606,7 +647,19 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                     }
                     result = &mut turn => result,
                 };
-                let reusable = result.is_ok() && state.lock().unwrap().finished && connection.rpc.process_handle().is_alive();
+                let mut limit_settled=false;
+                if timed_out || context.limited() {
+                    timed_out=true;
+                    let (thread,turn)={let mut state=state.lock().unwrap();state.cancelled=true;(state.thread_id.clone(),state.turn_id.clone())};
+                    if let (Some(thread),Some(turn))=(thread,turn) {
+                        let (_,response)=rpc.request_with_id("turn/interrupt",json!({"threadId":thread,"turnId":turn}));
+                        limit_settled=matches!(tokio::time::timeout(std::time::Duration::from_secs(3),async {
+                            let (terminal,response)=tokio::join!(context.terminal(),response);
+                            terminal?;response.map_err(|_|anyhow::anyhow!("Codex interrupt channel closed"))?.map_err(anyhow::Error::msg)?;Ok::<_,anyhow::Error>(())
+                        }).await,Ok(Ok(())));
+                    }
+                }
+                let reusable = (result.is_ok() || limit_settled) && state.lock().unwrap().finished && connection.rpc.process_handle().is_alive();
                 if let Err(error) = result {
                     if !timed_out && !state.lock().unwrap().cancelled {
                         let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
@@ -614,6 +667,7 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                 }
                 if reusable {
                     connection.initialized.store(true, Ordering::SeqCst);
+                    *connection.loaded_thread_id.lock().unwrap() = state.lock().unwrap().thread_id.clone();
                 } else {
                     // Retain the turn guard throughout cleanup. In particular,
                     // a delayed cancel must not kill the *next* session's turn.
@@ -621,6 +675,7 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                     discard_codex_app_server(&connection);
                 }
                 {
+                    context.park();
                     let mut state = state.lock().unwrap();
                     state.active = false;
                     state.active_rpc = None;
@@ -736,6 +791,8 @@ struct AppServerState {
     finished: bool,
     /// Child agent thread id → the collab tool call item that spawned it.
     child_threads: HashMap<String, String>,
+    native_dispatches: HashMap<String, Value>,
+    active_items: std::collections::HashSet<String>,
 }
 
 async fn run_turn(
@@ -745,28 +802,48 @@ async fn run_turn(
     state: Arc<Mutex<AppServerState>>,
     sender: mpsc::UnboundedSender<AdapterEvent>,
     already_initialized: bool,
+    loaded_thread_id: Option<String>,
+    context: Arc<session_events::Context>,
 ) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let warm_thread = resume_session.is_some() && resume_session == loaded_thread_id;
+    let timing = |phase: &str| crate::runtime::run_log::log(json!({
+        "event": "codex_turn_timing", "sessionId": request.local_session_id,
+        "model": request.model, "effort": request.reasoning_effort,
+        "warmThread": warm_thread, "phase": phase, "elapsedMs": started.elapsed().as_millis() as u64
+    }));
     if !already_initialized {
-        rpc.request("initialize", codex_app_server_initialize_params()).await?;
+        let initialized = rpc.request("initialize", codex_app_server_initialize_params()).await?;
+        let _ = sender.send(AdapterEvent::Status { phase: "runtime_capabilities".into(), raw: Some(json!({
+            "providerId":"codex", "source":"native-handshake", "transport":"app-server", "reported":initialized
+        })) });
         rpc.notify("initialized", json!({}));
     }
-    let mut thread_params = thread_options(request, true)?;
-    let method = if resume_session.is_some() { "thread/resume" } else { "thread/start" };
-    if let Some(session) = &resume_session {
-        thread_params.insert("threadId".to_string(), json!(session));
-    }
-    let thread_response = rpc.request(method, Value::Object(thread_params)).await?;
-    let thread_id = thread_response
-        .get("thread")
-        .and_then(|t| t.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| resume_session.clone())
-        .filter(|id| !id.is_empty());
+    let _ = sender.send(AdapterEvent::Status { phase: "runtime_ready".into(), raw: Some(json!({
+        "providerId":"codex", "transport":"app-server", "reused":already_initialized, "pid":rpc.process_handle().pid,
+        "attachMs":started.elapsed().as_millis()
+    })) });
+    timing("initialized");
+    let thread_id = if warm_thread {
+        resume_session.clone()
+    } else {
+        let mut thread_params = thread_options(request, true)?;
+        let method = if resume_session.is_some() { "thread/resume" } else { "thread/start" };
+        if let Some(session) = &resume_session {
+            thread_params.insert("threadId".to_string(), json!(session));
+            // Nautilo already has the visible transcript. Codex still loads
+            // its native context; excludeTurns only omits the response payload.
+            thread_params.insert("excludeTurns".to_string(), json!(true));
+        }
+        let response = rpc.request(method, Value::Object(thread_params)).await?;
+        response.pointer("/thread/id").and_then(Value::as_str).map(str::to_string)
+            .or_else(|| resume_session.clone()).filter(|id| !id.is_empty())
+    };
     let Some(thread_id) = thread_id else {
         anyhow::bail!("Codex app-server did not return a thread id");
     };
     state.lock().unwrap().thread_id = Some(thread_id.clone());
+    timing("thread_ready");
     let _ = sender.send(AdapterEvent::Session { provider_session_id: thread_id.clone(), raw: None });
 
     let compact = request.provider_command.as_deref() == Some("compact");
@@ -778,165 +855,13 @@ async fn run_turn(
         rpc.request("thread/compact/start", json!({ "threadId": thread_id })).await?;
     } else {
         let turn_response = rpc
-            .request("turn/start", json!({
-                "threadId": thread_id,
-                "input": build_codex_turn_input(&request.prompt, request.local_image_paths.as_deref().unwrap_or(&[])),
-                "cwd": request.cwd,
-                "model": request.model.as_deref().filter(|m| !m.is_empty()),
-                "serviceTier": request.service_tier.as_deref().filter(|t| !t.is_empty()),
-                "effort": request.reasoning_effort.as_deref().filter(|e| !e.is_empty()),
-                "summary": "auto"
-            }))
+            .request("turn/start", turn_start_params(request, &thread_id)?)
             .await?;
         let turn_id = turn_response.get("turn").and_then(|t| t.get("id")).and_then(Value::as_str).map(str::to_string);
         state.lock().unwrap().turn_id = turn_id;
     }
-
-    loop {
-        let Some(event) = rpc.next_event().await else {
-            break;
-        };
-        match event {
-            JsonRpcProcessEvent::Notification { method, params } => {
-                let current_turn_id = state.lock().unwrap().turn_id.clone();
-                let event_thread_id = params.get("threadId").and_then(Value::as_str);
-                // A resident server can still deliver notifications from the
-                // previous session (including subscribed child threads). Route
-                // only this thread and children registered by this turn.
-                if event_thread_id.is_some_and(|id| id != thread_id && !state.lock().unwrap().child_threads.contains_key(id)) {
-                    continue;
-                }
-                if event_thread_id == Some(thread_id.as_str())
-                    && params.get("turnId").and_then(Value::as_str).is_some_and(|id| Some(id) != current_turn_id.as_deref())
-                {
-                    continue;
-                }
-                if method == "turn/diff/updated" && !is_current_codex_turn_diff(&params, &thread_id, current_turn_id.as_deref()) {
-                    continue;
-                }
-                if method == "turn/completed" && (
-                    params.get("threadId").and_then(Value::as_str).is_some_and(|id| id != thread_id)
-                    || params.get("turnId").and_then(Value::as_str).is_some_and(|id| Some(id) != current_turn_id.as_deref())
-                    || params.pointer("/turn/id").and_then(Value::as_str).is_some_and(|id| Some(id) != current_turn_id.as_deref())
-                ) { continue; }
-                let item = params.get("item").cloned().unwrap_or(Value::Null);
-                if (method == "item/started" || method == "item/completed")
-                    && item.get("type").and_then(Value::as_str) == Some("collabAgentToolCall")
-                {
-                    // A collab spawn names its child threads; subscribe so
-                    // their items arrive, correlated to the dispatch item id.
-                    let dispatch_id = item.get("id").and_then(Value::as_str).map(str::to_string);
-                    let receivers = item.get("receiverThreadIds").and_then(Value::as_array).cloned().unwrap_or_default();
-                    for receiver in receivers {
-                        let Some(child_id) = receiver.as_str() else { continue };
-                        let Some(dispatch_id) = &dispatch_id else { continue };
-                        let mut state = state.lock().unwrap();
-                        if !state.child_threads.contains_key(child_id) {
-                            let rpc = rpc.clone();
-                            let child = child_id.to_string();
-                            tokio::spawn(async move {
-                                let _ = rpc.request("thread/subscribe", json!({ "threadId": child })).await;
-                            });
-                        }
-                        state.child_threads.insert(child_id.to_string(), dispatch_id.clone());
-                    }
-                }
-                let events = parse_codex_app_server_notification(&method, &params);
-                let event_thread_id = params.get("threadId").and_then(Value::as_str).map(str::to_string);
-                let dispatch = event_thread_id
-                    .filter(|id| *id != thread_id)
-                    .and_then(|id| state.lock().unwrap().child_threads.get(&id).cloned());
-                for event in match dispatch {
-                    Some(dispatch_id) => with_subagent_dispatch(events, &dispatch_id),
-                    None => events,
-                } {
-                    if sender.send(event).is_err() {
-                        return Ok(());
-                    }
-                }
-                if compact && method == "thread/compacted" {
-                    state.lock().unwrap().finished = true;
-                    let _ = sender.send(AdapterEvent::Message {
-                        text: "Codex 上下文已压缩".to_string(),
-                        phase: None,
-                        message_id: None,
-                        subagent_dispatch_id: None,
-                        raw: None,
-                    });
-                    // Do NOT kill the resident app-server: reuse it for the next turn (matches the official Codex desktop app).
-                    let _ = sender.send(AdapterEvent::Exit { exit_code: Some(0), signal: None });
-                    return Ok(());
-                }
-                if method == "turn/completed" {
-                    state.lock().unwrap().finished = true;
-                    // Do NOT kill the resident app-server: reuse it for the next turn (matches the official Codex desktop app).
-                    let _ = sender.send(AdapterEvent::Exit { exit_code: Some(0), signal: None });
-                    return Ok(());
-                }
-            }
-            JsonRpcProcessEvent::Request { id, method, params } => {
-                // Graceful cancellation drains terminal notifications, but must
-                // never initiate a newly queued tool or approval after Cancel.
-                if state.lock().unwrap().cancelled {
-                    rpc.respond_error(&id, -32600, "Codex turn was cancelled");
-                    continue;
-                }
-                let event_thread_id = params.get("threadId").and_then(Value::as_str);
-                let current_turn_id = state.lock().unwrap().turn_id.clone();
-                if event_thread_id.is_some_and(|id| id != thread_id && !state.lock().unwrap().child_threads.contains_key(id))
-                    || (event_thread_id == Some(thread_id.as_str())
-                        && params.get("turnId").and_then(Value::as_str).is_some_and(|id| Some(id) != current_turn_id.as_deref()))
-                {
-                    rpc.respond_error(&id, -32600, "Request does not belong to the active Codex turn");
-                    continue;
-                }
-                match method.as_str() {
-                    "item/tool/call" => {
-                        for emitted in handle_dynamic_tool_call(&rpc, request, &id, &params).await {
-                            if sender.send(emitted).is_err() {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    "item/tool/requestUserInput" => handle_request_user_input(&rpc, request, &id, &params).await,
-                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-                        handle_codex_approval(&rpc, request, &id, &params, &method).await
-                    }
-                    _ => rpc.respond_error(&id, -32601, &format!("Nautilo does not support app-server request {method}")),
-                }
-            }
-            JsonRpcProcessEvent::Transport(process_event) => {
-                let finished = state.lock().unwrap().finished;
-                match process_event {
-                    ProcessEvent::Stdout(text) => {
-                        let _ = sender.send(AdapterEvent::Raw { stream: "stdout".to_string(), text });
-                    }
-                    ProcessEvent::Stderr(text) => {
-                        let _ = sender.send(AdapterEvent::Raw { stream: "stderr".to_string(), text });
-                    }
-                    ProcessEvent::Exit { exit_code, signal } => {
-                        if !finished {
-                            let _ = sender.send(AdapterEvent::Exit { exit_code, signal });
-                        }
-                        return Ok(());
-                    }
-                    ProcessEvent::Error(message) => {
-                        let _ = sender.send(AdapterEvent::Error { message });
-                    }
-                    ProcessEvent::Timeout { reason } => {
-                        let kind = match reason {
-                            TimeoutReason::Timeout => TimeoutKind::Timeout,
-                            TimeoutReason::Idle => TimeoutKind::Idle,
-                            TimeoutReason::MaxOutput => TimeoutKind::MaxOutput,
-                        };
-                        let _ = sender.send(AdapterEvent::Timeout { reason: kind });
-                    }
-                }
-            }
-            JsonRpcProcessEvent::Response { .. } => {}
-        }
-    }
-    Ok(())
+    timing("turn_accepted");
+    context.wait().await
 }
 
 async fn handle_dynamic_tool_call(
@@ -1277,6 +1202,23 @@ async fn handle_codex_approval(
 mod queue_tests {
     use super::*;
     use std::time::Duration;
+    include!("session_events_tests.rs");
+
+    #[test]
+    fn resumed_turn_overrides_approval_and_sandbox_for_each_selection() {
+        let mut request = AdapterStartRequest { instance: json!({"providerOptions":{"permissionMode":"ask"}}), cwd: "C:/project".into(), ..Default::default() };
+        for (mode, approval, sandbox) in [("ask", "on-request", "workspaceWrite"), ("full-access", "never", "dangerFullAccess"), ("auto", "on-failure", "workspaceWrite")] {
+            request.permission_mode = Some(mode.into());
+            let params = turn_start_params(&request, "same-thread").unwrap();
+            assert_eq!(params["threadId"], "same-thread");
+            assert_eq!(params["approvalPolicy"], approval);
+            assert_eq!(params["sandboxPolicy"]["type"], sandbox);
+        }
+        request.permission_mode = None;
+        assert_eq!(turn_start_params(&request, "same-thread").unwrap()["approvalPolicy"], "on-request");
+        request.instance = json!({});
+        assert_eq!(turn_start_params(&request, "same-thread").unwrap()["sandboxPolicy"]["type"], "workspaceWrite");
+    }
 
     fn deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + Duration::from_secs(5)
@@ -1381,6 +1323,88 @@ mod queue_tests {
     }
 
     #[tokio::test]
+    async fn native_plugin_elicitation_survives_the_real_rpc_dispatch_and_waits_for_auth() {
+        for (accept, missing_id) in [(true, false), (true, true), (false, false)] {
+            let (mut request, root) = fake_request("plugin approval");
+            if missing_id { request.env.as_mut().unwrap().insert("CODEX_FAKE_MISSING_PLUGIN_ID".into(), "1".into()); }
+            std::fs::write(root.join("app-server"), include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/core-daemon/test/fixtures/fake-codex-elicitation.cjs"))).unwrap();
+            let prompts = Arc::new(Mutex::new(Vec::new()));
+            let seen = prompts.clone();
+            request.request_interaction = Some(Arc::new(move |input| {
+                seen.lock().unwrap().push(input);
+                Box::pin(async move { Ok(if accept { json!({"outcome":"selected","optionId":"confirm"}) } else { json!({"outcome":"cancelled"}) }) })
+            }));
+            let mut run = start_codex_app_server(request.clone(), None).unwrap();
+            let events = collect(&mut run).await;
+            assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message{text,..} if text == if accept {"Connected"} else {"Cancelled"})));
+            let prompts = prompts.lock().unwrap();
+            assert_eq!(prompts.len(), if accept {2} else {1});
+            if accept {
+                assert_eq!(prompts[0]["presentation"]["type"], "plugin_install");
+                assert_eq!(prompts[1]["presentation"]["type"], "plugin_authorization");
+                assert_eq!(prompts[1]["links"][0]["url"], "https://chatgpt.com/apps/github");
+            }
+            let rpc_log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+            assert_eq!(rpc_log.contains("\"method\":\"plugin/install\""), accept);
+            if accept { assert!(rpc_log.contains("\"pluginName\":\"plugin_fixture_github\"")); }
+            assert!(rpc_log.contains("\"mcpServerOpenaiFormElicitation\":true"));
+            drop(prompts);
+            cleanup(&request, root).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn native_child_join_keeps_dispatch_identity_and_parent_lifecycle_isolated() {
+        let (request, root) = fake_request("native-child");
+        let mut run = start_single_connection(request.clone(), None).unwrap();
+        let events = collect(&mut run).await;
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message { text, subagent_dispatch_id: Some(id), .. } if id == "spawn-native" && text == "Child snapshot before join")));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message { text, subagent_dispatch_id: Some(id), .. } if id == "spawn-native" && text == "Real native child result")));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Tool { call_id: Some(id), input: Some(input), .. } if id == "spawn-native" && input["agentsStates"]["native-child-thread"]["status"] == "completed")));
+        assert!(!events.iter().any(|event| matches!(event, AdapterEvent::Usage { input_tokens: Some(999999), .. })));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message { text, subagent_dispatch_id: None, .. } if text == "done:native-child")));
+        assert!(matches!(events.last(), Some(AdapterEvent::Exit { exit_code: Some(0), .. })));
+        let calls = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        assert!(!calls.contains("thread/subscribe"));
+        assert!(calls.contains("native-child-thread"));
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn modern_compaction_item_completes_and_errors_terminate_without_an_old_notification() {
+        let (mut request, root)=fake_request("compact");request.provider_command=Some("compact".into());
+        let mut run=start_single_connection(request.clone(),Some("thread-for-compaction".into())).unwrap();
+        let events=collect(&mut run).await;
+        assert!(events.iter().any(|event|matches!(event,AdapterEvent::Message{text,..} if text.contains("已压缩"))));
+        assert!(matches!(events.last(),Some(AdapterEvent::Exit{exit_code:Some(0),..})));
+        request.env.as_mut().unwrap().insert("CODEX_FAKE_COMPACT_ERROR".into(),"1".into());
+        let mut failed=start_single_connection(request.clone(),Some("thread-for-compaction".into())).unwrap();
+        let events=collect(&mut failed).await;
+        assert!(events.iter().any(|event|matches!(event,AdapterEvent::Error{message} if message.contains("Compaction API rejected"))));
+        assert!(matches!(events.last(),Some(AdapterEvent::Exit{exit_code:Some(1),..})));
+        cleanup(&request,root).await;
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_turn_stays_failed_and_retry_notice_can_recover() {
+        let (request, root) = fake_request("failed-turn");
+        let mut failed = start_single_connection(request.clone(), None).unwrap();
+        let events = collect(&mut failed).await;
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Error { message } if message.contains("rejected the credential"))));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Status { phase, .. } if phase == "turn_failed")));
+        assert!(!events.iter().any(|event| matches!(event, AdapterEvent::Status { phase, .. } if phase == "turn_completed")));
+        assert!(matches!(events.last(), Some(AdapterEvent::Exit { exit_code: Some(1), .. })));
+        let mut retry_request = request.clone();
+        retry_request.prompt = "retry-turn".into();
+        let mut retry = start_single_connection(retry_request, None).unwrap();
+        let events = collect(&mut retry).await;
+        assert!(!events.iter().any(|event| matches!(event, AdapterEvent::Error { .. })));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message { text, .. } if text == "done:retry-turn")));
+        assert!(matches!(events.last(), Some(AdapterEvent::Exit { exit_code: Some(0), .. })));
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
     async fn fake_rpc_queued_cancel_preserves_active_session_and_fifo() {
         let (request, root) = fake_request("slow");
         let mut first = start_single_connection(request.clone(), None).unwrap();
@@ -1482,11 +1506,13 @@ mod queue_tests {
     async fn fake_rpc_active_timeout_does_not_overwrite_timeout_with_error() {
         let (mut request, root) = fake_request("hang");
         request.timeout_ms = Some(250);
-        let mut run = start_single_connection(request, None).unwrap();
+        let mut run = start_single_connection(request.clone(), None).unwrap();
         let events = collect(&mut run).await;
         assert!(events.iter().any(|e| matches!(e, AdapterEvent::Timeout { .. })));
         assert!(!events.iter().any(|e| matches!(e, AdapterEvent::Error { .. })));
-        let _ = std::fs::remove_dir_all(root);
+        let resident = acquire_codex_app_server(&request).unwrap();
+        assert!(resident.rpc.process_handle().is_alive());
+        cleanup(&request, root).await;
     }
 
 

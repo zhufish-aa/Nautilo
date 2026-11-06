@@ -2,18 +2,22 @@ import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ChevronRight, Loader2, Plus, Users } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
-import { PageHeader } from "../../components/layout/AppShell";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { Field, Input } from "../../components/ui/Input";
 import { useTeamsStore } from "../../stores/teams";
+import { IdentityAvatar, ProviderAvatar } from "../../components/ui/IdentityAvatar";
+import { useAgentsStore } from "../../stores/agents";
+import { providerMeta } from "../../lib/provider-catalog";
 
-export function TeamsPage(): JSX.Element {
+export function TeamsPage({ embedded = false }: { embedded?: boolean }): JSX.Element {
+  const teamUrl = (id: string): string => embedded ? `/settings?section=teams&team=${encodeURIComponent(id)}` : `/teams/${encodeURIComponent(id)}`;
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
   const navigate = useNavigate();
   const teams = useTeamsStore((state) => state.teams);
+  const instances = useAgentsStore((state) => state.instances);
   const createTeam = useTeamsStore((state) => state.createTeam);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -37,7 +41,7 @@ export function TeamsPage(): JSX.Element {
     try {
       const team = await createTeam(name.trim());
       setOpen(false);
-      navigate(`/teams/${encodeURIComponent(team.id)}`);
+      navigate(teamUrl(team.id));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -46,19 +50,16 @@ export function TeamsPage(): JSX.Element {
     }
   };
   return (
-    <div data-tour="teams-page" className="mx-auto max-w-5xl py-3 sm:py-6">
-      <p className="mb-5 text-sm text-ink-3">
-        {zh ? "设置 / 模型与 Agent / 团队" : "Settings / Models & agents / Teams"}
-      </p>
-      <PageHeader
-        title={t("teams.title")}
-        actions={
-          <Button variant="outline" onClick={startCreate}>
+    <div data-tour="teams-page" className="teams-page">
+      <header className="teams-page-header">
+        <div>
+          <h2>{t("teams.title")}</h2>
+        </div>
+          <Button variant="primary" onClick={startCreate}>
             <Plus className="h-4 w-4" aria-hidden />
             {t("teams.new")}
           </Button>
-        }
-      />
+      </header>
       {teams.length === 0 ? (
         <EmptyState
           icon={Users}
@@ -72,27 +73,20 @@ export function TeamsPage(): JSX.Element {
           }
         />
       ) : (
-        <ul className="mt-8 divide-y divide-line border-b border-line">
+        <ul className="team-list team-overview-list" data-single={teams.length === 1}>
           {teams.map((team) => (
             <li key={team.id}>
               <Link
-                to={`/teams/${encodeURIComponent(team.id)}`}
-                className="grid min-h-[80px] grid-cols-[minmax(0,1fr)_20px] items-center gap-x-6 gap-y-2 rounded-lg px-2 py-5 transition-colors hover:bg-panel focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,0.7fr)_minmax(0,1fr)_20px]"
+                to={teamUrl(team.id)}
+                className="team-overview-card"
               >
-                <span className="flex min-w-0 items-center gap-3">
-                  <Users className="h-5 w-5 shrink-0 text-ink-2" aria-hidden />
-                  <span className="truncate text-[15px] font-medium">{team.name}</span>
-                </span>
-                <span className="col-start-1 row-start-2 pl-8 text-sm text-ink-3 sm:col-auto sm:row-auto sm:pl-0">
-                  {t("teams.card.members", { count: team.members.length })}
-                </span>
-                <span className="col-start-1 row-start-3 pl-8 text-sm text-ink-3 sm:col-auto sm:row-auto sm:pl-0">
-                  {t(`teams.policy.${team.delegationPolicy}` as MessageKey)}
-                </span>
-                <ChevronRight
-                  className="col-start-2 row-start-1 h-4 w-4 text-ink-3 sm:col-auto"
-                  aria-hidden
-                />
+                <div className="team-overview-card-heading"><IdentityAvatar label={team.name} seed={team.id} /><strong>{team.name}</strong><span className="team-overview-policy">{t(`teams.policy.${team.delegationPolicy}` as MessageKey)}</span></div>
+                <div className="team-preview-members">{team.members.slice(0, 4).map((member) => {
+                  const instance = instances.find((item) => item.id === member.agentInstanceId);
+                  const meta = instance ? providerMeta(instance.providerId) : undefined;
+                  return <div className="team-preview-member" data-enabled={member.enabled} key={member.id}><ProviderAvatar providerId={instance?.providerId ?? "custom"} size="sm" /><div><strong>{member.displayName}</strong><span>{member.role.name}</span><p title={member.model}>{meta?.name ?? "—"} · {member.model || (zh ? "默认模型" : "Default model")}</p></div></div>;
+                })}</div>
+                <div className="team-overview-card-footer"><span><Users size={14} aria-hidden />{t("teams.card.members", { count: team.members.length })}</span><span>{zh ? "配置团队" : "Configure team"}<ChevronRight size={15} aria-hidden /></span></div>
               </Link>
             </li>
           ))}
@@ -104,11 +98,6 @@ export function TeamsPage(): JSX.Element {
           if (!pending) setOpen(value);
         }}
         title={t("teams.new")}
-        description={
-          zh
-            ? "先为团队命名，然后添加成员与协作设置。"
-            : "Name your team, then add members and configure how they collaborate."
-        }
         footer={
           <>
             <Button variant="outline" disabled={pending} onClick={() => setOpen(false)}>

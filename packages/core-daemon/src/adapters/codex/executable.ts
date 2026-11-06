@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter, dirname, extname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 import { platform } from "node:os";
 import type { AdapterInvocation } from "../process-adapter.js";
 
@@ -10,7 +10,7 @@ function npmBinDirectory(executable: string, pathValue: string | undefined): str
 }
 
 export function resolveCodexInvocation(executable: string, args: string[], pathValue: string | undefined = process.env.PATH): AdapterInvocation {
-  if (platform() !== "win32" || extname(executable).toLowerCase() === ".exe") return { command: executable, args };
+  if (platform() !== "win32" || !["codex","codex.cmd","codex.bat","codex.ps1"].includes(basename(executable).toLowerCase())) return { command: executable, args };
 
   const binDirectory = npmBinDirectory(executable, pathValue);
   if (!binDirectory) return { command: executable, args };

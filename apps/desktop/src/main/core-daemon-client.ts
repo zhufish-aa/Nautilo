@@ -1,11 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect, type Socket } from "node:net";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, delimiter } from "node:path";
 
 interface ReadyMessage { service: "core-daemon"; status: "ok"; socketPath: string; }
 
-/** Owns the external Node daemon lifecycle; the Electron shell never imports SQLite. */
+/** Owns the external Rust daemon lifecycle (with a legacy Node fallback). */
 export class CoreDaemonClient {
   private process?: ChildProcess;
   private socketPath?: string;
@@ -20,11 +20,19 @@ export class CoreDaemonClient {
       ? `\\\\.\\pipe\\agenthub-core-${process.pid}`
       : join(userDataPath, "core.sock");
     this.tokenPath = join(userDataPath, "core.token");
+    const nodeRuntime=this.resolveNodeCommand();
+    const runtimeEnvironment={ ...process.env };
+    if (isAbsolute(nodeRuntime) && existsSync(nodeRuntime)) {
+      // Use the explicitly selected/bundled runtime for npm-based agent CLIs
+      // as well as the legacy daemon, even when the daemon itself is Rust.
+      const pathKey=Object.keys(runtimeEnvironment).find(key=>key.toLowerCase()==="path") ?? "PATH";
+      runtimeEnvironment[pathKey]=`${dirname(nodeRuntime)}${delimiter}${runtimeEnvironment[pathKey] ?? ""}`;
+    }
     this.process = spawn(command, args, {
       cwd: userDataPath,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, AGENTHUB_DATA_DIR: userDataPath, AGENTHUB_SOCKET: socketPath, AGENTHUB_TOKEN_PATH: this.tokenPath }
+      env: { ...runtimeEnvironment, AGENTHUB_DATA_DIR: userDataPath, AGENTHUB_SOCKET: socketPath, AGENTHUB_TOKEN_PATH: this.tokenPath }
     });
     const ready = await this.waitForReady(this.process);
     this.socketPath = ready.socketPath;

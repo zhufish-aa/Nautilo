@@ -61,20 +61,24 @@ test("session controls expose model/effort and confirmed source switching, never
   assert.match(source, /confirmConnectionChange: true/);
   assert.match(source, /getConnection\(connectionId, connectionRevision\)/);
   assert.match(source, /configureWorkbenchSession\(sessionId, patch\)/);
-  assert.match(source, /disabled=\{locked \|\| !efforts.length\}/);
+  assert.match(source, /efforts.length > 0/);
+  assert.match(source, /key=\{item\} disabled=\{locked\}/);
   const header = readFileSync(join(renderer, "features/sessions/SessionWorkbench.tsx"), "utf8");
   assert.match(header, /session-fixed-agent/);
 });
 
-test("CLI instances own connectivity while team members own delegated model defaults", () => {
+test("team members bind a runtime harness and a revision-pinned connection with model defaults", () => {
   const agentEditor = readFileSync(join(renderer, "features/agents/AgentEditorDialog.tsx"), "utf8");
   const memberEditor = readFileSync(join(renderer, "features/teams/MemberEditorDialog.tsx"), "utf8");
   const newSession = readFileSync(join(renderer, "features/sessions/NewSessionDialog.tsx"), "utf8");
   const modelControl = readFileSync(join(renderer, "features/sessions/SessionModelControl.tsx"), "utf8");
   assert.doesNotMatch(agentEditor, /modelCatalogs|ComboboxInput|form\.reasoningEffort/);
-  assert.match(memberEditor, /modelCatalogs\[selectedInstance\.id\]/);
-  assert.match(memberEditor, /model: form\.model\.trim\(\) \|\| undefined/);
-  assert.match(memberEditor, /reasoningEffort: form\.reasoningEffort\.trim\(\) \|\| undefined/);
+  assert.match(memberEditor, /connectionModelKey\(selectedConnection.id/);
+  assert.match(memberEditor, /modelCatalogs\[modelKey\]/);
+  assert.match(memberEditor, /connectionId: form.connectionId/);
+  assert.match(memberEditor, /connectionRevision: form.connectionRevision/);
+  assert.match(memberEditor, /model: form\.model\.trim\(\) \|\| modelCatalog\?\.defaultModel/);
+  assert.match(memberEditor, /reasoningEffort: form\.reasoningEffort\.trim\(\) \|\| selectedModel\?\.defaultReasoningEffort/);
   assert.doesNotMatch(newSession, /selectedInstance\.(model|reasoningEffort)/);
   assert.match(modelControl, /catalogs\[instance\.id\]/);
   assert.doesNotMatch(modelControl, /instance\.(model|reasoningEffort)/);
@@ -116,7 +120,6 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(runtime, /runningReasoningRows/);
   assert.match(runtime, /finishLatestReasoning\(runId\)/);
   assert.match(runtime, /const text = capReasoningText\(event\.payload\.text\);\s*if \(!text\.trim\(\)\) continue/);
-  assert.match(runtime, /data: \{ \.\.\.current, text: capReasoningText\(current\.text \|\| event\.payload\.text\), streaming: false \}/);
   assert.match(runtime, /retryableCommands/);
   assert.match(runtime, /normalizeCommandForRetry/);
   assert.match(runtime, /event\.type === "run\.failed" \? "failed"/);
@@ -144,7 +147,7 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(activityIndicator, /latest && latest\.data\.kind !== "activity"/);
 });
 
-test("chat timeline preserves every grouped tool in chronological, independently expandable rows", () => {
+test("chat timeline groups each turn while retaining all tools and controls", () => {
   const grouping = readFileSync(join(renderer, "lib/tool-timeline-groups.ts"), "utf8");
   const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
   const timeline = readFileSync(join(renderer, "features/timeline/Timeline.tsx"), "utf8");
@@ -154,9 +157,9 @@ test("chat timeline preserves every grouped tool in chronological, independently
   assert.match(grouping, /items: pending/);
   assert.match(runtime, /groupToolTimeline/);
   assert.match(conversation, /data\.kind === "tool_group"\) visit\(data\.items\)/);
-  assert.match(workbench, /conversationTimeline\(events\)/);
-  assert.match(workbench, /timelineEvents\.forEach/);
-  assert.match(workbench, /shell\(event\.id/);
+  assert.match(workbench, /conversationRows\(events, workbenchRunning\)/);
+  assert.match(workbench, /ConversationTurnView turn=\{row.turn\}/);
+  assert.match(workbench, /shell\(row.event.id/);
   assert.doesNotMatch(workbench, /ProcessFold/);
   assert.match(timeline, /function ToolActivityCard[\s\S]*const \[open, setOpen\] = useState\(false\)/);
   assert.match(timeline, /function CommandCard[\s\S]*const \[open, setOpen\] = useState\(false\)/);

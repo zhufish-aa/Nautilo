@@ -215,6 +215,8 @@ export interface ModelPricing {
 }
 
 export interface InstanceModelConfig {
+  /** Omit to inherit native capabilities; explicit text-only disables image input. */
+  inputModalities?: Array<"text" | "image">;
   /** Exact model id passed to the provider CLI's model option. */
   id: string;
   /** Optional display label override. */
@@ -232,6 +234,7 @@ export interface InstanceModelConfig {
 }
 
 export interface ProviderModel {
+  inputModalities?: Array<"text" | "image">;
   /** Exact value passed to the provider CLI's model option. */
   id: string;
   displayName: string;
@@ -274,6 +277,9 @@ export interface Role {
 }
 
 export interface TeamMember {
+  /** Independent provider/account, pinned when the member is saved. */
+  connectionId?: string;
+  connectionRevision?: number;
   id: string;
   displayName: string;
   agentInstanceId: AgentInstanceId;
@@ -404,6 +410,8 @@ export interface Session {
   connectionContextRebuildRequired?: boolean;
   /** Session-level overrides captured when the user creates the conversation. */
   model?: string;
+  /** Native Harness preset identity, independent of model and permissions. */
+  agentMode?: string;
   reasoningEffort?: string;
   serviceTier?: string;
   /** CLI-native permission mode override; falls back to the agent instance setting. */
@@ -415,9 +423,14 @@ export interface Session {
   mode?: "code" | "work";
   title: string;
   status: SessionStatus;
+  /** Internal automatic-title checkpoint; a different visible title is a manual rename. */
+  autoTitle?: { title: string; messageId: string };
   providerSessionId?: string;
+  /** Working directory of the bound native session, including delegated worktrees. */
+  nativeWorkingDirectory?: string;
   /** Set after persisted Nautilo history is synchronized into the provider thread. */
   providerContextSyncedAt?: string;
+  providerContextVersion?: string;
   /** Nautilo runtime-tool contract installed into the native provider thread. */
   runtimeToolVersion?: number;
   /** Last context window reported by the provider itself; wins over stale model-catalog entries. */
@@ -512,6 +525,7 @@ export interface Message {
   projectRunId?: ProjectRunId;
   taskId?: TaskId;
   runId?: AgentRunId;
+  background?: boolean;
   fromMemberId?: string;
   toMemberId?: string;
   correlationId?: string;

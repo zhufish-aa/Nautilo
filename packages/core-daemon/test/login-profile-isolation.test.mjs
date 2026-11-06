@@ -85,6 +85,6 @@ test('Claude profile also overrides the documented global Anthropic federation c
 
 test('API connections never inherit an isolated or global Anthropic profile directory', async () => {
   const { connectionEnvironment } = await import('../dist/runtime/runtime-connection.js');
-  const result = connectionEnvironment({ id: 'api', revision: 1, kind: 'api', baseUrl: 'https://api.example.test' }, { providerId: 'claude-code' }, { HOME: '/fixture-home', ANTHROPIC_CONFIG_DIR: '/other-account', CLAUDE_CONFIG_DIR: '/other-login', anthropic_profile: 'default' }, { has: () => true, environment: () => ({ ANTHROPIC_API_KEY: 'fixture-key' }) });
+  const result = connectionEnvironment({ id: 'api', revision: 1, kind: 'api', baseUrl: 'https://api.example.test' }, { providerId: 'claude-code' }, { HOME: '/fixture-home', ANTHROPIC_CONFIG_DIR: '/other-account', CLAUDE_CONFIG_DIR: '/other-login', anthropic_profile: 'default' }, { has: () => true, environment: () => ({ ANTHROPIC_API_KEY: 'fixture-key' }), connectionDirectory: () => '/fixture-api-connection' });
   assert.equal(result.ANTHROPIC_CONFIG_DIR, undefined); assert.equal(result.CLAUDE_CONFIG_DIR, undefined); assert.equal(result.anthropic_profile, undefined); assert.equal(result.ANTHROPIC_API_KEY, 'fixture-key');
 });

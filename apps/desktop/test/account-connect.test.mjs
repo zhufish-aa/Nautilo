@@ -41,16 +41,15 @@ test('failed native startup and cancelled running flow never save a connection',
   assert.ok(!running.calls.some(x => x[0] === 'save')); assert.equal(running.calls.at(-1)[0], 'cancel');
 });
 test('profile allocator makes separate protected directories without accepting caller paths', async (t) => {
-  if (process.platform === 'win32') { t.skip('Windows ACL integration requires native validation'); return; }
   const src = await readFile(new URL('../src/main/account-profile.ts', import.meta.url), 'utf8');
   const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} }; new Function('require', 'module', 'exports', js)(require, module, module.exports);
   const base = await mkdtemp(join(tmpdir(), 'account-profile-test-')); t.after(() => rm(base, { recursive: true, force: true }));
   const first = await module.exports.prepareAccountProfile(base, 'codex'), second = await module.exports.prepareAccountProfile(base, 'codex');
   assert.notEqual(first.directory, second.directory); assert.ok(first.directory.startsWith(join(base, 'account-profiles')));
-  assert.equal((await stat(first.directory)).mode & 0o777, 0o700); assert.equal((await lstat(first.directory)).isSymbolicLink(), false);
+  if (process.platform !== 'win32') assert.equal((await stat(first.directory)).mode & 0o777, 0o700); assert.equal((await lstat(first.directory)).isSymbolicLink(), false);
   await assert.rejects(module.exports.prepareAccountProfile(base, '../other'));
-  const linkBase = join(base, 'linked'); await mkdir(linkBase); await symlink(join(base, 'account-profiles'), join(linkBase, 'account-profiles'));
+  const linkBase = join(base, 'linked'); await mkdir(linkBase); await symlink(join(base, 'account-profiles'), join(linkBase, 'account-profiles'), process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(module.exports.prepareAccountProfile(linkBase, 'codex'), /regular directory/);
 });
 
@@ -74,7 +73,6 @@ test('recovering an active or stopping process never launches another login or s
 });
 
 test('pending records survive cancellation/save failure and attachment removes metadata only', async (t) => {
-  if (process.platform === 'win32') { t.skip('Windows ACL integration requires native validation'); return; }
   const { writeFile, access } = await import('node:fs/promises');
   const src = await readFile(new URL('../src/main/account-profile.ts', import.meta.url), 'utf8');
   const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -85,7 +83,7 @@ test('pending records survive cancellation/save failure and attachment removes m
   const records = await module.exports.recoverableAccountProfiles(base);
   assert.equal(records.length, 1); assert.equal(records[0].profileId, profile.profileId);
   assert.deepEqual(Object.keys(records[0]).sort(), ['createdAt', 'directory', 'profileId', 'providerId']);
-  assert.equal((await stat(join(profile.directory, 'anthropic'))).mode & 0o777, 0o700);
+  if (process.platform !== 'win32') assert.equal((await stat(join(profile.directory, 'anthropic'))).mode & 0o777, 0o700);
   await access(authPath); // Merely listing never deletes even a potentially live profile.
   await module.exports.attachAccountProfile(base, 'claude-code', profile.profileId);
   assert.deepEqual(await module.exports.recoverableAccountProfiles(base), []);
@@ -93,6 +91,6 @@ test('pending records survive cancellation/save failure and attachment removes m
   await assert.rejects(module.exports.attachAccountProfile(base, 'claude-code', '../outside'));
   const replaced = await module.exports.prepareAccountProfile(base, 'claude-code');
   await rm(join(replaced.directory, 'anthropic'), { recursive: true });
-  await symlink(base, join(replaced.directory, 'anthropic'));
+  await symlink(base, join(replaced.directory, 'anthropic'), process.platform === 'win32' ? 'junction' : 'dir');
   assert.deepEqual(await module.exports.recoverableAccountProfiles(base), [], 'recovery rejects a replaced Anthropic root');
 });

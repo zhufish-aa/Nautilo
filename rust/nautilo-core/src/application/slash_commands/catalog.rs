@@ -15,7 +15,9 @@ pub fn claude_slash_commands() -> Vec<Value> {
     serde_json::from_str(include_str!("claude_catalog.json")).unwrap_or_default()
 }
 
-const KIMI_ACP_COMMANDS: [&str; 6] = ["compact", "status", "usage", "mcp", "tasks", "help"];
+fn valid_native_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c|c.is_alphanumeric() || "_-.:".contains(c))
+}
 
 fn kimi_title(name: &str) -> &str {
     match name {
@@ -32,7 +34,7 @@ fn kimi_title(name: &str) -> &str {
 /// Verified against `kimi acp` /help on Kimi Code CLI 0.27.0.
 pub fn kimi_provider_command(input: &Value) -> Option<Value> {
     let name = input.get("name").and_then(Value::as_str).unwrap_or("").trim_start_matches('/').to_string();
-    if !KIMI_ACP_COMMANDS.contains(&name.as_str()) {
+    if !valid_native_name(&name) {
         return None;
     }
     let mut command = Map::new();
@@ -53,7 +55,6 @@ pub fn kimi_provider_command(input: &Value) -> Option<Value> {
     Some(Value::Object(command))
 }
 
-const CLAUDE_PRINT_COMMANDS: [&str; 8] = ["compact", "cost", "doctor", "export", "init", "mcp", "review", "security-review"];
 
 fn claude_title(name: &str) -> &str {
     match name {
@@ -73,7 +74,7 @@ fn claude_title(name: &str) -> &str {
 /// against Claude Code CLI 2.1).
 pub fn claude_provider_command(input: &Value) -> Option<Value> {
     let name = input.get("name").and_then(Value::as_str).unwrap_or("").trim_start_matches('/').to_string();
-    if !CLAUDE_PRINT_COMMANDS.contains(&name.as_str()) {
+    if !valid_native_name(&name) {
         return None;
     }
     let description = input.get("description").and_then(Value::as_str).unwrap_or("");
@@ -87,8 +88,7 @@ pub fn claude_provider_command(input: &Value) -> Option<Value> {
         json!(if description == name { format!("由 Claude Code CLI 执行 /{name}") } else { description.to_string() }),
     );
     command.insert("icon".to_string(), json!(if name == "compact" || name == "cost" { "usage" } else { "status" }));
-    // Every native command spawns a fresh headless process, so it must wait
-    // for a quiet session.
+    // Commands use the session's native stream, after its active turn settles.
     command.insert("availability".to_string(), json!("idle"));
     command.insert("execution".to_string(), json!("provider"));
     if let Some(hint) = input.get("inputHint").and_then(Value::as_str) {
@@ -102,7 +102,7 @@ pub fn claude_provider_command(input: &Value) -> Option<Value> {
 /// headlessly, so every reported command maps through.
 fn generic_provider_command(provider_id: &str, input: &Value) -> Option<Value> {
     let name = input.get("name").and_then(Value::as_str).unwrap_or("").trim_start_matches('/').to_string();
-    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+    if !valid_native_name(&name) {
         return None;
     }
     let compact = input.get("providerCommand").and_then(Value::as_str) == Some("compact") || name == "compact";

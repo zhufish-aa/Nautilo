@@ -1,14 +1,16 @@
 import { useEffect, useState } from "react";
-import { Check, ChevronDown, ChevronUp, ClipboardCheck, HelpCircle, RotateCcw, Send, ShieldAlert, X, type LucideIcon } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, ClipboardCheck, ExternalLink, HelpCircle, RotateCcw, Send, ShieldAlert, X, type LucideIcon } from "lucide-react";
 import type { InteractionOption, InteractionQuestion, InteractionRequest, InteractionResponse } from "@agenthub/domain";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn, formatDateTime } from "../../lib/utils";
 import { useInteractionsStore } from "../../stores/interactions";
 import { toast } from "../../stores/toast";
+import { getBridge } from "../../lib/bridge";
 import { StatusChip, type ChipTone } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
 import { MarkdownContent } from "../timeline/MarkdownContent";
+import { PluginApprovalCard, pluginPresentation } from "./PluginApprovalCard";
 
 const EMPTY: InteractionRequest[] = [];
 
@@ -36,6 +38,7 @@ function isDangerOption(option: InteractionOption): boolean {
 export function InteractionCards({ sessionId }: { sessionId: string }): JSX.Element | null {
   const interactions = useInteractionsStore((state) => state.bySession[sessionId] ?? EMPTY);
   const loadPending = useInteractionsStore((state) => state.loadPending);
+  const respondInteraction = useInteractionRespond();
 
   useEffect(() => {
     void loadPending(sessionId);
@@ -45,13 +48,14 @@ export function InteractionCards({ sessionId }: { sessionId: string }): JSX.Elem
   if (visible.length === 0) return null;
   return (
     <>
-      {visible.map((interaction) =>
-        interaction.kind === "question"
+      {visible.map((interaction) => {
+        const presentation = pluginPresentation(interaction);
+        return presentation ? <PluginApprovalCard key={interaction.id} interaction={interaction} presentation={presentation} onRespond={respondInteraction} /> : interaction.kind === "question"
           ? <QuestionCard key={interaction.id} interaction={interaction} />
           : interaction.kind === "plan_approval"
             ? <PlanApprovalCard key={interaction.id} interaction={interaction} />
             : <ApprovalCard key={interaction.id} interaction={interaction} />
-      )}
+      })}
     </>
   );
 }
@@ -130,7 +134,7 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
   const pending = interaction.status === "pending";
 
   const [selections, setSelections] = useState<Record<string, string[]>>({});
-  const [texts, setTexts] = useState<Record<string, string>>({});
+  const [texts, setTexts] = useState<Record<string, string>>(() => Object.fromEntries(questions.map(question => [question.id, question.initialValue ?? ""])));
   const [submitting, setSubmitting] = useState(false);
 
   const toggleOption = (question: InteractionQuestion, option: InteractionOption): void => {
@@ -156,7 +160,7 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
   };
 
   const answersComplete = questions.every((question) =>
-    (selections[question.id] ?? []).length > 0 || Boolean((texts[question.id] ?? "").trim())
+    question.allowEmpty || (selections[question.id] ?? []).length > 0 || Boolean((texts[question.id] ?? "").trim())
   );
 
   const submit = async (): Promise<void> => {
@@ -164,8 +168,9 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
     const answers: Record<string, string[]> = {};
     for (const question of questions) {
       const values = [...(selections[question.id] ?? [])];
-      const text = (texts[question.id] ?? "").trim();
-      if (text) values.push(text);
+      const original = texts[question.id] ?? "";
+      const text = question.preserveWhitespace ? original : original.trim();
+      if (text || question.allowEmpty && !(question.options?.length)) values.push(text);
       answers[question.id] = values;
     }
     setSubmitting(true);
@@ -292,19 +297,16 @@ function QuestionField({
           )}
         </div>
       )}
-      {showFreeText && (
-        <Input
-          className="mt-2"
-          type={question.isSecret ? "password" : "text"}
-          value={text}
-          placeholder={t(question.isSecret
-            ? "sessions.interactions.secretPlaceholder"
-            : options.length > 0
-              ? "sessions.interactions.otherPlaceholder"
-              : "sessions.interactions.freeTextPlaceholder")}
-          onChange={(event) => onText(event.currentTarget.value)}
-        />
-      )}
+      {showFreeText && (question.inputType === "multiline" ? (
+        <textarea className="mt-2 min-h-36 w-full resize-y rounded-lg border border-line bg-card px-3 py-2 text-sm leading-6 text-ink outline-none focus:border-accent"
+          aria-label={question.question} value={text} placeholder={question.placeholder}
+          onChange={event => onText(event.currentTarget.value)} />
+      ) : (
+        <Input className="mt-2" aria-label={question.question} type={question.isSecret ? "password" : "text"}
+          value={text} placeholder={question.placeholder ?? t(question.isSecret ? "sessions.interactions.secretPlaceholder"
+            : options.length > 0 ? "sessions.interactions.otherPlaceholder" : "sessions.interactions.freeTextPlaceholder")}
+          onChange={event => onText(event.currentTarget.value)} />
+      ))}
     </fieldset>
   );
 }
@@ -383,6 +385,10 @@ function ApprovalCard({ interaction }: { interaction: InteractionRequest }): JSX
             )}
           </div>
         )}
+        {interaction.links?.length ? <div className="mt-3 flex flex-wrap gap-2">{interaction.links.map((link) => <Button key={link.url} variant="outline" size="sm" onClick={() => {
+          const bridge = getBridge();
+          if (bridge) void bridge.shell.openExternal(link.url).catch((error) => toast.error(String(error)));
+        }}><ExternalLink className="h-3.5 w-3.5" aria-hidden />{link.label}</Button>)}</div> : null}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {options.map((option, index) => (
             <Button

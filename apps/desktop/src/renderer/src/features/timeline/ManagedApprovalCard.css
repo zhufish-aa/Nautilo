@@ -1,0 +1,39 @@
+.managed-approval {
+  width: 100%;
+  max-width: 680px;
+  margin-block: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  container: managed-approval / inline-size;
+}
+.managed-approval-main { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 14px; }
+.managed-approval-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--surface-soft); color: var(--ink-2); }
+.managed-approval-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+.managed-approval-identity h3 { margin: 0; min-width: 0; color: var(--ink); font-size: 14px; font-weight: 550; line-height: 1.6; overflow-wrap: anywhere; }
+.managed-approval-status { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; color: var(--ink-2); font-size: 12px; line-height: 1.5; }
+.managed-approval[data-status="pending"] .managed-approval-icon { background: color-mix(in srgb, var(--warn) 9%, var(--card)); color: var(--warn); }
+.managed-approval[data-status="pending"] .managed-approval-status { gap: 5px; color: var(--warn); font-size: 11px; }
+.managed-approval[data-status="pending"] .managed-approval-status::before { content: ""; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.managed-approval[data-status="approved"] .managed-approval-icon, .managed-approval[data-status="approved"] .managed-approval-status { color: var(--ok); }
+.managed-approval[data-status="rejected"] .managed-approval-icon, .managed-approval[data-status="rejected"] .managed-approval-status { color: var(--danger); }
+.managed-approval-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.managed-approval .managed-approval-scope.ui-select { width: auto; min-width: 100px; height: 32px; padding-inline: 10px; border: 1px solid var(--line); border-radius: 8px; box-shadow: none; background: var(--card); color: var(--ink); font-family: inherit; font-size: 13px; }
+.managed-approval .managed-approval-scope svg { width: 13px; height: 13px; }
+.managed-approval-actions .ui-button { height: 32px; min-height: 32px; border-radius: 8px; padding-inline: 12px; font-family: inherit; font-size: 13px; }
+.managed-approval-actions .ui-button-outline { border-color: var(--line); color: var(--ink); box-shadow: none; }
+.managed-approval-detail, .managed-approval-error { margin: 0; padding: 0 14px 12px 58px; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
+.managed-approval-detail { color: var(--ink); }
+.managed-approval-error { color: var(--danger); }
+.managed-approval:not([data-status="pending"]) { margin-block: 4px; border-color: transparent; background: transparent; }
+.managed-approval:not([data-status="pending"]) .managed-approval-main { grid-template-columns: 24px minmax(0, 1fr); padding: 6px 0; gap: 9px; }
+.managed-approval:not([data-status="pending"]) .managed-approval-icon { width: 24px; height: 24px; background: transparent; }
+.managed-approval:not([data-status="pending"]) .managed-approval-detail { padding-left: 33px; }
+@container managed-approval (max-width: 550px) {
+  .managed-approval-main { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; padding: 12px; }
+  .managed-approval-actions { grid-column: 1 / -1; padding-top: 2px; }
+  .managed-approval-actions .managed-approval-scope { margin-right: auto; }
+  .managed-approval-detail, .managed-approval-error { padding-left: 12px; padding-right: 12px; }
+}

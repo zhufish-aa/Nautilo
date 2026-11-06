@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type DragEvent } from "react";
 import {
   Blocks,
+  ChevronRight,
   Import,
   Pencil,
   Plus,
@@ -13,7 +14,9 @@ import {
 import type { CapabilityKind, ProviderCapability } from "@agenthub/domain";
 import { isElectron } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
-import { toUiProviderId } from "../../lib/core-mappers";
+import { toDaemonProviderId } from "../../lib/core-mappers";
+import { capabilityEnabledFor } from "../../lib/capability-enablement";
+import { capabilityOrigin, capabilityDescription, type CapabilityOriginKind } from "../../lib/capability-origin";
 import { providerMeta, useProviderMetas } from "../../lib/provider-catalog";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -21,6 +24,7 @@ import { Dialog } from "../../components/ui/Dialog";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { safeMcpSummary } from "./import-safety";
 import { Input } from "../../components/ui/Input";
+import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { toast } from "../../stores/toast";
 import { useProviderToolsStore } from "../../stores/provider-tools";
@@ -37,7 +41,7 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function ProviderToolsPanel(): JSX.Element {
+export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }): JSX.Element {
   const { t, locale } = useI18n();
   const providers = useProviderMetas();
   const tools = useProviderToolsStore((state) => state.tools);
@@ -45,12 +49,19 @@ export function ProviderToolsPanel(): JSX.Element {
   const loaded = useProviderToolsStore((state) => state.loaded);
   const loadError = useProviderToolsStore((state) => state.error);
   const load = useProviderToolsStore((state) => state.load);
-  const toggle = useProviderToolsStore((state) => state.toggle);
+  const toggle = useProviderToolsStore((state) => state.toggleForHarness);
   const remove = useProviderToolsStore((state) => state.remove);
 
-  const [kind, setKind] = useState<CapabilityKind | "all">("all");
-  const [providerId, setProviderId] = useState("all");
+  const [selectedProviderId, setProviderId] = useState("");
+  const providerId = providers.some((provider) => provider.id === selectedProviderId) ? selectedProviderId : providers[0]?.id || "";
+  const daemonProviderId = toDaemonProviderId(providerId);
+  const harnessName = providerMeta(providerId).name;
+  const [toggling, setToggling] = useState<string[]>([]);
+  const zh = locale === "zh-CN";
   const [query, setQuery] = useState("");
+  const [view, setView] = useState("enabled");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [detail, setDetail] = useState<ProviderCapability>();
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ProviderCapability | undefined>(
     undefined,
@@ -69,21 +80,31 @@ export function ProviderToolsPanel(): JSX.Element {
     if (isElectron && !loaded) void load();
   }, [load, loaded]);
 
+  const inventory = useMemo(() => tools.filter(tool => tool.kind === kind), [tools, kind]);
+  const enabledCount = inventory.filter(tool => capabilityEnabledFor(tool, daemonProviderId)).length;
+  const originNames: Record<CapabilityOriginKind, string> = {
+    builtin: zh ? "Nautilo 内置" : "Built into Nautilo",
+    plugin: zh ? "来自插件" : "From plugins",
+    local: zh ? "本机导入" : "Imported locally",
+    custom: zh ? "手动创建" : "Created manually",
+    unknown: zh ? "来源未记录" : "Source not recorded"
+  };
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    return tools.filter((tool) => {
-      if (kind !== "all" && tool.kind !== kind) return false;
-      if (
-        providerId !== "all" &&
-        !tool.providerIds.map(toUiProviderId).includes(providerId)
-      )
-        return false;
+    return inventory.filter((tool) => {
+      const enabled = capabilityEnabledFor(tool, daemonProviderId);
+      if (view === "enabled" && !enabled || view === "disabled" && enabled) return false;
+      const origin = capabilityOrigin(tool);
+      if (sourceFilter !== "all" && origin.kind !== sourceFilter) return false;
       if (!normalized) return true;
-      return `${tool.name} ${tool.description} ${tool.tags.join(" ")}`
+      return `${tool.name} ${tool.description} ${origin.label} ${origin.path ?? ""} ${tool.tags.join(" ")}`
         .toLowerCase()
         .includes(normalized);
-    });
-  }, [kind, providerId, query, tools]);
+    }).sort((a, b) => a.name.localeCompare(b.name, locale));
+  }, [inventory, query, view, sourceFilter, daemonProviderId, locale]);
+  const groups = (["builtin", "local", "plugin", "custom", "unknown"] as const)
+    .map(origin => ({ origin, items: filtered.filter(tool => capabilityOrigin(tool).kind === origin) }))
+    .filter(group => group.items.length);
 
   if (!isElectron) {
     return (
@@ -101,7 +122,7 @@ export function ProviderToolsPanel(): JSX.Element {
   };
 
   const openImport = (seed?: CapabilityImportSeed): void => {
-    setImportSeed(seed);
+    setImportSeed(seed ?? { tab: kind === "mcp" ? "mcp" : "skills", text: "" });
     setImportOpen(true);
   };
 
@@ -143,9 +164,10 @@ export function ProviderToolsPanel(): JSX.Element {
   };
 
   const handleToggle = (tool: ProviderCapability, enabled: boolean): void => {
-    void toggle(tool.id, enabled).catch((error: unknown) =>
-      toast.error(messageOf(error)),
-    );
+    setToggling((ids) => [...ids, tool.id]);
+    void toggle(tool.id, daemonProviderId, enabled)
+      .catch((error: unknown) => toast.error(messageOf(error)))
+      .finally(() => setToggling((ids) => ids.filter((id) => id !== tool.id)));
   };
 
   const confirmDelete = async (): Promise<void> => {
@@ -164,15 +186,14 @@ export function ProviderToolsPanel(): JSX.Element {
 
   return (
     <div
-      className="relative space-y-4"
+      className="capability-panel capability-library relative space-y-5"
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="text-sm font-medium text-ink">
-          {t("agents.tools.title")}
-        </h3>
+        <div><h2 className="text-xl font-semibold">{kind === "mcp" ? (zh ? "MCP 服务" : "MCP servers") : (zh ? "技能库" : "Skill library")}</h2>
+        <p className="mt-1.5 text-[13px] text-ink-2">{zh ? `${harnessName} 已启用 ${enabledCount} 项，共 ${inventory.length} 项。` : `${enabledCount} enabled for ${harnessName} · ${inventory.length} total`}</p></div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => openImport()}>
             <Import className="h-4 w-4" aria-hidden />
@@ -180,7 +201,7 @@ export function ProviderToolsPanel(): JSX.Element {
           </Button>
           <Button variant="primary" size="sm" onClick={openCreate}>
             <Plus className="h-4 w-4" aria-hidden />
-            {t("agents.tools.add")}
+            {kind === "mcp" ? (zh ? "添加 MCP" : "Add MCP") : (zh ? "添加 Skill" : "Add skill")}
           </Button>
         </div>
       </div>
@@ -198,31 +219,13 @@ export function ProviderToolsPanel(): JSX.Element {
             aria-label={t("agents.tools.searchPlaceholder")}
           />
         </div>
-        <select
-          className="h-9 rounded-lg border border-line bg-card px-3 text-sm text-ink"
-          value={kind}
-          onChange={(event) =>
-            setKind(event.target.value as CapabilityKind | "all")
-          }
-          aria-label={t("agents.tools.editor.kindLabel")}
-        >
-          <option value="all">{t("agents.tools.kindAll")}</option>
-          <option value="skill">{t("agents.tools.kindSkill")}</option>
-          <option value="mcp">MCP</option>
-        </select>
-        <select
-          className="h-9 rounded-lg border border-line bg-card px-3 text-sm text-ink"
-          value={providerId}
-          onChange={(event) => setProviderId(event.target.value)}
-          aria-label={t("agents.tools.editor.providers")}
-        >
-          <option value="all">{t("agents.tools.allProviders")}</option>
-          {providers.map((provider) => (
-            <option key={provider.id} value={provider.id}>
-              {provider.name}
-            </option>
-          ))}
-        </select>
+        <div className="capability-harness-select"><span>Harness</span><SelectField value={providerId} onValueChange={setProviderId} aria-label="Harness" options={providers.map((provider) => ({ value: provider.id, label: provider.name }))} /></div>
+      </div>
+      <div className="capability-library-filters">
+        <div className="capability-view-tabs" role="group" aria-label={zh ? "启用状态" : "Enabled status"}>
+          {[{ id: "enabled", label: zh ? "已启用" : "Enabled", count: enabledCount }, { id: "all", label: zh ? "全部" : "All", count: inventory.length }, { id: "disabled", label: zh ? "未启用" : "Disabled", count: inventory.length - enabledCount }].map(tab => <button key={tab.id} type="button" aria-pressed={view === tab.id} onClick={() => setView(tab.id)}>{tab.label}<span>{tab.count}</span></button>)}
+        </div>
+        <SelectField value={sourceFilter} onValueChange={setSourceFilter} aria-label={zh ? "筛选来源" : "Filter by source"} className="capability-source-filter" options={[{ value: "all", label: zh ? "所有来源" : "All sources" }, ...Object.entries(originNames).map(([value, label]) => ({ value, label }))]} />
       </div>
       {loadError && tools.length === 0 ? (
         <Card className="flex flex-col items-center gap-3 px-5 py-10 text-center">
@@ -252,91 +255,56 @@ export function ProviderToolsPanel(): JSX.Element {
         />
       ) : (
         <>
-          <div className="divide-y divide-line rounded-xl border border-line">
-            {filtered.map((tool) => (
-              <div
-                key={tool.id}
-                className="flex flex-wrap items-center gap-3 px-4 py-4"
-              >
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-line text-ink-2">
-                  {tool.kind === "mcp" ? (
-                    <Server className="h-4 w-4" />
-                  ) : (
-                    <Sparkles className="h-4 w-4" />
-                  )}
-                </span>
-                <div className="min-w-[140px] flex-1">
-                  <h3
-                    className="truncate text-sm font-medium text-ink"
-                    title={tool.description}
-                  >
-                    {tool.name}
-                  </h3>
-                  <p className="mt-1 truncate text-xs text-ink-3">
-                    {tool.kind === "mcp" ? "MCP" : t("agents.tools.kindSkill")}{" "}
-                    ·{" "}
-                    {tool.providerIds
-                      .map((id) => providerMeta(toUiProviderId(id)).name)
-                      .join(", ") || "—"}
-                  </p>
-                  {(tool.mcp || tool.tags.length > 0 || tool.skill?.source) && (
-                    <details className="mt-1 text-xs text-ink-3">
-                      <summary className="w-fit cursor-pointer">
-                        {locale === "zh-CN" ? "详情" : "Details"}
-                      </summary>
-                      <p className="mt-2 break-all font-mono">
-                        {tool.mcp
-                          ? safeMcpSummary(tool.mcp)
-                          : tool.skill?.source}
-                      </p>
-                      <p>{tool.tags.join(" · ")}</p>
-                    </details>
-                  )}
-                </div>
-                <Switch
-                  checked={tool.enabled}
-                  onCheckedChange={(checked) => handleToggle(tool, checked)}
-                  aria-label={`${tool.name} ${tool.enabled ? t("common.enabled") : t("common.disabled")}`}
-                />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => openEdit(tool)}
-                  aria-label={`${t("common.edit")} ${tool.name}`}
-                >
-                  <Pencil className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setDeleting(tool)}
-                  aria-label={`${t("common.remove")} ${tool.name}`}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
+          <div className="capability-library-groups">
+            {groups.map(group => <section key={group.origin} aria-label={originNames[group.origin]}>
+              <div className="capability-group-heading"><h3>{originNames[group.origin]}</h3><span>{group.items.length}</span></div>
+              <div className="capability-group-list">
+                {group.items.map(tool => {
+                  const origin = capabilityOrigin(tool);
+                  const description = capabilityDescription(tool);
+                  return <article key={tool.id} className="capability-library-row">
+                    <button type="button" className="capability-row-main" onClick={() => setDetail(tool)} aria-label={`${zh ? "查看详情" : "View details"} · ${tool.name}`}>
+                      <span className="capability-row-icon">{kind === "mcp" ? <Server size={18} /> : <Sparkles size={18} />}</span>
+                      <span className="capability-row-copy"><span className="capability-row-title">{tool.name}</span>
+                        {description && <span className="capability-row-description">{description}</span>}
+                        <span className="capability-row-origin">{origin.label || originNames[origin.kind]}</span>
+                      </span>
+                      <ChevronRight size={15} className="capability-row-chevron" aria-hidden />
+                    </button>
+                    <Switch checked={capabilityEnabledFor(tool, daemonProviderId)} disabled={!providerId || toggling.includes(tool.id)} onCheckedChange={checked => handleToggle(tool, checked)} aria-label={`${harnessName} · ${tool.name}`} />
+                  </article>;
+                })}
               </div>
-            ))}
+            </section>)}
           </div>
           {filtered.length === 0 && (
             <Card className="px-5 py-10 text-center text-sm text-ink-3">
-              {t("agents.tools.emptyFiltered")}
+              {view === "enabled" && !query && sourceFilter === "all" ? <><p>{zh ? `${harnessName} 还没有启用${kind === "skill" ? "技能" : "MCP 服务"}。` : `Nothing is enabled for ${harnessName} yet.`}</p><button className="mt-3 text-ink underline underline-offset-4" onClick={() => setView("all")}>{zh ? "浏览全部" : "Browse all"}</button></> : t("agents.tools.emptyFiltered")}
             </Card>
           )}
         </>
       )}
 
-      <button
-        type="button"
-        onClick={() => openImport()}
-        className="w-full rounded-xl border border-dashed border-line px-4 py-5 text-sm text-ink-3 transition-colors hover:bg-card-hover"
-      >
-        {t("agents.tools.import.dropTitle")}
-      </button>
+      <p className="capability-library-drop-hint">{t("agents.tools.import.dropTitle")}</p>
+
+      <Dialog open={!!detail} onOpenChange={open => { if (!open) setDetail(undefined); }} title={detail?.name ?? ""} footer={<><Button variant="ghost" onClick={() => { setDeleting(detail); setDetail(undefined); }}><Trash2 size={15} />{t("common.remove")}</Button><Button variant="outline" onClick={() => { if (detail) openEdit(detail); setDetail(undefined); }}><Pencil size={15} />{t("common.edit")}</Button></>}>
+        {detail && <div className="capability-detail">
+          {capabilityDescription(detail) && <p>{capabilityDescription(detail)}</p>}
+          <dl><div><dt>{zh ? "来源" : "Source"}</dt><dd>{originNames[capabilityOrigin(detail).kind]}{capabilityOrigin(detail).label ? ` · ${capabilityOrigin(detail).label}` : ""}</dd></div>
+            {capabilityOrigin(detail).path && <div><dt>{zh ? "原始位置" : "Original location"}</dt><dd className="break-all">{capabilityOrigin(detail).path}</dd></div>}
+            <div><dt>{zh ? "已启用于" : "Enabled for"}</dt><dd>{providers.filter(provider => capabilityEnabledFor(detail, toDaemonProviderId(provider.id))).map(provider => provider.name).join("、") || (zh ? "尚未启用" : "Not enabled yet")}</dd></div>
+          </dl>
+          {detail.mcp && <p className="break-all text-[13px]">{safeMcpSummary(detail.mcp)}</p>}
+          {detail.skill && <details><summary>{zh ? "查看技能内容" : "View skill instructions"}</summary><pre>{detail.skill.instructions}</pre></details>}
+        </div>}
+      </Dialog>
 
       <CapabilityEditorDialog
         open={editorOpen}
         onOpenChange={setEditorOpen}
         capability={editing}
+        defaultKind={kind}
+        defaultProviderId={providerId}
       />
 
       <CapabilityImportDialog
@@ -346,6 +314,7 @@ export function ProviderToolsPanel(): JSX.Element {
           if (!open) setImportSeed(undefined);
         }}
         seed={importSeed}
+        defaultProviderId={providerId}
       />
 
       {dropActive && (

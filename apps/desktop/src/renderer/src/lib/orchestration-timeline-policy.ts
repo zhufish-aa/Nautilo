@@ -54,7 +54,8 @@ export function compactOrchestrationTimeline(timeline: TimelineEvent[], mainSess
       compacted.push({ ...event, data });
       continue;
     }
-    compacted[existing] = { ...event, id: compacted[existing].id, data };
+    // Status updates must not change the task's original position or timestamp.
+    compacted[existing] = { ...compacted[existing], data };
   }
   return compacted;
 }

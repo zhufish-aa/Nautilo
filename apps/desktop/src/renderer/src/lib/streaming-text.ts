@@ -39,6 +39,13 @@ export function useStreamingText(text: string, streaming: boolean, identity?: st
       }
     }
   }, [text, streaming, identity]);
-  useEffect(() => () => { if (timer.current !== undefined) clearTimeout(timer.current); }, []);
+  useEffect(() => () => {
+    if (timer.current !== undefined) clearTimeout(timer.current);
+    // StrictMode replays setup after cleanup without discarding refs. A
+    // cleared timer must not look active to the next setup or every later
+    // snapshot will wait forever until the stream's final flush.
+    timer.current = undefined;
+    pendingDelay.current = 0;
+  }, []);
   return immediate ? text : visible.text;
 }

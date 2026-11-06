@@ -17,10 +17,10 @@
     "check": "pnpm typecheck && pnpm test",
     "dev": "pnpm --filter @agenthub/core-daemon dev",
     "dev:daemon": "pnpm --filter @agenthub/core-daemon serve",
-    "dev:desktop": "pnpm rust:build && pnpm --filter @agenthub/core-daemon build && pnpm --filter @agenthub/desktop dev",
+    "dev:desktop": "node scripts/dev-desktop.mjs",
 
-    "rust:build": "set \"PATH=%CD%\\.toolchains\\mingw64\\bin;%PATH%\" && cd rust && cargo build && cd .. && node scripts/sync-rust-plugins.mjs",
-    "rust:release": "set \"PATH=%CD%\\.toolchains\\mingw64\\bin;%PATH%\" && cd rust && cargo build --release && cd .. && node scripts/sync-rust-plugins.mjs --release",
+    "rust:build": "node scripts/rust-build.mjs",
+    "rust:release": "node scripts/rust-build.mjs --release",
     "tauri:renderer": "pnpm --filter @agenthub/desktop exec vite build --config vite.tauri.config.mts",
     "tauri:build": "pnpm tauri:renderer && set \"PATH=%CD%\\.toolchains\\mingw64\\bin;%PATH%\" && cd apps\\desktop\\src-tauri && cargo build --release",
     "dev:tauri": "pnpm rust:build && pnpm tauri:renderer && set \"PATH=%CD%\\.toolchains\\mingw64\\bin;%PATH%\" && cd apps\\desktop\\src-tauri && cargo run",

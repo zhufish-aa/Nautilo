@@ -73,14 +73,12 @@ export function startCodexChatCompatAppServer(
     try {
       if (options.anthropic && request.localImagePaths?.length) throw new Error("Anthropic compatibility does not support image input");
       if (options.anthropic && request.serviceTier && request.serviceTier !== "auto") throw new Error("Anthropic compatibility does not support service tier");
-      if (options.anthropic && request.reasoningEffort && request.reasoningEffort !== "none") throw new Error("Anthropic compatibility does not support explicit reasoning effort");
-      if (options.anthropic && request.instance.providerOptions?.webSearchMode === "native") throw new Error("Anthropic compatibility does not support native web search");
       const remoteBaseUrl = configuredBaseUrl(request.instance);
       if (!remoteBaseUrl) throw new Error("Protocol compatibility mode needs a configured API base URL");
       proxy = await (options.anthropic ? startAnthropicCompatProxy : startChatCompatProxy)({
         remoteBaseUrl,
         environment: request.env,
-        allowNativeWebSearch: request.instance.providerOptions?.webSearchMode === "native"
+        allowNativeWebSearch: !options.anthropic && request.instance.providerOptions?.webSearchMode === "native"
       });
       if (cancelled) return;
 
@@ -91,12 +89,12 @@ export function startCodexChatCompatAppServer(
           baseUrl: proxy.baseUrl,
           wireApi: "responses",
           ...(options.anthropic ? { anthropicCompat: true } : {}),
-          webSearch: request.instance.providerOptions?.webSearchMode === "native",
-          webSearchMode: request.instance.providerOptions?.webSearchMode === "native" ? "native" : "off"
+          webSearch: !options.anthropic && request.instance.providerOptions?.webSearchMode === "native",
+          webSearchMode: !options.anthropic && request.instance.providerOptions?.webSearchMode === "native" ? "native" : "off"
         }
       };
       const env = proxy.token ? compatibilityChildEnvironment(request.env, proxy.token, proxy.baseUrl) : request.env;
-      inner = startCodexAppServer({ ...request, instance, env, ...(options.anthropic ? { reasoningEffort: "none" } : {}) }, resume, { transient: true, owner: options.owner });
+      inner = startCodexAppServer({ ...request, instance, env }, resume, { transient: true, owner: options.owner });
       if (cancelled) await inner.cancel();
       yield* inner.events;
     } catch (error) {

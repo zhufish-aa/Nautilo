@@ -3,16 +3,22 @@ import assert from "node:assert/strict";
 import { readFile, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import ts from "typescript";
 const require = createRequire(new URL("../package.json", import.meta.url));
 const React = require("react");
 const { renderToStaticMarkup } = require("react-dom/server");
-const { default: Markdown } = await import(require.resolve("react-markdown"));
-const { default: gfm } = await import(require.resolve("remark-gfm"));
+const { default: Markdown } = await import(pathToFileURL(require.resolve("react-markdown")).href);
+const { default: gfm } = await import(pathToFileURL(require.resolve("remark-gfm")).href);
 const { build } = createRequire(require.resolve("vite/package.json"))("esbuild");
-const parsedBundle = await build({ stdin: { contents: 'export { parseMarkdownFragments } from "./src/renderer/src/lib/markdown-parse"; export { normalizeMarkdownLocalLinks } from "./src/renderer/src/lib/file-references";', resolveDir: new URL("..", import.meta.url).pathname }, bundle: true, platform: "browser", conditions: ["worker"], format: "esm", write: false, define: { "process.env.NODE_ENV": '"test"' } });
+const pluginSource = await readFile(new URL("../markdown-worker.vite.ts", import.meta.url), "utf8");
+const pluginModule = ts.transpileModule(pluginSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const { markdownEntitiesPlugin } = await import(`data:text/javascript,${encodeURIComponent(pluginModule)}`);
+const optimizer = markdownEntitiesPlugin().config().optimizeDeps;
+// Use normal browser conditions, just as Vite's dev prebundler does. There
+// is no document in this test runtime: selecting the DOM entry fails here.
+const parsedBundle = await build({ stdin: { contents: 'export { parseMarkdownFragments } from "./src/renderer/src/lib/markdown-parse"; export { normalizeMarkdownLocalLinks } from "./src/renderer/src/lib/file-references";', resolveDir: fileURLToPath(new URL("..", import.meta.url)) }, bundle: true, platform: "browser", plugins: optimizer.esbuildOptions.plugins, format: "esm", write: false, define: { "process.env.NODE_ENV": '"test"' } });
 const temporary = await mkdtemp(path.join(tmpdir(), "nautilo-markdown-test-"));
 after(() => rm(temporary, { recursive: true, force: true }));
 const parserFile = path.join(temporary, "parser.mjs");
@@ -108,7 +114,11 @@ test("worker error, message decoding error and posting failure signal a synchron
     h.queue.subscribe(() => assert.fail(), () => failures++);
     const a = h.queue.subscribe(() => assert.fail(), () => failures++);
     if (mode === "post") { h.worker.postMessage = () => { throw new Error("blocked worker"); }; a.update("source"); }
-    else h.worker[mode]({});
+    else {
+      let prevented = false;
+      h.worker[mode]({ preventDefault() { prevented = true; } });
+      assert(prevented, "Handled worker errors must not become fatal window errors");
+    }
     assert.equal(failures, 2); assert(h.worker.terminated); assert.equal(h.emptyCount(), 1);
   }
 });

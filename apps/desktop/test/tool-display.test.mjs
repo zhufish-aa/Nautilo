@@ -5,6 +5,30 @@ import ts from "typescript";
 
 const sourceUrl = new URL("../src/renderer/src/lib/tool-display.ts", import.meta.url);
 
+test("shared event icons recognize native names across harnesses", async () => {
+  const { toolActivityKind } = await loadToolDisplay();
+  for (const [name, input, expected] of [
+    ["exec_command", { command: "pwd" }, "command"], ["Bash", { command: "ls" }, "command"],
+    ["Shell", {}, "command"], ["functions.run_command", {}, "command"], ["pwsh", {}, "command"],
+    ["ReadFile", { path: "src/index.ts" }, "read"], ["read", { file_path: "src/index.ts" }, "read"],
+    ["WriteFile", {}, "write"], ["write", {}, "write"], ["StrReplaceFile", {}, "edit"], ["apply_patch", {}, "edit"],
+    ["mcp_firecrawl_firecrawl_map", {}, "mcp"], ["mcp__github__get_profile", {}, "mcp"],
+    ["Read", { file_path: "C:/skills/github/SKILL.md" }, "skill"], ["skill", {}, "skill"],
+    ["exec_command", { command: "Get-Content 'C:/skills/github/SKILL.md'" }, "skill"],
+    ["run_code", {}, "code"], ["read_image", {}, "image"], ["Grep", {}, "search"], ["web_fetch", {}, "web"],
+  ]) assert.equal(toolActivityKind(name, JSON.stringify(input)), expected, name);
+});
+
+test("PTC details decode code and recover older truncated inputs", async () => {
+  const { codeExecutionInput } = await loadToolDisplay();
+  const code = 'const value = "hello";\nconsole.log(value);';
+  assert.deepEqual(codeExecutionInput(JSON.stringify({ description: "Read files", code })), { description: "Read files", code, truncated: false });
+  const partial = codeExecutionInput('{"description":"Read files","code":"line one\\nline two');
+  assert.equal(partial.code, 'line one\nline two');
+  assert.equal(partial.description, 'Read files');
+  assert.equal(partial.truncated, true);
+});
+
 async function loadToolDisplay() {
   const source = await readFile(sourceUrl, "utf8");
   const transpiled = ts.transpileModule(source, {

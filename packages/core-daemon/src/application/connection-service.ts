@@ -16,6 +16,7 @@ function models(input: unknown): InstanceModelConfig[] | undefined {
     if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !raw.id.trim() || seen.has(raw.id.trim())) return invalid("models", "Model IDs must be nonempty and unique");
     seen.add(raw.id.trim());
     const efforts = raw.reasoningEfforts ?? [];
+    if (raw.inputModalities !== undefined && (!Array.isArray(raw.inputModalities) || !raw.inputModalities.length || raw.inputModalities.some((x: unknown) => x !== "text" && x !== "image"))) return invalid("models", "Invalid input modalities");
     if (!Array.isArray(efforts) || efforts.some((x: unknown) => typeof x !== "string")) return invalid("models", "Invalid reasoning values");
     const pricing: Record<string, number> = {};
     for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
@@ -25,6 +26,7 @@ function models(input: unknown): InstanceModelConfig[] | undefined {
       pricing[key] = value;
     }
     return { id: raw.id.trim(), reasoningEfforts: [...efforts],
+      ...(raw.inputModalities !== undefined ? { inputModalities: [...new Set<"text" | "image">(raw.inputModalities)] } : {}),
       ...(typeof raw.displayName === "string" ? { displayName: raw.displayName.trim() } : {}),
       ...(typeof raw.defaultReasoningEffort === "string" ? { defaultReasoningEffort: raw.defaultReasoningEffort } : {}),
       ...(typeof raw.enabled === "boolean" ? { enabled: raw.enabled } : {}),
@@ -105,9 +107,17 @@ export class ConnectionService {
         const catalog = await discoverOpenAiCompatibleModels(connection.baseUrl!, env.OPENAI_API_KEY ?? env.CODEX_API_KEY, undefined, connection.protocol === "anthropic" ? "anthropic-messages" : undefined);
         return mergeInstanceModelConfig({ ...catalog, providerId: `connection:${connection.id}` }, connection.models);
       }
-      const original = input.agentInstanceId ? this.database.agents.get(input.agentInstanceId) : undefined;
-      if (!original) return unavailable("Choose a matching CLI instance to discover models for this login account");
-      const agent = applyConnection(connection, original);
+      const matching = this.database.agents.list().filter((agent) => agent.providerId === connection.harness && agent.enabled);
+      const original = input.agentInstanceId ? this.database.agents.get(input.agentInstanceId)
+        : matching.find((agent) => agent.providerOptions?.configurationKind === "harness") ?? matching[0];
+      if (input.agentInstanceId && (!original || original.providerId !== connection.harness)) return unavailable("Account and harness must match");
+      const executable = original?.executable || this.adapters.get(connection.harness!).descriptor?.defaultExecutable;
+      if (!executable) return unavailable("Install the account's harness to discover models");
+      const now = new Date().toISOString();
+      const probe: AgentInstance = { id: `connection-models:${connection.id}`, providerId: connection.harness!,
+        displayName: connection.harness!, executable, baseArgs: [], capabilities: [], enabled: true,
+        status: "available", createdAt: now, updatedAt: now };
+      const agent = applyConnection(connection, probe);
       return this.adapters.listModels(agent, { env: connectionEnvironment(connection, agent, this.environment.build(undefined), this.credentials) }, true);
     } catch { return unavailable("Connection model discovery failed. Check the endpoint, protocol, credentials and CLI compatibility; secrets are not included in this error."); }
   }

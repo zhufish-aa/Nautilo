@@ -20,7 +20,15 @@
 use serde_json::{json, Value};
 
 pub mod jsonrpc;
+pub mod images;
+pub mod usage;
+pub mod connection;
+pub mod native_config;
 pub mod process;
+pub mod event_stream;
+pub mod extension_ui;
+pub mod session_pool;
+pub mod capabilities;
 pub mod serve;
 
 pub use serve::serve;
@@ -112,6 +120,10 @@ pub mod emit {
 
 /// Reverse call channel into the daemon (interactions + runtime tools).
 pub trait DaemonChannel: Send + Sync {
+    fn hold_session(&self, _binding: &str, _active: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> { Box::pin(async {}) }
+    fn publish_session(&self, _binding: &str, _event: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> { Box::pin(async {}) }
+    fn ask_session(&self, _binding: &str, _input: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> { Box::pin(async {json!({"outcome":"cancelled"})}) }
+    fn call_session_tool(&self, _binding: &str, _name: &str, _arguments: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> { Box::pin(async {json!({"success":false,"content":"Session tool channel unavailable"})}) }
     fn ask(
         &self,
         run_id: &str,
@@ -123,6 +135,22 @@ pub trait DaemonChannel: Send + Sync {
         name: &str,
         arguments: Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>>;
+}
+
+/// A native extension keeps this channel when its foreground turn settles.
+pub struct SessionDaemonChannel { pub inner: std::sync::Arc<dyn DaemonChannel>, pub binding: String }
+impl DaemonChannel for SessionDaemonChannel {
+    fn ask(&self, _: &str, input: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output=Value>+Send+'_>> { self.inner.ask_session(&self.binding,input) }
+    fn call_tool(&self, _: &str, name:&str, arguments:Value) -> std::pin::Pin<Box<dyn std::future::Future<Output=Value>+Send+'_>> { self.inner.call_session_tool(&self.binding,name,arguments) }
+}
+pub fn session_channel(channel:&Option<std::sync::Arc<dyn DaemonChannel>>, request:&Value)->Option<std::sync::Arc<dyn DaemonChannel>> {
+    Some(std::sync::Arc::new(SessionDaemonChannel{inner:channel.clone()?,binding:request["sessionBindingId"].as_str()?.into()}))
+}
+pub async fn session_sink(channel:std::sync::Arc<dyn DaemonChannel>,binding:String)->tokio::sync::mpsc::UnboundedSender<Value> {
+    channel.hold_session(&binding,true).await;
+    let (sender,mut receiver)=tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {while let Some(event)=receiver.recv().await {channel.publish_session(&binding,event).await;}channel.hold_session(&binding,false).await;});
+    sender
 }
 
 /// Implemented by the SDK's serve loop; provider CLIs' permission/question
@@ -152,12 +180,22 @@ pub trait ProviderPlugin: Send + Sync {
         })
     }
     async fn detect(&self, instance: &Value) -> Value;
+    /// Optional per-invocation native wire negotiation, for CLIs whose API
+    /// protocol differs between installed versions. Advertise this with
+    /// descriptor.connectionProtocolDiscovery; old plugins need no changes.
+    async fn connection_protocol(&self, _request: &Value) -> anyhow::Result<Value> {
+        Ok(self.descriptor()["nativeApiProtocol"].clone())
+    }
     async fn list_models(&self, instance: &Value, context: &Value) -> anyhow::Result<Value> {
         let _ = (instance, context);
         anyhow::bail!("models_unavailable")
     }
     /// Receives the daemon interaction channel at startup.
     fn set_interaction_channel(&self, _channel: std::sync::Arc<dyn InteractionChannel>) {}
+    fn set_daemon_channel(&self, _channel: std::sync::Arc<dyn DaemonChannel>) {}
+    async fn list_modes(&self, _instance: &Value, _context: &Value) -> anyhow::Result<Value> {
+        Ok(json!({"modes":[]}))
+    }
 
     /// Starts (or resumes) a provider turn. Events must end with `exit`.
     async fn start(
@@ -176,4 +214,9 @@ pub trait ProviderPlugin: Send + Sync {
     async fn cancel(&self, _run_id: &str) {}
     /// Releases long-lived resources before unload.
     async fn dispose(&self) {}
+    async fn release_session(&self,_request:&Value)->anyhow::Result<()> {Ok(())}
+    /// Internal host call: this plan may contain credentials; never expose it to the renderer.
+    async fn terminal_plan(&self,_request:&Value,_resume:Option<String>)->anyhow::Result<Value> {anyhow::bail!("native_terminal_plan_unavailable")}
+    fn native_terminal_supported(&self)->bool {false}
+    async fn close_terminal(&self,_token:&str) {}
 }

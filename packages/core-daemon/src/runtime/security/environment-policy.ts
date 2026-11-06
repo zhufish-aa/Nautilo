@@ -1,4 +1,5 @@
-import { isAbsolute, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { existsSync } from "node:fs";
 import { CoreError } from "../../errors.js";
 import type { AgentInstance, PermissionPolicy } from "@agenthub/domain";
 
@@ -42,6 +43,12 @@ export class EnvironmentPolicyService {
       if (value !== undefined) environment[key] = value;
     }
     for (const [key, value] of Object.entries(additions)) if (value !== undefined) environment[key] = value;
+    const runtime=process.env.AGENTHUB_NODE_PATH;
+    const pathKey=Object.keys(environment).find(key=>key.toLowerCase()==="path");
+    if (runtime && isAbsolute(runtime) && existsSync(runtime) && pathKey) {
+      const directory=dirname(runtime);
+      environment[pathKey]=[directory,...environment[pathKey].split(delimiter).filter(path=>path!==directory)].join(delimiter);
+    }
     return environment;
   }
 }

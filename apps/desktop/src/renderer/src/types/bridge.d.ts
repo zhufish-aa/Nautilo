@@ -83,6 +83,7 @@ export interface AgentHubBridge {
     importClipboard(input: { name: string; mimeType?: string; data: Uint8Array }): Promise<DesktopAttachment>;
   };
   shell: {
+    openExternal(url: string): Promise<void>;
     /** Resolves to "" on success or an error message string. */
     openPath(path: string): Promise<string>;
     showItemInFolder(path: string): Promise<void>;

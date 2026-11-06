@@ -9,3 +9,5 @@ export const PROVIDER_API_VERSION = 1;
 
 export * from "./types.js";
 export * from "./descriptor.js";
+export * from "./native-config.js";
+export * from "./native-capabilities.js";

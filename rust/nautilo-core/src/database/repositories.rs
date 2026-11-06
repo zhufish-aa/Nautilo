@@ -18,6 +18,14 @@ fn parse_row(data: String) -> Value {
     serde_json::from_str(&data).unwrap_or(Value::Null)
 }
 
+fn session_row(row:&rusqlite::Row<'_>)->rusqlite::Result<Value> {
+    let mut value=parse_row(row.get(0)?);
+    let activity:Option<String>=row.get(1)?;
+    if let Some(activity)=activity {value["lastMessageAt"]=json!(activity);}
+    else if let Some(fields)=value.as_object_mut(){fields.remove("lastMessageAt");}
+    Ok(value)
+}
+
 fn id_of(value: &Value) -> CoreResult<&str> {
     value
         .get("id")
@@ -177,45 +185,45 @@ impl<'a> SessionRepository<'a> {
     pub fn get(&self, id: &str) -> CoreResult<Option<Value>> {
         let row = self
             .db
-            .prepare("SELECT data FROM sessions WHERE id = ?1")
+            .prepare("SELECT data, (SELECT MAX(created_at) FROM messages WHERE session_id=sessions.id) FROM sessions WHERE id = ?1")
             .map_err(db_fail)?
-            .query_row(params![id], |row| row.get::<_, String>(0))
+            .query_row(params![id], session_row)
             .ok();
-        Ok(row.map(parse_row))
+        Ok(row)
     }
 
     pub fn list(&self, project_id: &str, member_id: Option<&str>) -> CoreResult<Vec<Value>> {
-        let rows: Vec<String> = match member_id {
+        let rows: Vec<Value> = match member_id {
             Some(member) => self
                 .db
-                .prepare("SELECT data FROM sessions WHERE project_id = ?1 AND member_id = ?2 ORDER BY updated_at DESC")
+                .prepare("SELECT data, (SELECT MAX(created_at) FROM messages WHERE session_id=sessions.id) FROM sessions WHERE project_id = ?1 AND member_id = ?2 ORDER BY updated_at DESC")
                 .map_err(db_fail)?
-                .query_map(params![project_id, member], |row| row.get(0))
+                .query_map(params![project_id, member], session_row)
                 .map_err(db_fail)?
                 .collect::<Result<_, _>>()
                 .map_err(db_fail)?,
             None => self
                 .db
-                .prepare("SELECT data FROM sessions WHERE project_id = ?1 ORDER BY updated_at DESC")
+                .prepare("SELECT data, (SELECT MAX(created_at) FROM messages WHERE session_id=sessions.id) FROM sessions WHERE project_id = ?1 ORDER BY updated_at DESC")
                 .map_err(db_fail)?
-                .query_map(params![project_id], |row| row.get(0))
+                .query_map(params![project_id], session_row)
                 .map_err(db_fail)?
                 .collect::<Result<_, _>>()
                 .map_err(db_fail)?,
         };
-        Ok(rows.into_iter().map(parse_row).collect())
+        Ok(rows)
     }
 
     pub fn list_all(&self) -> CoreResult<Vec<Value>> {
         let rows = self
             .db
-            .prepare("SELECT data FROM sessions ORDER BY updated_at DESC")
+            .prepare("SELECT data, (SELECT MAX(created_at) FROM messages WHERE session_id=sessions.id) FROM sessions ORDER BY updated_at DESC")
             .map_err(db_fail)?
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], session_row)
             .map_err(db_fail)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_fail)?;
-        Ok(rows.into_iter().map(parse_row).collect())
+        Ok(rows)
     }
 
     /// Permanently removes a conversation, its nested sub-sessions, and their
@@ -383,15 +391,20 @@ fn drop_redundant_thinking_deltas(events: Vec<Value>) -> Vec<Value> {
     if events.len() < 64 {
         return events;
     }
-    let summarized: std::collections::HashSet<String> = events
+    let summarized: std::collections::HashSet<(String, String, String)> = events
         .iter()
         .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent.thinking_summary"))
+        .filter(|event| event.pointer("/payload/text").and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty()))
         .filter_map(|event| {
             event
                 .get("payload")
                 .and_then(|payload| payload.get("messageId"))
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .map(|id| (
+                    event["sessionId"].as_str().unwrap_or("").to_string(),
+                    event["runId"].as_str().unwrap_or("").to_string(),
+                    id.to_string(),
+                ))
         })
         .collect();
     if summarized.is_empty() {
@@ -407,9 +420,31 @@ fn drop_redundant_thinking_deltas(events: Vec<Value>) -> Vec<Value> {
                 .get("payload")
                 .and_then(|payload| payload.get("messageId"))
                 .and_then(Value::as_str);
-            !message_id.map(|id| summarized.contains(id)).unwrap_or(false)
+            !message_id.map(|id| summarized.contains(&(
+                event["sessionId"].as_str().unwrap_or("").to_string(),
+                event["runId"].as_str().unwrap_or("").to_string(),
+                id.to_string(),
+            ))).unwrap_or(false)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod reasoning_replay_tests {
+    use super::*;
+
+    #[test]
+    fn empty_reasoning_end_and_reused_ids_do_not_hide_another_runs_thoughts() {
+        let mut events = (0..64).map(|index| json!({"type":"agent.status","sequence":index})).collect::<Vec<_>>();
+        for (run_id, text) in [("old", "Old thought"), ("new", "New thought")] {
+            events.push(json!({"sessionId":"s","runId":run_id,"type":"agent.thinking_delta","payload":{"messageId":"omp-thinking-1","text":text}}));
+        }
+        events.push(json!({"sessionId":"s","runId":"old","type":"agent.thinking_summary","payload":{"messageId":"omp-thinking-1","text":"Old thought"}}));
+        events.push(json!({"sessionId":"s","runId":"new","type":"agent.thinking_summary","payload":{"messageId":"omp-thinking-1","text":""}}));
+        let replay = drop_redundant_thinking_deltas(events);
+        assert!(replay.iter().any(|event| event["runId"]=="new" && event["type"]=="agent.thinking_delta" && event["payload"]["text"]=="New thought"));
+        assert!(!replay.iter().any(|event| event["runId"]=="old" && event["type"]=="agent.thinking_delta"));
+    }
 }
 
 pub struct TaskRepository<'a> {
@@ -531,6 +566,11 @@ pub struct EventRepository<'a> {
 }
 
 impl<'a> EventRepository<'a> {
+    pub fn latest_type(&self,session_id:&str,event_type:&str)->CoreResult<Option<Value>> {
+        use rusqlite::OptionalExtension;
+        self.db.query_row("SELECT data FROM runtime_events WHERE session_id=?1 AND json_extract(data,'$.type')=?2 ORDER BY sequence DESC LIMIT 1",params![session_id,event_type],|row|row.get::<_,String>(0))
+            .optional().map(|row|row.map(parse_row)).map_err(db_fail)
+    }
     pub fn next_sequence(&self, session_id: Option<&str>, run_id: Option<&str>) -> CoreResult<i64> {
         if session_id.is_none() && run_id.is_none() {
             return Ok(1);
@@ -636,11 +676,20 @@ impl<'a> EventRepository<'a> {
                     .map_err(db_fail)?
                     .execute(params![session_id.unwrap_or(""), event_run_id, event_type, message_id])
                     .map_err(db_fail)?;
-            } else if matches!(event_type.as_str(), "run.completed" | "run.failed") {
+            } else if matches!(event_type.as_str(), "run.completed" | "run.failed" | "run.cancelled") {
+                // A provider may finish without committing its text. Preserve
+                // those deltas for replay, and never purge a sibling run's text.
+                let event_run_id = event.get("runId").and_then(Value::as_str);
                 self.db
-                    .prepare("DELETE FROM runtime_events WHERE session_id = ?1 AND json_extract(data, '$.type') = 'agent.message_delta'")
+                    .prepare("DELETE FROM runtime_events AS delta WHERE delta.session_id = ?1 \
+                        AND COALESCE(delta.run_id, '') = COALESCE(?2, '') \
+                        AND json_extract(delta.data, '$.type') = 'agent.message_delta' \
+                        AND EXISTS (SELECT 1 FROM runtime_events AS saved WHERE saved.session_id = delta.session_id \
+                            AND COALESCE(saved.run_id, '') = COALESCE(delta.run_id, '') \
+                            AND json_extract(saved.data, '$.type') = 'agent.message' \
+                            AND json_extract(saved.data, '$.payload.providerMessageId') = json_extract(delta.data, '$.payload.messageId'))")
                     .map_err(db_fail)?
-                    .execute(params![session_id.unwrap_or("")])
+                    .execute(params![session_id.unwrap_or(""), event_run_id])
                     .map_err(db_fail)?;
             }
             if let Some(map) = event.as_object_mut() {
@@ -1096,10 +1145,10 @@ mod tests {
 
         // Delta text is incremental — the renderer concatenates chunk texts on
         // replay — so coalescing must ACCUMULATE chunks, not keep the newest.
-        let mut first = delta_event("s1", "m1", "he");
-        let mut second = delta_event("s1", "m1", "ll");
-        let mut third = delta_event("s1", "m1", "o");
-        let mut other_message = delta_event("s1", "m2", "world");
+        let mut first = typed_delta_event("s1", "r1", "agent.message_delta", "m1", "he");
+        let mut second = typed_delta_event("s1", "r1", "agent.message_delta", "m1", "ll");
+        let mut third = typed_delta_event("s1", "r1", "agent.message_delta", "m1", "o");
+        let mut other_message = typed_delta_event("s1", "r1", "agent.message_delta", "m2", "world");
         let mut other_session = delta_event("s2", "m1", "untouched");
         // Thinking deltas of the same run merge; another run never does.
         let mut thought_a = typed_delta_event("s1", "r1", "agent.thinking_delta", "t1", "think-");
@@ -1135,18 +1184,22 @@ mod tests {
         let s3 = third.get("sequence").and_then(Value::as_i64).unwrap();
         assert!(s1 < s2 && s2 < s3, "sequences must increase: {s1} {s2} {s3}");
 
-        // A terminal run event purges message deltas (their text also lives in
-        // the final agent.message event) but never thinking deltas — those are
-        // the only record of the run's reasoning.
+        // Purge only a segment with an explicit saved-message receipt. Keep
+        // unfinished segments and concurrent runs replayable.
+        let mut saved = json!({"eventId":uuid::Uuid::new_v4().to_string(),"sessionId":"s1","runId":"r1",
+            "type":"agent.message","timestamp":"2026-08-08T00:00:00.999Z",
+            "payload":{"messageId":"saved-message","providerMessageId":"m1","text":"hello"}});
+        events.append_allocating_sequence(&mut saved, Some("s1"), None).unwrap();
         let mut done = json!({
             "eventId": uuid::Uuid::new_v4().to_string(),
             "sessionId": "s1",
+            "runId": "r1",
             "type": "run.completed",
             "timestamp": "2026-08-08T00:00:01.000Z",
             "payload": {}
         });
         events.append_allocating_sequence(&mut done, Some("s1"), None).unwrap();
-        assert_eq!(delta_rows(&db.raw, "s1"), vec![("t1".to_string(), "think-ing".to_string())]);
+        assert_eq!(delta_rows(&db.raw, "s1"), vec![("m2".to_string(), "world".to_string()), ("t1".to_string(), "think-ing".to_string()), ("m1".to_string(), "other-run".to_string())]);
         assert_eq!(delta_rows(&db.raw, "s2").len(), 1);
     }
 }

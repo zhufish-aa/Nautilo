@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Minus, Square, X } from "lucide-react";
+import { PanelsTopLeft, Copy, Minus, Square, X } from "lucide-react";
 import { getBridge, isElectron } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
@@ -49,6 +49,7 @@ export function TitleBar(): JSX.Element {
   return (
     <header className="titlebar-root drag-region relative z-30 flex h-11 shrink-0 items-stretch justify-between bg-canvas">
       <div className="titlebar-brand flex items-center gap-2.5 pl-4">
+        <PanelsTopLeft className="titlebar-logo" aria-hidden strokeWidth={1.7} />
         <span className="titlebar-name text-[13px] font-semibold tracking-tight text-ink">
           {"Nautilo"}
         </span>

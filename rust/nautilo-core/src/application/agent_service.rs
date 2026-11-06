@@ -32,6 +32,15 @@ impl AgentService {
         Repositories::new(&lock(&self.db).raw).agents().list_default()
     }
 
+    pub async fn list_modes(&self, instance_id: &str, cwd: Option<&str>) -> CoreResult<Value> {
+        let instance=self.list()?.into_iter().find(|i|i["id"]==instance_id).ok_or_else(||invalid("agentInstanceId","Harness instance not found"))?;
+        let adapter=self.adapters.find(instance["providerId"].as_str().unwrap_or(""))
+            .ok_or_else(||invalid("providerId","Harness plugin is not loaded"))?;
+        if adapter.descriptor()["modeDiscovery"]!=true {return Ok(json!({"modes":[]}));}
+        let env=build_environment(None,provider_environment_passthrough(&instance,Some(&adapter.descriptor())));
+        adapter.list_modes(&instance,Some(&json!({"env":env,"cwd":cwd}))).await
+    }
+
     pub fn upsert(&self, instance: &Value) -> CoreResult<Value> {
         if instance.get("executable").and_then(Value::as_str).unwrap_or("").trim().is_empty() {
             return Err(invalid("executable", ""));

@@ -1,12 +1,12 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   AlertTriangle,
+  Atom,
   ArrowRightLeft,
   Bot,
   Check,
   ChevronDown,
-  ClipboardList,
   Copy,
   FileCode2,
   FileText,
@@ -14,17 +14,24 @@ import {
   GitBranch,
   ImageIcon,
   Loader2,
-  Pencil,
-  X
+  Pencil
 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
+import { connectionSendError } from "../../lib/session-connections";
+import { getBridge } from "../../lib/bridge";
 import { cn, formatDateTime } from "../../lib/utils";
-import type { ApprovalScope, TimelineEvent } from "../../lib/types";
+import type { TimelineEvent } from "../../lib/types";
 import { StatusChip, Tag } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
 import { toolActivityLabel, toolInputFileDiff } from "../../lib/tool-display";
 import { MarkdownContent } from "./MarkdownContent";
+import { DelegationCard } from "./DelegationCard";
+import { CodeExecutionCard } from "./CodeExecutionCard";
+import { ProcessDisclosure } from "./ProcessDisclosure";
+import { ToolActivityIcon } from "./ToolActivityIcon";
+import { ManagedApprovalCard } from "./ManagedApprovalCard";
+import { reasoningPreview } from "../../lib/process-display";
 import { useStreamingText } from "../../lib/streaming-text";
 import { reconcileTimelineKeys, type TimelineKeySequence } from "../../lib/timeline-row-keys";
 import { ToolFileDiffView } from "./ToolFileDiffView";
@@ -72,17 +79,20 @@ export function TimelineViewport({
   className?: string;
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const previousForceFollowKeyRef = useRef(forceFollowKey);
   const previousContentKeyRef = useRef<unknown>(contentKey);
   const previousRowCountRef = useRef(rows.length);
+  const virtualized = rows.length > 80;
 
   const keySequenceRef = useRef<TimelineKeySequence>();
   const keySequence = reconcileTimelineKeys(keySequenceRef.current, rows, sessionKey);
   keySequenceRef.current = keySequence;
 
   const virtualizer = useVirtualizer({
+    enabled: active && virtualized,
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     // A folded turn block (header + fold row + answer) is typically under
@@ -103,7 +113,9 @@ export function TimelineViewport({
     // scrollTop = scrollHeight reflects the real, freshly laid-out content
     // height (no virtualizer state lag). The virtualizer observes scroll via
     // the scroll event and re-windows accordingly.
-    element.scrollTop = element.scrollHeight;
+    if (Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop) > 1) {
+      element.scrollTop = element.scrollHeight;
+    }
     lastScrollTopRef.current = element.scrollTop;
   }, [active]);
 
@@ -141,11 +153,31 @@ export function TimelineViewport({
     scrollToTail();
   }, [forceFollowKey, scrollToTail]);
 
-  // Height-only changes (markdown layout, images, framer-motion settling) and
-  // the virtualizer's own row measurement update the total height. Follow the
-  // tail on those changes WITHOUT a ResizeObserver: observing the sized
-  // container and scrolling from its callback re-measured rows every frame and
-  // produced "ResizeObserver loop completed with undelivered notifications".
+  // Child streams/Markdown workers can commit after the parent's event effect.
+  // Observe actual content and viewport sizes, then pin once on the next frame.
+  // Never write scroll/layout synchronously inside ResizeObserver: that used
+  // to feed back into virtual row measurement and create observer loops.
+  useLayoutEffect(() => {
+    const viewport = scrollRef.current;
+    const content = contentRef.current;
+    if (!active || !viewport || !content) return;
+    let frame: number | undefined;
+    const observer = new ResizeObserver(() => {
+      if (!followTailRef.current || frame !== undefined) return;
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        scrollToTail();
+      });
+    });
+    observer.observe(content);
+    observer.observe(viewport);
+    return () => {
+      observer.disconnect();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
+  }, [active, scrollToTail, sessionKey]);
+
+  // Virtual row measurements also update the spacer's explicit height.
   const totalSize = virtualizer.getTotalSize();
   const previousTotalSizeRef = useRef(totalSize);
   useLayoutEffect(() => {
@@ -159,10 +191,11 @@ export function TimelineViewport({
       ref={scrollRef}
       onScroll={(event) => {
         const element = event.currentTarget;
+        if (event.target !== element) return;
         const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
-        if (element.scrollTop < lastScrollTopRef.current - 1) {
-          // Any upward scroll (wheel, thumb drag, keys) is explicit user
-          // intent ? even inside the re-engage threshold.
+        if (element.scrollTop < lastScrollTopRef.current - 1 && gap > 1) {
+          // Collapsing process rows or enlarging the viewport clamps scrollTop
+          // to a smaller bottom offset. That is not the user scrolling up.
           followTailRef.current = false;
         } else if (gap < FOLLOW_TAIL_THRESHOLD && element.scrollTop > lastScrollTopRef.current) {
           // Only scrolling DOWN into the tail re-engages follow mode.
@@ -178,18 +211,18 @@ export function TimelineViewport({
       className={cn("relative h-full overflow-y-auto", className)}
       aria-live="polite"
     >
-      <div style={{ height: totalSize, position: "relative", width: "100%" }}>
-        {virtualizer.getVirtualItems().map((virtualRow) => (
+      <div ref={contentRef} data-timeline-content="" style={{ height: virtualized ? totalSize : undefined, position: "relative", width: "100%" }}>
+        {(virtualized ? virtualizer.getVirtualItems() : rows.map((row, index) => ({ key: row.key, index, start: 0 }))).map((virtualRow) => (
           <div
             key={virtualRow.key}
-            ref={virtualizer.measureElement}
+            ref={virtualized ? virtualizer.measureElement : undefined}
             data-index={virtualRow.index}
             style={{
-              position: "absolute",
+              position: virtualized ? "absolute" : "relative",
               top: 0,
               left: 0,
               width: "100%",
-              transform: `translateY(${virtualRow.start}px)`
+              transform: virtualized ? `translateY(${virtualRow.start}px)` : undefined
             }}
           >
             {rows[virtualRow.index]?.render()}
@@ -248,11 +281,12 @@ function CardShell({
   );
 }
 
-function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
+function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor = true }: {
   event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> };
   locale: "zh-CN" | "en-US";
   onEditMessage?: (messageId: string, text: string) => void;
   onOpenLocalFile?: (path: string) => void;
+  showAuthor?: boolean;
 }): JSX.Element {
   const { sender, authorName, text, streaming, messageId, attachments, editedAt } = event.data;
   const { t } = useI18n();
@@ -260,13 +294,10 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
   const isUser = sender === "user";
   const isSystem = sender === "system";
   const visibleText = useStreamingText(text, Boolean(streaming), `${event.sessionId}:${event.id}`);
-  // Historical messages render statically on remounts (mode switches reopen the
-  // whole timeline); only fresh live-conversation rows pay for the spring-in.
-  const animateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
   if (isSystem) {
     return (
       <motion.p
-        initial={{ opacity: 0 }}
+        initial={false}
         animate={{ opacity: 1 }}
         className="log-line py-1 text-center text-ink-3"
       >
@@ -276,13 +307,13 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
   }
   return (
       <motion.div
-      initial={animateIn ? { opacity: 0, y: 10 } : false}
+      initial={false}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: "spring", stiffness: 500, damping: 45 }}
       className="group relative flex w-full"
     >
       <div className={cn("min-w-0 flex-1", isUser && "flex flex-col items-end")}>
-        <span className="sr-only">{isUser ? (locale === "zh-CN" ? "你" : "You") : authorName ?? "Nautilo"}</span>
+        {isUser ? <span className="sr-only">{locale === "zh-CN" ? "你" : "You"}</span> : showAuthor && <div className="assistant-identity"><span className="assistant-mark"><Bot size={16} aria-hidden /></span><strong>{authorName ?? "Nautilo"}</strong></div>}
         <div
           className={cn(
             "text-[15px] leading-7 text-ink",
@@ -293,7 +324,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
             void popupTextMenu(window.getSelection()?.toString() ?? "", t);
           }}
         >
-          <MarkdownContent source={visibleText} inverted={false} onOpenLocalFile={onOpenLocalFile} />
+          <MarkdownContent source={visibleText} inverted={false} onOpenLocalFile={onOpenLocalFile} streaming={Boolean(streaming)} />
           {attachments && attachments.length > 0 && (
             <div className={cn("mt-2.5 grid gap-2", attachments.length > 1 && "sm:grid-cols-2")}>
               {attachments.map((attachment) => attachment.kind === "image" && attachment.path ? (
@@ -370,6 +401,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
 }
 
 function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind: "activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element | null {
+  if (event.data.phase === "stopped") return <p className="py-1 text-[13px] text-ink-3">{locale === "zh-CN" ? "已停止" : "Stopped"}</p>;
   if (event.data.phase !== "starting") return null;
   return (
     <details className="text-[13px] text-ink-3">
@@ -383,93 +415,13 @@ function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind
 
 function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kind: "reasoning" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  const reasoningScrollRef = useRef<HTMLDivElement>(null);
-  const visibleText = useStreamingText(event.data.text, Boolean(event.data.streaming), `${event.sessionId}:${event.id}`);
-  const followReasoningRef = useRef(true);
-  const zh = locale === "zh-CN";
-  const scrollToLatest = useCallback(() => {
-    const element = reasoningScrollRef.current;
-    if (!element) return;
-    element.scrollTop = element.scrollHeight;
-    followReasoningRef.current = true;
-    setShowJumpToLatest(false);
-  }, []);
-
-  useLayoutEffect(() => {
-    if (!open) return;
-    followReasoningRef.current = true;
-    setShowJumpToLatest(false);
-    scrollToLatest();
-  }, [open, scrollToLatest]);
-
-  // Streaming text replaces the reasoning event on every delta. Keep the
-  // viewport pinned only while the user is already at the tail; a manual
-  // upward scroll opts out until they return to the bottom.
-  useLayoutEffect(() => {
-    if (open && event.data.streaming && followReasoningRef.current) scrollToLatest();
-  }, [event.data.streaming, visibleText, open, scrollToLatest]);
-
-  const handleReasoningScroll = (): void => {
-    const element = reasoningScrollRef.current;
-    if (!element) return;
-    const atLatest = element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_TAIL_THRESHOLD;
-    followReasoningRef.current = atLatest;
-    setShowJumpToLatest(!atLatest);
-  };
-
-  return (
-    <motion.article initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="reasoning-card">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-[13px] text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50"
-      >
-        <span className="font-normal">
-          {event.data.streaming ? (zh ? "推理中" : "Reasoning") : (zh ? "推理完成" : "Reasoning complete")}
-        </span>
-        {event.data.streaming && <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden />}
-        <ChevronDown className={cn("h-3.5 w-3.5 text-ink-3 transition-transform duration-200", !open && "-rotate-90")} aria-hidden />
-      </button>
-      {open && (
-        <motion.div
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          onAnimationComplete={scrollToLatest}
-          className="overflow-hidden"
-        >
-          <div className="relative">
-            <div
-              ref={reasoningScrollRef}
-              onScroll={handleReasoningScroll}
-              className="mt-2 max-h-96 overscroll-contain overflow-y-auto rounded-xl border border-line px-3.5 py-3 text-[13px] leading-relaxed text-ink-2"
-            >
-              <MarkdownContent source={visibleText} />
-              {event.data.streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-hidden />}
-            </div>
-            <AnimatePresence>
-              {showJumpToLatest && (
-                <motion.button
-                  type="button"
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 8 }}
-                  transition={{ duration: 0.15, ease: "easeOut" }}
-                  onClick={scrollToLatest}
-                  className="absolute bottom-2 right-3 inline-flex items-center gap-1 rounded-full border border-line bg-card px-2 py-1 text-[11px] text-ink-2 shadow-pop transition-colors hover:bg-card-hover"
-                  aria-label={zh ? "滚动到最新推理" : "Scroll to latest reasoning"}
-                >
-                  <ChevronDown className="h-3 w-3" aria-hidden />
-                  {zh ? "回到底部" : "Latest"}
-                </motion.button>
-              )}
-            </AnimatePresence>
-          </div>
-        </motion.div>
-      )}
-    </motion.article>
-  );
+  const streaming = Boolean(event.data.streaming);
+  const visibleText = useStreamingText(event.data.text, streaming, `${event.sessionId}:${event.id}`);
+  const preview = useMemo(() => reasoningPreview(visibleText, streaming), [visibleText, streaming]);
+  return <ProcessDisclosure className="reasoning-card" icon={<Atom size={14} />} label={locale === "zh-CN" ? "思考" : "Thinking"}
+    preview={preview} open={open} onToggle={() => setOpen(value => !value)} running={streaming}>
+    <MarkdownContent source={visibleText} streaming={streaming} />
+  </ProcessDisclosure>;
 }
 
 function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { kind: "tool_activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
@@ -495,6 +447,7 @@ function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { 
       >
         {status === "running" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />}
         {status === "failed" && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
+        {status === "done" && <ToolActivityIcon name={toolName} input={input} />}
         <span className="truncate" title={label}>{label}</span>
         {counts && <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
         {details && <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !open && "-rotate-90")} aria-hidden />}
@@ -528,7 +481,8 @@ function UsageLine({ event, locale }: { event: TimelineEvent & { data: { kind: "
 /** A provider CLI's native sub-agent dispatch, rendered like our own delegation cards. */
 function SubagentCard({ event, locale, onOpenSubagent }: { event: TimelineEvent & { data: { kind: "tool_activity" } }; locale: "zh-CN" | "en-US"; onOpenSubagent?: (eventId: string) => void }): JSX.Element {
   const { t } = useI18n();
-  const { status, subagent } = event.data;
+  const { subagent } = event.data;
+  const status = event.data.status === "failed" ? "failed" : subagent?.status ?? event.data.status;
   const tone = status === "running" ? "accent" : status === "done" ? "ok" : "danger";
   const statusLabel = status === "running"
     ? subagent?.background ? t("sessions.cards.subagentBackgroundRunning") : t("sessions.cards.running")
@@ -537,34 +491,22 @@ function SubagentCard({ event, locale, onOpenSubagent }: { event: TimelineEvent 
       : t("sessions.cards.failed");
   const activityCount = subagent?.activities?.length ?? 0;
   return (
-    <CardShell
-      icon={Bot}
-      tone="info"
-      title={
-        <span className="inline-flex min-w-0 items-center gap-2 text-[13px]">
-          <span className="shrink-0 text-ink-3">{t("sessions.cards.subagent")}</span>
-          {subagent?.agentType && <Tag label={subagent.agentType} />}
-          {subagent?.background && <Tag label={t("sessions.cards.subagentBackground")} />}
-          <StatusChip tone={tone} label={statusLabel} pulse={status === "running"} className="h-5 shrink-0 px-1.5 text-[10px]" />
-          {onOpenSubagent && (
-            <button
-              type="button"
-              onClick={() => onOpenSubagent(event.id)}
-              className="shrink-0 rounded-md px-1.5 py-0.5 text-xs font-medium text-accent transition-colors hover:bg-accent-soft focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none"
-            >
-              {activityCount > 0 ? t("sessions.cards.subagentDetailCount", { count: activityCount }) : t("sessions.cards.subagentDetail")} →
-            </button>
-          )}
-        </span>
-      }
+    <DelegationCard
+      name={subagent?.agentType || t("sessions.cards.subagent")}
+      task={subagent?.task}
+      status={statusLabel}
+      tone={tone}
+      running={status === "running"}
+      native
+      zh={locale === "zh-CN"}
+      meta={[subagent?.model, subagent?.background ? t("sessions.cards.subagentBackground") : undefined].filter((value): value is string => Boolean(value))}
+      actionLabel={activityCount > 0 ? t("sessions.cards.subagentDetailCount", { count: activityCount }) : t("sessions.cards.subagentDetail")}
+      onOpen={onOpenSubagent ? () => onOpenSubagent(event.id) : undefined}
+      input={event.data.input}
+      output={event.data.output}
+      toolName={event.data.toolName}
       time={formatDateTime(event.timestamp, locale)}
-    >
-      {subagent?.task && (
-        <p className="rounded-xl border border-line bg-card px-3.5 py-2.5 text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-2">
-          {subagent.task}
-        </p>
-      )}
-    </CardShell>
+    />
   );
 }
 
@@ -654,45 +596,35 @@ function RecoveryDecisionCard({ event, locale }: { event: TimelineEvent & { data
 
 function TaskUpdateCard({ event, t, locale, onOpenSession }: { event: TimelineEvent & { data: { kind: "task_update" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string; onOpenSession?: (id: string) => void }): JSX.Element {
   const statusTone: Record<string, "muted" | "info" | "accent" | "ok" | "danger" | "warn"> = {
+    draft: "muted",
+    ready: "muted",
     queued: "muted",
     running: "accent",
     completed: "ok",
     failed: "danger",
     cancelled: "muted",
     blocked_dependency: "warn",
-    verifying: "info"
+    verifying: "info",
+    waiting_user: "warn",
+    waiting_approval: "warn",
+    review_required: "warn",
+    merge_ready: "info"
   };
   return (
-    <CardShell
-      icon={ClipboardList}
+    <DelegationCard
+      name={event.data.memberName || (locale === "zh-CN" ? "委派任务" : "Delegated task")}
+      task={event.data.title}
+      status={t(`sessions.taskStatus.${event.data.status}` as MessageKey)}
       tone={statusTone[event.data.status] ?? "muted"}
-      title={
-        <span className="inline-flex min-w-0 items-center gap-2">
-          <span className="truncate">{event.data.memberName ? (locale === "zh-CN" ? `已委派给 ${event.data.memberName}` : `Delegated to ${event.data.memberName}`) : event.data.title}</span>
-        </span>
-      }
+      running={event.data.status === "running" || event.data.status === "verifying"}
+      cancelled={event.data.status === "cancelled"}
+      zh={locale === "zh-CN"}
+      onOpen={event.data.sessionId && onOpenSession ? () => onOpenSession(event.data.sessionId!) : undefined}
+      input={event.data.dispatchCall?.input}
+      output={event.data.dispatchCall?.output}
+      toolName={event.data.dispatchCall?.toolName}
       time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-card px-3.5 py-2.5">
-        <span className="min-w-0 truncate text-[13px] text-ink-2">{event.data.title}</span>
-        <span className="inline-flex shrink-0 items-center gap-2">
-          <StatusChip
-            tone={statusTone[event.data.status] ?? "muted"}
-            label={t(`sessions.taskStatus.${event.data.status}` as MessageKey)}
-            pulse={event.data.status === "running"}
-          />
-          {event.data.sessionId && onOpenSession && (
-            <button
-              type="button"
-              onClick={() => onOpenSession(event.data.sessionId!)}
-              className="rounded-md px-1.5 py-0.5 text-xs font-medium text-accent transition-colors hover:bg-accent-soft focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none"
-            >
-              {t("sessions.cards.openSub")}
-            </button>
-          )}
-        </span>
-      </div>
-    </CardShell>
+    />
   );
 }
 
@@ -722,6 +654,7 @@ function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { ki
         className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-[13px] text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50">
         {status === "running" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-label={t("sessions.cards.running")} />}
         {status === "failed" && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
+        {status === "done" && <ToolActivityIcon name="exec_command" input={JSON.stringify({ command })} />}
         <span className="truncate" title={presented.full}>{zh ? "运行" : "Ran"} {presented.summary}</span>
         {attempts > 1 && <span className="shrink-0 text-xs">{zh ? `${attempts} 次` : `${attempts} attempts`}</span>}
         <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !open && "-rotate-90")} aria-hidden />
@@ -865,63 +798,8 @@ function GitMergeCard({ event, locale }: { event: TimelineEvent & { data: { kind
   );
 }
 
-const SCOPES: ApprovalScope[] = ["once", "run", "task", "project", "global"];
-
-function ApprovalCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "approval" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
-  const { approval } = event.data;
-  const [scope, setScope] = useState<ApprovalScope>(approval.kind === "merge" ? "project" : approval.kind === "delegate" ? "run" : "once");
-  const pending = approval.status === "pending";
-  return (
-    <CardShell
-      icon={AlertTriangle}
-      tone="warn"
-      title={
-        <span className="inline-flex items-center gap-2">
-          {t("sessions.cards.approval")}
-          <StatusChip
-            tone={pending ? "warn" : approval.status === "approved" ? "ok" : "danger"}
-            label={t(pending ? "sessions.status.waiting_approval" : approval.status === "approved" ? "sessions.cards.approved" : "sessions.cards.rejected")}
-            pulse={pending}
-          />
-        </span>
-      }
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      <div className="rounded-xl border border-line bg-panel px-5 py-4">
-        <p className="text-sm font-medium text-ink">{approval.title}</p>
-        <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{approval.description}</p>
-        {pending && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1 rounded-lg border border-line bg-card p-0.5" role="radiogroup" aria-label={t("sessions.cards.scope")}>
-              {SCOPES.map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  role="radio"
-                  aria-checked={scope === item}
-                  onClick={() => setScope(item)}
-                  className={cn(
-                    "h-7 rounded-md px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
-                    scope === item ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink-2"
-                  )}
-                >
-                  {t(`sessions.cards.scope${item[0].toUpperCase()}${item.slice(1)}` as MessageKey)}
-                </button>
-              ))}
-            </div>
-            <Button variant="primary" size="sm" onClick={() => void resolveWorkbenchApproval(event.sessionId, approval.id, true, scope)}>
-              <Check className="h-3.5 w-3.5" aria-hidden />
-              {t("sessions.cards.approve")}
-            </Button>
-            <Button variant="danger" size="sm" onClick={() => void resolveWorkbenchApproval(event.sessionId, approval.id, false, scope)}>
-              <X className="h-3.5 w-3.5" aria-hidden />
-              {t("sessions.cards.reject")}
-            </Button>
-          </div>
-        )}
-      </div>
-    </CardShell>
-  );
+function ApprovalCard({ event }: { event: TimelineEvent & { data: { kind: "approval" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
+  return <ManagedApprovalCard approval={event.data.approval} onResolve={(approved, scope) => resolveWorkbenchApproval(event.sessionId, event.data.approval.id, approved, scope)} />;
 }
 
 function ErrorCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "error" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
@@ -939,7 +817,7 @@ function ErrorCard({ event, t, locale }: { event: TimelineEvent & { data: { kind
       time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
     >
       <p className="rounded-xl border border-danger/25 bg-danger/5 px-3.5 py-2.5 text-[13px] break-all whitespace-pre-wrap text-ink-2">
-        {event.data.message}
+        {connectionSendError(event.data.message, locale === "zh-CN")}
       </p>
     </CardShell>
   );
@@ -982,7 +860,8 @@ function TimelineEventViewImpl({
   onOpenSession,
   onEditMessage,
   onOpenSubagent,
-  onOpenLocalFile
+  onOpenLocalFile,
+  showAuthor = true
 }: {
   event: TimelineEvent;
   onViewDiff?: (path?: string) => void;
@@ -991,22 +870,27 @@ function TimelineEventViewImpl({
   onOpenSubagent?: (eventId: string) => void;
   /** Work mode only: local file clicks route to the session's preview pane. */
   onOpenLocalFile?: (path: string) => void;
+  showAuthor?: boolean;
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const data = event.data;
 
   switch (data.kind) {
     case "message":
-      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} />;
+      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />;
+    case "provider_ui":
+      if (data.method === "open_url" && data.url) return <a href={data.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 py-1 text-[13px] text-accent underline underline-offset-4" onClick={(event) => { const bridge = getBridge(); if (bridge) { event.preventDefault(); void bridge.shell.openExternal(data.url!).catch(() => {}); } }}>{data.text || (locale === "zh-CN" ? "打开授权链接" : "Open authorization link")} ↗</a>;
+      return data.method === "notify" ? <p className="whitespace-pre-wrap py-1 text-[13px] text-ink-2">{data.text}</p> : null;
     case "activity":
       return <ActivityLine event={event as TimelineEvent & { data: { kind: "activity" } }} locale={locale} />;
     case "reasoning":
       return <ReasoningCard event={event as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
     case "tool_activity":
       if (data.subagent) return <SubagentCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} onOpenSubagent={onOpenSubagent} />;
+      if (data.toolName === "run_code" || data.codeExecution) return <CodeExecutionCard data={data} locale={locale} />;
       return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
     case "tool_group":
-      return <div className="space-y-3">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onViewDiff={onViewDiff} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenLocalFile={onOpenLocalFile} />)}</div>;
+        return <div className="space-y-1">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onViewDiff={onViewDiff} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />)}</div>;
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
     case "artifact":
@@ -1069,4 +953,5 @@ export const TimelineEventView = memo(
     && prev.onEditMessage === next.onEditMessage
     && prev.onOpenSubagent === next.onOpenSubagent
     && prev.onOpenLocalFile === next.onOpenLocalFile
+    && prev.showAuthor === next.showAuthor
 );

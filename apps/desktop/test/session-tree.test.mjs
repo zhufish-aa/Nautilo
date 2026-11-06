@@ -30,6 +30,16 @@ function session(id, updatedAt, parentSessionId, projectId = "project-1") {
   };
 }
 
+test("opening, reading or renaming an old session cannot move it above newer messages", async () => {
+  const { flattenSessionForest } = await loadSessionTree();
+  const old = { ...session("old", "2026-07-20T01:00:00.000Z"), lastMessageAt: "2026-07-20T02:00:00.000Z" };
+  const recent = { ...session("recent", "2026-07-20T03:00:00.000Z"), lastMessageAt: "2026-07-20T04:00:00.000Z" };
+  const changed = { ...old, title: "Generated title", unreadCount: 0, updatedAt: "2026-07-20T12:00:00.000Z" };
+  assert.deepEqual(flattenSessionForest([changed, recent]).map(entry => entry.session.id), ["recent", "old"]);
+  const empty = { ...session("empty", "2026-07-20T00:00:00.000Z"), updatedAt: "2026-07-20T15:00:00.000Z" };
+  assert.deepEqual(flattenSessionForest([empty, changed, recent]).map(entry => entry.session.id), ["recent", "old", "empty"]);
+});
+
 test("children remain directly below their parent instead of joining the global time order", async () => {
   const { flattenSessionForest } = await loadSessionTree();
   const entries = flattenSessionForest([

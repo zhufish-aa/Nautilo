@@ -31,6 +31,8 @@ use crate::runtime::RuntimeToolProvider;
 use crate::runtime::observability::AuditService;
 
 const TERMINAL_RUN_STATUSES: [&str; 5] = ["completed", "failed", "timed_out", "crashed", "cancelled"];
+#[path = "session_events.rs"]
+mod session_events;
 
 pub struct RunCompletion {
     pub run: Value,
@@ -75,12 +77,15 @@ pub struct RunService {
     session_queue: SessionRunQueue,
     runtime_tool_provider: RwLock<Option<Arc<dyn RuntimeToolProvider>>>,
     interactions: RwLock<Option<Arc<InteractionService>>>,
+    terminals: RwLock<Option<Arc<crate::runtime::terminal_service::TerminalService>>>,
     active: Arc<Mutex<HashMap<String, ActiveRun>>>,
     output_tails: Arc<Mutex<HashMap<String, String>>>,
-    message_buffers: Arc<Mutex<HashMap<String, HashMap<String, String>>>>,
+    message_buffers: Arc<Mutex<HashMap<String, HashMap<session_events::MessageKey, session_events::BufferedMessage>>>>,
     touched_files: Arc<Mutex<HashMap<String, HashMap<String, (String, String)>>>>,
     workspace_baselines: Arc<Mutex<HashMap<String, WorkspaceSnapshot>>>,
     completion_waiters: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Receiver<RunCompletionSnapshot>>>>,
+    native_origins: Mutex<HashMap<(String,String,String),session_events::NativeOrigin>>,
+    session_event_gates: Mutex<HashMap<String, std::sync::Weak<session_events::SessionEventGate>>>,
 }
 
 /// Serializable view of a finished run (orchestration consumes it later).
@@ -91,6 +96,9 @@ pub struct RunCompletionSnapshot {
 }
 
 impl RunService {
+    pub async fn generate_session_title(&self, session_id: &str) -> CoreResult<Value> {
+        crate::runtime::session_title::generate(self.db.clone(),self.credentials.clone(),session_id).await
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Mutex<Database>>,
@@ -115,12 +123,15 @@ impl RunService {
             session_queue: SessionRunQueue::default(),
             runtime_tool_provider: RwLock::new(None),
             interactions: RwLock::new(None),
+            terminals: RwLock::new(None),
             active: Arc::new(Mutex::new(HashMap::new())),
             output_tails: Arc::new(Mutex::new(HashMap::new())),
             message_buffers: Arc::new(Mutex::new(HashMap::new())),
             touched_files: Arc::new(Mutex::new(HashMap::new())),
             workspace_baselines: Arc::new(Mutex::new(HashMap::new())),
             completion_waiters: Arc::new(Mutex::new(HashMap::new())),
+            native_origins: Mutex::new(HashMap::new()),
+            session_event_gates: Mutex::new(HashMap::new()),
         })
     }
 
@@ -130,6 +141,51 @@ impl RunService {
 
     pub fn set_interaction_service(&self, interactions: Arc<InteractionService>) {
         *self.interactions.write().unwrap() = Some(interactions);
+    }
+    pub fn set_terminal_service(&self,terminals:Arc<crate::runtime::terminal_service::TerminalService>){*self.terminals.write().unwrap()=Some(terminals);}
+    pub fn native_request(&self,session_id:&str)->CoreResult<(Value,AdapterStartRequest)> {
+        let (session,agent,connection,project)={
+            let db=self.db.lock().unwrap();let repos=Repositories::new(&db.raw);
+            let session=repos.sessions().get(session_id)?.ok_or_else(||crate::errors::not_found("session",session_id))?;
+            let id=crate::application::session_service::effective_agent_id(&db.raw,&session)?;
+            let agent=repos.agents().get(&id)?.ok_or_else(||crate::errors::not_found("agent",&id))?;
+            let (agent,connection)=crate::application::connection_service::resolve_session_connection(&db.raw,&session,&agent)?;
+            let project=repos.projects().get(session["projectId"].as_str().unwrap_or(""))?.ok_or_else(||crate::errors::not_found("project",""))?;
+            (session,agent,connection,project)
+        };
+        let descriptor=self.adapters.get(agent["providerId"].as_str().unwrap_or(""))?.descriptor();
+        let policy=self.command_policies.get(project["policyId"].as_str().unwrap_or("default"))?;
+        let evaluation=self.command_policies.evaluate(&json!({"policyId":policy["id"],"command":agent["executable"],"args":agent["baseArgs"]}))?;
+        if evaluation["action"]=="blocked" {
+            return Err(CoreError::details(ErrorCode::CommandBlocked, Map::from_iter([
+                ("command".into(), agent["executable"].clone()), ("ruleId".into(), evaluation["ruleId"].clone())
+            ])));
+        }
+        let operation = format!("agent.launch:{}", agent["id"].as_str().unwrap_or(""));
+        if evaluation["action"]=="approval" && !self.approvals.authorize(&operation, project["id"].as_str(), None, None, Some(session_id))? {
+            let approval=self.approvals.request(&json!({"category":"command","operation":operation,
+                "summary":format!("Launch {}",agent["displayName"].as_str().unwrap_or("")),
+                "projectId":project["id"],"sessionId":session["id"]}))?;
+            let _=self.events.append_for_session(&session,&json!({}),"approval.requested",json!({
+                "approvalId":approval["id"],"category":"command","summary":approval["summary"],"operation":operation}));
+            return Err(CoreError::details(ErrorCode::CommandApprovalRequired,Map::from_iter([("approvalId".into(),approval["id"].clone())])));
+        }
+        let mut additions=provider_environment_passthrough(&agent,Some(&descriptor));
+        if connection.is_none(){additions.extend(self.credentials_environment(agent["id"].as_str().unwrap_or(""),agent["providerId"].as_str().unwrap_or("")));}
+        let env=build_environment(Some(&policy),additions);
+        let env=match connection {Some(connection)=>crate::application::connection_service::connection_environment_with_descriptor(&agent,&connection,&self.credentials,env,Some(&descriptor))?,None=>isolate_login_profile(&agent,env)?};
+        let cwd = session["nativeWorkingDirectory"].as_str().unwrap_or_else(||project["rootPath"].as_str().unwrap_or(""));
+        let request=AdapterStartRequest{instance:agent.clone(),local_session_id:Some(session_id.into()),cwd:cwd.into(),
+            model:session["model"].as_str().map(str::to_string),reasoning_effort:session["reasoningEffort"].as_str().map(str::to_string),permission_mode:session["permissionMode"].as_str().map(str::to_string),agent_mode:session["agentMode"].as_str().map(str::to_string),
+            service_tier:session["serviceTier"].as_str().map(str::to_string),env:Some(env),skills:Some(self.resolve_skills(&agent)),mcp_servers:Some(self.resolve_mcp_servers(&agent)?),..Default::default()};
+        Ok((session,request))
+    }
+
+    pub fn requires_provider_recovery(&self, session:&Value, agent:&Value)->bool {
+        let Some(adapter)=self.adapters.find(agent["providerId"].as_str().unwrap_or("")) else {return true};
+        if !adapter.capabilities().native_resume {return true}
+        let descriptor=adapter.descriptor();
+        descriptor["nativeContextVersion"].as_str().is_some_and(|version|session["providerContextVersion"].as_str()!=Some(version))
     }
 
     pub async fn cancel(&self, run_id: &str) -> CoreResult<()> {
@@ -144,7 +200,9 @@ impl RunService {
                     updated.insert("status".to_string(), json!("cancelled"));
                     updated.insert("endedAt".to_string(), json!(now_iso()));
                     updated.insert("failureCode".to_string(), json!("RUN_CANCELLED"));
-                    Repositories::new(&self.db.lock().unwrap().raw).runs().save(&Value::Object(updated))?;
+                    let updated = Value::Object(updated);
+                    Repositories::new(&self.db.lock().unwrap().raw).runs().save(&updated)?;
+                    self.record_cancelled(&updated);
                     let session_id = existing.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
                     self.update_session_status(&session_id, "idle");
                 }
@@ -156,13 +214,13 @@ impl RunService {
             updated.insert("status".to_string(), json!("cancelling"));
             Repositories::new(&self.db.lock().unwrap().raw).runs().save(&Value::Object(updated))?;
         }
-        (active.cancel)().await;
         // Resolve any pending provider approvals for this run right away.
         // Otherwise the plugin-side interaction handler stays parked on its
         // oneshot and the run's own stream never finalizes.
         if let Some(interactions) = self.interactions.read().unwrap().clone() {
             interactions.cancel_for_run(run_id);
         }
+        (active.cancel)().await;
         let latest = Repositories::new(&self.db.lock().unwrap().raw).runs().get(run_id)?.or(existing);
         if let Some(latest) = latest {
             let mut updated = latest.as_object().cloned().unwrap_or_default();
@@ -280,6 +338,10 @@ impl RunService {
         self.session_queue.cancel_pending(session_id, key)
     }
 
+    pub async fn steer_queued(&self, session_id: &str, key: &str, text: &str) -> CoreResult<bool> {
+        self.session_queue.promote_pending(session_id, key, || self.steer_session(session_id, text)).await
+    }
+
     async fn launch_now(
         self: &Arc<Self>,
         session: &Value,
@@ -287,6 +349,9 @@ impl RunService {
         prompt: &str,
         mut context: RunContext,
     ) -> CoreResult<(String, watch::Receiver<bool>)> {
+        let terminals=self.terminals.read().unwrap().clone();
+        let _ownership=if let Some(terminals)=terminals.as_ref(){Some(terminals.lock_session(session["id"].as_str().unwrap_or("")).await)}else{None};
+        if terminals.as_ref().is_some_and(|terminals|terminals.owns(session["id"].as_str().unwrap_or(""))){return Err(invalid_field("sessionId","会话正在原生终端中运行，请先结束终端，再继续聊天。"));}
         // Re-read after reaching the head of the queue. Its predecessor may
         // have learned a native thread id or saved newer settings meanwhile.
         let mut latest_session = Repositories::new(&self.db.lock().unwrap().raw)
@@ -424,6 +489,7 @@ impl RunService {
                 project.as_ref().and_then(|p| p.get("id")).and_then(Value::as_str),
                 context.project_run_id.as_deref(),
                 context.task_id.as_deref(),
+                session.get("id").and_then(Value::as_str),
             )? {
                 let approval = self.approvals.request(&json!({
                     "category": "command",
@@ -452,7 +518,8 @@ impl RunService {
                     json!({
                         "approvalId": approval.get("id").cloned().unwrap_or(Value::Null),
                         "category": "command",
-                        "summary": approval.get("summary").cloned().unwrap_or(Value::Null)
+                        "summary": approval.get("summary").cloned().unwrap_or(Value::Null),
+                        "operation": operation
                     }),
                 );
                 let mut audit_record = Map::new();
@@ -476,7 +543,7 @@ impl RunService {
         }
         let environment = build_environment(Some(&policy), additions);
         let environment = match bound_connection.as_ref() {
-            Some(connection) => crate::application::connection_service::connection_environment(agent, connection, &self.credentials, environment)?,
+            Some(connection) => crate::application::connection_service::connection_environment_with_descriptor(agent, connection, &self.credentials, environment, descriptor.as_ref())?,
             None => isolate_login_profile(agent, environment)?,
         };
 
@@ -530,6 +597,13 @@ impl RunService {
                 provider.for_run(session, &json!({ "projectRunId": context.project_run_id, "taskId": context.task_id }), agent)
             })
         };
+        let image_generation = if provider_command { None } else {
+            crate::runtime::image_generation::image_generation_executor(self.db.clone(), self.credentials.clone(), agent.clone(), session.clone(),
+                context.working_directory.clone().or_else(|| project.as_ref().and_then(|p| p["rootPath"].as_str()).map(str::to_string))
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned()))
+        };
+        let background = self.session_callbacks(session, agent, &run, &context);
+        let background_handoff = background.handoff;
         let request = AdapterStartRequest {
             instance: agent.clone(),
             local_session_id: session.get("id").and_then(Value::as_str).map(str::to_string),
@@ -540,18 +614,22 @@ impl RunService {
                 .or_else(|| project.as_ref().and_then(|p| p.get("rootPath")).and_then(Value::as_str).map(str::to_string))
                 .unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
             model: session.get("model").and_then(Value::as_str).map(str::to_string),
+            agent_mode: session.get("agentMode").and_then(Value::as_str).map(str::to_string),
             reasoning_effort,
             service_tier: session.get("serviceTier").and_then(Value::as_str).map(str::to_string),
-            permission_mode: session.get("permissionMode").and_then(Value::as_str).map(str::to_string),
+            permission_mode: session.get("permissionMode").and_then(Value::as_str).map(str::trim).filter(|mode| !mode.is_empty())
+                .or_else(|| agent.pointer("/providerOptions/permissionMode").and_then(Value::as_str).map(str::trim).filter(|mode| !mode.is_empty()))
+                .map(str::to_string),
             context_window,
             env: Some(environment),
-            timeout_ms: Some(30 * 60_000),
+            timeout_ms: Some(if context.provider_command.as_deref()==Some("compact") {5 * 60_000} else {30 * 60_000}),
             idle_timeout_ms: Some(30 * 60_000),
             max_output_bytes: None,
             output_schema_path: None,
             local_image_paths: context.local_image_paths.clone(),
             runtime_tools: runtime_tool_binding.as_ref().map(|binding| Value::Array(binding.tools.clone())),
             execute_runtime_tool: runtime_tool_binding.map(|binding| binding.execute),
+            image_generation: image_generation.clone(),
             request_interaction: if provider_command {
                 None
             } else {
@@ -573,6 +651,9 @@ impl RunService {
             skills: Some(self.resolve_skills(agent)),
             mcp_servers: Some(self.resolve_mcp_servers(agent)?),
             provider_command: context.provider_command.clone(),
+            session_events: Some(background.events),
+            session_interaction: Some(background.interaction),
+            session_tool: Some(background.tool),
         };
 
         if !provider_command {
@@ -588,13 +669,14 @@ impl RunService {
             .get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
             .unwrap_or_else(|| session.clone());
         let must_recreate_codex_thread = provider_id == "codex"
-            && request.runtime_tools.is_some()
-            && current_session.get("runtimeToolVersion").and_then(Value::as_i64)
-                != Some(crate::runtime::RUNTIME_TOOL_SCHEMA_VERSION);
+            && (current_session["runtimeToolVersion"] == 0 || (request.runtime_tools.is_some()
+                && current_session.get("runtimeToolVersion").and_then(Value::as_i64)
+                    != Some(crate::runtime::RUNTIME_TOOL_SCHEMA_VERSION)));
         let same_connection = current_session.get("connectionId") == session.get("connectionId") && current_session.get("connectionRevision") == session.get("connectionRevision");
         let resume_session = if same_connection { &current_session } else { session };
         let provider_session_id = resume_session.get("providerSessionId").and_then(Value::as_str).map(str::to_string);
         let native_resume = session["connectionContextRebuildRequired"] != true && provider_session_id.is_some()
+            && !self.requires_provider_recovery(resume_session,agent)
             && self.adapters
                 .capabilities(agent)
                 .map(|capabilities| capabilities.native_resume)
@@ -617,6 +699,11 @@ impl RunService {
             }
         };
         let (events, cancel, steer, _write) = adapter_run.into_parts();
+        let image_generation_cleanup = image_generation.clone();
+        let cancel: Box<dyn FnOnce() -> crate::adapters::BoxFuture<()> + Send> = Box::new(move || {
+            if let Some(executor) = image_generation { (executor.cancel)(); }
+            cancel()
+        });
         context.runtime_tool_version = if context.runtime_tool_version.is_some() {
             context.runtime_tool_version
         } else if !provider_command {
@@ -634,8 +721,9 @@ impl RunService {
         let consume_run_id = run_id.clone();
         tokio::spawn(async move {
             let completion = consume_service
-                .consume(&consume_run, &consume_session, events, consume_context)
+                .consume(&consume_run, &consume_session, events, consume_context, background_handoff)
                 .await;
+            if let Some(executor) = image_generation_cleanup { (executor.cancel)(); }
             let _ = snapshot_sender.send(completion);
             let _ = completion_sender.send(true);
             let service = consume_service;
@@ -749,13 +837,18 @@ impl RunService {
         session: &Value,
         mut adapter_events: tokio::sync::mpsc::UnboundedReceiver<AdapterEvent>,
         context: RunContext,
+        background_handoff: session_events::ForegroundHandoff,
     ) -> RunCompletionSnapshot {
         let mut messages: Vec<Value> = vec![];
+        let mut provider_error: Option<String> = None;
         let provider_command = context.presentation.as_deref() == Some("provider_command");
         let mut saw_exit = false;
         let consume_run_id = run.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         run_log::run_event(&consume_run_id, "consume_enter", json!({}));
         while let Some(event) = adapter_events.recv().await {
+            if let AdapterEvent::Error { message } = &event {
+                provider_error = Some(self.redaction.text(message));
+            }
             if matches!(event, AdapterEvent::Exit { .. }) {
                 saw_exit = true;
             }
@@ -763,6 +856,10 @@ impl RunService {
                 messages.push(message);
             }
         }
+        // An interrupt or transport failure may close a stream before its
+        // final message frame. Commit already-visible main-agent text first.
+        messages.extend(self.handoff_message_buffers(run, session, &context));
+        drop(background_handoff);
         if !provider_command {
             self.collect_run_diff(run, session, &context).await;
         }
@@ -774,15 +871,17 @@ impl RunService {
             let detail = if cancelled {
                 "CLI process cancelled".to_string()
             } else {
-                self.output_tails
+                provider_error.filter(|message| !message.trim().is_empty()).or_else(|| self.output_tails
                     .lock()
                     .unwrap()
                     .get(run_id)
                     .map(|tail| tail.trim().to_string())
-                    .filter(|tail| !tail.is_empty())
+                    .filter(|tail| !tail.is_empty()))
                     .unwrap_or_else(|| run_failure_detail(&latest))
             };
-            if !provider_command {
+            if cancelled {
+                self.record_cancelled(&latest);
+            } else if !provider_command {
                 let _ = self.events.append(&latest, session, "run.failed", json!({
                     "code": latest.get("failureCode").and_then(Value::as_str).unwrap_or("RUN_START_FAILED"),
                     "message": detail.chars().skip(detail.chars().count().saturating_sub(4_000)).collect::<String>(),
@@ -873,6 +972,11 @@ impl RunService {
             .runs()
             .get(run.get("id").and_then(Value::as_str).unwrap_or(""))?
             .unwrap_or_else(|| run.clone());
+        if matches!(current["status"].as_str(), Some("cancelled" | "cancelling")) {
+            self.record_cancelled(&current);
+            self.update_session_status(session["id"].as_str().unwrap_or(""), "idle");
+            return Ok(current);
+        }
         let mut failed = current.as_object().cloned().unwrap_or_default();
         failed.insert("status".to_string(), json!("failed"));
         failed.insert("endedAt".to_string(), json!(now_iso()));
@@ -901,6 +1005,14 @@ impl RunService {
         Ok(failed)
     }
 
+    fn record_cancelled(&self, run: &Value) {
+        let session_id = run["sessionId"].as_str().unwrap_or("");
+        let session = Repositories::new(&self.db.lock().unwrap().raw).sessions().get(session_id).ok().flatten();
+        if let Some(session) = session {
+            let _ = self.events.append(run, &session, "run.cancelled", json!({"reason":"user"}));
+        }
+    }
+
     fn update_session_status(&self, session_id: &str, status: &str) {
         let guard = self.db.lock().unwrap();
         let repos = Repositories::new(&guard.raw);
@@ -913,11 +1025,21 @@ impl RunService {
     }
 
     fn persist(&self, run: &Value, session: &Value, event: &AdapterEvent, context: &RunContext) -> Option<Value> {
-        let provider_command = context.presentation.as_deref() == Some("provider_command");
+        if let Some(mut origin)=self.native_origin(run,session,event,context) {
+            if self.queue_native_origin(origin.run["id"].as_str().unwrap_or(""), event.clone()) { return None; }
+            origin.run["backgroundEvent"]=json!(true);
+            self.persist(&origin.run,session,event,&origin.context);
+            return None;
+        }
+        let background = run["backgroundEvent"] == true;
+        let provider_command = !background && context.presentation.as_deref() == Some("provider_command");
         let run_id = run.get("id").and_then(Value::as_str).unwrap_or("");
+        let buffer_run_id = if background {format!("{run_id}:background")} else {run_id.to_string()};
         match event {
             AdapterEvent::Message { text, phase, message_id, subagent_dispatch_id, .. } => {
-                let message_id = message_id.clone().unwrap_or_else(|| "default".to_string());
+                let native_message_id = message_id.clone();
+                let message_id = message_id.clone().unwrap_or_else(|| if background { "background:default".into() } else { "default".into() });
+                let key = session_events::MessageKey { message_id: message_id.clone(), subagent_dispatch_id: subagent_dispatch_id.clone() };
                 // Sub-agent messages share the run; keep their delta buffers
                 // separate and never persist them as chat history.
                 let buffer_key = subagent_dispatch_id
@@ -926,8 +1048,10 @@ impl RunService {
                     .unwrap_or_else(|| message_id.clone());
                 if phase.as_deref() == Some("delta") {
                     let mut buffers = self.message_buffers.lock().unwrap();
-                    let run_buffers = buffers.entry(run_id.to_string()).or_default();
-                    run_buffers.entry(buffer_key.clone()).or_default().push_str(text);
+                    let run_buffers = buffers.entry(buffer_run_id.clone()).or_default();
+                    run_buffers.entry(key.clone()).or_insert_with(|| session_events::BufferedMessage {
+                        text: String::new(), message_id: native_message_id, subagent_dispatch_id: subagent_dispatch_id.clone(),
+                    }).text.push_str(text);
                     drop(buffers);
                     if !provider_command {
                         let _ = self.events.append(run, session, "agent.message_delta", json!({
@@ -942,9 +1066,9 @@ impl RunService {
                     .message_buffers
                     .lock()
                     .unwrap()
-                    .get_mut(run_id)
-                    .and_then(|buffers| buffers.remove(&buffer_key));
-                let final_text = if !text.is_empty() { text.clone() } else { buffered.unwrap_or_default() };
+                    .get_mut(&buffer_run_id)
+                    .and_then(|buffers| buffers.remove(&key));
+                let final_text = if !text.is_empty() { text.clone() } else { buffered.map(|message| message.text).unwrap_or_default() };
                 if final_text.is_empty() {
                     return None;
                 }
@@ -960,6 +1084,7 @@ impl RunService {
                     message.insert("taskId".to_string(), json!(id));
                 }
                 message.insert("runId".to_string(), json!(run_id));
+                if background {message.insert("background".into(),json!(true));}
                 message.insert(
                     "fromMemberId".to_string(),
                     context.member_id.clone().or_else(|| session.get("memberId").and_then(Value::as_str).map(str::to_string)).map(Value::String).unwrap_or(Value::Null),
@@ -972,7 +1097,8 @@ impl RunService {
                         let _ = Repositories::new(&self.db.lock().unwrap().raw).sessions().save_message(&message);
                     }
                     let _ = self.events.append(run, session, "agent.message", json!({
-                        "messageId": message.get("id").cloned().unwrap_or(Value::Null),
+                        "providerMessageId": buffer_key,
+                        "messageId": if subagent_dispatch_id.is_some() { json!(buffer_key) } else { message.get("id").cloned().unwrap_or(Value::Null) },
                         "text": message.get("text").cloned().unwrap_or(Value::Null),
                         "subagentDispatchId": subagent_dispatch_id.clone().map(Value::String).unwrap_or(Value::Null)
                     }));
@@ -998,7 +1124,17 @@ impl RunService {
                 }
                 None
             }
-            AdapterEvent::Status { phase, .. } => {
+            AdapterEvent::Status { phase, raw } => {
+                if ["runtime_ready","runtime_capabilities"].contains(&phase.as_str()) {
+                    let _=self.events.append(run,session,&format!("provider.{phase}"),raw.clone().unwrap_or(Value::Null));return None;
+                }
+                if phase == "extension_ui" {
+                    if let Some(native_id) = raw.as_ref().filter(|raw|raw["method"] == "cancel").and_then(|raw|raw.pointer("/raw/targetId")).and_then(Value::as_str) {
+                        if let Some(interactions) = self.interactions.read().unwrap().as_ref() { interactions.cancel_native(run["id"].as_str().unwrap_or(""), native_id); }
+                    }
+                    let _ = self.events.append(run, session, "provider.extension_ui", raw.clone().unwrap_or(Value::Null));
+                    return None;
+                }
                 if !provider_command {
                     let _ = self.events.append(run, session, "agent.status", json!({ "phase": phase }));
                 }
@@ -1011,7 +1147,15 @@ impl RunService {
                     if current.get("connectionId") != session.get("connectionId") || current.get("connectionRevision") != session.get("connectionRevision") { return None; }
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("providerSessionId".to_string(), json!(provider_session_id));
+                    if let Some(cwd) = &context.working_directory {
+                        updated.insert("nativeWorkingDirectory".into(), json!(cwd));
+                    }
                     updated.insert("providerContextSyncedAt".to_string(), json!(now_iso()));
+                    if let Ok(Some(agent))=repos.agents().get(run["agentInstanceId"].as_str().unwrap_or("")) {
+                        if let Some(version)=self.adapters.find(agent["providerId"].as_str().unwrap_or("")).and_then(|adapter|adapter.descriptor()["nativeContextVersion"].as_str().map(str::to_string)) {
+                            updated.insert("providerContextVersion".into(),json!(version));
+                        }
+                    }
                     if let Some(version) = context.runtime_tool_version {
                         updated.insert("runtimeToolVersion".to_string(), json!(version));
                     }
@@ -1104,14 +1248,23 @@ impl RunService {
                 }
                 None
             }
-            AdapterEvent::Tool { call_id, name, phase, input, output, success, file_diff, subagent_dispatch_id, .. } => {
+            AdapterEvent::Tool { call_id, name, phase, input, output, success, file_diff, subagent_dispatch_id, raw } => {
                 let completed = phase.as_deref() == Some("completed");
-                let event_type = if completed { "tool.finished" } else { "tool.started" };
+                let updated = phase.as_deref() == Some("updated");
+                let event_type = if completed { "tool.finished" } else if updated { "tool.updated" } else { "tool.started" };
                 let mut payload = Map::new();
                 payload.insert("callId".to_string(), call_id.clone().map(Value::String).unwrap_or(Value::Null));
                 payload.insert("toolName".to_string(), json!(name));
+                if let Some(execution) = raw.as_ref().and_then(|v| v.get("codeExecution")).filter(|v| v.is_object()) {
+                    // PTC emits an incremental dispatch patch. Preserve its
+                    // JSON structure: truncating serialized JSON could erase
+                    // the entire tool tree, including small sibling calls.
+                    payload.insert("codeExecution".to_string(), self.redaction.value(execution));
+                }
                 if completed {
                     payload.insert("success".to_string(), json!(success.unwrap_or(true)));
+                }
+                if completed || updated {
                     payload.insert(
                         "outputSummary".to_string(),
                         self.event_detail(output.as_ref(), 2_000).map(Value::String).unwrap_or(Value::Null),
@@ -1134,7 +1287,13 @@ impl RunService {
                 None
             }
             AdapterEvent::Command { call_id, command, phase, exit_code, output, subagent_dispatch_id, .. } => {
-                if phase.as_deref() == Some("completed") {
+                if phase.as_deref() == Some("updated") {
+                    let _ = self.events.append(run, session, "command.updated", json!({
+                        "callId": call_id, "command":command,
+                        "outputSummary":output.as_ref().map(|o| self.redaction.text(&o.chars().take(2_000).collect::<String>())),
+                        "subagentDispatchId":subagent_dispatch_id
+                    }));
+                } else if phase.as_deref() == Some("completed") {
                     let _ = self.events.append(run, session, "command.finished", json!({
                         "callId": call_id.clone().map(Value::String).unwrap_or(Value::Null),
                         "command": command,
@@ -1226,6 +1385,7 @@ impl RunService {
                 let guard = self.db.lock().unwrap();
                 let repos = Repositories::new(&guard.raw);
                 if let Ok(Some(current)) = repos.runs().get(run_id) {
+                    if matches!(current["status"].as_str(), Some("cancelling" | "cancelled")) { return None; }
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("status".to_string(), json!(if *reason == TimeoutKind::MaxOutput { "failed" } else { "timed_out" }));
                     updated.insert("endedAt".to_string(), json!(now_iso()));
@@ -1239,6 +1399,7 @@ impl RunService {
                 let guard = self.db.lock().unwrap();
                 let repos = Repositories::new(&guard.raw);
                 if let Ok(Some(current)) = repos.runs().get(run_id) {
+                    if matches!(current["status"].as_str(), Some("cancelling" | "cancelled")) { return None; }
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("status".to_string(), json!("failed"));
                     updated.insert("endedAt".to_string(), json!(now_iso()));
@@ -1379,7 +1540,9 @@ fn tool_input_limit(tool_name: &str) -> usize {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    if ["todolist", "todo_list", "todowrite", "todo_write", "update_plan"].contains(&normalized.as_str()) {
+    if normalized == "run_code" {
+        256_000
+    } else if ["todolist", "todo_list", "todowrite", "todo_write", "update_plan"].contains(&normalized.as_str()) {
         16_000
     } else {
         2_000

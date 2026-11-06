@@ -60,6 +60,15 @@ const MAX_TEXT_WRITE_BYTES: usize = 8 * 1024 * 1024;
 
 // --- shell ---------------------------------------------------------------
 
+#[tauri::command]
+pub fn shell_open_external(url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Expected an HTTPS authorization URL".into());
+    }
+    opener::open(parsed.as_str()).map_err(|e| e.to_string())
+}
+
 /// Resolves to "" on success or an error message string (shell.openPath contract).
 #[tauri::command]
 pub fn shell_open_path(path: String) -> String {

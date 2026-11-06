@@ -65,6 +65,7 @@ function installTauriBridge(): void {
         invoke("attachment_import_clipboard", { input: { name: input.name, mimeType: input.mimeType, dataBase64: toBase64(input.data) } })
     },
     shell: {
+      openExternal: (url) => invoke("shell_open_external", { url }),
       openPath: (path) => invoke("shell_open_path", { path }),
       showItemInFolder: async (path) => {
         await invoke("shell_show_item_in_folder", { path });

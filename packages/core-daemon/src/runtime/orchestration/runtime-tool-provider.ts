@@ -28,7 +28,7 @@ function specs(session: Session, database: Database): RuntimeToolSpec[] {
   return [
     {
       name: RUNTIME_TOOL_NAMES.delegate,
-      description: `Optionally dispatch one independent, self-contained task to a configured child Agent and continue your current turn. Available members: ${membersText}. The child cannot read the parent or sibling Agent sessions, pending child results, or chat-only attachments/images. Include all required context in task text and do not call this when you can complete the work yourself.`,
+      description: `Dispatch one self-contained task to a configured Nautilo member using that member's Harness, connection and model. Honor explicit user requests to delegate, including small tasks. Available members: ${membersText}. The child cannot read the parent or sibling Agent sessions, pending results, or chat-only attachments/images. Include all required context in task text. Success returns a real taskId and sessionId; it does not mean the task has completed.`,
       inputSchema: {
         type: "object",
         additionalProperties: false,

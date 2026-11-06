@@ -78,7 +78,7 @@ function SessionItem({
   const statusLabel = STATUS_DOT[status] ? t(`sessions.status.${status}` as MessageKey) : null;
   const isChild = depth > 0;
   const targetName = sessionTargetName(session, teams, instances);
-  const timestamp = session.lastMessageAt ?? session.updatedAt;
+  const timestamp = session.lastMessageAt ?? session.createdAt;
   const visualDepth = Math.min(depth, 4);
 
   return (
@@ -102,7 +102,7 @@ function SessionItem({
         onClick={onSelect}
         aria-current={active ? "page" : undefined}
         className={cn(
-          "relative flex w-full min-w-0 items-start gap-2 overflow-hidden rounded-lg py-2 pr-8 pl-2 text-left transition-[background-color,box-shadow] duration-150 outline-none",
+          "relative flex w-full min-w-0 items-center gap-2 overflow-hidden rounded-md py-1.5 pr-8 pl-2 text-left transition-[background-color,box-shadow] duration-150 outline-none",
           "focus-visible:ring-2 focus-visible:ring-accent/70",
           active
             ? "bg-card-hover"
@@ -110,7 +110,7 @@ function SessionItem({
           isChild && "py-1.5"
         )}
       >
-        <span className="mt-1 flex h-3 w-3 shrink-0 items-center justify-center">
+        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
           {isChild ? (
             <CornerDownRight
               className="h-3 w-3 text-ink-3"
@@ -126,7 +126,7 @@ function SessionItem({
             <span
               title={[session.title, targetName, statusLabel, formatRelativeTime(timestamp, locale)].filter(Boolean).join(" · ")}
               className={cn(
-                "block min-w-0 flex-1 truncate text-[13px] leading-5 text-ink",
+                "block min-w-0 flex-1 truncate text-[14px] font-medium leading-5 text-ink",
                 (active || session.unreadCount > 0 || hasChildren) && "font-medium"
               )}
             >
@@ -219,10 +219,10 @@ export function SessionListPanel({
           const limit = limits[projectId] ?? 60;
           const visibleEntries = visibleSidebarEntries(projectEntries, limit, activeSessionId);
           return (
-            <section key={projectId} className="min-w-0 overflow-hidden mt-3.5 first:mt-1">
-              <div className="mb-1 flex min-w-0 items-center gap-1">
+            <section key={projectId} className="min-w-0 overflow-hidden mt-1.5 first:mt-0">
+              <div className="flex min-w-0 items-center gap-1">
                 <button type="button" onClick={() => toggleProjectCollapsed(projectId)} aria-expanded={expanded}
-                  className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-[13px] text-ink hover:bg-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                  className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-[14px] font-medium text-ink hover:bg-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                   title={project?.rootPath ?? (locale === "zh-CN" ? "未分组" : "Ungrouped")}>
                   <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform duration-150", !expanded && "-rotate-90")} aria-hidden />
                   {project && <Folder className="h-4 w-4 shrink-0 text-ink-2" aria-hidden />}

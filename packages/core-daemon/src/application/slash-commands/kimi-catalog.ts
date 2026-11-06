@@ -17,11 +17,10 @@ const KIMI_TITLES: Readonly<Record<string, string>> = {
 };
 
 /** Verified against `kimi acp` `/help` on Kimi Code CLI 0.27.0. */
-const KIMI_ACP_COMMANDS = new Set(["compact", "status", "usage", "mcp", "tasks", "help"]);
 
 export function kimiProviderCommand(input: { name: string; description: string; inputHint?: string }): SlashCommandDefinition | undefined {
   const name = input.name.replace(/^\//, "");
-  if (!KIMI_ACP_COMMANDS.has(name)) return undefined;
+  if (!/^[\p{L}\p{N}_:.-]+$/u.test(name)) return undefined;
   return {
     id: `kimi-code.native.${name}`,
     name: `/${name}`,

@@ -25,17 +25,21 @@ import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { Tooltip } from "../../components/ui/Tooltip";
 import { useTeamsStore, validateTeam } from "../../stores/teams";
+import { useConnectionsStore } from "../../stores/connections";
 import { useAgentsStore } from "../../stores/agents";
 import { toast } from "../../stores/toast";
 import { MemberEditorDialog } from "./MemberEditorDialog";
 import { persistTeamChange } from "./team-mutations";
+import { IdentityAvatar, ProviderAvatar } from "../../components/ui/IdentityAvatar";
 
 const POLICIES: DelegationPolicy[] = ["autonomous", "ask_before_delegate", "direct_only"];
 
-export function TeamEditorPage(): JSX.Element {
+export function TeamEditorPage({ teamIdOverride, backTo = "/teams" }: { teamIdOverride?: string; backTo?: string }): JSX.Element {
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
-  const { teamId } = useParams<{ teamId: string }>();
+  const { teamId: routeTeamId } = useParams<{ teamId: string }>();
+  const teamId = teamIdOverride ?? routeTeamId;
+  const connections = useConnectionsStore((state) => state.connections);
   const navigate = useNavigate();
   const team = useTeamsStore((state) => state.teams.find((item) => item.id === teamId));
   const updateTeam = useTeamsStore((state) => state.updateTeam);
@@ -53,7 +57,7 @@ export function TeamEditorPage(): JSX.Element {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const inFlight = useRef(false);
-  const issues = useMemo(() => (team ? validateTeam(team, instances) : []), [team, instances]);
+  const issues = useMemo(() => (team ? validateTeam(team, instances, connections) : []), [team, instances, connections]);
   const instanceById = useMemo(
     () => new Map(instances.map((instance) => [instance.id, instance])),
     [instances]
@@ -65,7 +69,7 @@ export function TeamEditorPage(): JSX.Element {
         title={zh ? "团队不存在" : "Team not found"}
         description={t("teams.empty.desc")}
         action={
-          <Button variant="outline" onClick={() => navigate("/teams")}>
+          <Button variant="outline" onClick={() => navigate(backTo)}>
             <ArrowLeft className="h-4 w-4" aria-hidden />
             {t("teams.editor.back")}
           </Button>
@@ -118,18 +122,19 @@ export function TeamEditorPage(): JSX.Element {
     <Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden />
   ) : null;
   return (
-    <div className="mx-auto max-w-5xl py-3 sm:py-6">
+    <div className="team-editor-page">
       <Link
-        to="/teams"
-        className="mb-6 inline-flex items-center gap-2 rounded text-sm text-ink-3 hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+        to={backTo}
+        className="team-back-link"
       >
         <ArrowLeft className="h-4 w-4" aria-hidden />
         {t("teams.editor.back")}
       </Link>
-      <header className="mb-8 flex items-center gap-3">
-        <h1 className="min-w-0 break-words text-2xl font-semibold tracking-tight">{team.name}</h1>
+      <header className="team-profile-header">
+        <IdentityAvatar label={team.name} seed={team.id} size="lg" />
+        <div className="team-profile-copy"><span className="team-profile-eyebrow">{zh ? "协作团队" : "AGENT TEAM"}</span><h1>{team.name}</h1><p>{team.members.length ? team.members.slice(0,3).map(member => member.role.name || member.displayName).join(" · ") : (zh ? "添加成员，组建你的专属 Agent 团队" : "Build your own team of agents")}</p></div>
         <Button
-          variant="ghost"
+          variant="primary"
           size="sm"
           disabled={pending}
           onClick={() => {
@@ -141,11 +146,12 @@ export function TeamEditorPage(): JSX.Element {
           <Pencil className="h-4 w-4" aria-hidden />
           {t("common.edit")}
         </Button>
+      <div className="team-profile-stats"><div><strong>{team.members.length}</strong><span>{zh ? "团队成员" : "Team members"}</span></div><div><strong>{team.members.filter(member => member.enabled).length}</strong><span>{zh ? "已启用成员" : "Enabled members"}</span></div><div><strong className="team-config-state" data-ready={!issues.some(issue=>issue.level==="critical")}><ShieldCheck size={17} />{issues.some(issue=>issue.level==="critical") ? (zh ? "待完善" : "Needs setup") : (zh ? "配置就绪" : "Ready")}</strong><span>{zh ? "团队配置" : "Configuration"}</span></div></div>
       </header>
       {!renameOpen && !removing && !confirmDelete && failure}
-      <section className="mb-10 mt-5" aria-labelledby="team-policy-title">
+      <section className="team-policy-card" aria-labelledby="team-policy-title">
         <div className="flex flex-wrap items-center gap-4">
-          <h2 id="team-policy-title" className="text-sm text-ink-2">
+          <h2 id="team-policy-title" className="text-sm font-semibold text-ink">
             {t("teams.editor.policyTitle")}
           </h2>
           <div className="w-64 max-w-full">
@@ -174,14 +180,14 @@ export function TeamEditorPage(): JSX.Element {
             </button>
           </Tooltip>
         </div>
-        <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink-3">
+        <p className="team-policy-description">
           {t(`teams.policy.${team.delegationPolicy}Desc` as MessageKey)}
         </p>
       </section>
-      <section aria-labelledby="team-members-title">
+      <section className="team-members-section" aria-labelledby="team-members-title">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h2 id="team-members-title" className="text-[15px] font-medium">
-            {t("teams.editor.membersTitle")}{" "}
+          <h2 id="team-members-title" className="team-section-title">
+            <Users size={18} />{t("teams.editor.membersTitle")}{" "}
             <span className="ml-2 text-sm font-normal text-ink-3">{team.members.length}</span>
           </h2>
           <Button variant="ghost" disabled={pending} onClick={() => openEditor()}>
@@ -202,36 +208,26 @@ export function TeamEditorPage(): JSX.Element {
             }
           />
         ) : (
-          <ul className="divide-y divide-line border-y border-line">
+          <ul className="team-member-list">
             {team.members.map((member) => {
               const instance = instanceById.get(member.agentInstanceId);
               const meta = instance ? providerMeta(instance.providerId) : undefined;
               return (
-                <li key={member.id} className="flex flex-wrap items-center gap-4 py-5">
-                  <span
-                    aria-hidden
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line-strong text-sm text-ink-2"
-                  >
-                    {Array.from(member.displayName)[0] || <Bot className="h-4 w-4" />}
-                  </span>
-                  <div className="min-w-0 flex-1 sm:w-[26%] sm:flex-none">
+                <li key={member.id} className="team-member-row">
+                  <IdentityAvatar label={member.displayName} seed={member.id} />
+                  <div className="team-member-name">
                     <p className="truncate text-[15px] font-medium">{member.displayName}</p>
                     <p className="mt-1 truncate text-sm text-ink-3" title={member.role.description}>
                       {member.role.name}
                     </p>
                   </div>
                   <span
-                    className="hidden min-w-0 flex-1 truncate text-sm text-ink-3 sm:block"
+                    className="team-member-binding text-sm text-ink-3"
                     title={[member.model, member.reasoningEffort].filter(Boolean).join(" · ")}
                   >
-                    {meta?.name ?? (zh ? "Agent 不可用" : "Agent unavailable")}
+                    <span className="team-member-provider"><ProviderAvatar providerId={instance?.providerId ?? "custom"} size="sm" />{meta?.name ?? (zh ? "Harness 不可用" : "Harness unavailable")}</span><small>{member.connectionId ? `${connections.find((connection) => connection.id === member.connectionId)?.name ?? member.connectionId} · ${member.model || (zh ? "默认模型" : "Default model")}` : (zh ? "请选择供应商或账号" : "Select a provider or account")}</small>
                   </span>
-                  <span
-                    className="hidden min-w-0 flex-1 truncate text-sm text-ink-3 lg:block"
-                    title={member.role.responsibilities.join(" · ")}
-                  >
-                    {member.role.responsibilities[0] || member.role.description || "—"}
-                  </span>
+                  <div className="team-member-actions">
                   <Switch
                     disabled={pending}
                     checked={member.enabled}
@@ -265,13 +261,14 @@ export function TeamEditorPage(): JSX.Element {
                       <Trash2 className="h-4 w-4 text-ink-3" aria-hidden />
                     </Button>
                   </Tooltip>
+                  </div>
                 </li>
               );
             })}
           </ul>
         )}
       </section>
-      <section className="mt-8" aria-labelledby="team-validation">
+      <section className="team-validation-section" aria-labelledby="team-validation">
         <h2
           id="team-validation"
           className="mb-3 flex items-center gap-2 text-sm font-medium text-ink-2"
@@ -298,7 +295,7 @@ export function TeamEditorPage(): JSX.Element {
           <p className="text-sm text-ink-3">{t("teams.validation.ok")}</p>
         )}
       </section>
-      <div className="mt-12 border-t border-line pt-5">
+      <div className="team-danger-zone">
         <Button
           variant="ghost"
           className="text-danger hover:text-danger"
@@ -408,7 +405,7 @@ export function TeamEditorPage(): JSX.Element {
                   () => deleteTeam(team.id),
                   () => {
                     toast.info(t("teams.editor.deletedToast", { name: team.name }));
-                    navigate("/teams");
+                    navigate(backTo);
                   }
                 )
               }

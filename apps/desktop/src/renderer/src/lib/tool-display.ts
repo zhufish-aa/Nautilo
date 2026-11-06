@@ -105,7 +105,40 @@ function firstString(input: Record<string, unknown> | undefined, keys: readonly 
 }
 
 function normalizedToolName(toolName: string): string {
-  return toolName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  return toolName.trim().replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+}
+
+export type ToolActivityKind = "command" | "read" | "write" | "edit" | "search" | "mcp" | "skill" | "web" | "image" | "code" | "tool";
+/** Classify the shared event vocabulary, including native names used by each CLI. */
+export function toolActivityKind(name: string, input?: string): ToolActivityKind {
+  const normalized = normalizedToolName(name);
+  const parsed = parseInput(input);
+  const path = firstText(parsed, PATH_KEYS);
+  const command = firstText(parsed, ["command", "cmd", "command_line"]) ?? "";
+  const fileKind = toolKind(name);
+  if (/(?:^|_)(?:load_skill|read_skill|use_skill|skill|skills)(?:_|$)/.test(normalized)
+    || fileKind === "read" && /(?:^|[\\/])SKILL\.md$/i.test(path ?? "")
+    || /(?:Get-Content|\bcat\b|\btype\b|\bsed\b|\bhead\b).*\bSKILL\.md\b/i.test(command)) return "skill";
+  if (/(?:^|_)mcp(?:_|$)/.test(normalized) || normalized.startsWith("codex_apps_")) return "mcp";
+  if (/(?:^|_)(?:bash|pwsh|shell|shell_command|exec_command|run_command|execute_command|terminal|write_stdin)(?:_|$)/.test(normalized)) return "command";
+  if (/(?:^|_)(?:read_image|view_image|image_gen|imagegen)(?:_|$)/.test(normalized)) return "image";
+  if (/(?:^|_)(?:run_code|execute_code|python|node_repl)(?:_|$)/.test(normalized)) return "code";
+  if (/(?:^|_)(?:web|web_search|web_fetch|fetch_url|browse)(?:_|$)/.test(normalized)) return "web";
+  if (fileKind === "grep" || fileKind === "glob") return "search";
+  if (fileKind) return fileKind;
+  if (/(?:^|_)(?:str_replace|apply_patch|replace_in_file|edit_file)(?:_|$)/.test(normalized)) return "edit";
+  if (/(?:^|_)(?:view_files|view_file|read_file|read_text_file|open_file)(?:_|$)/.test(normalized)) return "read";
+  if (/(?:^|_)(?:create_file|write_file)(?:_|$)/.test(normalized)) return "write";
+  if (/(?:^|_)(?:search|find|list_directory|list_dir|ls)(?:_|$)/.test(normalized)) return "search";
+  return "tool";
+}
+
+export function codeExecutionInput(input: string | undefined): { code: string; description?: string; truncated: boolean } {
+  const parsed = parseInput(input);
+  const code = firstString(parsed, ["code"]);
+  if (code !== undefined) return { code, description: firstText(parsed, ["description"]), truncated: false };
+  const partial = input ? partialString(input, "code", true) : undefined;
+  return { code: partial?.value ?? input ?? "", description: input ? partialString(input, "description")?.value : undefined, truncated: partial?.truncated ?? false };
 }
 
 function toolKind(toolName: string): "read" | "write" | "edit" | "grep" | "glob" | undefined {

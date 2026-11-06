@@ -131,6 +131,8 @@ Descriptor 是 Provider 的"展示 + 集成"元数据：**渲染端的 CLI 检�
 | `credentialEnv` | string[] | 否 | 用户在 UI 保存的 API Key 注入为哪些环境变量。**每个列出的变量都会注入同一把 key**（例如 Codex 同时需要 `OPENAI_API_KEY` 和 `CODEX_API_KEY`） |
 | `envPassthrough` | string[] | 否 | 允许从 shell 环境透传给探测/运行进程的变量名 |
 | `baseUrlEnv` | string | 否 | 实例配置的 `baseUrl` 写入哪个环境变量 |
+| `nativeApiProtocol` | `"responses"` / `"anthropic"` | 否 | CLI 只接受一种原生协议时，声明所需协议，宿主为所选连接提供转换桥 |
+| `connectionProtocolDiscovery` | boolean | 否 | 原生插件需要按已安装 CLI 版本选择协议时，启用 `connectionProtocol` 调用 |
 | `permissionModes` | array | 否 | CLI 原生权限模式（见下）；不配则 UI 不显示模式选择器 |
 | `configProfile` | boolean | 否 | CLI 支持命名配置档案（如 `codex --profile`）时开启；否则实例编辑器隐藏 profile 字段 |
 | `modelSuggestions` | string[] | 否 | 模型发现完成前，在模型选择器里展示的静态建议 |
@@ -214,6 +216,30 @@ interface AdapterDetectionResult {
 ### start(request) / resume(request)
 
 启动一次运行，返回 `AdapterRun`。**同步返回**，事件通过 `events` 异步流持续产出。
+
+### 独立 API 连接与插件配置
+
+API 连接不使用 Harness 名称白名单。用户选定供应商后，宿主按会话固定的连接版本提供运行配置；插件负责把它转换为自己 CLI 的原生配置。新增 Provider 插件无需修改前端兼容列表或核心的 CLI 判断分支。
+
+插件在 `start` / `resume` 中收到：
+
+| 位置 | 内容 |
+|---|---|
+| `instance.providerOptions.runtimeConnectionId` / `runtimeConnectionRevision` | 本次运行绑定的连接及不可变版本 |
+| `instance.providerOptions.runtimeConnectionName` | 供应商显示名称 |
+| `instance.providerOptions.baseUrl` / `apiType` | 所选端点和 `openai-completions`、`openai-responses` 或 `anthropic-messages` |
+| `instance.models` | 该版本中保存的模型；聊天只允许选其中已启用的项 |
+| `request.model` / `reasoningEffort` | 实际选择的上游模型 ID 与推理档位 |
+| `request.env.NAUTILO_CONNECTION_API_KEY` | 仅在运行环境中传递的所选连接密钥 |
+| `request.env.NAUTILO_CONNECTION_DIRECTORY` | 此连接版本的专用配置目录 |
+
+宿主同时按插件的 `credentialEnv` 和 `baseUrlEnv` 注入密钥与端点。配置文件应使用环境变量引用，不能把明文密钥写入文件或参数；不要再次合并 `process.env`，否则会重新引入其他账号的认证。CLI 不能读取配置文件时，应由插件使用其原生参数或环境变量入口。需要转换协议时，CLI 收到的是本机转换端点及临时凭据，真实密钥只用于用户选定的上游。
+
+TS 适配器可实现可选的 `connectionProtocol(request)`，返回 `"responses"` 或 `"anthropic"`。Rust 插件实现 SDK 的 `connection_protocol`，并在 descriptor 声明 `connectionProtocolDiscovery: true`；宿主只在插件声明后调用，旧插件继续使用原契约。协议选择和 CLI 版本识别属于插件，不能据此在核心增加 Harness 名称白名单。
+
+原生 CLI 的登录前置条件需要在执行失败时如实呈现。例如部分旧版 Kimi ACP 只接受登录身份，API 连接使用其原生提示词模式；部分 Trae 企业版即使加载了自定义模型配置，执行时仍要求 Trae 登录。插件须报告具体原因，不能把这些错误改成空回复，也不能自动借用其他账号或悄悄换成另一个 CLI。
+
+本地端到端验证可运行 `apps/desktop/test/native-connection-smoke.mjs`。它启动隔离的 Rust daemon、真实 CLI 和本机 API 测试端点，检查保存连接、模型选择、凭据传递及回复入库；不使用用户数据、真实 API 密钥或计费请求。设置 `NAUTILO_NATIVE_CORE`、`NAUTILO_NATIVE_PLUGINS` 指向构建产物，`NAUTILO_NATIVE_PROTOCOL` 可选 `chat` / `responses` / `anthropic`。
 
 `AdapterStartRequest` 关键字段：
 
@@ -394,6 +420,18 @@ CLI 支持在一轮运行中追加输入时，实现 `AdapterRun.steer(input)`�
 
 **resume 不生效？**
 确认三点：`start` 时发出过 `session` 事件上报 `providerSessionId`；`supportsResume` 和 `capabilities.nativeResume` 都为 true；`resume()` 里真正使用了 `request.providerSessionId`。
+
+原生插件的请求还包含稳定的 `localSessionId`。会话目录必须按这个标识隔离，不能按每轮新建的 run id 隔离，也不能使用全局“最近一个会话”。需要续聊的运行不要传 `--no-session`。
+
+当插件更改原生上下文的保存方式时，可在 descriptor 声明 `nativeContextVersion`。宿主会比较会话中保存的版本；旧版本首次续聊时重建已保存的聊天上下文，之后使用新原生会话恢复。没有原生 resume 能力的适配器每轮都需要恢复聊天上下文。
+
+**CLI 的 JSON 输出不包含推理，或只在结束时返回文本？**
+
+插件可声明 `observeApiOutput: true`。宿主在 API 连接中读取所选协议的实时输出，保留原生 CLI 的工具循环，并将原生终态文本去重。这个观察层保持 Chat / Responses / Messages 原协议；协议转换仅用于 CLI 原生协议和连接协议不同时。没有返回推理的上游不会被补造推理内容。
+
+**Windows 上 Node CLI 在退出阶段触发 `UV_HANDLE_CLOSING`？**
+
+本地验证中 Node 24.15 下的 Pi / Command Code 推理请求出现了此问题；独立 Node 22 LTS 运行时通过了相同的流式与多轮验证。可通过绝对路径环境变量 `AGENTHUB_NODE_PATH` 选择运行时。Electron 与 Tauri 都会将所选运行时目录传入 daemon 的 PATH，使 npm CLI 使用同一运行时；不需要更换全局 Node。
 
 **如何本地迭代？**
 改代码 → `pnpm --filter <你的包> build` → 应用内重新从本地目录安装（会覆盖 `~/.agenthub/plugins/<id>/` 并热重载，无需重启应用）。

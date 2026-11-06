@@ -11,6 +11,14 @@ import { connectOfficialAccount, type AccountHarness, type ConnectStage } from "
 
 type RecoverableProfile = { profileId: string; providerId: string; directory: string; createdAt: number };
 
+function loginError(cause: unknown, zh: boolean): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (/ACCOUNT_PROFILE_PERMISSIONS|SeSecurityPrivilege|NAUTILO_ACCOUNT_DIR/.test(message)) {
+    return zh ? "无法设置独立账号目录的访问权限。请确认目录归当前 Windows 用户所有且允许写入，然后重试。" : "Could not secure the account directory. Check that it is owned by your Windows user and writable, then retry.";
+  }
+  return message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
+}
+
 export function AccountConnectDialog({ open, onOpenChange, onConnected }: { open: boolean; onOpenChange(open: boolean): void; onConnected(connection: RuntimeConnection): void }): JSX.Element {
   const { locale } = useI18n(); const zh = locale === "zh-CN";
   const [recoverable, setRecoverable] = useState<RecoverableProfile[]>([]);
@@ -22,7 +30,7 @@ export function AccountConnectDialog({ open, onOpenChange, onConnected }: { open
       const profiles = await getBridge()?.accounts.recoverableLogins?.() ?? [];
       const saved = new Set(useConnectionsStore.getState().connections.map((connection) => connection.id));
       if (request === generation.current) setRecoverable(profiles.filter((profile) => !saved.has(profile.profileId) && ["codex", "claude-code"].includes(profile.providerId)));
-    } catch { if (request === generation.current) setError(zh ? "无法读取未完成的登录记录，请稍后重试。" : "Could not read unfinished login records. Try again later."); }
+    } catch { if (request === generation.current) setError((current) => current || (zh ? "无法读取未完成的登录记录，请稍后重试。" : "Could not read unfinished login records. Try again later.")); }
   };
   useEffect(() => {
     generation.current++; setStage(undefined); setError(""); setRecoverable([]);
@@ -42,7 +50,7 @@ export function AccountConnectDialog({ open, onOpenChange, onConnected }: { open
         detect: async (id) => {
           await useAgentsStore.getState().redetect(id);
           const installation = useAgentsStore.getState().installations.find((item) => item.providerId === id);
-          if (installation?.status !== "ready" || !installation.executable) throw new Error(zh ? `未找到可用的 ${provider} 官方 CLI。请先安装或在 Agent 设置中修复检测，再重试。` : `A working ${provider} CLI was not found. Install it or repair detection in Agent settings, then retry.`);
+          if (installation?.status !== "ready" || !installation.executable) throw new Error(zh ? `未找到可用的 ${provider} 官方 CLI。请先安装或在 Harness 管理中修复检测，再重试。` : `A working ${provider} CLI was not found. Install it or repair detection in Agent settings, then retry.`);
           return installation.executable;
         },
         reusePrepared: !!recovered,
@@ -51,9 +59,10 @@ export function AccountConnectDialog({ open, onOpenChange, onConnected }: { open
         start: accounts.startLogin, status: accounts.loginStatus, cancel: accounts.cancelLogin,
         save: (connection) => useConnectionsStore.getState().save(connection)
       });
+      void useConnectionsStore.getState().loadModels(result.id, result.revision, true);
       if (request === generation.current && !abort.signal.aborted) { setStage(undefined); onConnected(result); onOpenChange(false); }
     } catch (cause) {
-      if (request === generation.current && !abort.signal.aborted) { setStage(undefined); setError(`${cause instanceof Error ? cause.message : String(cause)} ${zh ? "已生成的账号空间会保留，可从未完成登录记录恢复。" : "Prepared account profiles are retained and can be recovered below."}`); void loadRecoverable(); }
+      if (request === generation.current && !abort.signal.aborted) { setStage(undefined); setError(`${loginError(cause, zh)} ${zh ? "已生成的账号空间会保留，可从未完成登录记录恢复。" : "Prepared account profiles are retained and can be recovered below."}`); void loadRecoverable(); }
     } finally { if (controller.current === abort) controller.current = undefined; }
   };
   const stages = zh ? { detecting: "检查官方 CLI…", preparing: "准备独立账号空间…", login: "等待官方浏览器登录完成…", saving: "添加账号连接…" } : { detecting: "Checking the official CLI…", preparing: "Preparing an isolated account profile…", login: "Waiting for official browser sign-in…", saving: "Adding the account connection…" };

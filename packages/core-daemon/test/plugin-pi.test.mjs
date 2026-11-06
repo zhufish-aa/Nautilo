@@ -180,13 +180,17 @@ test("the Pi plugin discovers models and streams RPC turns with native resume", 
   assert.equal(events.find((event) => event.kind === "thinking" && event.phase === "delta")?.text, "checking");
   assert.deepEqual(events.find((event) => event.kind === "usage"), {
     kind: "usage",
+    usageScope: "context",
+    inputTokensIncludesCache: false,
+    cacheCreationInputTokens: 0,
     inputTokens: 10,
     cachedInputTokens: 3,
     outputTokens: 4,
     reasoningOutputTokens: 1,
-    contextUsed: 17,
+    contextUsed: 13,
     raw: events.find((event) => event.kind === "usage").raw
   });
+  assert.equal(events.find((event)=>event.kind === "usage" && event.usageScope === "turn")?.inputTokens,10);
   const tool = events.find((event) => event.kind === "tool" && event.phase === "completed");
   assert.deepEqual(tool.fileDiff, { operation: "edit", path: "a.ts", before: "a", after: "b" });
   assert.equal(tool.success, true);

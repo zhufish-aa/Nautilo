@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::Child;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone)]
@@ -51,6 +51,7 @@ enum StdinCommand {
 }
 
 impl ProcessHandle {
+    pub fn is_alive(&self) -> bool { !*self.exit_watch.borrow() }
     pub fn write(&self, input: &str) {
         let _ = self.stdin.send(StdinCommand::Write(input.as_bytes().to_vec()));
     }
@@ -74,7 +75,7 @@ impl ProcessHandle {
 
 pub struct StartedProcess {
     pub handle: ProcessHandle,
-    pub events: mpsc::UnboundedReceiver<ProcessEvent>,
+    pub events: crate::event_stream::ProcessEvents,
 }
 
 // ---------------------------------------------------------------- win-command
@@ -115,8 +116,9 @@ fn resolve_spawn_command(
 
 /// Case-insensitive env lookup: Windows typically spells it "Path".
 fn env_value(env: Option<&std::collections::HashMap<String, String>>, key: &str) -> Option<String> {
+    if let Some(value) = env.and_then(|values|values.get(key)) { return Some(value.clone()); }
     let merged_process: std::collections::HashMap<String, String> = std::env::vars().collect();
-    for (name, value) in merged_process.iter().chain(env.into_iter().flatten()) {
+    for (name, value) in env.into_iter().flatten().chain(merged_process.iter()) {
         if name.eq_ignore_ascii_case(key) {
             return Some(value.clone());
         }
@@ -184,6 +186,9 @@ pub fn start(request: &ProcessRequest) -> std::io::Result<StartedProcess> {
         command.args(&resolved.args);
     }
     if let Some(cwd) = &request.cwd {
+        if !std::path::Path::new(cwd).is_dir() {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("工作目录不存在或不可访问：{cwd}")));
+        }
         command.current_dir(cwd);
     }
     if request.inherit_env {
@@ -205,7 +210,8 @@ pub fn start(request: &ProcessRequest) -> std::io::Result<StartedProcess> {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child: Child = command.spawn()?;
+    let mut child: Child = command.spawn().map_err(|error| std::io::Error::new(error.kind(),
+        format!("无法启动 {}（工作目录：{}）：{error}", request.command, request.cwd.as_deref().unwrap_or("默认"))))?;
     let pid = child.id();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
@@ -394,5 +400,5 @@ pub fn start(request: &ProcessRequest) -> std::io::Result<StartedProcess> {
         stdin: stdin_sender,
         exit_code,
     };
-    Ok(StartedProcess { handle, events: receiver })
+    Ok(StartedProcess { handle, events: crate::event_stream::ProcessEvents::new(receiver) })
 }

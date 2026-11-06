@@ -25,11 +25,20 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
   if (method === "item/agentMessage/delta") {
     return [{ kind: "message", phase: "delta", messageId: text(params.itemId), text: text(params.delta) ?? "", raw: paramsValue }];
   }
-  if (method === "item/reasoning/summaryTextDelta") {
-    return [{ kind: "thinking", phase: "delta", messageId: text(params.itemId), text: text(params.delta) ?? "", raw: paramsValue }];
+  if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta") {
+    const id = text(params.itemId);
+    return [{ kind: "thinking", phase: "delta", messageId: method === "item/reasoning/textDelta" && id ? `${id}:content` : id, text: text(params.delta) ?? "", raw: paramsValue }];
   }
   if (method === "turn/started") return [{ kind: "status", phase: "turn_started", raw: paramsValue }];
-  if (method === "turn/completed") return [{ kind: "status", phase: "turn_completed", raw: paramsValue }];
+  if (method === "turn/completed") {
+    const turn = record(params.turn);
+    const failed = turn.status === "failed" || (turn.error !== undefined && turn.error !== null);
+    return [{ kind: "status", phase: failed ? "turn_failed" : "turn_completed", raw: paramsValue },
+      ...(failed ? [{ kind: "error" as const, error: new Error(text(record(turn.error).message) ?? "Codex turn failed before producing a reply") }] : [])];
+  }
+  if (method === "error") return params.willRetry === true
+    ? [{ kind: "status", phase: "turn_started", raw: paramsValue }]
+    : [{ kind: "error", error: new Error(text(record(params.error).message) ?? text(params.message) ?? "Codex reported an error") }];
   if (method === "thread/tokenUsage/updated") {
     const usage = record(params.tokenUsage ?? params.usage);
     const total = record(usage.total ?? usage);
@@ -56,9 +65,7 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
   const phase = method === "item/completed" ? "completed" : "started";
   const id = text(item.id);
   if (item.type === "collabAgentToolCall") {
-    // Codex multi-agent collab call (spawnAgent / sendInput / wait / …). The
-    // spawnAgent variant is Nautilo's sub-agent dispatch; its receiver thread
-    // ids are correlated back to this item's id by the run loop.
+    // Provider-native dispatch, distinct from Nautilo team delegation.
     const states = record(item.agentsStates);
     const stateSummary = Object.entries(states)
       .map(([threadId, state]) => {
@@ -72,7 +79,7 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
       callId: id,
       name: text(item.tool) ?? "spawnAgent",
       phase,
-      input: { prompt: text(item.prompt), model: text(item.model) },
+      input: { agent_type: "Codex", prompt: text(item.prompt), model: text(item.model), receiverThreadIds: item.receiverThreadIds, agentsStates: item.agentsStates },
       output: phase === "completed" ? stateSummary || undefined : undefined,
       success: text(item.status) !== "failed",
       raw: paramsValue
@@ -85,7 +92,11 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
   if (item.type === "reasoning") {
     if (phase === "started") return [];
     const summary = Array.isArray(item.summary) ? item.summary.filter((part): part is string => typeof part === "string").join("\n") : "";
-    return summary ? [{ kind: "thinking", phase: "completed", messageId: id, text: summary, raw: paramsValue }] : [];
+    const content = Array.isArray(item.content) ? item.content.filter((part): part is string => typeof part === "string").join("\n") : "";
+    return [
+      ...(summary ? [{ kind: "thinking" as const, phase: "completed" as const, messageId: id, text: summary, raw: paramsValue }] : []),
+      ...(content ? [{ kind: "thinking" as const, phase: "completed" as const, messageId: id ? `${id}:content` : undefined, text: content, raw: paramsValue }] : [])
+    ];
   }
   if (item.type === "commandExecution") {
     return [{
@@ -108,8 +119,10 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
       name: name || "tool",
       phase,
       input: item.arguments ?? item.input,
-      output: printable(item.result ?? item.output ?? item.error),
-      success: item.status !== "failed" && item.error === undefined,
+      output: printable(item.result ?? item.output ?? item.contentItems ?? item.error),
+      success: phase === "completed"
+        ? item.success !== false && item.status !== "failed" && item.error == null && record(item.result).isError !== true
+        : undefined,
       raw: paramsValue
     }];
   }
@@ -165,15 +178,33 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
 
 /** Tags events emitted from a subscribed child agent thread with their dispatch id. */
 export function withSubagentDispatch(events: AdapterEvent[], subagentDispatchId: string): AdapterEvent[] {
-  return events.map((event) => {
+  return events.flatMap((event): AdapterEvent[] => {
     switch (event.kind) {
       case "message":
       case "thinking":
       case "tool":
       case "command":
-        return { ...event, subagentDispatchId };
+        return [{ ...event, subagentDispatchId }];
+      case "file":
+        return [event];
       default:
-        return event;
+        return [];
     }
+  });
+}
+
+export function updateNativeChild(dispatch: RecordValue, childId: string, status: string, message?: string): AdapterEvent[] {
+  dispatch.agentsStates = { ...record(dispatch.agentsStates), [childId]: { status, message } };
+  return parseCodexAppServerNotification("item/completed", { item: dispatch });
+}
+
+export function nativeChildHistory(threadValue: unknown, dispatchId: string): AdapterEvent[] {
+  const thread = record(threadValue);
+  return (Array.isArray(thread.turns) ? thread.turns : []).flatMap((turnValue): AdapterEvent[] => {
+    const turn = record(turnValue);
+    return (Array.isArray(turn.items) ? turn.items : []).flatMap((itemValue): AdapterEvent[] => {
+      const item = record(itemValue);
+      return withSubagentDispatch(parseCodexAppServerNotification(item.status === "inProgress" ? "item/started" : "item/completed", { item }), dispatchId);
+    });
   });
 }

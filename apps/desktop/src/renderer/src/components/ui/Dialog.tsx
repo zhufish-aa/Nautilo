@@ -13,7 +13,8 @@ export function Dialog({
   description,
   children,
   footer,
-  widthClass = "max-w-lg"
+  widthClass = "max-w-lg",
+  presentation = "dialog"
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -22,6 +23,7 @@ export function Dialog({
   children: ReactNode;
   footer?: ReactNode;
   widthClass?: string;
+  presentation?: "dialog" | "workspace";
 }): JSX.Element {
   const { t } = useI18n();
   const systemReducedMotion = useReducedMotion();
@@ -57,7 +59,7 @@ export function Dialog({
                 animate={{ opacity: 1 }}
                 exit={{ opacity: reduceMotion ? 1 : 0 }}
                 transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.22, 1, 0.36, 1] }}
-                className="fixed inset-0 z-40 bg-black/20"
+                className={cn("fixed inset-0 z-40", presentation === "workspace" ? "bg-transparent" : "bg-black/20")}
               />
             </DialogPrimitive.Overlay>
             <DialogPrimitive.Content
@@ -93,7 +95,8 @@ export function Dialog({
                 transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.22, 1, 0.36, 1] }}
                 className={cn(
                   "ui-dialog fixed top-1/2 left-1/2 z-50 flex max-h-[86vh] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-line bg-card shadow-pop outline-none",
-                  widthClass
+                  widthClass,
+                  presentation === "workspace" && "workspace-dialog"
                 )}
               >
                 <div className="flex items-start justify-between gap-4 border-b border-line px-6 pt-5 pb-4">
@@ -104,7 +107,7 @@ export function Dialog({
                     {description && (
                       <DialogPrimitive.Description
                         id={descriptionId}
-                        className="mt-1 text-sm leading-relaxed text-ink-3"
+                        className="mt-1 break-words text-sm leading-relaxed text-ink-3 [overflow-wrap:anywhere]"
                       >
                         {description}
                       </DialogPrimitive.Description>

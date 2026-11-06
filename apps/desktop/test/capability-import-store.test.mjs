@@ -6,6 +6,8 @@ const source = await readFile(
   new URL("../src/renderer/src/stores/provider-tools.ts", import.meta.url),
   "utf8",
 );
+const helperSource = await readFile(new URL("../src/renderer/src/lib/capability-enablement.ts", import.meta.url), "utf8");
+const helperModule = `data:text/javascript,${encodeURIComponent(ts.transpileModule(helperSource, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText)}`;
 let calls = [];
 let outcome = [];
 let rejectImport = false;
@@ -19,6 +21,7 @@ globalThis.__capabilityTestRequest = async (method, payload) => {
     return [{ id: "daemon-resolved", name: "renamed-on-server" }];
   if (method === "capability.parseImport")
     return { candidates: [], errors: [] };
+  if (method === "capability.upsert") return payload;
   throw new Error("Unexpected method");
 };
 const compiled = ts
@@ -35,7 +38,7 @@ const compiled = ts
   .replace(
     'import { requestCore } from "../lib/bridge";',
     "const requestCore = (...args) => globalThis.__capabilityTestRequest(...args);",
-  );
+  ).replace('from "../lib/capability-enablement"', `from ${JSON.stringify(helperModule)}`);
 const { useProviderToolsStore: store } = await import(
   `data:text/javascript;charset=utf-8,${encodeURIComponent(compiled)}`
 );

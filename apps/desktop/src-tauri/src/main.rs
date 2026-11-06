@@ -73,6 +73,7 @@ fn main() {
             shell_commands::attachment_describe_paths,
             shell_commands::attachment_import_clipboard,
             interactions::shell_open_path,
+            interactions::shell_open_external,
             interactions::shell_show_item_in_folder,
             interactions::clipboard_write_image,
             interactions::image_save_as,

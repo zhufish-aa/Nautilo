@@ -5,7 +5,7 @@ import ts from "typescript";
 const lib = new URL("../../src/renderer/src/lib/", import.meta.url);
 const compile = (source) => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 export const helperModules = {};
-for (const name of ["orchestration-timeline-policy", "tool-timeline-groups", "subagent-activities", "provider-diff", "tool-display", "changed-files"]) {
+for (const name of ["process-display", "orchestration-timeline-policy", "tool-timeline-groups", "subagent-activities", "provider-diff", "tool-display", "changed-files"]) {
   const exports = {};
   vm.runInNewContext(compile(readFileSync(new URL(`${name}.ts`, lib), "utf8")), {
     exports, TextEncoder, TextDecoder, require: (name) => helperModules[name]
@@ -17,7 +17,7 @@ const runtimeSource = readFileSync(new URL("orchestration-runtime.ts", lib), "ut
 // Runs the real runtime and timeline builders with deterministic IPC and clock.
 // No desktop, daemon, provider process, network, or model requests are made.
 export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCount = 1, failMethod, bridgeAvailable = true, interactionsModule } = {}) {
-  let now = 10_000, nextTimer = 1;
+  let now = 10_000, nextTimer = 1, nextMessage = 1;
   const timers = new Map(), calls = [], renders = [];
   const setTimeout = (fn, delay = 0) => { const id = nextTimer++; timers.set(id, { fn, at: now + delay }); return id; };
   const clearTimeout = (id) => timers.delete(id);
@@ -26,13 +26,21 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
   const team = { id: "t", members: instances.map((instance) => ({ agentInstanceId: instance.id, enabled: true })) };
   const state = {
     providerCommandRevisions: {}, sessions: [session], tasks: {}, artifacts: {}, foreground: {}, running: {}, activeAgentRunIds: {}, events: { s: [] }, queuedFollowUps: { s: [] },
-    _append: (id, data) => state.events[id].push({ id: `local-${state.events[id].length}`, sessionId: id, timestamp: session.createdAt, sequence: 0, data }),
+    _append: (id, data) => {
+      const event = { id: data.kind === "message" && data.messageId ? `message-${data.messageId}` : `local-${state.events[id].length}`, sessionId: id, timestamp: session.createdAt, sequence: 0, data };
+      state.events[id].push(event);
+      return event;
+    },
     _replaceEvents: (id, rows) => { state.events[id] = rows; renders.push({ at: now, rows }); },
     _replaceContextUsage() {}, _replaceRawLog() {},
     _replaceArtifacts: (id, items) => { state.artifacts[id] = items; },
     _replaceTasks: (id, items) => { state.tasks[id] = items; },
     _setRunning: (id, value) => { state.running[id] = value; },
     _setForeground: (id, value) => { state.foreground[id] = value; },
+    _updateApproval: (id, approvalId, status) => {
+      state.events[id] = state.events[id].map((event) => event.data.kind === "approval" && event.data.approval.id === approvalId
+        ? {...event, data: {...event.data, approval: {...event.data.approval, status}}} : event);
+    },
     _setActiveAgentRun: (id, value) => { state.activeAgentRunIds[id] = value; },
     _replaceSessions: (items) => { state.sessions = items; },
     _upsertExternalSession: (item) => { state.sessions = [...state.sessions.filter((s) => s.id !== item.id), item]; },
@@ -78,7 +86,7 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
   const bridge = {};
   const requestCore = (method, params) => {
     calls.push({ method, params, at: now });
-    if (method === "event.wait") return new Promise(() => {});
+    if (method === "event.wait" && !(method in replies)) return new Promise(() => {});
     return new Promise((resolve, reject) => setTimeout(() => {
       if (method === failMethod) { reject(new Error("simulated IPC failure")); return; }
       try { resolve(typeof replies[method] === "function" ? replies[method](params) : replies[method] ?? params); }
@@ -88,7 +96,9 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
   const projectState = { projects: [{ id: "p" }], setActiveRun: (id, run) => { const p = projectState.projects.find((p) => p.id === id); if (p) p.activeRun = run; } };
   const modules = {
     ...helperModules,
+    "./provider-ui": { applyLiveProviderUi() {} },
     "./bridge": { getBridge: () => bridgeAvailable ? bridge : undefined, requestCore },
+    "./utils": { newId: (prefix) => `${prefix}-${nextMessage++}` },
     "./core-mappers": Object.fromEntries(["toDomainProject", "toDomainAgent", "toDomainTeam", "toStandaloneUiSession"].map((name) => [name, (value) => value])),
     "../stores/usage": { useUsageStore: { getState: () => ({ ingest() {} }) } },
     "../stores/sessions": { useSessionsStore: { getState: () => state } },
@@ -100,7 +110,7 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
   const exports = {};
   const optionalExports = (source.includes("function isAwaitingFirstOutput(") ? ", isAwaitingFirstOutput, projectRunAwaitingOutput" : "")
     + (source.includes("function needsStandalonePersistenceSync(") ? ", needsStandalonePersistenceSync" : "");
-  const extraExports = `\nexport { toUiArtifact, sameArtifacts, syncProjectAndAgents, mergeStandaloneEvents, standaloneHydrated, standaloneMessageCache, standaloneEventCache, standaloneLastRebuildAt, scheduleStandaloneRender, clearSessionRuntime, schedulePoll, buildStandaloneTimeline, hydrateProjectRun, projectSessionBuilt, mergeEventCache, readSessionHistory, readArtifactHistory, persistedHistory, resetHistoryCapabilities, hydrateStandaloneSession, refreshStandaloneSessionState, readSessionHistoryBatch, standaloneSequences, projectSessionSequences, projectSessionEventCache, projectSessionDetails, consumeProjectPollFeed, projectEventCursors${optionalExports} };\nexport function setTestProjectHydrator(fn) { hydrateProjectRun = fn; }`;
+  const extraExports = `\nexport { pendingMessages, replaceSessionTimeline, sessionConfigWrites, toUiArtifact, sameArtifacts, syncProjectAndAgents, mergeStandaloneEvents, standaloneHydrated, standaloneMessageCache, standaloneEventCache, standaloneLastRebuildAt, scheduleStandaloneRender, clearSessionRuntime, schedulePoll, buildStandaloneTimeline, hydrateProjectRun, projectSessionBuilt, mergeEventCache, readSessionHistory, readArtifactHistory, persistedHistory, resetHistoryCapabilities, hydrateStandaloneSession, refreshStandaloneSessionState, readSessionHistoryBatch, standaloneSequences, projectSessionSequences, projectSessionEventCache, projectSessionDetails, consumeProjectPollFeed, projectEventCursors${optionalExports} };\nexport function setTestProjectHydrator(fn) { hydrateProjectRun = fn; }`;
   class FakeDate extends Date { static now() { return now; } }
   vm.runInNewContext(compile(source + extraExports), { exports, require: (name) => {
     if (!(name in modules)) throw new Error(`Unexpected import: ${name}`);

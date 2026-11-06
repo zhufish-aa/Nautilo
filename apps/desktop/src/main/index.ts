@@ -12,9 +12,10 @@ const isDev = !!process.env.ELECTRON_RENDERER_URL;
 const legacyUserDataPath = app.getPath("userData");
 app.setName("Nautilo");
 app.setPath("userData", legacyUserDataPath);
-const appIcon = isDev
-  ? join(__dirname, "../../resources/nautilo-icon-512.png")
-  : join(process.resourcesPath, "app", "resources", "nautilo-icon.png");
+// A local preview has no Vite URL, but still uses workspace resources.
+const appIcon = app.isPackaged
+  ? join(process.resourcesPath, "app", "resources", "nautilo-icon.png")
+  : join(__dirname, "../../resources/nautilo-icon-512.png");
 const coreDaemon = new CoreDaemonClient();
 registerArtifactScheme();
 

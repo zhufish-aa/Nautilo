@@ -39,12 +39,12 @@ export interface AdapterFileDiff {
 export type AdapterEvent =
   | { kind: "message"; text: string; phase?: "delta" | "completed"; messageId?: string; subagentDispatchId?: string; raw?: unknown }
   | { kind: "thinking"; text: string; phase?: "delta" | "completed"; messageId?: string; subagentDispatchId?: string; raw?: unknown }
-  | { kind: "tool"; callId?: string; name: string; phase?: "started" | "completed"; input?: unknown; output?: unknown; success?: boolean; fileDiff?: AdapterFileDiff; subagentDispatchId?: string; raw?: unknown }
-  | { kind: "command"; callId?: string; command: string; phase?: "started" | "completed"; exitCode?: number; output?: string; subagentDispatchId?: string; raw?: unknown }
+  | { kind: "tool"; callId?: string; name: string; phase?: "started" | "updated" | "completed"; input?: unknown; output?: unknown; success?: boolean; fileDiff?: AdapterFileDiff; subagentDispatchId?: string; raw?: unknown }
+  | { kind: "command"; callId?: string; command: string; phase?: "started" | "updated" | "completed"; exitCode?: number; output?: string; subagentDispatchId?: string; raw?: unknown }
   | { kind: "turn_diff"; diff: string; threadId: string; turnId: string; raw?: unknown }
   | { kind: "file"; path: string; changeType?: string; additions?: number; deletions?: number; diff?: string; raw?: unknown }
   | { kind: "session"; providerSessionId: string; raw?: unknown }
-  | { kind: "status"; phase: "turn_started" | "turn_completed" | "turn_failed"; raw?: unknown }
+  | { kind: "status"; phase: "turn_started" | "turn_completed" | "turn_failed" | "runtime_ready" | "runtime_capabilities"; raw?: unknown }
   /** Usage is a replacement snapshot for (usageScope, usageKey), never a delta.
    * context is footprint-only; turn is one CLI execution; session is a provider thread total.
    * Missing scope means accounting is unknown. Missing numbers are unavailable, not zero.
@@ -54,7 +54,8 @@ export type AdapterEvent =
    * reportedCost is provider accounting, not proof of billing (including subscriptions).
    */
   | { kind: "usage"; usageScope?: "context" | "turn" | "session"; usageKey?: string; inputTokensIncludesCache?: boolean; cacheCreationInputTokens?: number; reportedCost?: number; estimatedCost?: number; currency?: string; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningOutputTokens?: number; contextUsed?: number; contextWindow?: number; raw?: unknown }
-  | { kind: "commands"; commands: Array<{ name: string; description: string; inputHint?: string; providerCommand?: "compact" }>; raw?: unknown }
+  | { kind: "commands"; commands: Array<{ name: string; description: string; inputHint?: string; providerCommand?: string }>; raw?: unknown }
+  | { kind: "extension_ui"; method: string; key?: string; text: string; raw?: unknown }
   | { kind: "artifact"; artifactType: "image" | "file"; name: string; mimeType?: string; data?: string; path?: string; raw?: unknown }
   | { kind: "raw"; stream: "stdout" | "stderr"; text: string }
   | { kind: "exit"; exitCode: number | null; signal?: string }
@@ -70,6 +71,7 @@ export interface AdapterStartRequest {
   /** Session-scoped execution settings; these do not belong to AgentInstance. */
   model?: string;
   reasoningEffort?: string;
+  agentMode?: string;
   serviceTier?: string;
   /** Session-scoped CLI permission mode; overrides the instance-level setting. */
   permissionMode?: string;
@@ -83,6 +85,11 @@ export interface AdapterStartRequest {
   /** Tools supplied by Nautilo for this provider session, such as delegation. */
   runtimeTools?: RuntimeToolSpec[];
   executeRuntimeTool?: RuntimeToolExecutor;
+  /** Host-owned official image execution, isolated from this turn's text API. */
+  imageGeneration?: {
+    generate: (input: unknown) => Promise<{ path: string; name: string; mimeType: string; content: string }>;
+    cancel: () => void;
+  };
   /**
    * Provider-initiated user interaction (structured question or permission
    * prompt). The adapter must block the provider request until this resolves;
@@ -98,7 +105,7 @@ export interface AdapterStartRequest {
    * dedicated transport for it (e.g. Codex app-server thread/compact/start)
    * should honor it instead of sending the command text as a chat prompt.
    */
-  providerCommand?: "compact";
+  providerCommand?: string;
 }
 
 export interface AdapterResumeRequest extends AdapterStartRequest {
@@ -128,7 +135,7 @@ export interface AdapterMcpServer {
 }
 
 /** Interaction payload supplied by an adapter; the daemon fills in session/run metadata. */
-export type AdapterInteractionInput = Pick<InteractionRequest, "kind" | "title" | "detail" | "questions" | "options" | "plan">;
+export type AdapterInteractionInput = Pick<InteractionRequest, "kind" | "title" | "detail" | "links" | "presentation" | "questions" | "options" | "plan">;
 
 export interface AdapterCapabilities {
   structuredOutput: boolean;
@@ -169,6 +176,9 @@ export interface AgentCliAdapter {
   readonly capabilities: AdapterCapabilities;
   detect(instance: AgentInstance): Promise<AdapterDetectionResult>;
   listModels?(instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<ProviderModelCatalog>;
+  listModes?(instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<{ modes: Array<{ id: string; name?: string; broken?: string; order?: number }>; defaultMode?: string }>;
+  /** Optional plugin-owned wire selection for the installed CLI version. */
+  connectionProtocol?(request: AdapterStartRequest): Promise<"responses" | "anthropic" | undefined>;
   start(request: AdapterStartRequest): AdapterRun;
   resume?(request: AdapterResumeRequest): AdapterRun;
   /** Releases provider-owned long-lived processes when a plugin is reloaded or the host stops. */

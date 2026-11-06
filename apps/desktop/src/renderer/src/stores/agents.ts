@@ -2,7 +2,8 @@ import { create } from "zustand";
 import type { AgentInstance, ProviderModelCatalog } from "@agenthub/domain";
 import { requestCore } from "../lib/bridge";
 import { toDomainAgent, toUiAgent } from "../lib/core-mappers";
-import { providerMetas } from "../lib/provider-catalog";
+import { useProvidersStore } from "./providers";
+import { providerMetas, permissionModesFor } from "../lib/provider-catalog";
 import { newId } from "../lib/utils";
 import type { AgentInstanceConfig, ProviderInstallation } from "../lib/types";
 
@@ -24,6 +25,7 @@ interface AgentsState {
   modelCatalogs: Record<string, ProviderModelCatalog | undefined>;
   loadingModels: Record<string, boolean>;
   hydrate: () => Promise<void>;
+  ensureHarness: (providerId: string, executable?: string) => Promise<AgentInstanceConfig>;
   redetect: (providerId: string) => Promise<void>;
   loadModels: (agentInstanceId: string) => Promise<ProviderModelCatalog>;
   /** Ad-hoc discovery for the instance editor form; nothing is persisted or cached. */
@@ -32,6 +34,8 @@ interface AgentsState {
   updateInstance: (id: string, draft: AgentInstanceDraft) => Promise<void>;
   setInstanceEnabled: (id: string, enabled: boolean) => Promise<void>;
 }
+
+const harnessPending = new Map<string, Promise<AgentInstanceConfig>>();
 
 export const useAgentsStore = create<AgentsState>((set, get) => ({
   installations: [],
@@ -48,11 +52,37 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     }));
     set({ instances: hydrated });
     await Promise.all(providerMetas().map((provider) => get().redetect(provider.id)));
+    await Promise.all(get().installations.filter((item) => item.status === "ready").map((item) => get().ensureHarness(item.providerId)));
+  },
+
+  ensureHarness: async (providerId, configuredExecutable) => {
+    const existing = get().instances.find((item) => item.providerId === providerId && item.configurationKind === "harness");
+    if (existing) return existing;
+    const pending = harnessPending.get(providerId);
+    if (pending) return pending;
+    const operation = (async () => {
+      const installation = get().installations.find((item) => item.providerId === providerId);
+      const descriptor = useProvidersStore.getState().catalog.find((item) => item.providerId === (providerId === "custom-cli" ? "custom" : providerId));
+      const executable = configuredExecutable || installation?.executable || descriptor?.defaultExecutable;
+      if (!executable) throw new Error("请先配置 Harness 可执行文件 / Configure the harness executable first");
+      const now = new Date().toISOString();
+      const instance: AgentInstanceConfig = {
+        id: `harness-${providerId}`, configurationKind: "harness", providerId,
+        displayName: descriptor?.name ?? providerId, executable, baseArgs: [],
+        envPolicyId: "env-standard", permissionMode: permissionModesFor(providerId)[0]?.value,
+        enabled: true, status: "available", createdAt: now, updatedAt: now
+      };
+      const saved = toUiAgent(await requestCore<AgentInstance>("agent.upsert", toDomainAgent(instance)));
+      set((state) => ({ instances: [...state.instances.filter((item) => item.id !== saved.id), saved] }));
+      return saved;
+    })();
+    harnessPending.set(providerId, operation);
+    try { return await operation; } finally { harnessPending.delete(providerId); }
   },
 
   redetect: async (providerId) => {
     set((state) => ({ detecting: { ...state.detecting, [providerId]: true } }));
-    const configured = get().instances.find((instance) => instance.providerId === providerId);
+    const configured = get().instances.find((instance) => instance.providerId === providerId && instance.configurationKind === "harness") ?? get().instances.find((instance) => instance.providerId === providerId);
     try {
       const result = await requestCore<DetectionResult>("provider.detect", {
         providerId: providerId === "custom-cli" ? "custom" : providerId,

@@ -174,8 +174,23 @@ impl Listener {
                         Err(_) => break,
                     }
                 }
-                let server = instances.pop_front().expect("named pipe instance pool must not be empty");
-                server.connect().await?;
+                // Windows may connect a client to ANY available instance,
+                // independently of our queue order. Waiting only for the
+                // first instance can strand connected clients in the pool
+                // and eventually stall every renderer request.
+                let (index, connected) = {
+                    let mut pending = instances.iter().map(|server| Box::pin(server.connect())).collect::<Vec<_>>();
+                    std::future::poll_fn(|cx| {
+                        for (index, future) in pending.iter_mut().enumerate() {
+                            if let std::task::Poll::Ready(result) = std::future::Future::poll(future.as_mut(), cx) {
+                                return std::task::Poll::Ready((index, result));
+                            }
+                        }
+                        std::task::Poll::Pending
+                    }).await
+                };
+                let server = instances.remove(index).expect("connected pipe instance must exist");
+                connected?;
                 Ok(Box::new(server))
             }
             #[cfg(unix)]
@@ -318,4 +333,24 @@ async fn write_line(write: &mut (impl AsyncWrite + Unpin), value: &Value) -> any
 
 pub fn read_gateway_token(token_path: &Path) -> std::io::Result<String> {
     Ok(std::fs::read_to_string(token_path)?.trim().to_string())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accept_does_not_depend_on_pipe_instance_queue_order() {
+        let path = format!(r"\\.\pipe\nautilo-accept-{}", Uuid::new_v4());
+        let mut listener = Listener::bind(&path).unwrap();
+        if let Listener::Pipe { instances, .. } = &mut listener {
+            instances.rotate_left(1);
+        }
+        let mut client = tokio::net::windows::named_pipe::ClientOptions::new().open(&path).unwrap();
+        let mut server = tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept()).await.unwrap().unwrap();
+        client.write_all(b"connected").await.unwrap();
+        let mut received = [0; 9];
+        tokio::io::AsyncReadExt::read_exact(&mut server, &mut received).await.unwrap();
+        assert_eq!(&received, b"connected");
+    }
 }
