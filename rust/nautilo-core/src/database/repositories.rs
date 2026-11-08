@@ -3,7 +3,7 @@
 //! Entities stay opaque serde_json::Values — the DB stores JSON documents,
 //! so the Rust port does not need full domain structs to persist them.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::database::connection::db_fail;
@@ -314,6 +314,10 @@ impl<'a> SessionRepository<'a> {
         Ok(())
     }
 
+    pub fn message(&self, session_id: &str, id: &str) -> CoreResult<Option<Value>> {
+        self.db.query_row("SELECT data FROM messages WHERE session_id=?1 AND id=?2",params![session_id,id],|row|row.get::<_,String>(0)).optional().map_err(db_fail).map(|row|row.map(parse_row))
+    }
+
     pub fn messages(&self, session_id: &str) -> CoreResult<Vec<Value>> {
         let rows = self
             .db
@@ -341,6 +345,10 @@ pub struct RunRepository<'a> {
 }
 
 impl<'a> RunRepository<'a> {
+    pub fn list_for_session(&self, session_id: &str) -> CoreResult<Vec<Value>> {
+        self.db.prepare("SELECT data FROM runs WHERE session_id=?1 ORDER BY updated_at").map_err(db_fail)?.query_map(params![session_id],|row|row.get::<_,String>(0)).map_err(db_fail)?.collect::<Result<Vec<_>,_>>().map_err(db_fail).map(|rows|rows.into_iter().map(parse_row).collect())
+    }
+
     pub fn save(&self, run: &Value) -> CoreResult<()> {
         let updated_at = str_field(run, "endedAt")
             .or_else(|| str_field(run, "startedAt"))

@@ -61,11 +61,44 @@ export interface ProviderUpdateStartPayload {
 
 export type ProviderUpdateStartResult = { ok: true } | { ok: false; reason: string };
 
+export interface BrowserTab {
+  id: string;
+  title: string;
+  url: string;
+  manual: boolean;
+  busy: boolean;
+  queued?: number;
+  zoomFactor?: number;
+}
+
+export interface BrowserPanelState {
+  manual: boolean;
+  url: string;
+  title: string;
+  busy: boolean;
+  queued?: number;
+  zoomFactor?: number;
+  image?: string;
+  tabId?: string;
+  agentTabId?: string;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  tabs?: BrowserTab[];
+}
+
 /** Mirrors the preload bridge. Kept in sync with src/preload/index.ts. */
 export interface AgentHubBridge {
   readonly isElectron: true;
   readonly platform: string;
   getAppInfo(): Promise<AppInfo>;
+  assistant?: import("../../../shared/workspace-assistant").AssistantBridge;
+  panels?: {
+    context?: import("../../../shared/panel-window").PanelTarget;
+    open(target:import("../../../shared/panel-window").PanelTarget, focusOnly?:boolean):Promise<boolean>;
+    dock():Promise<void>;
+    onDock(callback:(target:import("../../../shared/panel-window").PanelTarget)=>void):()=>void;
+  };
+  browser?: { panel(id:string,command:"state"|"control"|"open"|"layout"|"hide"|"release"|"new"|"select"|"close"|"back"|"forward"|"reload"|"zoom",value?:unknown): Promise<BrowserPanelState|undefined> };
   window: {
     minimize(): Promise<void>;
     toggleMaximize(): Promise<void>;

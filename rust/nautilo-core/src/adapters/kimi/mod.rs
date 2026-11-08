@@ -1,6 +1,8 @@
 //! Kimi Code adapter — port of adapters/kimi/{adapter,commands,events,
 //! interaction,models}.ts. The ACP run loop lives in acp_run.rs.
 
+mod native_experience;
+
 use std::collections::HashMap;
 
 use serde_json::{json, Value};
@@ -382,6 +384,11 @@ impl Default for KimiCodeAdapter {
 
 #[async_trait::async_trait]
 impl AgentCliAdapter for KimiCodeAdapter {
+    fn native_capabilities(&self,instance:&Value)->Value {
+        let caps=self.capabilities();
+        let legacy=json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty});
+        agenthub_plugin_sdk::capabilities::describe(self.provider_id(),instance,&agenthub_plugin_sdk::capabilities::with_profile(legacy,native_experience::declarations()))
+    }
     fn provider_id(&self) -> &str {
         "kimi-code"
     }
@@ -538,7 +545,7 @@ impl AgentCliAdapter for KimiCodeAdapter {
         let mut args=base_args(&request.instance);args.extend(default_args(Some(&request)));
         if let Some(resume)=resume {args.extend(["--session".into(),resume]);}
         if let Some(effort)=request.reasoning_effort {request.env.get_or_insert_with(HashMap::new).insert("KIMI_MODEL_THINKING_EFFORT".into(),effort);}
-        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("kimi").into(),args,env:request.env,cwd:request.cwd,resources:vec![Box::new(proxy)]})
+        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("kimi").into(),args,env:request.env,cwd:request.cwd,resources:vec![Box::new(proxy)],provider_session_id:None})
     }
 }
 

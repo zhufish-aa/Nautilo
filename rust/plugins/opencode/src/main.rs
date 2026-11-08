@@ -4,7 +4,17 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod runtime;
+mod history;
+#[cfg(test)]
+mod tests;
+
+mod native_experience;
+
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+use runtime::{Route, Runtime};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
@@ -26,7 +36,7 @@ fn descriptor() -> Value {
         "capabilities": ["headless_text", "provider_server"],
         "defaultExecutable": "opencode",
         "credentialEnv": ["OPENCODE_API_KEY"],
-        "envPassthrough": ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"],
+        "envPassthrough": ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"],
         "permissionModes": [
             { "value": "build", "name": { "zh-CN": "执行模式", "en-US": "Build mode" },
               "description": { "zh-CN": "正常执行，可修改文件", "en-US": "Normal execution with file edits" } },
@@ -156,93 +166,273 @@ async fn capture(command: &str, args: &[&str], env: Option<HashMap<String, Strin
 // ---------------------------------------------------------------- server management
 
 struct ManagedServer {
+    key: String,
     base_url: String,
+    cwd: String,
     handle: agenthub_plugin_sdk::process::ProcessHandle,
-    active_runs: usize,
-    retire_when_idle: bool,
+    events: Arc<Runtime>,
+    terminals: AtomicUsize,
+    external_use: AtomicBool,
 }
-
+impl ManagedServer {
+    async fn close(&self) {
+        self.events.close();
+        self.handle.cancel().await;
+    }
+}
 #[derive(Default)]
 struct ServerPool {
-    servers: HashMap<String, Arc<Mutex<ManagedServer>>>,
+    servers: HashMap<String, Arc<ManagedServer>>,
+    terminals: HashMap<String, Arc<ManagedServer>>,
+    closed: bool,
 }
-
+#[derive(Default)]
+struct RunControl {
+    cancelled: AtomicBool,
+    native: Mutex<Option<(Arc<ManagedServer>, Arc<Route>)>>,
+    process: Mutex<Option<agenthub_plugin_sdk::process::ProcessHandle>>,
+    local_id: String,
+}
+#[derive(Clone)]
 struct OpenCodePlugin {
-    pool: Mutex<ServerPool>,
-    opening: tokio::sync::Mutex<()>,
-    interactions: Mutex<Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>>,
+    pool: Arc<Mutex<ServerPool>>,
+    opening: Arc<tokio::sync::Mutex<()>>,
+    interactions: Arc<Mutex<Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>>>,
+    daemon: Arc<Mutex<Option<Arc<dyn agenthub_plugin_sdk::DaemonChannel>>>>,
+    active: Arc<Mutex<HashMap<String, Arc<RunControl>>>>,
 }
-
 impl OpenCodePlugin {
     fn new() -> Self {
-        Self { pool: Mutex::new(ServerPool::default()), opening: tokio::sync::Mutex::new(()), interactions: Mutex::new(None) }
+        Self {
+            pool: Arc::new(Mutex::new(ServerPool::default())),
+            opening: Arc::new(tokio::sync::Mutex::new(())),
+            interactions: Arc::new(Mutex::new(None)),
+            daemon: Arc::new(Mutex::new(None)),
+            active: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
-
     fn server_key(request: &Value) -> String {
         let instance = request.get("instance").cloned().unwrap_or(Value::Null);
         let env = env_of(request);
         let mut pairs: Vec<(&String, &String)> = env.iter().collect();
         pairs.sort();
-        let env_json = serde_json::to_string(&pairs).unwrap_or_default();
-        let config = json!({"env":env_json,"baseArgs":instance["baseArgs"],"providerOptions":instance["providerOptions"],
+        let config = json!({"env":pairs,"baseArgs":instance["baseArgs"],"providerOptions":instance["providerOptions"],
             "models":instance["models"],"skills":request["skills"],"mcpServers":request["mcpServers"],"runtimeTools":request["runtimeTools"]});
         let hash = format!("{:x}", Sha256::digest(config.to_string().as_bytes()));
         [
-            instance.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-            std::fs::canonicalize(request.get("cwd").and_then(Value::as_str).unwrap_or(""))
+            instance["id"].as_str().unwrap_or("").to_string(),
+            std::fs::canonicalize(request["cwd"].as_str().unwrap_or(""))
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string()),
+                .unwrap_or_else(|_| request["cwd"].as_str().unwrap_or("").into()),
             executable_of(&instance),
             hash,
         ]
         .join("\0")
     }
-
-    async fn server_for(&self, request: &Value) -> anyhow::Result<Arc<Mutex<ManagedServer>>> {
-        let _opening = self.opening.lock().await;
+    // Callers hold opening through registration/release, so a last-session
+    // release cannot retire a server that another turn is about to borrow.
+    async fn server_for(&self, request: &Value) -> anyhow::Result<Arc<ManagedServer>> {
+        self.server_for_control(request, None).await
+    }
+    async fn server_for_control(&self, request: &Value, control: Option<&RunControl>) -> anyhow::Result<Arc<ManagedServer>> {
+        anyhow::ensure!(
+            !self.pool.lock().unwrap().closed,
+            "OpenCode plugin was disposed"
+        );
         let key = Self::server_key(request);
-        if let Some(existing) = self.pool.lock().unwrap().servers.get(&key).cloned() {
-            if existing.lock().unwrap().handle.is_alive() { return Ok(existing); }
+        let existing = self.pool.lock().unwrap().servers.get(&key).cloned();
+        if let Some(existing) = existing {
+            if existing.handle.is_alive() && existing.events.alive.load(Ordering::Acquire) {
+                return Ok(existing);
+            }
+            anyhow::ensure!(existing.terminals.load(Ordering::Acquire) == 0 && !existing.external_use.load(Ordering::Acquire),
+                "OpenCode event channel was lost while a native terminal owns the server; close it before reconnecting");
+            // The failed reader first stops its owned sessions. Do not restart
+            // underneath that in-flight native interruption.
+            let mut stopped = existing.events.stopped.subscribe();
+            let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+                let _ = stopped.wait_for(|done| *done).await;
+            })
+            .await
+            .is_ok();
+            if existing.handle.is_alive()
+                && stopped
+                && !existing
+                    .events
+                    .interruption_confirmed
+                    .load(Ordering::Acquire)
+            {
+                self.retire_if_unused(&existing).await;
+            }
+            anyhow::ensure!(!existing.handle.is_alive() || stopped && existing.events.interruption_confirmed.load(Ordering::Acquire),
+                "OpenCode disconnection left unconfirmed native work; the shared server was retained");
+            existing.close().await;
         }
-        let server = self.launch_server(request).await?;
-        let server = Arc::new(Mutex::new(server));
-        self.pool.lock().unwrap().servers.insert(key, server.clone());
+        let server = self.launch_server(request, key.clone(), control).await?;
+        self.pool
+            .lock()
+            .unwrap()
+            .servers
+            .insert(key, server.clone());
         Ok(server)
     }
-
-    async fn launch_server(&self, request: &Value) -> anyhow::Result<ManagedServer> {
-        let instance = request.get("instance").cloned().unwrap_or(Value::Null);
-        let cwd = request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    async fn launch_server(
+        &self,
+        request: &Value,
+        key: String,
+        control: Option<&RunControl>,
+    ) -> anyhow::Result<Arc<ManagedServer>> {
+        let instance = &request["instance"];
+        let cwd = request["cwd"].as_str().unwrap_or("").to_string();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
         let started = process::start(&ProcessRequest {
-            command: executable_of(&instance),
-            args: vec!["serve".to_string(), "--hostname".to_string(), "127.0.0.1".to_string(), "--port".to_string(), port.to_string()],
-            cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
+            command: executable_of(instance),
+            args: vec![
+                "serve".into(),
+                "--hostname".into(),
+                "127.0.0.1".into(),
+                "--port".into(),
+                port.to_string(),
+            ],
+            cwd: Some(cwd.clone()),
             env: Some(runtime_environment(request)?),
-            idle_timeout_ms: None,
             ..Default::default()
-        })
-        ?;
+        })?;
         let base_url = format!("http://127.0.0.1:{port}");
         let handle = started.handle.clone();
-        // Keep the server output flowing so its buffers never fill.
         tokio::spawn(async move {
             let mut events = started.events;
             while events.recv().await.is_some() {}
         });
-        match wait_for_server(&base_url, &cwd).await {
-            Ok(()) => Ok(ManagedServer { base_url, handle, active_runs: 0, retire_when_idle: false }),
+        let readiness = async {
+            tokio::select! {
+                ready = wait_for_server(&base_url, &cwd) => ready?,
+                _ = handle.wait() => anyhow::bail!("OpenCode server exited before its HTTP transport was ready"),
+            }
+            Runtime::open(base_url.clone(), cwd.clone()).await
+        };
+        let interrupted = async {
+            loop {
+                if self.pool.lock().unwrap().closed || control.is_some_and(|control| control.cancelled.load(Ordering::Acquire)) { break; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        let ready = tokio::select! {
+            ready = readiness => ready,
+            _ = interrupted => Err(anyhow::anyhow!("OpenCode server startup was cancelled")),
+        };
+        match ready {
+            Ok(events) => Ok(Arc::new(ManagedServer {
+                key,
+                base_url,
+                cwd,
+                handle,
+                events,
+                terminals: AtomicUsize::new(0),
+                external_use: AtomicBool::new(false),
+            })),
             Err(error) => {
                 handle.cancel().await;
                 Err(error)
             }
         }
     }
+    async fn retire_if_unused(&self, server: &Arc<ManagedServer>) {
+        if server.events.has_sessions()
+            || server.terminals.load(Ordering::Acquire) > 0
+            || server.external_use.load(Ordering::Acquire)
+        {
+            return;
+        }
+        // Unknown/failed status is not proof of safety. Native TUI servers are
+        // retained until unload because they can own untracked background jobs.
+        let clear = async {
+            let statuses = api_json(
+                &server.base_url,
+                &server.cwd,
+                "/session/status",
+                "GET",
+                None,
+            )
+            .await
+            .ok()?;
+            if !statuses
+                .as_object()?
+                .values()
+                .all(|status| status["type"] == "idle")
+            {
+                return None;
+            }
+            for path in ["/question", "/permission", "/pty"] {
+                let values = api_json(&server.base_url, &server.cwd, path, "GET", None)
+                    .await
+                    .ok()?;
+                if !values
+                    .as_array()?
+                    .iter()
+                    .all(|item| path == "/pty" && item["status"] == "exited")
+                {
+                    return None;
+                }
+            }
+            Some(())
+        };
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(3), clear).await,
+            Ok(Some(()))
+        ) {
+            return;
+        }
+        let removed = {
+            let mut pool = self.pool.lock().unwrap();
+            if pool
+                .servers
+                .get(&server.key)
+                .is_some_and(|current| Arc::ptr_eq(current, server))
+            {
+                pool.servers.remove(&server.key);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            server.close().await;
+        }
+    }
+    async fn release_local(
+        &self,
+        local: &str,
+        keep: Option<&Arc<ManagedServer>>,
+    ) -> anyhow::Result<()> {
+        let servers: Vec<_> = self
+            .pool
+            .lock()
+            .unwrap()
+            .servers
+            .values()
+            .cloned()
+            .collect();
+        for server in servers {
+            if server.events.has_local(local) {
+                anyhow::ensure!(
+                    server.events.release(local).await,
+                    "OpenCode did not confirm session interruption; shared server was retained"
+                );
+            }
+            if !keep.is_some_and(|keep| Arc::ptr_eq(keep, &server)) {
+                self.retire_if_unused(&server).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn wait_for_server(base_url: &str, cwd: &str) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().no_proxy().build()?;
     while std::time::Instant::now() < deadline {
         let url = directory_url(base_url, cwd, "/session/status");
         if let Ok(response) = client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -270,7 +460,7 @@ fn urlencoding(value: &str) -> String {
 }
 
 async fn api_json(base_url: &str, cwd: &str, path: &str, method: &str, body: Option<Value>) -> anyhow::Result<Value> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(if path.ends_with("/summarize") { 1800 } else { 30 })).build()?;
     let url = directory_url(base_url, cwd, path);
     let request = match method {
         "POST" => client.post(&url),
@@ -645,29 +835,96 @@ async fn read_plan(cwd: &str, question: &Value) -> Value {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for OpenCodePlugin {
-    fn native_terminal_supported(&self)->bool {true}
-    async fn terminal_plan(&self,request:&Value,resume:Option<String>)->anyhow::Result<Value> {
-        let server=self.server_for(request).await?;
-        let base_url=server.lock().unwrap().base_url.clone();
-        let mut args=vec!["attach".to_string(),base_url];if let Some(resume)=resume{args.extend(["--session".into(),resume]);}
-        Ok(json!({"command":executable_of(&request["instance"]),"args":args,"env":runtime_environment(request)?}))
+    fn native_terminal_supported(&self) -> bool {
+        true
     }
+    async fn terminal_plan(
+        &self,
+        request: &Value,
+        resume: Option<String>,
+    ) -> anyhow::Result<Value> {
+        let _opening = self.opening.lock().await;
+        let server = self.server_for(request).await?;
+        let environment=runtime_environment(request)?;
+        server.external_use.store(true, Ordering::Release);
+        let session=match resume {
+            Some(session)=>session,
+            None=>api_json(&server.base_url,&server.cwd,"/session","POST",Some(json!({"title":"Nautilo native terminal"}))).await?["id"].as_str().filter(|id|!id.is_empty()).ok_or_else(||anyhow::anyhow!("OpenCode server did not return a native session ID"))?.to_string(),
+        };
+        let (output,_events)=mpsc::unbounded_channel();
+        let binding=request["sessionBindingId"].as_str().map(str::to_string).unwrap_or_else(||next_native_id("terminal-binding"));
+        let daemon=self.daemon.lock().unwrap().clone();let legacy=self.interactions.lock().unwrap().clone();
+        let route=Route::new(&binding,request,output,daemon,legacy).await;
+        route.finish(0,None);
+        server.events.park(&session,route.clone())?;
+        server.events.pause_terminal_interactions(&route.local_id);
+        let token = next_native_id("terminal");
+        server.terminals.fetch_add(1, Ordering::AcqRel);
+        server.external_use.store(true, Ordering::Release);
+        self.pool
+            .lock()
+            .unwrap()
+            .terminals
+            .insert(token.clone(), server.clone());
+        let mut args = vec!["attach".to_string(), server.base_url.clone()];
+        args.extend(["--session".into(), session.clone()]);
+        Ok(
+            json!({"command":executable_of(&request["instance"]),"args":args,"env":environment,"token":token,"providerSessionId":session}),
+        )
+    }
+    async fn close_terminal(&self, token: &str) {
+        let _opening = self.opening.lock().await;
+        let server = self.pool.lock().unwrap().terminals.remove(token);
+        if let Some(server) = server {
+            server.terminals.fetch_sub(1, Ordering::AcqRel);
+            self.retire_if_unused(&server).await;
+        }
+    }
+
     fn descriptor(&self) -> Value {
         descriptor()
     }
 
-    fn capabilities(&self) -> Value {
-        json!({
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({
             "structuredOutput": true,
             "textOutput": true,
             "interactiveStdin": false,
             "nativeResume": true,
+            "sessionBackgroundEvents": true,
+            "nativeHistory": true,
+            "nativeEventIdentities": true,
+            "sharedTerminalServer": true,
+            "nativeExperienceVersion": 1,
             "pty": false
-        })
+        }),native_experience::declarations())
     }
 
     fn set_interaction_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::InteractionChannel>) {
         *self.interactions.lock().unwrap() = Some(channel);
+    }
+    async fn read_session_history(&self, request: &Value, session: &str) -> anyhow::Result<Option<Value>> {
+        if !base_args(&request["instance"]).is_empty() {return Ok(None);}
+        history::read(self, request, session).await.map(Some)
+    }
+    async fn resume_terminal_events(&self,request:&Value,session:&str,snapshot:&Value)->anyhow::Result<()> {
+        let _opening=self.opening.lock().await;
+        let server=self.server_for(request).await?;
+        let local=request["localSessionId"].as_str().ok_or_else(||anyhow::anyhow!("A local session is required"))?;
+        if !server.events.has_local(local) {
+            agenthub_plugin_sdk::history::validate(snapshot,session)?;
+            let (output,_events)=mpsc::unbounded_channel();
+            let binding=request["sessionBindingId"].as_str().ok_or_else(||anyhow::anyhow!("A session event binding is required"))?;
+            let daemon=self.daemon.lock().unwrap().clone();let legacy=self.interactions.lock().unwrap().clone();
+            let route=Route::new(binding,request,output,daemon,legacy).await;
+            route.finish(0,None);server.events.park(session,route.clone())?;
+            server.events.seed_history(session,&route,snapshot);
+        }
+        server.events.resume_terminal_interactions(local).await
+    }
+
+    fn set_daemon_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::DaemonChannel>) {
+        *self.daemon.lock().unwrap() = Some(channel);
     }
 
     async fn detect(&self, instance: &Value) -> Value {
@@ -704,50 +961,140 @@ impl ProviderPlugin for OpenCodePlugin {
         Ok(parse_opencode_models(&text))
     }
 
-    async fn start(&self, _run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
-        let provider_command = request.get("providerCommand").and_then(Value::as_str).map(str::to_string);
-        if provider_command.as_deref() == Some("compact") && resume.is_none() {
+    async fn start(
+        &self,
+        run_id: &str,
+        request: Value,
+        resume: Option<String>,
+    ) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+        if request["providerCommand"] == "compact" && resume.is_none() {
             anyhow::bail!("OpenCode context compaction requires an existing provider session");
         }
-        let instance = request.get("instance").cloned().unwrap_or(Value::Null);
-        let has_base_args = !base_args(&instance).is_empty();
-        // Provider commands always use the server transport; `run` has no
-        // headless summarize surface.
-        if has_base_args && resume.is_none() {
-            let args = start_args(&instance, &request);
-            return self.spawn_run(request, args).await;
-        }
-        if has_base_args && provider_command.is_none() {
-            let mut args = start_args(&instance, &request);
-            args.push("--session".to_string());
-            args.push(resume.clone().unwrap_or_default());
-            return self.spawn_run(request, args).await;
-        }
-        let interactions = self.interactions.lock().unwrap().clone();
-        self.server_run(request, resume, interactions).await
-    }
-
-    async fn dispose(&self) {
-        let servers: Vec<Arc<Mutex<ManagedServer>>> = self.pool.lock().unwrap().servers.drain().map(|(_, s)| s).collect();
-        for server in servers {
-            let handle = {
-                let mut server = server.lock().unwrap();
-                server.retire_when_idle = true;
-                if server.active_runs == 0 {
-                    Some(server.handle.clone())
-                } else {
-                    None
+        agenthub_plugin_sdk::images::read_request_images(&request)?;
+        anyhow::ensure!(
+            !self.pool.lock().unwrap().closed,
+            "OpenCode plugin was disposed"
+        );
+        let control = Arc::new(RunControl {
+            local_id: request["localSessionId"].as_str().unwrap_or(run_id).into(),
+            ..Default::default()
+        });
+        self.active
+            .lock()
+            .unwrap()
+            .insert(run_id.into(), control.clone());
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let plugin = self.clone();
+        let run_id = run_id.to_string();
+        tokio::spawn(async move {
+            let result = if !base_args(&request["instance"]).is_empty()
+                && request["providerCommand"].is_null()
+            {
+                let mut args = start_args(&request["instance"], &request);
+                if let Some(resume) = resume {
+                    args.extend(["--session".into(), resume]);
                 }
+                match plugin.spawn_run(&control, request, args).await {
+                    Ok(mut events) => {
+                        while let Some(mut event) = events.recv().await {
+                            let exit = event["kind"] == "exit";
+                            if exit && control.cancelled.load(Ordering::Acquire) {
+                                event["exitCode"] = json!(130);
+                            }
+                            let _ = sender.send(event);
+                            if exit {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                plugin
+                    .server_run(&run_id, &control, request, resume, sender.clone())
+                    .await
             };
-            if let Some(handle) = handle {
-                handle.cancel().await;
+            if let Err(error) = result {
+                if !control.cancelled.load(Ordering::Acquire) {
+                    let _ = sender.send(json!({"kind":"error","message":error.to_string()}));
+                }
+                let _ = sender.send(json!({"kind":"exit","exitCode":if control.cancelled.load(Ordering::Acquire) {130} else {1}}));
+            }
+            plugin.active.lock().unwrap().remove(&run_id);
+        });
+        Ok(receiver)
+    }
+    async fn cancel(&self, run_id: &str) {
+        let control = self.active.lock().unwrap().get(run_id).cloned();
+        let Some(control) = control else { return };
+        control.cancelled.store(true, Ordering::Release);
+        let native = control.native.lock().unwrap().clone();
+        if let Some((server, route)) = native {
+            if route.foreground() {
+                route.cancelled.store(true, Ordering::Release);
+                let confirmed = server.events.interrupt(&route, 130, None).await;
+                if !confirmed {
+                    route.emit(json!({"kind":"raw","stream":"stderr","text":"OpenCode interruption was not confirmed; the shared server is retained"}));
+                }
+            }
+        }
+        let process = control.process.lock().unwrap().clone();
+        if let Some(process) = process {
+            process.cancel().await;
+        }
+    }
+    async fn release_session(&self, request: &Value) -> anyhow::Result<()> {
+        let Some(local) = request["localSessionId"].as_str() else {
+            return Ok(());
+        };
+        let controls: Vec<_> = self
+            .active
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|c| c.local_id == local)
+            .cloned()
+            .collect();
+        for control in controls {
+            control.cancelled.store(true, Ordering::Release);
+            let process = control.process.lock().unwrap().clone();
+            if let Some(process) = process {
+                process.cancel().await;
+            }
+        }
+        let _opening = self.opening.lock().await;
+        self.release_local(local, None).await
+    }
+    async fn dispose(&self) {
+        self.pool.lock().unwrap().closed = true;
+        let controls: Vec<_> = self.active.lock().unwrap().values().cloned().collect();
+        for control in &controls {
+            control.cancelled.store(true, Ordering::Release);
+        }
+        let _opening = self.opening.lock().await;
+        let servers: Vec<_> = {
+            let mut pool = self.pool.lock().unwrap();
+            pool.closed = true;
+            pool.terminals.clear();
+            pool.servers.drain().map(|(_, server)| server).collect()
+        };
+        for server in servers {
+            server.close().await;
+        }
+        for control in controls {
+            let process = control.process.lock().unwrap().clone();
+            if let Some(process) = process {
+                process.cancel().await;
             }
         }
     }
+
+
 }
 
 impl OpenCodePlugin {
-    async fn spawn_run(&self, request: Value, args: Vec<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+    async fn spawn_run(&self, control: &Arc<RunControl>, request: Value, args: Vec<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         agenthub_plugin_sdk::images::read_request_images(&request)?;
         let instance = request.get("instance").cloned().unwrap_or(Value::Null);
         let started = process::start(&ProcessRequest {
@@ -760,6 +1107,8 @@ impl OpenCodePlugin {
             max_output_bytes: Some(request.get("maxOutputBytes").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20 * 1024 * 1024)),
             ..Default::default()
         })?;
+        *control.process.lock().unwrap() = Some(started.handle.clone());
+        if control.cancelled.load(Ordering::Acquire) { started.handle.cancel().await; }
         started.handle.end_stdin();
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
         tokio::spawn(async move {
@@ -818,82 +1167,142 @@ impl OpenCodePlugin {
 
     async fn server_run(
         &self,
+        run_id: &str,
+        control: &Arc<RunControl>,
         request: Value,
         resume: Option<String>,
-        interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
-    ) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
-        let (sender, receiver) = mpsc::unbounded_channel::<Value>();
-        let attached = std::time::Instant::now();
-        let reused = self.pool.lock().unwrap().servers.get(&Self::server_key(&request)).is_some_and(|server|server.lock().unwrap().handle.is_alive());
-        let server = self.server_for(&request).await?;
-        let _ = sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{
-            "providerId":"opencode","transport":"http-sse","reused":reused,"pid":server.lock().unwrap().handle.pid,"attachMs":attached.elapsed().as_millis()}}));
-        let _ = sender.send(json!({"kind":"status","phase":"runtime_capabilities","raw":{
-            "providerId":"opencode","source":"native-handshake","transport":"http-sse","reported":{"sessionStatusReady":true}}}));
-        server.lock().unwrap().active_runs += 1;
-        let server_for_task = server.clone();
-        tokio::spawn(async move {
-            let result = server_run_loop(request, resume, server, sender.clone(), interactions).await;
-            if let Err(error) = result {
-                let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
-                let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
+        sender: mpsc::UnboundedSender<Value>,
+    ) -> anyhow::Result<()> {
+        let attached = Instant::now();
+        let daemon = self.daemon.lock().unwrap().clone();
+        let interactions = self.interactions.lock().unwrap().clone();
+        let route = Route::new(run_id, &request, sender.clone(), daemon, interactions).await;
+        let server;
+        let session_id;
+        let user_message = next_native_id("msg");
+        {
+            let _opening = self.opening.lock().await;
+            if control.cancelled.load(Ordering::Acquire) {
+                route.cancelled.store(true, Ordering::Release);
+                route.finish(130, None);
+                return Ok(());
             }
-            let handle = {
-                let mut server = server_for_task.lock().unwrap();
-                server.active_runs = server.active_runs.saturating_sub(1);
-                if server.retire_when_idle && server.active_runs == 0 {
-                    Some(server.handle.clone())
-                } else {
-                    None
-                }
+            let reused = self
+                .pool
+                .lock()
+                .unwrap()
+                .servers
+                .get(&Self::server_key(&request))
+                .is_some_and(|s| s.handle.is_alive() && s.events.alive.load(Ordering::Acquire));
+            server = self.server_for_control(&request, Some(control)).await?;
+            if control.cancelled.load(Ordering::Acquire) {
+                self.retire_if_unused(&server).await;
+                route.cancelled.store(true, Ordering::Release);
+                route.finish(130, None);
+                return Ok(());
+            }
+            // Changed account/config identity must detach the old local binding.
+            let previous: Vec<_> = self
+                .pool
+                .lock()
+                .unwrap()
+                .servers
+                .values()
+                .filter(|s| !Arc::ptr_eq(s, &server) && s.events.has_local(&route.local_id))
+                .cloned()
+                .collect();
+            for old in previous {
+                anyhow::ensure!(
+                    old.events.release(&route.local_id).await,
+                    "Previous OpenCode session could not be interrupted"
+                );
+                self.retire_if_unused(&old).await;
+            }
+            session_id = match resume {
+                Some(id) => id,
+                None => api_json(&server.base_url, &server.cwd, "/session", "POST", Some(json!({"title":request["prompt"].as_str().unwrap_or("").chars().take(80).collect::<String>()}))).await?["id"].as_str().filter(|id| !id.is_empty()).ok_or_else(||anyhow::anyhow!("OpenCode server did not return a session id"))?.to_string(),
             };
-            if let Some(handle) = handle {
-                handle.cancel().await;
+            server
+                .events
+                .begin(&session_id, &user_message, route.clone())?;
+            *control.native.lock().unwrap() = Some((server.clone(), route.clone()));
+            let _ = sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"opencode","transport":"http-sse","reused":reused,"pid":server.handle.pid,"attachMs":attached.elapsed().as_millis()}}));
+            let _ = sender.send(json!({"kind":"status","phase":"runtime_capabilities","raw":{"providerId":"opencode","source":"native-handshake","transport":"http-sse","reported":{"sessionStatusReady":true,"sessionBackgroundEvents":true}}}));
+            let _ = sender.send(json!({"kind":"commands","commands":native_commands()}));
+            let _ = sender.send(json!({"kind":"session","providerSessionId":session_id,"raw":{"providerUserMessageId":user_message}}));
+            let _ = sender.send(json!({"kind":"status","phase":"turn_started"}));
+        }
+        if control.cancelled.load(Ordering::Acquire) {
+            self.cancel(run_id).await;
+            return Ok(());
+        }
+        let began = Instant::now();
+        let mut done = route.done.subscribe();
+        let mut submission = Box::pin(submit_prompt(
+            &request,
+            &server.base_url,
+            &server.cwd,
+            &session_id,
+            &user_message,
+        ));
+        let mut submitted = false;
+        let mut interval = tokio::time::interval(Duration::from_millis(25));
+        loop {
+            tokio::select! {
+                _ = async { let _ = done.wait_for(|finished| *finished).await; } => break,
+                result = &mut submission, if !submitted => {
+                    submitted = true;
+                    match result {
+                        Ok(()) if request["providerCommand"] == "compact" => route.finish(0, None),
+                        Err(error) => { server.events.interrupt(&route, 1, Some(&error.to_string())).await; },
+                        _ => {}
+                    }
+                },
+                _ = interval.tick() => {
+                    if control.cancelled.load(Ordering::Acquire) { self.cancel(run_id).await; break; }
+                    if let Some(reason) = route.limit(&request, began) {
+                        if reason != "receiver_closed" { route.emit(json!({"kind":"timeout","reason":reason})); }
+                        server.events.interrupt(&route, 1, Some(reason)).await;
+                        break;
+                    }
+                }
             }
-        });
-        Ok(receiver)
+        }
+        Ok(())
     }
+
+
 }
 
-async fn server_run_loop(
-    request: Value,
-    resume: Option<String>,
-    server: Arc<Mutex<ManagedServer>>,
-    sender: mpsc::UnboundedSender<Value>,
-    interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
+fn next_native_id(prefix: &str) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let count = NEXT.fetch_add(1, Ordering::Relaxed);
+    // OpenCode accepts caller-supplied IDs with the native prefix. Retain its
+    // sortable 48-bit time encoding; the suffix separates processes and calls.
+    let time = ((chrono::Utc::now().timestamp_millis() as u64) << 12) | (count & 0xfff);
+    format!(
+        "{prefix}_{:012x}{:08x}{:06x}",
+        time & 0xffffffffffff,
+        std::process::id(),
+        count & 0xffffff
+    )
+}
+
+async fn submit_prompt(
+    request: &Value,
+    base_url: &str,
+    cwd: &str,
+    session_id: &str,
+    user_message: &str,
 ) -> anyhow::Result<()> {
-    let (base_url, cwd) = {
-        let server = server.lock().unwrap();
-        (server.base_url.clone(), request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string())
-    };
-    let _ = sender.send(json!({ "kind": "commands", "commands": native_commands() }));
-
-    // Open the SSE event stream first so no event is missed.
-    let client = reqwest::Client::new();
-    let stream_response = client
-        .get(directory_url(&base_url, &cwd, "/event"))
-        .header("accept", "text/event-stream")
-        .send()
-        .await?;
-    if !stream_response.status().is_success() {
-        anyhow::bail!("OpenCode event stream failed ({})", stream_response.status().as_u16());
-    }
-
-    let mut session_id = resume;
-    if session_id.is_none() {
-        let title = request.get("prompt").and_then(Value::as_str).unwrap_or("").chars().take(80).collect::<String>();
-        let created = api_json(&base_url, &cwd, "/session", "POST", Some(json!({ "title": title }))).await?;
-        session_id = created.get("id").and_then(Value::as_str).map(str::to_string);
-        if session_id.is_none() {
-            anyhow::bail!("OpenCode server did not return a session id");
-        }
-    }
-    let session_id = session_id.unwrap();
-    let _ = sender.send(json!({ "kind": "session", "providerSessionId": session_id }));
-    let _ = sender.send(json!({ "kind": "status", "phase": "turn_started" }));
-
     if request.get("providerCommand").and_then(Value::as_str) == Some("compact") {
-        let model = resolve_summarize_model(&base_url, &cwd, &session_id, request.get("model").and_then(Value::as_str)).await?;
+        let model = resolve_summarize_model(
+            &base_url,
+            &cwd,
+            &session_id,
+            request.get("model").and_then(Value::as_str),
+        )
+        .await?;
         api_json(
             &base_url,
             &cwd,
@@ -919,10 +1328,13 @@ async fn server_run_loop(
                     .filter(|m| !m.is_empty())
                     .map(str::to_string)
             });
-        let mut parts = vec![json!({ "type": "text", "text": request.get("prompt").and_then(Value::as_str).unwrap_or("") })];
+        let mut parts = vec![
+            json!({ "type": "text", "text": request.get("prompt").and_then(Value::as_str).unwrap_or("") }),
+        ];
         for image in agenthub_plugin_sdk::images::read_request_images(&request)? {
-            let url = reqwest::Url::from_file_path(&image.path)
-                .map_err(|_| anyhow::anyhow!("Invalid absolute image path: {}", image.path.display()))?;
+            let url = reqwest::Url::from_file_path(&image.path).map_err(|_| {
+                anyhow::anyhow!("Invalid absolute image path: {}", image.path.display())
+            })?;
             parts.push(json!({
                 "type": "file", "url": url.as_str(),
                 "filename": image.path.file_name().map(|s|s.to_string_lossy()),
@@ -930,11 +1342,24 @@ async fn server_run_loop(
             }));
         }
         let mut body = Map::new();
-        let selected = request.get("model").and_then(Value::as_str).map(|model| if instance.pointer("/providerOptions/runtimeConnectionId").is_some() { format!("nautilo/{model}") } else { model.to_string() });
+        let selected = request.get("model").and_then(Value::as_str).map(|model| {
+            if instance
+                .pointer("/providerOptions/runtimeConnectionId")
+                .is_some()
+            {
+                format!("nautilo/{model}")
+            } else {
+                model.to_string()
+            }
+        });
         if let Some(model) = opencode_model(selected.as_deref()) {
             body.insert("model".to_string(), model);
         }
-        if let Some(effort) = request.get("reasoningEffort").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+        if let Some(effort) = request
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
             body.insert("variant".to_string(), json!(effort));
         }
         if let Some(mode) = mode.as_deref() {
@@ -943,6 +1368,7 @@ async fn server_run_loop(
             }
         }
         body.insert("parts".to_string(), Value::Array(parts));
+        body.insert("messageID".to_string(), json!(user_message));
         api_json(
             &base_url,
             &cwd,
@@ -952,220 +1378,7 @@ async fn server_run_loop(
         )
         .await?;
     }
-
-    // Sub-agent (task tool) child sessions also publish on the event bus.
-    let mut pending_task_parts: Vec<String> = vec![];
-    let mut child_sessions: HashMap<String, String> = HashMap::new();
-    let mut rejected_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Part-id -> part type ("text"/"reasoning"/"tool"/...). OpenCode >=1.18.x
-    // streams incremental output through `message.part.delta` events which only
-    // carry a partID; we learn the part type from the preceding
-    // `message.part.updated` events.
-    let mut part_stream = PartStream::default();
-    // Deltas that arrive before their part type is known (rare reordering) are
-    // buffered here until the matching `message.part.updated` arrives.
-
-    let mut stream = stream_response;
-    let mut pending = String::new();
-    loop {
-        let chunk = match tokio::time::timeout(std::time::Duration::from_secs(600), stream.chunk()).await {
-            Ok(Ok(Some(chunk))) => chunk,
-            Ok(Ok(None)) => break,
-            Ok(Err(error)) => anyhow::bail!(error.to_string()),
-            Err(_) => anyhow::bail!("OpenCode event stream timed out"),
-        };
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        let mut frames: Vec<String> = pending.split("\n\n").map(str::to_string).collect();
-        pending = frames.pop().unwrap_or_default();
-        for frame in frames {
-            let data = frame
-                .lines()
-                .filter(|line| line.starts_with("data:"))
-                .map(|line| line[5..].trim_start())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() {
-                continue;
-            }
-            let Ok(raw) = serde_json::from_str::<Value>(&data) else { continue };
-            let event = unwrap_server_event(&raw);
-            let properties = event.get("properties").cloned().unwrap_or(Value::Null);
-            let event_type = event.get("type").and_then(Value::as_str).unwrap_or("").to_string();
-            let event_session_id = properties.get("sessionID").and_then(Value::as_str).unwrap_or("").to_string();
-            let known_child = !event_session_id.is_empty() && child_sessions.contains_key(&event_session_id);
-            if !event_session_id.is_empty()
-                && event_session_id != session_id
-                && !known_child
-                && event_type != "message.part.updated"
-                && event_type != "message.part.delta"
-            {
-                continue;
-            }
-            match event_type.as_str() {
-                "message.part.updated" => {
-                    let part = properties.get("part").cloned().unwrap_or(Value::Null);
-                    let part_session_id = part.get("sessionID").and_then(Value::as_str).unwrap_or("").to_string();
-                    let is_main = part_session_id.is_empty() || part_session_id == session_id;
-                    if is_main
-                        && part.get("type").and_then(Value::as_str) == Some("tool")
-                        && part.get("tool").and_then(Value::as_str) == Some("task")
-                    {
-                        let call_id = part
-                            .get("callID")
-                            .and_then(Value::as_str)
-                            .or_else(|| part.get("id").and_then(Value::as_str))
-                            .unwrap_or("")
-                            .to_string();
-                        if !call_id.is_empty() && !pending_task_parts.contains(&call_id) {
-                            pending_task_parts.push(call_id.clone());
-                        }
-                        // Exact pairing: opencode puts the child session id into
-                        // the task part's metadata before the child starts.
-                        let child_id = part
-                            .get("state")
-                            .and_then(|s| s.get("metadata"))
-                            .and_then(|m| m.get("sessionId"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        if !call_id.is_empty() && !child_id.is_empty() && !child_sessions.contains_key(&child_id) {
-                            child_sessions.insert(child_id, call_id.clone());
-                            if let Some(index) = pending_task_parts.iter().position(|p| p == &call_id) {
-                                pending_task_parts.remove(index);
-                            }
-                        }
-                    }
-                    let mut dispatch_id: Option<String> = None;
-                    if !is_main {
-                        dispatch_id = child_sessions.get(&part_session_id).cloned();
-                        if dispatch_id.is_none() && !rejected_sessions.contains(&part_session_id) {
-                            let parent = fetch_session_parent(&base_url, &cwd, &part_session_id).await;
-                            if parent.as_deref() == Some(session_id.as_str()) {
-                                if !pending_task_parts.is_empty() {
-                                    let dispatch = pending_task_parts.remove(0);
-                                    child_sessions.insert(part_session_id.clone(), dispatch.clone());
-                                    dispatch_id = Some(dispatch);
-                                }
-                            } else {
-                                rejected_sessions.insert(part_session_id.clone());
-                            }
-                        }
-                        if dispatch_id.is_none() {
-                            continue;
-                        }
-                    }
-                    let delta = properties.get("delta").and_then(Value::as_str);
-                    let events = part_stream.update(&part, &raw, delta);
-                    for event in match dispatch_id {
-                        Some(id) => with_subagent_dispatch(events, &id),
-                        None => events,
-                    } {
-                        if sender.send(event).is_err() {
-                            return Ok(());
-                        }
-                    }
-                }
-                // OpenCode >=1.18.x streams part output as dedicated
-                // `message.part.delta` events (properties.partID / delta).
-                // Older versions carried the delta on `message.part.updated`
-                // instead; both are handled so the plugin keeps working across
-                // opencode versions.
-                "message.part.delta" => {
-                    let part_id = properties.get("partID").and_then(Value::as_str).unwrap_or("").to_string();
-                    let delta_text = properties.get("delta").and_then(Value::as_str).unwrap_or("").to_string();
-                    if part_id.is_empty() || delta_text.is_empty() {
-                        continue;
-                    }
-                    let mut dispatch_id: Option<String> = None;
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        dispatch_id = child_sessions.get(&event_session_id).cloned();
-                        if dispatch_id.is_none() && !rejected_sessions.contains(&event_session_id) {
-                            let parent = fetch_session_parent(&base_url, &cwd, &event_session_id).await;
-                            if parent.as_deref() == Some(session_id.as_str()) {
-                                if !pending_task_parts.is_empty() {
-                                    let dispatch = pending_task_parts.remove(0);
-                                    child_sessions.insert(event_session_id.clone(), dispatch.clone());
-                                    dispatch_id = Some(dispatch);
-                                }
-                            } else {
-                                rejected_sessions.insert(event_session_id.clone());
-                            }
-                        }
-                        if dispatch_id.is_none() {
-                            continue;
-                        }
-                    }
-                    let events = part_stream.delta(&properties, &raw);
-                    for event in match &dispatch_id {
-                        Some(id) => with_subagent_dispatch(events, id),
-                        None => events,
-                    } {
-                        if sender.send(event).is_err() {
-                            return Ok(());
-                        }
-                    }
-                }
-                "question.asked" => {
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        continue;
-                    }
-                    handle_question(&base_url, &cwd, &request, &properties, interactions.clone()).await;
-                }
-                "permission.asked" => {
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        continue;
-                    }
-                    handle_permission(&base_url, &cwd, &properties, interactions.clone(), &session_id).await;
-                }
-                "session.status" => {
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        continue;
-                    }
-                    let status_type = properties
-                        .get("status")
-                        .and_then(|s| s.get("type"))
-                        .and_then(Value::as_str)
-                        .or_else(|| properties.get("status").and_then(Value::as_str))
-                        .unwrap_or("");
-                    if status_type != "idle" {
-                        continue;
-                    }
-                    let _ = sender.send(json!({ "kind": "status", "phase": "turn_completed", "raw": raw }));
-                    let _ = sender.send(json!({ "kind": "exit", "exitCode": 0 }));
-                    return Ok(());
-                }
-                "session.error" => {
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        continue;
-                    }
-                    let message = properties
-                        .get("error")
-                        .and_then(|e| e.get("data"))
-                        .and_then(|d| d.get("message"))
-                        .and_then(Value::as_str)
-                        .or_else(|| properties.get("error").and_then(|e| e.get("message")).and_then(Value::as_str))
-                        .unwrap_or("OpenCode session failed");
-                    let _ = sender.send(json!({ "kind": "status", "phase": "turn_failed", "raw": raw }));
-                    let _ = sender.send(json!({ "kind": "error", "message": message }));
-                    // Every terminal path must end the stream — the daemon
-                    // finalizes the turn only when the exit frame arrives.
-                    let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-    }
     Ok(())
-}
-
-fn unwrap_server_event(value: &Value) -> Value {
-    let payload = value.get("payload").cloned().unwrap_or(Value::Null);
-    if payload.get("type").is_some() {
-        payload
-    } else {
-        value.clone()
-    }
 }
 
 fn opencode_model(model: Option<&str>) -> Option<Value> {
@@ -1197,18 +1410,13 @@ async fn resolve_summarize_model(base_url: &str, cwd: &str, session_id: &str, mo
     anyhow::bail!("OpenCode summarize needs a model; pick a session model first")
 }
 
-async fn fetch_session_parent(base_url: &str, cwd: &str, child_session_id: &str) -> Option<String> {
-    let info = api_json(base_url, cwd, &format!("/session/{}", urlencoding(child_session_id)), "GET", None).await.ok()?;
-    info.get("parentID").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
-}
-
 async fn handle_question(
     base_url: &str,
     cwd: &str,
-    request: &Value,
     properties: &Value,
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
-) {
+    run_id: &str,
+) -> anyhow::Result<()> {
     let request_id = properties
         .get("id")
         .and_then(Value::as_str)
@@ -1216,13 +1424,13 @@ async fn handle_question(
         .unwrap_or("")
         .to_string();
     if request_id.is_empty() {
-        return;
+        return Ok(());
     }
     let reject_path = format!("/question/{}/reject", urlencoding(&request_id));
     let reject = || api_json(base_url, cwd, &reject_path, "POST", None);
     let Some(channel) = interactions else {
-        let _ = reject().await;
-        return;
+        reject().await?;
+        return Ok(());
     };
     let channel = channel.clone();
     let (is_plan, questions, options) = classify_question(properties);
@@ -1230,33 +1438,33 @@ async fn handle_question(
         let question = questions.first().cloned().unwrap_or(Value::Null);
         let plan = read_plan(cwd, &question).await;
         let response = channel
-            .ask("", json!({ "kind": "plan_approval", "title": "计划已就绪", "plan": plan, "options": options }))
+            .ask(run_id, json!({ "kind": "plan_approval", "nativeRequestId":request_id, "providerSessionId":properties["sessionID"], "title": "计划已就绪", "plan": plan, "options": options }))
             .await;
         let option_id = response.get("optionId").and_then(Value::as_str);
         let selected = options.iter().find(|option| option.get("id").and_then(Value::as_str) == option_id);
         if response.get("outcome").and_then(Value::as_str) == Some("selected") {
             if let Some(selected) = selected {
                 let label = selected.get("label").cloned().unwrap_or(Value::Null);
-                let _ = api_json(
+                api_json(
                     base_url,
                     cwd,
                     &format!("/question/{}/reply", urlencoding(&request_id)),
                     "POST",
                     Some(json!({ "answers": [[label]] })),
                 )
-                .await;
-                return;
+                .await?;
+                return Ok(());
             }
         }
-        let _ = reject().await;
-        return;
+        reject().await?;
+        return Ok(());
     }
     let response = channel
-        .ask("", json!({ "kind": "question", "title": "OpenCode question", "questions": questions }))
+        .ask(run_id, json!({ "kind": "question", "nativeRequestId":request_id, "providerSessionId":properties["sessionID"], "title": "OpenCode question", "questions": questions }))
         .await;
     if response.get("outcome").and_then(Value::as_str) != Some("selected") {
-        let _ = reject().await;
-        return;
+        reject().await?;
+        return Ok(());
     }
     let answers: Vec<Value> = questions
         .iter()
@@ -1265,15 +1473,15 @@ async fn handle_question(
             response.get("answers").and_then(|a| a.get(id)).cloned().unwrap_or_else(|| json!([]))
         })
         .collect();
-    let _ = api_json(
+    api_json(
         base_url,
         cwd,
         &format!("/question/{}/reply", urlencoding(&request_id)),
         "POST",
         Some(json!({ "answers": answers })),
     )
-    .await;
-    let _ = request;
+    .await?;
+    Ok(())
 }
 
 async fn handle_permission(
@@ -1282,7 +1490,7 @@ async fn handle_permission(
     properties: &Value,
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
     run_id: &str,
-) {
+) -> anyhow::Result<()> {
     let request_id = properties
         .get("id")
         .and_then(Value::as_str)
@@ -1290,7 +1498,7 @@ async fn handle_permission(
         .unwrap_or("")
         .to_string();
     if request_id.is_empty() {
-        return;
+        return Ok(());
     }
     let mut reply = "reject".to_string();
     if let Some(channel) = interactions.clone() {
@@ -1307,7 +1515,7 @@ async fn handle_permission(
             .ask(
                 run_id,
                 json!({
-                    "kind": "approval",
+                    "kind": "approval", "nativeRequestId":request_id, "providerSessionId":properties["sessionID"],
                     "title": properties.get("permission").and_then(Value::as_str).unwrap_or("OpenCode permission"),
                     "detail": detail_parts.join("\n"),
                     "options": [
@@ -1327,14 +1535,15 @@ async fn handle_permission(
             }
         }
     }
-    let _ = api_json(
+    api_json(
         base_url,
         cwd,
         &format!("/permission/{}/reply", urlencoding(&request_id)),
         "POST",
         Some(json!({ "reply": reply })),
     )
-    .await;
+    .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------- models

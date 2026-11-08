@@ -3,6 +3,10 @@ mod config;
 mod events;
 mod interactions;
 mod runtime;
+#[cfg(windows)]
+mod windows_workspace;
+
+mod native_experience;
 
 use agenthub_plugin_sdk::process::{self, ProcessEvent, ProcessHandle, ProcessRequest};
 use agenthub_plugin_sdk::{DaemonChannel, ProviderPlugin};
@@ -46,6 +50,8 @@ impl Native {
             .timeout(Duration::from_secs(
                 if path == "/wait" || path == "/compact" {
                     1800
+                } else if path == "/plugins" {
+                    780
                 } else {
                     60
                 },
@@ -83,9 +89,16 @@ impl Native {
 
 #[derive(Default)]
 struct DeepSeek {
+    #[cfg(windows)]
+    workspace_access: Arc<windows_workspace::WorkspaceAccess>,
     active: Arc<Mutex<HashMap<String, Native>>>,
     daemon: Mutex<Option<Arc<dyn DaemonChannel>>>,
     pool: Arc<Mutex<RuntimePool>>,
+    plugin_management: tokio::sync::Mutex<()>,
+    // The native workspace registry takes a snapshot on startup. Publish a new
+    // session's membership before another runtime opens the same registry.
+    workspace_open: Arc<tokio::sync::Mutex<()>>,
+    plugin_resource_id: std::sync::OnceLock<String>,
 }
 
 fn descriptor() -> Value {
@@ -224,6 +237,10 @@ async fn ready(readiness: oneshot::Receiver<Result<(), String>>) -> anyhow::Resu
 
 impl DeepSeek {
     async fn catalog(&self, instance: &Value, context: &Value) -> anyhow::Result<Value> {
+        self.profile_operation(instance, context, "/catalog", json!({})).await
+    }
+
+    async fn profile_operation(&self, instance: &Value, context: &Value, path: &str, body: Value) -> anyhow::Result<Value> {
         let cwd = context["cwd"]
             .as_str()
             .map(str::to_string)
@@ -233,14 +250,20 @@ impl DeepSeek {
                     .to_string_lossy()
                     .into_owned()
             });
-        let request = json!({"instance":instance,"cwd":cwd,"env":context["env"],"localSessionId":format!("catalog-{}",uuid::Uuid::new_v4()),"timeoutMs":90_000});
+        let resource_id = if path == "/plugins" {
+            self.plugin_resource_id.get_or_init(|| format!("plugins-{}", uuid::Uuid::new_v4())).clone()
+        } else {
+            format!("catalog-{}", uuid::Uuid::new_v4())
+        };
+        let request = json!({"instance":instance,"cwd":cwd,"env":context["env"],"localSessionId":resource_id,"timeoutMs":90_000,
+            "pluginManagementWrite":path == "/plugins" && body["action"] != "list"});
         let cfg = config::prepare(&request)?;
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let (native, readiness) = launch(&request, &cfg, RunRoute::new(String::new(), sender, None, None, None))?;
         tokio::spawn(async move { while receiver.recv().await.is_some() {} });
         let result = async {
             ready(readiness).await?;
-            native.call("/catalog", json!({})).await
+            native.call(path, body).await
         }
         .await;
         native.close().await;
@@ -253,8 +276,8 @@ impl ProviderPlugin for DeepSeek {
     fn descriptor(&self) -> Value {
         descriptor()
     }
-    fn capabilities(&self) -> Value {
-        json!({"structuredOutput":true,"textOutput":true,"interactiveStdin":true,"nativeResume":true,"pty":false,"steerAcknowledgement":true,"sessionBackgroundEvents":true})
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({"structuredOutput":true,"textOutput":true,"interactiveStdin":true,"nativeResume":true,"pty":false,"steerAcknowledgement":true,"sessionBackgroundEvents":true}),native_experience::declarations())
     }
     fn set_daemon_channel(&self, channel: Arc<dyn DaemonChannel>) {
         *self.daemon.lock().unwrap() = Some(channel);
@@ -313,6 +336,11 @@ impl ProviderPlugin for DeepSeek {
             json!({"providerId":"deepseek","models":models,"source":"provider_cli","fetchedAt":chrono::Utc::now().to_rfc3339(),"defaultModel":default_id}),
         )
     }
+    async fn harness_plugins(&self, instance: &Value, context: &Value, operation: &Value) -> anyhow::Result<Value> {
+        let _guard = self.plugin_management.lock().await;
+        self.profile_operation(instance, context, "/plugins", operation.clone()).await
+    }
+
     async fn list_modes(&self, instance: &Value, context: &Value) -> anyhow::Result<Value> {
         let catalog = self.catalog(instance, context).await?;
         Ok(json!({"modes":catalog["modes"],"defaultMode":catalog["defaultMode"]}))
@@ -348,12 +376,15 @@ impl ProviderPlugin for DeepSeek {
         let background = if let (Some(channel), Some(binding)) = (&daemon, request["sessionBindingId"].as_str()) {
             Some(agenthub_plugin_sdk::session_sink(channel.clone(), binding.into()).await)
         } else { None };
-        let route = RunRoute::new(run_id.into(), sender.clone(), daemon, background, session_channel);
+        let route = RunRoute::new(run_id.into(), sender.clone(), daemon.clone(), background, session_channel);
         let reusable = cached.as_ref().is_some_and(|cached| {
             resume.is_some()
                 && cached.identity == identity
                 && cached.native.alive.load(Ordering::Acquire)
         });
+        let workspace_open = if reusable { None } else {
+            Some(self.workspace_open.clone().lock_owned().await)
+        };
         let (native, readiness, provider, model) = if reusable {
             let cached = cached.unwrap();
             // Flush already emitted frames through their old route before
@@ -369,6 +400,12 @@ impl ProviderPlugin for DeepSeek {
                 cached.native.close().await;
             }
             let cfg = config::prepare(&request)?;
+            #[cfg(windows)]
+            let cfg = {
+                let mut cfg = cfg;
+                self.workspace_access.configure_temp(&mut cfg.env)?;
+                cfg
+            };
             let (native, readiness) = launch(&request, &cfg, route)?;
             *native.session.lock().unwrap() = session.clone();
             (native, Some(readiness), cfg.provider, cfg.model)
@@ -379,6 +416,8 @@ impl ProviderPlugin for DeepSeek {
             .insert(run_id.into(), native.clone());
         let active = self.active.clone();
         let pool = self.pool.clone();
+        #[cfg(windows)]
+        let workspace_access = self.workspace_access.clone();
         let run_id = run_id.to_string();
         tokio::spawn(async move {
             let work = async {
@@ -394,10 +433,15 @@ impl ProviderPlugin for DeepSeek {
                     .as_ref()
                     .map(|v| v["models"]["default"].clone())
                     .unwrap_or(Value::Null);
+                let reasoning_effort = match (request["instance"]["providerOptions"]["apiType"].as_str(), request["reasoningEffort"].as_str()) {
+                    (Some("openai-responses"), Some("none")) => Some("off"),
+                    (_, effort) => effort,
+                };
                 let opened=native.call("/open",json!({"sessionId":session,"resume":resume.is_some(),"cwd":request["cwd"],
                     "agentMode":request["agentMode"],"provider":provider.clone().or_else(||default["provider"].as_str().map(str::to_string)),
-                    "model":model.clone().or_else(||default["model"].as_str().map(str::to_string)),"reasoningEffort":request["reasoningEffort"],
+                    "model":model.clone().or_else(||default["model"].as_str().map(str::to_string)),"reasoningEffort":reasoning_effort,
                     "permissionMode":request["permissionMode"]})).await?;
+                drop(workspace_open);
                 native.emit(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"deepseek","transport":"native-web","reused":reusable,"pid":native.process.pid,"attachMs":started_at.elapsed().as_millis()}}));
                 if std::env::var_os("NAUTILO_DSH_TIMING").is_some() {
                     eprintln!(
@@ -411,6 +455,11 @@ impl ProviderPlugin for DeepSeek {
                     .to_string();
                 *native.session.lock().unwrap() = session_id.clone();
                 let _ = sender.send(json!({"kind":"session","providerSessionId":session_id}));
+                #[cfg(windows)]
+                if opened["permissionMode"] == "workspace-write" && request["providerCommand"] != "compact" {
+                    let cwd = request["cwd"].as_str().unwrap_or("");
+                    workspace_access.prepare(std::path::Path::new(cwd), &run_id, daemon.as_ref(), &native.cancelled).await?;
+                }
                 let commands = if opened["supportsCompact"] == true {
                     json!([{"name":"compact","description":"压缩当前 DeepSeek 会话","providerCommand":"compact"}])
                 } else {

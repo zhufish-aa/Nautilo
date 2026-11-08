@@ -20,12 +20,13 @@ export function PermissionModeSelect({ value, options, onChange, disabled }: {
   const zh = locale === "zh-CN";
   const selected = options.find((option) => option.value === value);
   const fullAccess = (mode: string): boolean => ["full-access", "bypassPermissions", "danger-full-access"].includes(mode);
+  const permissionLabel = value === "default" ? (zh ? "默认权限" : "Default permissions") : selected?.name[locale] ?? value;
   const Icon = fullAccess(value) ? ShieldAlert : ShieldCheck;
   return <Select.Root value={value} onValueChange={onChange} disabled={disabled || !options.length}>
-    <Select.Trigger className="permission-trigger" data-danger={fullAccess(value)} aria-label={zh ? "权限模式" : "Permission mode"}>
+    <Select.Trigger className="permission-trigger" data-danger={fullAccess(value)} aria-label={zh ? "权限模式" : "Permission mode"} aria-description={permissionLabel} title={permissionLabel}>
       <Icon size={15} aria-hidden />
-      <span>{value === "default" ? (zh ? "默认权限" : "Default permissions") : selected?.name[locale] ?? (zh ? "默认权限" : "Default permissions")}</span>
-      <Select.Icon><ChevronDown size={12} aria-hidden /></Select.Icon>
+      <span className="composer-control-label">{permissionLabel}</span>
+      <Select.Icon className="composer-control-chevron"><ChevronDown size={12} aria-hidden /></Select.Icon>
     </Select.Trigger>
     <Select.Portal>
       <Select.Content className="permission-menu" position="popper" side="top" align="start" sideOffset={10} collisionPadding={12}>

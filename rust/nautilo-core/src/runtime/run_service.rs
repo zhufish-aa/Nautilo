@@ -33,6 +33,8 @@ use crate::runtime::observability::AuditService;
 const TERMINAL_RUN_STATUSES: [&str; 5] = ["completed", "failed", "timed_out", "crashed", "cancelled"];
 #[path = "session_events.rs"]
 mod session_events;
+#[path = "native_history.rs"]
+mod native_history;
 
 pub struct RunCompletion {
     pub run: Value,
@@ -62,6 +64,7 @@ pub struct RunContext {
     pub runtime_tool_version: Option<i64>,
     pub context_window_override: Option<i64>,
     pub queue_key: Option<String>,
+    pub user_message_id: Option<String>,
 }
 
 pub struct RunService {
@@ -92,6 +95,7 @@ pub struct RunService {
 #[derive(Clone)]
 pub struct RunCompletionSnapshot {
     pub run: Value,
+    pub failure_detail: Option<String>,
     pub final_message: Option<String>,
 }
 
@@ -155,21 +159,15 @@ impl RunService {
         };
         let descriptor=self.adapters.get(agent["providerId"].as_str().unwrap_or(""))?.descriptor();
         let policy=self.command_policies.get(project["policyId"].as_str().unwrap_or("default"))?;
-        let evaluation=self.command_policies.evaluate(&json!({"policyId":policy["id"],"command":agent["executable"],"args":agent["baseArgs"]}))?;
+        let evaluation=self.command_policies.evaluate(&json!({"policyId":policy["id"],"command":agent["executable"],"args":agent["baseArgs"],"source":"agent"}))?;
         if evaluation["action"]=="blocked" {
             return Err(CoreError::details(ErrorCode::CommandBlocked, Map::from_iter([
                 ("command".into(), agent["executable"].clone()), ("ruleId".into(), evaluation["ruleId"].clone())
             ])));
         }
-        let operation = format!("agent.launch:{}", agent["id"].as_str().unwrap_or(""));
-        if evaluation["action"]=="approval" && !self.approvals.authorize(&operation, project["id"].as_str(), None, None, Some(session_id))? {
-            let approval=self.approvals.request(&json!({"category":"command","operation":operation,
-                "summary":format!("Launch {}",agent["displayName"].as_str().unwrap_or("")),
-                "projectId":project["id"],"sessionId":session["id"]}))?;
-            let _=self.events.append_for_session(&session,&json!({}),"approval.requested",json!({
-                "approvalId":approval["id"],"category":"command","summary":approval["summary"],"operation":operation}));
-            return Err(CoreError::details(ErrorCode::CommandApprovalRequired,Map::from_iter([("approvalId".into(),approval["id"].clone())])));
-        }
+        // Opening the user's configured native CLI is a direct UI action.
+        // Its own tool permissions remain in the Harness; do not add a host
+        // launch approval before displaying the native terminal.
         let mut additions=provider_environment_passthrough(&agent,Some(&descriptor));
         if connection.is_none(){additions.extend(self.credentials_environment(agent["id"].as_str().unwrap_or(""),agent["providerId"].as_str().unwrap_or("")));}
         let env=build_environment(Some(&policy),additions);
@@ -177,7 +175,7 @@ impl RunService {
         let cwd = session["nativeWorkingDirectory"].as_str().unwrap_or_else(||project["rootPath"].as_str().unwrap_or(""));
         let request=AdapterStartRequest{instance:agent.clone(),local_session_id:Some(session_id.into()),cwd:cwd.into(),
             model:session["model"].as_str().map(str::to_string),reasoning_effort:session["reasoningEffort"].as_str().map(str::to_string),permission_mode:session["permissionMode"].as_str().map(str::to_string),agent_mode:session["agentMode"].as_str().map(str::to_string),
-            service_tier:session["serviceTier"].as_str().map(str::to_string),env:Some(env),skills:Some(self.resolve_skills(&agent)),mcp_servers:Some(self.resolve_mcp_servers(&agent)?),..Default::default()};
+            service_tier:session["serviceTier"].as_str().map(str::to_string),env:Some(env),skills:Some(self.resolve_skills(&agent)),mcp_servers:Some(self.resolve_mcp_servers(&agent, session_id)?),..Default::default()};
         Ok((session,request))
     }
 
@@ -352,6 +350,8 @@ impl RunService {
         let terminals=self.terminals.read().unwrap().clone();
         let _ownership=if let Some(terminals)=terminals.as_ref(){Some(terminals.lock_session(session["id"].as_str().unwrap_or("")).await)}else{None};
         if terminals.as_ref().is_some_and(|terminals|terminals.owns(session["id"].as_str().unwrap_or(""))){return Err(invalid_field("sessionId","会话正在原生终端中运行，请先结束终端，再继续聊天。"));}
+        let sync=self.reconcile_native_history_locked(session["id"].as_str().unwrap_or(""),true).await?;
+        if !matches!(sync["status"].as_str(),Some("none"|"synced"|"unsupported")) {return Err(invalid_field("nativeHistory",sync["error"].as_str().unwrap_or("正在同步原生会话，请稍后继续聊天。")));}
         // Re-read after reaching the head of the queue. Its predecessor may
         // have learned a native thread id or saved newer settings meanwhile.
         let mut latest_session = Repositories::new(&self.db.lock().unwrap().raw)
@@ -605,6 +605,7 @@ impl RunService {
         let background = self.session_callbacks(session, agent, &run, &context);
         let background_handoff = background.handoff;
         let request = AdapterStartRequest {
+            native_terminal_live: None,
             instance: agent.clone(),
             local_session_id: session.get("id").and_then(Value::as_str).map(str::to_string),
             prompt: prompt.to_string(),
@@ -649,7 +650,7 @@ impl RunService {
                 })
             },
             skills: Some(self.resolve_skills(agent)),
-            mcp_servers: Some(self.resolve_mcp_servers(agent)?),
+            mcp_servers: Some(self.resolve_mcp_servers(agent, session["id"].as_str().unwrap_or(""))?),
             provider_command: context.provider_command.clone(),
             session_events: Some(background.events),
             session_interaction: Some(background.interaction),
@@ -779,10 +780,10 @@ impl RunService {
     }
 
     /// User-managed MCP servers enabled for this run's provider.
-    fn resolve_mcp_servers(&self, agent: &Value) -> CoreResult<Vec<Value>> {
+    fn resolve_mcp_servers(&self, agent: &Value, session_id: &str) -> CoreResult<Vec<Value>> {
         let provider_id = agent.get("providerId").and_then(Value::as_str).unwrap_or("");
         let capabilities = Repositories::new(&self.db.lock().unwrap().raw).capabilities().list_default()?;
-        let servers = capabilities
+        let mut servers: Vec<Value> = capabilities
             .iter()
             .filter(|capability| {
                 capability.get("enabled").and_then(Value::as_bool) == Some(true)
@@ -793,6 +794,14 @@ impl RunService {
             })
             .filter_map(|capability| capability_to_mcp_server(capability))
             .collect();
+        if let Some(mut browser) = super::desktop_browser::server(session_id) {
+            let mut name = "nautilo_browser".to_owned();
+            while servers.iter().any(|s| s["name"].as_str() == Some(&name)) {
+                name.push('_');
+            }
+            browser["name"] = json!(name);
+            servers.push(browser);
+        }
         Ok(servers)
     }
 
@@ -879,12 +888,14 @@ impl RunService {
                     .filter(|tail| !tail.is_empty()))
                     .unwrap_or_else(|| run_failure_detail(&latest))
             };
+            let detail = self.redaction.text(&detail);
+            let detail = detail.chars().skip(detail.chars().count().saturating_sub(4_000)).collect::<String>();
             if cancelled {
                 self.record_cancelled(&latest);
             } else if !provider_command {
                 let _ = self.events.append(&latest, session, "run.failed", json!({
                     "code": latest.get("failureCode").and_then(Value::as_str).unwrap_or("RUN_START_FAILED"),
-                    "message": detail.chars().skip(detail.chars().count().saturating_sub(4_000)).collect::<String>(),
+                    "message": detail,
                     "retryable": !cancelled
                 }));
             }
@@ -896,7 +907,7 @@ impl RunService {
             self.touched_files.lock().unwrap().remove(run_id);
             self.workspace_baselines.lock().unwrap().remove(run_id);
             run_log::run_event(run_id, "consume_exit", json!({ "status": status, "sawExit": saw_exit, "messages": messages.len() }));
-            return RunCompletionSnapshot { run: latest, final_message: last_message_text(&messages) };
+            return RunCompletionSnapshot { run: latest, failure_detail: Some(detail), final_message: last_message_text(&messages) };
         }
         if !saw_exit {
             // The stream closed without a real exit event: the provider
@@ -925,7 +936,7 @@ impl RunService {
             self.touched_files.lock().unwrap().remove(run_id);
             self.workspace_baselines.lock().unwrap().remove(run_id);
             run_log::run_event(run_id, "consume_exit", json!({ "status": "crashed", "sawExit": saw_exit, "messages": messages.len() }));
-            return RunCompletionSnapshot { run: crashed, final_message: last_message_text(&messages) };
+            return RunCompletionSnapshot { run: crashed, failure_detail: Some("Provider process exited mid-run; the turn was interrupted.".into()), final_message: last_message_text(&messages) };
         }
         if session["connectionContextRebuildRequired"] == true && !provider_command {
             let db = self.db.lock().unwrap(); let sessions = Repositories::new(&db.raw).sessions();
@@ -964,7 +975,7 @@ impl RunService {
         self.touched_files.lock().unwrap().remove(run_id);
         self.workspace_baselines.lock().unwrap().remove(run_id);
         run_log::run_event(run_id, "consume_exit", json!({ "status": "completed", "sawExit": saw_exit, "messages": messages.len() }));
-        RunCompletionSnapshot { run: completed, final_message: last_message_text(&messages) }
+        RunCompletionSnapshot { run: completed, failure_detail: None, final_message: last_message_text(&messages) }
     }
 
     fn fail_run(&self, run: &Value, session: &Value, error: &str, provider_command: bool) -> CoreResult<Value> {
@@ -1072,8 +1083,17 @@ impl RunService {
                 if final_text.is_empty() {
                     return None;
                 }
-                let mut message = Map::new();
-                message.insert("id".to_string(), json!(Uuid::new_v4().to_string()));
+                let sid=session["id"].as_str().unwrap_or("");
+                let native_identity_supported={let db=self.db.lock().unwrap();Repositories::new(&db.raw).agents().get(run["agentInstanceId"].as_str().unwrap_or("")).ok().flatten().is_some_and(|agent|self.adapters.find(agent["providerId"].as_str().unwrap_or("")).is_some_and(|adapter|adapter.native_message_ids_supported(&agent)))};
+                let (native_session,previous) = if native_identity_supported && !provider_command && subagent_dispatch_id.is_none() && native_message_id.is_some() {
+                    let db=self.db.lock().unwrap();let repos=Repositories::new(&db.raw);
+                    let native=repos.sessions().get(sid).ok().flatten().and_then(|session|session["providerSessionId"].as_str().map(str::to_string));
+                    let previous=native.as_deref().and_then(|native|crate::database::native_history::NativeHistoryRepository::new(&db.raw).binding(sid,native,"messages",native_message_id.as_deref().unwrap_or("")).ok().flatten()).and_then(|binding|binding["localId"].as_str().and_then(|id|repos.sessions().message(sid,id).ok().flatten()));
+                    (native,previous)
+                }else{(None,None)};
+                let local_id=native_session.as_deref().zip(native_message_id.as_deref()).map(|(native,id)|native_history::native_message_id(sid,native,id)).unwrap_or_else(||Uuid::new_v4().to_string());
+                let mut message = previous.as_ref().and_then(Value::as_object).cloned().unwrap_or_default();
+                message.entry("id".to_string()).or_insert_with(||json!(local_id));
                 message.insert("sessionId".to_string(), session.get("id").cloned().unwrap_or(Value::Null));
                 message.insert("sender".to_string(), json!("agent"));
                 message.insert("kind".to_string(), context.message_kind.clone().map(Value::String).unwrap_or_else(|| json!("chat")));
@@ -1083,18 +1103,25 @@ impl RunService {
                 if let Some(id) = &context.task_id {
                     message.insert("taskId".to_string(), json!(id));
                 }
-                message.insert("runId".to_string(), json!(run_id));
+                message.entry("runId".to_string()).or_insert_with(||json!(run_id));
                 if background {message.insert("background".into(),json!(true));}
                 message.insert(
                     "fromMemberId".to_string(),
                     context.member_id.clone().or_else(|| session.get("memberId").and_then(Value::as_str).map(str::to_string)).map(Value::String).unwrap_or(Value::Null),
                 );
                 message.insert("text".to_string(), json!(self.redaction.text(&final_text)));
-                message.insert("createdAt".to_string(), json!(now_iso()));
+                message.entry("createdAt".to_string()).or_insert_with(||json!(now_iso()));
+                if let Some(native)=native_session.as_deref() {
+                    message.insert("nativeIdentity".into(),json!({"providerSessionId":native,"id":native_message_id,"source":"native-stream","completed":true}));
+                }
                 let message = Value::Object(message);
                 if !provider_command {
                     if subagent_dispatch_id.is_none() {
-                        let _ = Repositories::new(&self.db.lock().unwrap().raw).sessions().save_message(&message);
+                        let db=self.db.lock().unwrap();
+                        let _ = Repositories::new(&db.raw).sessions().save_message(&message);
+                        if let (Some(native),Some(id))=(native_session.as_deref(),native_message_id.as_deref()) {
+                            let _=crate::database::native_history::NativeHistoryRepository::new(&db.raw).bind(sid,native,"messages",id,message["id"].as_str(),"");
+                        }
                     }
                     let _ = self.events.append(run, session, "agent.message", json!({
                         "providerMessageId": buffer_key,
@@ -1140,7 +1167,7 @@ impl RunService {
                 }
                 None
             }
-            AdapterEvent::Session { provider_session_id, .. } => {
+            AdapterEvent::Session { provider_session_id, raw } => {
                 let guard = self.db.lock().unwrap();
                 let repos = Repositories::new(&guard.raw);
                 if let Ok(Some(current)) = repos.sessions().get(session.get("id").and_then(Value::as_str).unwrap_or("")) {
@@ -1161,6 +1188,14 @@ impl RunService {
                     }
                     updated.insert("updatedAt".to_string(), json!(now_iso()));
                     let _ = repos.sessions().save(&Value::Object(updated));
+                    if let (Some(native),Some(local))=(raw.as_ref().and_then(|raw|raw["providerUserMessageId"].as_str()),context.user_message_id.as_deref().or(context.queue_key.as_deref())) {
+                        let _=crate::database::native_history::NativeHistoryRepository::new(&guard.raw).bind(session["id"].as_str().unwrap_or(""),provider_session_id,"messages",native,Some(local),"");
+                    }
+                }
+                drop(guard);
+                if let Some(native)=raw.as_ref().and_then(|raw|raw["providerUserMessageId"].as_str()) {
+                    let scope=json!([run["agentInstanceId"],run["connectionId"],run["connectionRevision"]]).to_string();
+                    self.native_origins.lock().unwrap().entry((session["id"].as_str().unwrap_or("").into(),scope,format!("native-turn:{native}"))).or_insert_with(||session_events::NativeOrigin{run:run.clone(),context:context.clone()});
                 }
                 None
             }

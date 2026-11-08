@@ -5,7 +5,24 @@ import { Database } from "../database/index.js";
 import { CoreError } from "../errors.js";
 import { CredentialService, EnvironmentPolicyService, providerEnvironmentPassthrough, isolateLoginProfile, loginProfileDirectory } from "../runtime/security/index.js";
 
+import type { AgentCliAdapter, HarnessPluginOperation } from "@agenthub/provider-sdk";
+import { applyConnection, readConnection } from "../runtime/runtime-connection.js";
+
 export class AgentService {
+  async harnessPlugins(agentInstanceId: string, operation: HarnessPluginOperation, managerFor: (id: string) => AgentCliAdapter | undefined, connectionId?: string) {
+    let instance = this.database.agents.get(agentInstanceId);
+    if (!instance) throw new CoreError("IPC_NOT_FOUND", { resource: "agent", id: agentInstanceId });
+    const adapter = this.adapters.find(instance.providerId);
+    const manager = managerFor(instance.providerId);
+    if (!adapter || !manager?.harnessPlugins) throw new Error("This harness has no plugin manager");
+    if (connectionId) {
+      const connection = readConnection(this.database, connectionId);
+      if (!connection.enabled || connection.kind !== "login" || connection.harness !== instance.providerId) throw new Error("Select an enabled login for this harness");
+      instance = applyConnection(connection, instance);
+    }
+    const env = isolateLoginProfile(instance, this.environment.build(undefined, providerEnvironmentPassthrough(instance, process.env, manager.descriptor)));
+    return manager.harnessPlugins(instance, { env }, operation);
+  }
   async listModes(agentInstanceId: string) {
     const instance = this.database.agents.get(agentInstanceId);
     if (!instance) throw new CoreError("IPC_NOT_FOUND", { resource: "agent", id: agentInstanceId });

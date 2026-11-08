@@ -1,7 +1,7 @@
 // Manual native integration: no user databases, accounts or paid API requests.
 // NAUTILO_NATIVE_CORE=<built core exe> NAUTILO_NATIVE_PLUGINS=<cargo profile dir>
 // node apps/desktop/test/native-connection-smoke.mjs [pi codex ...]
-// NAUTILO_NATIVE_COMPACT=1 also verifies Codex's real native /compact lifecycle.
+// NAUTILO_NATIVE_COMPACT=1 also verifies native /compact for Codex and DeepSeek (use Responses for DeepSeek).
 // NAUTILO_NATIVE_STREAM=1 checks successive reasoning/text updates before completion.
 // NAUTILO_NATIVE_TEAM=1 exercises the native main-Agent team launch and IPC liveness.
 import { createServer } from 'node:http';
@@ -21,7 +21,7 @@ const scratch = await mkdtemp(join(tmpdir(), 'nautilo-native-api-'));
 const root = resolve(import.meta.dirname, '../../..');
 const wanted = process.argv.slice(2);
 const harnesses = wanted.length ? wanted : ['pi', 'omp', 'kimi-code', 'opencode', 'commandcode', 'codex', 'claude-code', 'trae'];
-const pluginIds = ['pi', 'omp', 'opencode', 'commandcode', 'trae'];
+const pluginIds = ['pi', 'omp', 'opencode', 'commandcode', 'trae', 'deepseek'];
 const fixtureKey = 'nautilo-fixture-key';
 const model = 'deepseek/nautilo-fixture';
 const effort = process.env.NAUTILO_NATIVE_EFFORT ?? 'max';
@@ -30,6 +30,9 @@ const verifyStream = process.env.NAUTILO_NATIVE_STREAM === '1';
 const verifyTeam = process.env.NAUTILO_NATIVE_TEAM === '1';
 const verifyResources = process.env.NAUTILO_NATIVE_RESOURCES === '1';
 const calls = [];
+const verifyDshCompact = harnesses.includes('deepseek') && protocol === 'responses' && process.env.NAUTILO_NATIVE_COMPACT === '1';
+const checkpoint = 'Nautilo verified checkpoint';
+let rejectDshSummary = false;
 const server = createServer((request, response) => { void (async () => {
   const chunks = []; for await (const chunk of request) chunks.push(chunk);
   const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
@@ -38,11 +41,18 @@ const server = createServer((request, response) => { void (async () => {
   const pathname = new URL(request.url, 'http://fixture').pathname;
   const suffix = protocol === 'responses' ? '/responses' : protocol === 'anthropic' ? '/messages' : '/chat/completions';
   if (!harnesses.some(harness => pathname === `/${harness}/v1${suffix}`)) { response.writeHead(404, { 'content-type': 'application/json' }); response.end(JSON.stringify({error:{message:'Unexpected API route'}})); return; }
-  calls.push({ path: request.url, model: body.model, stream: body.stream, authorization: request.headers.authorization ?? `Bearer ${request.headers['x-api-key']}`, effort: body.reasoning_effort ?? body.reasoning?.effort ?? body.output_config?.effort, hasPreviousReply: JSON.stringify(body.messages ?? body.input ?? '').includes('Nautilo API fixture OK'),
+  const input = JSON.stringify(body.input ?? []);
+  const dshSummary = verifyDshCompact && pathname.startsWith('/deepseek/') && input.includes('acting as a compaction engine');
+  calls.push({ dshSummary, hasCheckpoint: input.includes(checkpoint), path: request.url, model: body.model, stream: body.stream, authorization: request.headers.authorization ?? `Bearer ${request.headers['x-api-key']}`, effort: body.reasoning_effort ?? body.reasoning?.effort ?? body.output_config?.effort, hasPreviousReply: JSON.stringify(body.messages ?? body.input ?? '').includes('Nautilo API fixture OK'),
     nativeMcp: JSON.stringify(body).includes('native_fixture_echo'), managedMcp: JSON.stringify(body).includes('managed_fixture_echo'), toolNames:(body.tools??[]).map(tool=>tool.function?.name??tool.name) });
   await writeFile(join(scratch, 'calls.json'), JSON.stringify(calls.map(({authorization, ...call}) => call), null, 2));
+  if (dshSummary && (rejectDshSummary || body.reasoning?.effort === 'off')) {
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Fixture rejected the summary request', param: 'reasoning.effort', type: 'invalid_request_error' } }));
+    return;
+  }
   if (verifyStream && body.stream) { await incrementalFixture(response, protocol, request.url?.includes('/trae/') && body.tools?.some(tool => (tool.function?.name ?? tool.name) === 'task_done')); return; }
-  const fixtureText = 'Nautilo API fixture OK';
+  const fixtureText = dshSummary ? checkpoint : 'Nautilo API fixture OK';
   const taskDone = request.url?.includes('/trae/') && body.tools?.some(tool => (tool.function?.name ?? tool.name) === 'task_done');
   const sendEvents = events => { response.writeHead(200, { 'content-type': 'text/event-stream' }); for (const [index, event] of events.entries()) response.write(`event: ${event.type}\ndata: ${JSON.stringify({ ...event, sequence_number: index })}\n\n`); response.end(); };
   if (protocol === 'responses') {
@@ -173,6 +183,7 @@ if (verifyResources) {
   if (harnesses.includes('trae')) await writeFile(join(scratch,'trae_config.yaml'), JSON.stringify({agents:{trae_agent:{max_steps:4,enable_lakeview:false,tools:['bash','task_done']}},mcp_servers:{native_fixture:nativeSpec},allow_mcp_servers:['native_fixture']}));
 }
 const fixtureEnv = { ...process.env, USERPROFILE:nativeHome, HOME:nativeHome, XDG_CONFIG_HOME:join(nativeHome,'.config'), AGENTHUB_DATA_DIR: scratch, AGENTHUB_SOCKET: socketPath, AGENTHUB_TOKEN_PATH: tokenPath };
+if (harnesses.includes('deepseek')) Object.assign(fixtureEnv, { DSH_HOME: join(nativeHome, '.dsh'), DSH_AGENTS_HOME: join(nativeHome, '.agents'), APPDATA: join(nativeHome, 'AppData/Roaming'), LOCALAPPDATA: join(nativeHome, 'AppData/Local') });
 for (const key of ['CODEX_HOME','CLAUDE_CONFIG_DIR','KIMI_CODE_HOME','PI_CODING_AGENT_DIR','OMP_PROFILE','PI_PROFILE','PI_CONFIG_DIR','PI_CONFIG_FILES','OPENCODE_CONFIG','OPENCODE_CONFIG_DIR','OPENCODE_CONFIG_CONTENT','TRAE_CONFIG_FILE']) delete fixtureEnv[key];
 const child = spawn(fixtureCore, ['--serve'], { cwd: scratch, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: fixtureEnv });
 child.stderr.on('data', chunk => stderr.push(String(chunk)));
@@ -195,7 +206,7 @@ async function ipc(method, input = {}) {
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); const message = JSON.parse(line);
         if (phase++ === 0) { if (!message.ok) { socket.destroy(); reject(Error('Fixture authentication failed')); return; } socket.write(JSON.stringify({ request: { method, input } }) + '\n'); }
-        else { socket.destroy(); if (message.ok) resolve(message.data); else reject(Error(message.error?.details?.reason ?? message.error?.message ?? `${method} failed`)); }
+        else { socket.destroy(); if (message.ok) resolve(message.data); else reject(Object.assign(Error(message.error?.details?.reason ?? message.error?.message ?? `${method} failed`), { code: message.error?.code })); }
       }
     });
   });
@@ -215,7 +226,7 @@ try {
   if (verifyResources) await ipc('capability.upsert',{id:'managed-fixture',kind:'mcp',name:'managed_fixture',description:'',enabled:true,providerIds:harnesses,tags:[],mcp:{transport:'stdio',command:process.execPath,args:[mcpScript,'managed']}});
   await ipc('project.upsert', { id: 'fixture-project', name: 'API fixture', rootPath: scratch, repositoryType: 'none', workspaceMode: 'direct', nonGitDiffMode: 'off', frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: 'fixture-policy' });
   for (const harness of harnesses) {
-    let executable = { 'kimi-code': join(process.env.USERPROFILE, '.kimi-code/bin/kimi.exe'), commandcode: 'command-code', 'claude-code': join(process.env.USERPROFILE, '.local/bin/claude.exe'), trae: process.env.NAUTILO_TRAE_EXECUTABLE ?? 'traecli' }[harness] ?? harness;
+    let executable = { deepseek: process.env.NAUTILO_DEEPSEEK_TEST_CLI ?? 'dsh', 'kimi-code': join(process.env.USERPROFILE, '.kimi-code/bin/kimi.exe'), commandcode: 'command-code', 'claude-code': join(process.env.USERPROFILE, '.local/bin/claude.exe'), trae: process.env.NAUTILO_TRAE_EXECUTABLE ?? 'traecli' }[harness] ?? harness;
     try {
       if (harness === 'codex') executable = join(process.env.APPDATA, 'npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe');
       if (executable.includes('/') || executable.includes('\\')) await access(executable);
@@ -227,11 +238,11 @@ try {
     let teamRunId;
     const before = calls.length;
     try {
-      await ipc('connection.upsert', { connection: { id: connectionId, name: 'Local fixture', kind: 'api', enabled: true, protocol, baseUrl: baseUrl.replace('/v1', `/${harness}/v1`), models: [{ id: model, reasoningEfforts: ['low', 'max'], defaultReasoningEffort: 'low' }] }, apiKey: fixtureKey });
+      await ipc('connection.upsert', { connection: { id: connectionId, name: 'Local fixture', kind: 'api', enabled: true, protocol, baseUrl: baseUrl.replace('/v1', `/${harness}/v1`), models: [{ id: model, reasoningEfforts: harness === 'deepseek' ? ['off', 'high', 'max'] : ['low', 'max'], defaultReasoningEffort: harness === 'deepseek' ? 'max' : 'low' }] }, apiKey: fixtureKey });
       await ipc('agent.upsert', { id: `harness-${harness}`, providerId: harness, displayName: harness, executable, baseArgs: [], capabilities: [], enabled: true, status: 'available', createdAt: now, updatedAt: now, providerOptions: { configurationKind: 'harness', ...(harness === 'codex' ? { webSearchMode: 'native' } : {}) } });
       const teamId = `fixture-team-${harness}`;
       if (verifyTeam) await ipc('team.upsert', { id: teamId, name: 'Team launch fixture', roles: [], members: [], delegationPolicy: 'autonomous', createdAt: now, updatedAt: now });
-      await ipc('session.upsert', { id: sessionId, projectId: 'fixture-project', memberId: `harness-${harness}`, agentInstanceId: `harness-${harness}`, ...(verifyTeam ? { teamId } : {}), connectionId, connectionRevision: 1, model, reasoningEffort: effort, title: process.env.NAUTILO_NATIVE_TITLE === '1' ? 'Say hello only. Do not use any tools.' : 'Fixture', status: 'idle', unreadCount: 0, createdAt: now, updatedAt: now });
+      await ipc('session.upsert', { id: sessionId, projectId: 'fixture-project', memberId: `harness-${harness}`, agentInstanceId: `harness-${harness}`, ...(harness === 'deepseek' && verifyDshCompact ? { permissionMode: 'danger-full-access' } : {}), ...(verifyTeam ? { teamId } : {}), connectionId, connectionRevision: 1, model, reasoningEffort: effort, title: process.env.NAUTILO_NATIVE_TITLE === '1' ? 'Say hello only. Do not use any tools.' : 'Fixture', status: 'idle', unreadCount: 0, createdAt: now, updatedAt: now });
       if (verifyTeam) {
         const started = await ipc('orchestration.start', { projectId: 'fixture-project', teamId, agentInstanceId: `harness-${harness}`, sessionId, messageId: `${sessionId}-outgoing`, goal: 'Say hello only. Do not use any tools.' });
         teamRunId = started.projectRun.id;
@@ -243,7 +254,7 @@ try {
           if (!runId) await new Promise(resolve => setTimeout(resolve, 100));
         }
         assert.ok(runId, 'The team main-Agent run was never created');
-      } else ({ runId } = await ipc('session.send', { sessionId, messageId: `${sessionId}-outgoing`, text: 'Say hello only. Do not use any tools.' }));
+      } else ({ runId } = await ipc('session.send', { sessionId, messageId: `${sessionId}-outgoing`, text: 'Say hello only. Do not use any tools.' + (harness === 'deepseek' && verifyDshCompact ? ' Synthetic context for compaction.'.repeat(500) : '') }));
       let run;
       const sub = await ipc('event.subscribe', { sessionId });
       const streaming = { thinking: new Set(), text: new Set() };
@@ -302,6 +313,31 @@ try {
         console.log(`PASS ${harness}: ${streaming.thinking.size} reasoning updates and ${streaming.text.size} text updates before completion`);
       }
       let compact;
+      if (harness === 'deepseek' && verifyDshCompact) {
+        const command = (await ipc('slashCommand.list', { sessionId })).find(item => item.providerCommand === 'compact');
+        assert.ok(command, 'DSH did not expose its native compact command');
+        assert.ok(calls.slice(before).some(call => call.effort === effort), 'DSH lost the selected chat effort');
+        const execute = () => ipc('slashCommand.execute', { sessionId, commandId: command.id });
+        rejectDshSummary = true;
+        try {
+          await assert.rejects(execute, { code: 'PROVIDER_COMMAND_FAILED', message: /Fixture rejected the summary request/ });
+        } finally {
+          rejectDshSummary = false;
+        }
+        const marker = calls.length;
+        assert.equal((await execute()).completed, true);
+        assert.ok(calls.slice(marker).some(call => call.dshSummary && call.effort === 'none'), 'DSH sent the wrong compaction effort');
+        const followUp = await ipc('session.send', { sessionId, text: 'Continue from the checkpoint.' });
+        let resumed;
+        for (let i = 0; i < 300; i++) {
+          resumed = (await ipc('run.list', { sessionId })).find(item => item.id === followUp.runId);
+          if (resumed && ['completed', 'failed', 'cancelled', 'crashed', 'timed_out'].includes(resumed.status)) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        assert.equal(resumed?.status, 'completed');
+        assert.ok(calls.slice(marker).some(call => !call.dshSummary && call.hasCheckpoint && call.effort === effort), 'Next turn lost the saved checkpoint or chat effort');
+        console.log('PASS deepseek: upstream failure reason, native compaction retry and resume from the saved checkpoint');
+      }
       if (harness === 'codex' && process.env.NAUTILO_NATIVE_COMPACT === '1') {
         const commands = await ipc('slashCommand.list', { sessionId });
         const command = commands.find(item => item.providerCommand === 'compact');

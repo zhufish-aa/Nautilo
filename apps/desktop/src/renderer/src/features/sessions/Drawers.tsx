@@ -29,6 +29,7 @@ import { toast } from "../../stores/toast";
 
 // Monaco is heavy; it only loads when the user actually opens the file editor.
 const DiffCodeEditor = lazy(() => import("../../components/ui/DiffCodeEditor"));
+const MultiTerminalDrawer = lazy(() => import("./TerminalWorkspace").then(module => ({ default: module.TerminalDrawer })));
 
 /* ---------------------------------------------------------------------------
  * Terminal workspace: native CLI, shell and runtime logs share one toolbar.
@@ -42,6 +43,22 @@ export function TerminalDrawer({
   onClose: () => void;
   sessionId?: string;
 }): JSX.Element {
+  const [multiTabs, setMultiTabs] = useState<boolean>();
+  const { locale } = useI18n();
+  useEffect(() => {
+    if (!open || !sessionId || multiTabs !== undefined) return;
+    let disposed = false;
+    // A live older daemon may still own the user's terminal. Upgrade the
+    // workspace after the next daemon start without interrupting that PTY.
+    void requestCore("terminal.list", { sessionId }).then(() => { if (!disposed) setMultiTabs(true); }).catch(() => { if (!disposed) setMultiTabs(false); });
+    return () => { disposed = true; };
+  }, [open, sessionId, multiTabs]);
+  if (multiTabs) return <Suspense fallback={null}><MultiTerminalDrawer open={open} onClose={onClose} sessionId={sessionId} /></Suspense>;
+  if (multiTabs === false || !sessionId) return <LegacyTerminalDrawer open={open} onClose={onClose} sessionId={sessionId} />;
+  return open ? <Drawer placement="bottom" open onClose={onClose} title={locale === "zh-CN" ? "终端" : "Terminal"} resizable><div className="terminal-workspace-loading" role="status"><Loader2 size={16} className="animate-spin" />{locale === "zh-CN" ? "正在恢复终端" : "Restoring terminals"}</div></Drawer> : <></>;
+}
+
+function LegacyTerminalDrawer({ open, onClose, sessionId }: { open: boolean; onClose: () => void; sessionId?: string }): JSX.Element {
   const { t, locale } = useI18n();
   const lines = useSessionsStore((state) => (sessionId ? (state.rawLog[sessionId] ?? SESSION_EMPTY.lines) : SESSION_EMPTY.lines));
   const bottomRef = useRef<HTMLDivElement>(null);

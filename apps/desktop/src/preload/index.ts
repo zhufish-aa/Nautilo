@@ -19,7 +19,34 @@ export interface AppInfo {
  * Core Daemon over its own authenticated channel (backend scope); this bridge
  * exposes just the desktop shell primitives the workbench UI needs.
  */
+const panelArgument = process.argv.find(arg => arg.startsWith("--nautilo-panel="));
+const panelContext = panelArgument ? JSON.parse(decodeURIComponent(panelArgument.slice("--nautilo-panel=".length))) : undefined;
 const bridge = {
+  assistant: {
+    view: (before?:number) => ipcRenderer.invoke("assistant:view",before),
+    configure: (settings:import("../shared/workspace-assistant").AssistantSettings) => ipcRenderer.invoke("assistant:configure",settings),
+    submit: (id:string,text:string) => ipcRenderer.invoke("assistant:submit",id,text),
+    stop: (id:string) => ipcRenderer.invoke("assistant:stop",id),
+    onOutput:(cb:(output:import("../shared/workspace-assistant").AssistantLiveOutput)=>void)=>{
+      const listener=(_event:Electron.IpcRendererEvent,draft:import("../shared/workspace-assistant").AssistantLiveOutput)=>cb(draft);
+      ipcRenderer.on("assistant:output",listener);return ()=>{ipcRenderer.removeListener("assistant:output",listener);};
+    },
+    onChange: (cb:(sessionId?:string)=>void) => {
+      const listener=(_event:Electron.IpcRendererEvent,id?:string)=>cb(id);
+      ipcRenderer.on("assistant:changed",listener);
+      return ()=>{ipcRenderer.removeListener("assistant:changed",listener);};
+    },
+  },
+  panels: {
+    context:panelContext,
+    open:(target:import("../shared/panel-window").PanelTarget,focusOnly=false)=>ipcRenderer.invoke("panels:open",target,focusOnly),
+    dock:()=>ipcRenderer.invoke("panels:dock"),
+    onDock:(cb:(target:import("../shared/panel-window").PanelTarget)=>void)=>{
+      const listener=(_event:Electron.IpcRendererEvent,target:import("../shared/panel-window").PanelTarget)=>cb(target);
+      ipcRenderer.on("panels:docked",listener);
+      return ()=>{ipcRenderer.removeListener("panels:docked",listener);};
+    },
+  },
   isElectron: true,
   platform: process.platform,
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke("app:get-info"),
@@ -94,6 +121,9 @@ const bridge = {
         ipcRenderer.removeListener("provider:update-exit", listener);
       };
     }
+  },
+  browser: {
+    panel: (sessionId: string, command: string, value?: unknown) => ipcRenderer.invoke("browser:panel",sessionId,command,value)
   },
   core: {
     request: (request: { requestId?: string; method: string; input?: unknown }): Promise<unknown> => ipcRenderer.invoke("core:request", request)

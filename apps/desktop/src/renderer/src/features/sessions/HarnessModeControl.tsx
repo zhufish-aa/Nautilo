@@ -52,10 +52,12 @@ export function HarnessModeControl({ instanceId, value, onChange, disabled }: {
   const label = (mode: Catalog["modes"][number]) => mode.name || names[mode.id]?.[zh ? 0 : 1] || mode.id;
   const selected = value ?? catalog?.defaultMode;
   const selectedMode = catalog?.modes.find(mode => mode.id === selected);
+  const modeLabel = selectedMode ? label(selectedMode) : value || (zh ? "选择模式" : "Choose mode");
+  const modeHint = disabled ? (zh ? "模式随原生会话保持，选择其他模式请新建会话" : "This native session keeps its mode. Start a new conversation to change it.") : undefined;
   return <Select.Root value={selected} onValueChange={onChange} disabled={disabled} onOpenChange={open => { if (open) void load(); }}>
-    <Select.Trigger className="permission-trigger" aria-label={zh ? "Harness 模式" : "Harness mode"} title={disabled ? (zh ? "模式随原生会话保持，选择其他模式请新建会话" : "This native session keeps its mode. Start a new conversation to change it.") : undefined}>
+    <Select.Trigger className="permission-trigger" aria-label={zh ? "Harness 模式" : "Harness mode"} aria-description={modeLabel} title={modeHint ? modeLabel + " · " + modeHint : modeLabel}>
       {loading ? <Loader2 size={14} className="animate-spin" /> : <Layers size={14} />}
-      <span>{selectedMode ? label(selectedMode) : value || (zh ? "选择模式" : "Choose mode")}</span><ChevronDown size={12} />
+      <span className="composer-control-label">{modeLabel}</span><ChevronDown className="composer-control-chevron" size={12} />
     </Select.Trigger>
     <Select.Portal><Select.Content className="permission-menu" position="popper" side="top" align="start" sideOffset={8}>
       <Select.Viewport>

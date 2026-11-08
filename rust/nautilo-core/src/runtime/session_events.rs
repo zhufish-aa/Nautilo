@@ -252,24 +252,43 @@ impl RunService {
             run["connectionRevision"]
         ])
         .to_string();
+        let provider_session=session["providerSessionId"].as_str().unwrap_or("").to_string();
         let session = session["id"].as_str().unwrap_or("").to_string();
-        let mut origins = self.native_origins.lock().unwrap();
-        let existing = parent
+        let native_turn=match event {
+            AdapterEvent::Message{raw,..}|AdapterEvent::Thinking{raw,..}|AdapterEvent::Tool{raw,..}|AdapterEvent::Command{raw,..}=>raw.as_ref().and_then(|raw|raw["nativeTurnId"].as_str()).map(str::to_string),_=>None,
+        };
+        let existing = {let origins=self.native_origins.lock().unwrap();parent
             .as_ref()
             .and_then(|id| origins.get(&(session.clone(), scope.clone(), id.clone())))
             .or_else(|| {
                 id.as_ref()
                     .and_then(|id| origins.get(&(session.clone(), scope.clone(), id.clone())))
             })
-            .cloned();
-        let origin = existing.clone().unwrap_or_else(|| NativeOrigin {
+            .or_else(||native_turn.as_ref().and_then(|turn|origins.get(&(session.clone(),scope.clone(),format!("native-turn:{turn}")))))
+            .cloned()};
+        let origin = existing.unwrap_or_else(|| {
+            if run["origin"]=="native-terminal" {
+                if let Some(turn)=&native_turn {
+                    let db=self.db.lock().unwrap();let repo=crate::database::Repositories::new(&db.raw);
+                    let id=super::native_history::native_run_id(&session,&provider_session,turn);
+                    let mut native=repo.runs().get(&id).ok().flatten().unwrap_or_else(||run.clone());
+                    native["id"]=json!(id);native["mode"]=json!("foreground");native["nativeTurnId"]=json!(turn);
+                    native["providerSessionId"]=json!(provider_session);
+                    if native["status"].is_null(){native["status"]=json!("running");native["startedAt"]=json!(crate::errors::now_iso());}
+                    let _=repo.runs().save(&native);
+                    return NativeOrigin{run:native,context:context.clone()};
+                }
+            }
+            NativeOrigin {
             run: run.clone(),
             context: context.clone(),
-        });
+        }});
+        let mut origins=self.native_origins.lock().unwrap();
         if let Some(id) = id {
-            origins.entry((session, scope, id)).or_insert(origin);
+            origins.entry((session.clone(), scope.clone(), id)).or_insert_with(||origin.clone());
         }
-        existing.filter(|origin| origin.run["id"] != run["id"])
+        if let Some(turn)=native_turn {origins.entry((session,scope,format!("native-turn:{turn}"))).or_insert_with(||origin.clone());}
+        (origin.run["id"]!=run["id"]).then_some(origin)
     }
 
     fn bound_session(&self, expected: &Value, agent: &Value) -> Option<Value> {

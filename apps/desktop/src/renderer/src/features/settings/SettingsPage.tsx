@@ -17,6 +17,7 @@ import {
   Server,
   Puzzle,
   Monitor,
+  Orbit,
   Plus,
   RotateCcw,
   Settings2,
@@ -47,11 +48,13 @@ import { PluginMarketPanel } from "../agents/PluginMarketPanel";
 import { RuntimeOperationsCard } from "./RuntimeOperationsCard";
 import { PermissionPolicyCard } from "./PermissionPolicyCard";
 import { UsagePanel } from "./UsagePanel";
+import { AssistantSettingsPanel } from "../assistant/AssistantSettingsPanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
 
 type SettingsSection =
   | "teams"
   | "accounts"
+  | "assistant"
   | "usage"
   | "general"
   | "appearance"
@@ -71,6 +74,7 @@ const SECTIONS: Array<{
   { id: "general", zh: "通用", en: "General", icon: Settings2 },
   { id: "appearance", zh: "外观", en: "Appearance", icon: Monitor },
   { id: "agents", zh: "Harness 管理", en: "Harnesses", icon: Box },
+  { id: "assistant", zh: "助手", en: "Assistant", icon: Orbit },
   { id: "accounts", zh: "供应商与账号", en: "Providers & accounts", icon: Users },
   { id: "usage", zh: "用量与费用", en: "Usage & costs", icon: BarChart3 },
   { id: "teams", zh: "团队管理", en: "Teams", icon: Users },
@@ -450,6 +454,7 @@ export function SettingsPage(): JSX.Element {
             </>
           )}
 
+          {section === "assistant" && <AssistantSettingsPanel />}
           {section === "accounts" && <div className="settings-panel-card"><ConnectionsPanel /></div>}
 
           {section === "agents" && <div className="settings-panel-card"><HarnessPanel /></div>}

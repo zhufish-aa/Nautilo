@@ -243,6 +243,7 @@ fn parse_item(method: &str, params: &Value) -> Vec<AdapterEvent> {
     let phase = if method == "item/completed" { "completed" } else { "started" };
     let id = item.get("id").and_then(text_of);
     match item.get("type").and_then(Value::as_str).unwrap_or("") {
+        "userMessage" => params["threadId"].as_str().zip(id.as_deref()).map(|(thread,id)|vec![AdapterEvent::Session{provider_session_id:thread.into(),raw:Some(json!({"providerUserMessageId":id,"nativeTurnId":params["turnId"]}))}]).unwrap_or_default(),
         "collabAgentToolCall" => {
             // Provider-native dispatch, distinct from Nautilo team delegation.
             let state_summary = item

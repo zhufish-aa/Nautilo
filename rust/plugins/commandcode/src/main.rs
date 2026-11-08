@@ -22,6 +22,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod native_experience;
+mod history;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -765,6 +768,7 @@ impl CommandCodePlugin {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for CommandCodePlugin {
+    async fn read_session_history(&self,request:&Value,session:&str)->anyhow::Result<Option<Value>>{history::read(request,session).await.map(Some)}
     fn native_terminal_supported(&self)->bool {true}
     async fn terminal_plan(&self,request:&Value,resume:Option<String>)->anyhow::Result<Value> {
         let mut args=build_args(request,&request["instance"],resume);
@@ -777,14 +781,15 @@ impl ProviderPlugin for CommandCodePlugin {
         descriptor()
     }
 
-    fn capabilities(&self) -> Value {
-        json!({
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({
             "structuredOutput": false,
             "textOutput": true,
             "interactiveStdin": false,
+            "nativeHistory": true,
             "nativeResume": true,
             "pty": false
-        })
+        }),native_experience::declarations())
     }
 
     async fn detect(&self, instance: &Value) -> Value {

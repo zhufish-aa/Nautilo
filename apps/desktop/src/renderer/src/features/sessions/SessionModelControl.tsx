@@ -121,6 +121,7 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
       : (zh ? "请在供应商设置中启用模型" : "Enable a model in provider settings");
   const efforts = model?.reasoningEfforts ?? [];
   const label = model?.displayName || modelId || (loading[instance.id] ? (zh ? "读取模型…" : "Loading models…") : unavailable);
+  const modelDescription = effort ? label + " · " + effortLabel(effort) : label;
   const hint = disabled ? (zh ? "运行中不可更改" : "Cannot change during a run") : (zh ? "下一次发送时生效" : "Applies to the next message");
   const changeConnection = (candidate: { id?: string; revision?: number; name: string; destination?: string }) => {
     if (locked || (candidate.id === connectionId && candidate.revision === connectionRevision)) return;
@@ -179,7 +180,7 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
       {connectionCatalog?.warning && <p className="model-menu-empty">{connectionCatalog.warning}</p>}
       {connectionError && <p role="alert" className="model-menu-empty text-danger">{zh ? "绑定连接读取失败，请重试。" : "Unable to load the bound connection. Please retry."}</p>}
     </div>}
-    <button ref={triggerRef} type="button" disabled={locked} className="composer-model-trigger" aria-label={zh ? "选择模型" : "Choose model"} aria-expanded={menu} title={label} onClick={() => { setMenu(!menu); setQuery(""); }}>
+    <button ref={triggerRef} type="button" disabled={locked} className="composer-model-trigger" aria-label={zh ? "选择模型" : "Choose model"} aria-expanded={menu} aria-description={modelDescription} title={modelDescription} onClick={() => { setMenu(!menu); setQuery(""); }}>
       <Box size={16} aria-hidden /><span>{modelId === "default" ? `${instance.displayName} / ${zh ? "默认" : "Default"}` : label}</span>{effort && <span className="composer-effort-label" aria-label={`${zh ? "推理强度" : "Reasoning effort"} ${effortLabel(effort)}`}>· {effortLabel(effort)}</span>}<ChevronDown size={12} aria-hidden />
     </button>
   </div>;

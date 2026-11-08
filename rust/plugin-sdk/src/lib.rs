@@ -28,6 +28,8 @@ pub mod process;
 pub mod event_stream;
 pub mod extension_ui;
 pub mod session_pool;
+pub mod history;
+pub mod history_files;
 pub mod capabilities;
 pub mod serve;
 
@@ -197,6 +199,11 @@ pub trait ProviderPlugin: Send + Sync {
         Ok(json!({"modes":[]}))
     }
 
+    /// Optional management of the harness's own plugins in its selected native profile.
+    async fn harness_plugins(&self, _instance: &Value, _context: &Value, _operation: &Value) -> anyhow::Result<Value> {
+        anyhow::bail!("Harness plugin management is unavailable")
+    }
+
     /// Starts (or resumes) a provider turn. Events must end with `exit`.
     async fn start(
         &self,
@@ -215,6 +222,8 @@ pub trait ProviderPlugin: Send + Sync {
     /// Releases long-lived resources before unload.
     async fn dispose(&self) {}
     async fn release_session(&self,_request:&Value)->anyhow::Result<()> {Ok(())}
+    async fn read_session_history(&self,_request:&Value,_session:&str)->anyhow::Result<Option<Value>> {Ok(None)}
+    async fn resume_terminal_events(&self,_request:&Value,_session:&str,_snapshot:&Value)->anyhow::Result<()> {Ok(())}
     /// Internal host call: this plan may contain credentials; never expose it to the renderer.
     async fn terminal_plan(&self,_request:&Value,_resume:Option<String>)->anyhow::Result<Value> {anyhow::bail!("native_terminal_plan_unavailable")}
     fn native_terminal_supported(&self)->bool {false}

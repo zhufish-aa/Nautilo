@@ -331,6 +331,7 @@ export interface MessageAttachmentView {
   kind: "image" | "file";
   mimeType?: string;
   sizeBytes?: number;
+  unavailable?: boolean;
 }
 
 export type TimelinePayload =

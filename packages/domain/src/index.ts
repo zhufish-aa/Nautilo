@@ -530,6 +530,8 @@ export interface Message {
   toMemberId?: string;
   correlationId?: string;
   attachmentIds?: ArtifactId[];
+  nativeIdentity?: { providerId?: string; providerSessionId: string; id: string; messageId?: string; source: "native-terminal" | "native-stream"; completed: boolean; turnStatus?: "running" | "completed" | "failed" | "cancelled" };
+  nativeFiles?: Array<{ id: string; name: string; url?: string; unavailable: true }>;
   editedAt?: string;
   text: string;
   createdAt: string;

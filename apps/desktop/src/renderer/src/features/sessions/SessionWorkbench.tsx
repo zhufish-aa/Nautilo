@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ClipboardList, Users, ListChecks, GitFork, FileDiff, Package, SquareTerminal } from "lucide-react";
+import { ClipboardList, Users, ListChecks, GitFork, GitBranch, FileDiff, Package, SquareTerminal, Globe } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { TimelineEventView, type TimelineRow, TimelineViewport } from "../timeline/Timeline";
 import { ConversationTurnView } from "../timeline/ConversationTurnView";
@@ -7,7 +7,7 @@ import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Composer } from "./Composer";
 import { providerUiState } from "../../lib/provider-ui";
-import { useNativeTerminalStatus } from "../../lib/use-native-terminal";
+import { useNativeTerminalState } from "../../lib/use-native-terminal";
 import { ArtifactsDrawer, DagDrawer, SubagentDrawer, TerminalDrawer } from "./Drawers";
 import { RunActivityIndicator } from "./RunActivityIndicator";
 import { sessionTargetName } from "./SessionListPanel";
@@ -29,11 +29,14 @@ import { cachedChangedFileCount } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
 import { TodoGoalCard } from "./TodoGoalCard";
-import { requestCore } from "../../lib/bridge";
+import { BrowserDrawer } from "./BrowserDrawer";
+import { getBridge, requestCore } from "../../lib/bridge";
+import { SourceControlDrawer } from "./SourceControlDrawer";
+import { useCoreFeatures } from "../../lib/use-core-features";
 
 const pendingTitles = new Map<string, Promise<{ title?: string }>>();
 
-export type DrawerKind = "terminal" | "artifacts" | "dag" | null;
+export type DrawerKind = "terminal" | "artifacts" | "dag" | "source-control" | "browser" | null;
 
 // Stable fallbacks: `?? []` inside a selector would return a fresh array on
 // every store update and re-render subscribers of empty sessions each token.
@@ -108,10 +111,12 @@ export function SessionWorkbench({
   agentsOpen?: boolean;
 }): JSX.Element {
   const { t, locale } = useI18n();
+  const coreFeatures = useCoreFeatures();
   const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
   const events = useSessionsStore((state) => state.events[sessionId] ?? NO_EVENTS);
   const extensionUi = useMemo(() => providerUiState(events), [events]);
-  const nativeOwnsSession = useNativeTerminalStatus(sessionId, active);
+  const nativeTerminal = useNativeTerminalState(sessionId, active);
+  const nativeOwnsSession = nativeTerminal.nativeActive;
   const queuedFollowUps = useSessionsStore((state) => state.queuedFollowUps[sessionId]);
   const visibleEvents = useMemo(() => {
     if (!queuedFollowUps?.length) return events;
@@ -275,7 +280,7 @@ export function SessionWorkbench({
 
   return (
     <div className="conversation-workspace relative flex h-full min-h-0 min-w-0 flex-1">
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="session-chat-column relative flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="workspace-conversation-header relative flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-3 sm:px-7">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -317,6 +322,8 @@ export function SessionWorkbench({
               <SquareTerminal className="h-4 w-4" aria-hidden />
             </Button>
           )}
+          {coreFeatures.sourceControl === 1 && <Button variant="ghost" size="sm" title={locale === "zh-CN" ? "源码管理" : "Source control"} aria-label={locale === "zh-CN" ? "源码管理" : "Source control"} onClick={() => onOpenDrawer("source-control")}><GitBranch className="h-4 w-4" aria-hidden /><span>Git</span></Button>}
+          {getBridge()?.browser && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "浏览器" : "Browser"} aria-label={locale === "zh-CN" ? "浏览器" : "Browser"} onClick={() => onOpenDrawer("browser")}><Globe className="h-4 w-4" aria-hidden /></Button>}
           {headerActions}
           {onToggleAgents && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} aria-label={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} aria-pressed={agentsOpen} aria-expanded={agentsOpen} aria-controls={agentsOpen ? "session-agent-inspector" : undefined} onClick={onToggleAgents}>
             <Users className="h-4 w-4" aria-hidden />
@@ -340,7 +347,7 @@ export function SessionWorkbench({
         {extensionUi.widgets.map((text, index) => <div key={`widget-${index}`} className="whitespace-pre-wrap">{text}</div>)}
         {extensionUi.statuses.length > 0 && <div className="flex flex-wrap gap-x-4">{extensionUi.statuses.map((text, index) => <span key={index}>{text}</span>)}</div>}
       </div>}
-      {nativeOwnsSession && <div className="mx-auto flex w-full max-w-[1000px] items-center justify-between gap-3 px-5 pb-2 text-[13px] text-ink-2"><span>{locale === "zh-CN" ? "会话正在原生终端中运行" : "Session is active in the native terminal"}</span><Button variant="ghost" size="sm" onClick={() => onOpenDrawer("terminal")}>{locale === "zh-CN" ? "返回终端" : "Open terminal"}</Button></div>}
+      {nativeOwnsSession && <div className="mx-auto flex w-full max-w-[1000px] items-center justify-between gap-3 px-5 pb-2 text-[13px] text-ink-2"><span>{nativeTerminal.historySync?.status === "failed" ? (locale === "zh-CN" ? "原生历史同步失败，请在终端中重试" : "Native history sync failed. Retry in the terminal.") : nativeTerminal.historySync?.status === "syncing" ? (locale === "zh-CN" ? "正在同步原生会话历史" : "Syncing native session history") : (locale === "zh-CN" ? "会话正在原生终端中运行" : "Session is active in the native terminal")}</span><Button variant="ghost" size="sm" onClick={() => onOpenDrawer("terminal")}>{locale === "zh-CN" ? "返回终端" : "Open terminal"}</Button></div>}
       <Composer
         sessionId={sessionId}
         targetName={targetName}
@@ -348,9 +355,11 @@ export function SessionWorkbench({
         disabled={session.status === "archived" || nativeOwnsSession}
       />
 
-      {<TerminalDrawer open={drawer === "terminal"} onClose={onCloseDrawer} sessionId={sessionId} />}
+      {<TerminalDrawer open={drawer === "terminal" && active} onClose={onCloseDrawer} sessionId={sessionId} />}
       </div>
       {<ArtifactsDrawer open={drawer === "artifacts"} onClose={onCloseDrawer} sessionId={sessionId} focusPath={diffFocusPath} />}
+      {drawer === "browser" && active && getBridge()?.browser && <BrowserDrawer key={sessionId} sessionId={sessionId} onClose={onCloseDrawer} />}
+      <SourceControlDrawer open={drawer === "source-control" && active && coreFeatures.sourceControl === 1} onClose={onCloseDrawer} sessionId={sessionId} projectId={project?.id} />
       <DagDrawer open={drawer === "dag"} onClose={onCloseDrawer} tasks={tasks} />
       <SubagentDrawer open={!!subagentEventId} onClose={() => setSubagentEventId(undefined)} sessionId={sessionId} eventId={subagentEventId} />
     </div>

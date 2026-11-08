@@ -32,7 +32,7 @@ export function buildCodexMcpConfigArgs(servers: AdapterMcpServer[] = []): strin
       if (server.cwd) args.push("-c", `${key}.cwd=${tomlString(server.cwd)}`);
     } else if (server.transport === "http" && server.url) {
       args.push("-c", `${key}.url=${tomlString(server.url)}`);
-      if (server.headers && Object.keys(server.headers).length) args.push("-c", `${key}.headers=${tomlInlineTable(server.headers)}`);
+      if (server.headers && Object.keys(server.headers).length) args.push("-c", `${key}.http_headers=${tomlInlineTable(server.headers)}`);
     }
   }
   return args;

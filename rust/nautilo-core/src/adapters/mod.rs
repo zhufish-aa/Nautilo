@@ -36,7 +36,8 @@ pub use process_adapter::stream_events;
 pub type BoxFuture<T> = Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 
 /// AdapterEvent in the TS SDK. `raw` payloads stay as JSON values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag="kind", rename_all="snake_case", rename_all_fields="camelCase")]
 pub enum AdapterEvent {
     Message { text: String, phase: Option<String>, message_id: Option<String>, subagent_dispatch_id: Option<String>, raw: Option<Value> },
     Thinking { text: String, phase: Option<String>, message_id: Option<String>, subagent_dispatch_id: Option<String>, raw: Option<Value> },
@@ -90,7 +91,8 @@ pub enum AdapterEvent {
     Timeout { reason: TimeoutKind },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all="snake_case")]
 pub enum TimeoutKind {
     Timeout,
     Idle,
@@ -119,6 +121,8 @@ pub struct AdapterStartRequest {
     pub instance: Value,
     /// Stable Nautilo identity for local transport isolation, not a provider thread ID.
     pub local_session_id: Option<String>,
+    /// History-only evidence from the PTY owner; never a provider launch flag.
+    pub native_terminal_live: Option<bool>,
     pub prompt: String,
     pub cwd: String,
     pub model: Option<String>,
@@ -273,6 +277,15 @@ pub trait AgentCliAdapter: Send + Sync {
     }
     async fn dispose(&self) {}
     async fn release_session(&self, _request:&AdapterStartRequest) -> CoreResult<()> {Ok(())}
+    async fn read_session_history(&self,_request:&AdapterStartRequest,_session:&str)->CoreResult<Option<Value>> {Ok(None)}
+    fn native_history_supported(&self,_instance:&Value)->bool {false}
+    /// History readback alone does not prove stream message/call IDs are native.
+    fn native_message_ids_supported(&self,_instance:&Value)->bool {false}
+    async fn resume_terminal_events(&self,_request:&AdapterStartRequest,_session:&str,_snapshot:&Value)->CoreResult<()> {Ok(())}
+    async fn prepare_native_terminal(&self,request:AdapterStartRequest,resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
+        self.release_session(&request).await?;
+        self.native_terminal(request,resume).await
+    }
     async fn native_terminal(&self,_request:AdapterStartRequest,_resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
         Err(crate::errors::invalid("providerId","This adapter has not declared a native terminal launch plan"))
     }
@@ -384,6 +397,7 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
 /// not serializable; interactions/tools travel over reverse channels).
 pub fn start_request_to_json(request: &AdapterStartRequest) -> Value {
     let mut map = serde_json::Map::new();
+    if let Some(live)=request.native_terminal_live {map.insert("nativeTerminalLive".into(),Value::Bool(live));}
     if let Some(mode)=&request.agent_mode { map.insert("agentMode".into(),Value::String(mode.clone())); }
     if let Some(id)=&request.local_session_id {map.insert("localSessionId".into(),Value::String(id.clone()));}
     map.insert("instance".to_string(), request.instance.clone());

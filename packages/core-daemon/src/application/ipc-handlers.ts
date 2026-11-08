@@ -1,4 +1,8 @@
+import { assistantModelStep } from "./assistant-model.js";
+import { assistantRecords, saveAssistantRecord, assistantSessions, assistantExcerpts } from "../database/assistant-reads.js";
 import { TerminalService } from "../runtime/terminal-service.js";
+import { SourceControl } from "../runtime/source-control.js";
+import { sourceControlDirectory } from "./source-control.js";
 import { ConnectionService } from "./connection-service.js";
 import { projectPollHealIds, projectPollLastSequence, readProjectPoll } from "../database/project-poll.js";
 import { IpcGateway } from "../ipc-gateway.js";
@@ -31,6 +35,7 @@ export interface ApplicationServices {
   events: EventService;
   runs: RunService;
   terminals: TerminalService;
+  sourceControl: SourceControl;
   projects: ProjectService;
   agents: AgentService;
   connections: ConnectionService;
@@ -53,16 +58,28 @@ export interface ApplicationServices {
   dataDir: string;
 }
 export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationServices): void {
-  gateway.register("terminal.open", async ({sessionId, projectId, cols, rows}) => {
+  gateway.register("scm.status", async input => services.sourceControl.status(sourceControlDirectory(services.database,input)));
+  gateway.register("scm.diff", async input => services.sourceControl.diff(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.commit", async input => services.sourceControl.commitDetails(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.commitDiff", async input => services.sourceControl.commitDiff(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.history", async input => services.sourceControl.history(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.file", async input => services.sourceControl.file(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.save", async input => services.sourceControl.save(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.mutate", async input => services.sourceControl.mutate(sourceControlDirectory(services.database,input),input));
+  gateway.register("terminal.open", async ({sessionId, projectId, tabId = "default", restoreOnly, cols, rows}) => {
     const session = sessionId ? services.sessions.get(sessionId).session : undefined;
     const project = services.database.projects.get(projectId ?? session?.projectId ?? "");
     if (!project) throw new Error("Project not found");
-    return services.terminals.open(`shell:${sessionId ?? project.id}`, session?.nativeWorkingDirectory ?? project.rootPath, cols, rows);
+    if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(tabId)) throw new Error("Invalid terminal tab identity");
+    const scope = TerminalService.scope(sessionId, project.id);
+    return services.terminals.open(JSON.stringify(["shell", scope, tabId]), session?.nativeWorkingDirectory ?? project.rootPath, cols, rows, {scope, tabId, restoreOnly});
   });
+  gateway.register("terminal.list", async ({sessionId, projectId}) => services.terminals.list(TerminalService.scope(sessionId, projectId ?? "")));
+  gateway.register("terminal.stop", async ({terminalId}) => services.terminals.stop(terminalId));
   gateway.register("terminal.read", async ({terminalId, cursor}) => services.terminals.read(terminalId, cursor));
   gateway.register("terminal.write", async ({terminalId, data}) => services.terminals.write(terminalId, data));
   gateway.register("terminal.resize", async ({terminalId, cols, rows}) => services.terminals.resize(terminalId, cols, rows));
-  gateway.register("terminal.close", async ({terminalId}) => services.terminals.close(terminalId));
+  gateway.register("terminal.close", async input => "terminalId" in input ? services.terminals.close(input.terminalId) : services.terminals.closeTab(TerminalService.scope(input.sessionId,input.projectId ?? ""),input.tabId));
   gateway.register("terminal.status", async () => ({nativeActive:false}));
   gateway.register("terminal.native", async () => { throw new Error("原生会话交接需要使用 Rust 核心运行项目。"); });
   gateway.register("agent.runtimeCapabilities", async ({sessionId, agentInstanceId}) => {
@@ -77,12 +94,17 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
       resources:{nativeConfig:"unknown" as const,managedMcp:"unknown" as const,managedSkills:"unknown" as const}};
   });
 
+  gateway.register("assistant.records", async input => assistantRecords(services.database.connection.raw, input));
+  gateway.register("assistant.save", async input => saveAssistantRecord(services.database.connection.raw, input));
+  gateway.register("assistant.modelStep", input => assistantModelStep(services, input));
+  gateway.register("assistant.sessions", async input => assistantSessions(services.database.connection.raw, input));
+  gateway.register("assistant.excerpts", async input => assistantExcerpts(services.database.connection.raw, input));
   gateway.register("connection.list", async () => services.connections.list());
   gateway.register("connection.get", async ({ connectionId, revision }) => services.connections.get(connectionId, revision));
   gateway.register("connection.upsert", async (input) => services.connections.upsert(input));
   gateway.register("connection.remove", async ({ connectionId }) => services.connections.remove(connectionId));
   gateway.register("connection.models", async (input) => services.connections.discover(input));
-  gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0" }));
+  gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0", features: {sourceControl:1,sourceControlHistory:1,sourceControlHistoryPaging:1,sourceControlEditing:1,terminalTabs:1} }));
   gateway.register("project.list", async () => services.projects.list());
   gateway.register("project.add", async (input) => services.projects.add(input));
   gateway.register("project.upsert", async (input) => { services.database.projects.save(input, new Date().toISOString()); return input; });
@@ -94,7 +116,10 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   // The renderer builds its whole provider UI (detection page, instance
   // editor, permission mode picker) from these descriptors — built-ins and
   // loaded plugins alike.
-  gateway.register("provider.catalog", async () => services.adapters.list().map((adapter) => adapter.descriptor));
+  gateway.register("provider.catalog", async () => services.adapters.list().map(adapter => ({
+    ...adapter.descriptor,
+    harnessPlugins: services.plugins.managerFor(adapter.descriptor.providerId) ? true : undefined
+  })));
   gateway.register("plugin.list", async () => services.plugins.list());
   gateway.register("plugin.registry", async (input) => services.plugins.fetchRegistry(input.registryUrl));
   gateway.register("plugin.install", async (input) => {
@@ -165,12 +190,18 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("session.generateTitle", async ({ sessionId }) => services.runs.generateSessionTitle(sessionId));
   gateway.register("session.create", async (input) => services.sessions.create(input));
   gateway.register("session.upsert", async (input) => services.sessions.upsert(input));
-  gateway.register("session.delete", async (input) => services.sessions.delete(input));
+  gateway.register("session.delete", async (input) => {
+    const result = services.sessions.delete(input);
+    for (const id of result.sessionIds) services.terminals.closeScope(TerminalService.scope(id,""));
+    return result;
+  });
   gateway.register("session.followUp", async (input) => services.sessions.followUp(input));
   gateway.register("session.followUp.list", async (input) => services.sessions.followUpList(input));
   gateway.register("session.followUp.cancel", async (input) => services.sessions.followUpCancel(input));
   gateway.register("session.followUp.steer", async (input) => services.sessions.followUpSteer(input));
   gateway.register("provider.modes", async (input) => services.agents.listModes(input.agentInstanceId));
+  gateway.register("provider.harnessPlugins", async ({agentInstanceId, connectionId, operation}) =>
+    services.agents.harnessPlugins(agentInstanceId, operation, id => services.plugins.managerFor(id), connectionId));
   gateway.register("session.send", async (input) => services.sessions.send(input));
   gateway.register("slashCommand.list", async ({ sessionId }) => services.slashCommands.list(sessionId));
   gateway.register("slashCommand.execute", async (input) => services.slashCommands.execute(input.sessionId, input.commandId, input.argument));

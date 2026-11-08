@@ -42,7 +42,7 @@ function run(command, args, cwd) {
 
 // Daemon + first-party provider plugins, all release executables.
 run("cargo", ["build", "--release", "-p", "nautilo-core"], join(repositoryRoot, "rust"));
-run("cargo", ["build", "--release", "-p", "agenthub-plugin-pi", "-p", "agenthub-plugin-trae", "-p", "agenthub-plugin-opencode", "-p", "agenthub-plugin-omp", "-p", "agenthub-plugin-deepseek"], join(repositoryRoot, "rust"));
+run("cargo", ["build", "--release", "-p", "agenthub-plugin-commandcode", "-p", "agenthub-plugin-pi", "-p", "agenthub-plugin-trae", "-p", "agenthub-plugin-opencode", "-p", "agenthub-plugin-omp", "-p", "agenthub-plugin-deepseek", "-p", "agenthub-plugin-codex-plugins"], join(repositoryRoot, "rust"));
 
 const profileDirectory = join(repositoryRoot, "rust", "target", "x86_64-pc-windows-gnu", "release");
 const daemonExecutable = join(profileDirectory, "nautilo-core.exe");
@@ -55,7 +55,7 @@ copyFileSync(daemonExecutable, join(coreDaemonDirectory, "nautilo-core.exe"));
 // Bundled for manual "install from local folder": plugins/<id>/ carrying the
 // manifest + native executable, mirroring the Tauri package layout.
 const pluginsDirectory = join(stagingDirectory, "plugins");
-for (const id of ["opencode", "trae", "pi", "omp", "deepseek"]) {
+for (const id of ["opencode", "trae", "pi", "omp", "commandcode", "deepseek", "codex-plugins"]) {
   const source = join(repositoryRoot, "rust", "plugins", id);
   const manifest = join(source, "agenthub-plugin.json");
   const exe = join(profileDirectory, `agenthub-plugin-${id}.exe`);

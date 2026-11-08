@@ -858,6 +858,9 @@ async fn run_turn(
             .request("turn/start", turn_start_params(request, &thread_id)?)
             .await?;
         let turn_id = turn_response.get("turn").and_then(|t| t.get("id")).and_then(Value::as_str).map(str::to_string);
+        if let Some(user)=turn_response["turn"]["items"].as_array().into_iter().flatten().find(|item|item["type"]=="userMessage") {
+            let _=sender.send(AdapterEvent::Session{provider_session_id:thread_id.clone(),raw:Some(json!({"providerUserMessageId":user["id"],"nativeTurnId":turn_id}))});
+        }
         state.lock().unwrap().turn_id = turn_id;
     }
     timing("turn_accepted");

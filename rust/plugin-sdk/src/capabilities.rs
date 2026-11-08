@@ -1,81 +1,78 @@
-//! Native experience contract. Unknown capabilities are never advertised as false.
+//! Provider-owned native experience declarations. No provider names are interpreted by this SDK.
 use serde_json::{json, Value};
-pub fn describe(provider: &str, instance: &Value, legacy: &Value) -> Value {
-    let api = instance
-        .pointer("/providerOptions/runtimeConnectionId")
-        .is_some();
-    let (transport, resident, dialogs, steer, terminal) = match provider {
-        "codex" => (
-            "app-server",
-            true,
-            vec!["approval", "question", "elicitation"],
-            true,
-            true,
-        ),
-        "claude-code" => (
-            "stream-json",
-            true,
-            vec!["approval", "question", "plan"],
-            true,
-            true,
-        ),
-        "kimi-code" if !api => ("acp", true, vec!["approval"], false, true),
-        "kimi-code" => ("stream-json", false, vec![], false, true),
-        "pi" | "omp" => (
-            "rpc",
-            true,
-            vec!["confirm", "select", "input", "editor"],
-            true,
-            true,
-        ),
-        "opencode" => ("http-sse", true, vec!["approval", "question"], true, true),
-        "deepseek" => (
-            "native-web",
-            true,
-            vec!["approval", "question"],
-            true,
-            false,
-        ),
-        "commandcode" => ("ndjson", false, vec![], false, true),
-        "trae" => ("native-cli", false, vec!["approval"], false, false),
-        _ => ("custom", false, vec![], false, false),
-    };
-    let custom = instance["baseArgs"]
-        .as_array()
-        .is_some_and(|args| !args.is_empty());
-    let (transport, resident, steer) = if custom && provider == "codex" {
-        ("exec-json", false, false)
-    } else if custom && (provider == "kimi-code" || provider == "opencode") {
-        ("stream-json", false, false)
-    } else {
-        (transport, resident, steer)
-    };
-    let background = legacy["sessionBackgroundEvents"] == true
-        || provider == "claude-code"
-        || provider == "kimi-code" && transport == "acp"
-        || provider == "codex" && transport == "app-server";
-    json!({"schemaVersion":1,"providerId":provider,"evidence":{"source":"adapter-contract","cliVersion":instance.get("version").or_else(||instance.pointer("/providerOptions/detectedVersion"))},
-        "session":{"transport":transport,"processReuse":resident,"resume":if legacy["nativeResume"]==true{"native"}else{"unknown"},"backgroundEvents":if background{"session"}else{"unknown"}},
+pub fn profile(
+    transport: &str,
+    resident: bool,
+    dialogs: &[&str],
+    steer: bool,
+    terminal: bool,
+    background: bool,
+    history: bool,
+) -> Value {
+    json!({"schemaVersion":1,
+        "session":{"transport":transport,"processReuse":resident,"backgroundEvents":if background{"session"}else{"unknown"},"history":if history{"native"}else{"unknown"}},
         "turn":{"interrupt":if resident{"native-or-process"}else{"process"},"steer":if steer{"native"}else{"queued"}},
         "interactions":{"dialogs":dialogs,"nativeTerminal":terminal,"unknownRequests":"visible-error"},
-        "resources":{"nativeConfig":if transport=="custom"{"unknown"}else{"preserved"},"managedMcp":if transport=="custom"{"unknown"}else{"merged"},"managedSkills":if transport=="custom"{"unknown"}else{"merged"}},
-        "legacy":legacy})
+        "resources":{"nativeConfig":"preserved","managedMcp":"merged","managedSkills":"merged"}})
 }
-
+pub fn with_profile(mut legacy: Value, declarations: Value) -> Value {
+    legacy["nativeExperience"] = declarations;
+    legacy
+}
+/// The plugin supplies a default and ordered variants. Predicates use JSON pointers on the instance.
+pub fn describe(provider: &str, instance: &Value, legacy: &Value) -> Value {
+    let declarations = &legacy["nativeExperience"];
+    let mut value=declarations.get("default").cloned().unwrap_or_else(||json!({"schemaVersion":1,
+        "session":{"transport":"unknown","processReuse":false,"backgroundEvents":"unknown","history":"unknown"},
+        "turn":{"interrupt":"process","steer":"queued"},"interactions":{"dialogs":[],"nativeTerminal":false,"unknownRequests":"visible-error"},
+        "resources":{"nativeConfig":"unknown","managedMcp":"unknown","managedSkills":"unknown"}}));
+    for variant in declarations["variants"].as_array().into_iter().flatten() {
+        let predicate = &variant["when"];
+        let actual = predicate["pointer"]
+            .as_str()
+            .and_then(|p| instance.pointer(p));
+        let matches = if predicate["nonempty"] == true {
+            actual.is_some_and(|v| {
+                v.as_array().is_some_and(|a| !a.is_empty())
+                    || v.as_str().is_some_and(|s| !s.is_empty())
+                    || v.as_object().is_some_and(|o| !o.is_empty())
+            })
+        } else {
+            actual.is_some_and(|v| predicate.get("equals") == Some(v))
+        };
+        if matches {
+            value = variant["profile"].clone();
+        }
+    }
+    value["providerId"] = json!(provider);
+    value["session"]["resume"] = json!(if legacy["nativeResume"] == true {
+        "native"
+    } else {
+        "unknown"
+    });
+    value["evidence"] = json!({"source":declarations["evidenceSource"].as_str().unwrap_or("plugin-contract"),"cliVersion":instance.get("version").or_else(||instance.pointer("/providerOptions/detectedVersion"))});
+    value["legacy"] = legacy.clone();
+    value
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn codex_background_contract_only_covers_the_resident_transport() {
-        let resident = describe("codex", &json!({}), &json!({"nativeResume":true}));
-        assert_eq!(resident["session"]["backgroundEvents"], "session");
-        let custom = describe(
-            "codex",
-            &json!({"baseArgs":["exec","--json"]}),
-            &json!({"nativeResume":true}),
+    fn arbitrary_plugin_owns_its_profile_and_instance_variants() {
+        let declared = with_profile(
+            json!({"nativeResume":true}),
+            json!({"default":profile("custom-wire",true,&["question"],true,true,true,true),"variants":[{"when":{"pointer":"/baseArgs","nonempty":true},"profile":profile("single",false,&[],false,true,false,false)}]}),
         );
-        assert_eq!(custom["session"]["transport"], "exec-json");
+        assert_eq!(
+            describe("brand-new", &json!({}), &declared)["session"]["history"],
+            "native"
+        );
+        let custom = describe("brand-new", &json!({"baseArgs":["run"]}), &declared);
+        assert_eq!(custom["session"]["transport"], "single");
         assert_eq!(custom["session"]["backgroundEvents"], "unknown");
-        assert_eq!(custom["session"]["processReuse"], false);
+        assert_eq!(
+            describe("codex", &json!({}), &json!({}))["session"]["transport"],
+            "unknown"
+        );
     }
 }

@@ -1,6 +1,13 @@
 import { registerAccountLoginHandlers } from "./account-login";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import { mkdirSync, readFileSync } from "node:fs";
+import { registerPanelWindows } from "./panel-windows";
+import type { PanelTarget } from "../shared/panel-window";
+import { WorkspaceAssistant } from "./assistant/workspace-assistant";
+import type { CoreRequest } from "./assistant/context";
+import type { AssistantSettings } from "../shared/workspace-assistant";
+import { TaskBrowser } from "./task-browser";
 import { readWindowState, trackWindowState } from "./window-state";
 import { CoreDaemonClient } from "./core-daemon-client";
 import { ARTIFACT_SCHEME, registerArtifactProtocol, registerArtifactScheme } from "./artifact-protocol";
@@ -9,14 +16,30 @@ import { registerInteractionHandlers } from "./desktop-interactions";
 import { registerProviderUpdateHandlers } from "./provider-updates";
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
-const legacyUserDataPath = app.getPath("userData");
+const configuredUserDataPath = process.env.NAUTILO_USER_DATA_DIR?.trim();
+if (configuredUserDataPath && !isAbsolute(configuredUserDataPath)) throw new Error("NAUTILO_USER_DATA_DIR must be an absolute path");
+const legacyUserDataPath = configuredUserDataPath || app.getPath("userData");
 app.setName("Nautilo");
+mkdirSync(legacyUserDataPath, { recursive: true });
 app.setPath("userData", legacyUserDataPath);
+if (configuredUserDataPath) {
+  app.setPath("sessionData", legacyUserDataPath);
+  const crashPath = join(legacyUserDataPath, "crashes");
+  mkdirSync(crashPath, { recursive: true });
+  app.setPath("crashDumps", crashPath);
+  app.setAppLogsPath(join(legacyUserDataPath, "logs"));
+}
 // A local preview has no Vite URL, but still uses workspace resources.
 const appIcon = app.isPackaged
   ? join(process.resourcesPath, "app", "resources", "nautilo-icon.png")
   : join(__dirname, "../../resources/nautilo-icon-512.png");
-const coreDaemon = new CoreDaemonClient();
+const coreDaemon = new CoreDaemonClient((stepId,text)=>workspaceAssistant.receiveText(stepId,text));
+const taskBrowser = new TaskBrowser();
+const requestForAssistant: CoreRequest = (method, input) => coreDaemon.request({method,input}) as Promise<import("@agenthub/schemas").IpcRequestMap[typeof method]["output"]>;
+const workspaceAssistant = new WorkspaceAssistant(requestForAssistant, sessionId => {
+  if (workbenchWindow && !workbenchWindow.isDestroyed()) workbenchWindow.webContents.send("assistant:changed",sessionId);
+},draft=>{if(workbenchWindow&&!workbenchWindow.isDestroyed())workbenchWindow.webContents.send("assistant:output",draft);});
+let closeSessionPanels: ((id:string)=>void) | undefined;
 registerArtifactScheme();
 
 /** Strict CSP for the packaged app; dev mode keeps Vite HMR working instead. */
@@ -48,8 +71,17 @@ function registerIpcHandlers(): void {
   }));
 
   ipcMain.handle("core:request", async (_event, request: { requestId?: string; method: string; input?: unknown }) => {
-    return coreDaemon.request(request);
+    const result = await coreDaemon.request(request);
+    if (request.method === "session.delete") {
+      for (const id of (result as {sessionIds?: string[]})?.sessionIds ?? []) { closeSessionPanels?.(id); taskBrowser.release(id); }
+    }
+    return result;
   });
+
+  ipcMain.handle("assistant:view", (_event,before?:number) => workspaceAssistant.view(before));
+  ipcMain.handle("assistant:configure", (_event,settings:AssistantSettings) => workspaceAssistant.configure(settings));
+  ipcMain.handle("assistant:submit", (_event,id:string,text:string) => workspaceAssistant.submit(id,text));
+  ipcMain.handle("assistant:stop", (_event,id:string) => workspaceAssistant.stop(id));
 
   ipcMain.handle("window:minimize", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();
@@ -97,6 +129,7 @@ function registerIpcHandlers(): void {
     importClipboardAttachment(app.getPath("userData"), input)
   );
 
+  closeSessionPanels = registerPanelWindows(() => workbenchWindow, createPanelWindow, loadWorkbenchRenderer);
   registerInteractionHandlers();
   registerProviderUpdateHandlers();
   registerAccountLoginHandlers();
@@ -110,6 +143,25 @@ async function registeredProjectRoots(): Promise<string[]> {
     // The fixed roots still work while the daemon is restarting or unavailable.
     return [];
   }
+}
+
+let workbenchWindow: BrowserWindow | undefined;
+function loadWorkbenchRenderer(win:BrowserWindow) {
+  return isDev ? win.loadURL(process.env.ELECTRON_RENDERER_URL!) : win.loadFile(join(__dirname,"../renderer/index.html"));
+}
+
+function createPanelWindow(target:PanelTarget) {
+  const win = new BrowserWindow({
+    width: target.kind === "browser" ? 1040 : 1220, height:780, minWidth:420, minHeight:320,
+    show:false, autoHideMenuBar:true, icon:appIcon, title:target.kind === "browser" ? "Nautilo · Browser" : "Nautilo · Git",
+    webPreferences:{preload:join(__dirname,"../preload/index.js"),sandbox:true,contextIsolation:true,
+      nodeIntegration:false,webSecurity:true,spellcheck:false,
+      additionalArguments:["--nautilo-panel="+encodeURIComponent(JSON.stringify(target))]},
+  });
+  win.webContents.setWindowOpenHandler(()=>({action:"deny"}));
+  win.webContents.on("will-navigate",event=>event.preventDefault());
+  if (target.kind === "browser") taskBrowser.attachPanelWindow(target.sessionId!,win);
+  return win;
 }
 
 function createMainWindow(): BrowserWindow {
@@ -140,7 +192,10 @@ function createMainWindow(): BrowserWindow {
     }
   });
 
+  workbenchWindow = win;
+  win.once("closed", () => { if (workbenchWindow === win) workbenchWindow = undefined; });
   trackWindowState(win);
+  taskBrowser.attachWindow(win);
 
   win.once("ready-to-show", () => {
     if (state.isMaximized) win.maximize();
@@ -160,11 +215,7 @@ function createMainWindow(): BrowserWindow {
     if (!url.startsWith(allowed)) event.preventDefault();
   });
 
-  if (isDev) {
-    void win.loadURL(process.env.ELECTRON_RENDERER_URL!);
-  } else {
-    void win.loadFile(join(__dirname, "../renderer/index.html"));
-  }
+  void loadWorkbenchRenderer(win);
 
   return win;
 }
@@ -174,7 +225,7 @@ if (!gotSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    const [win] = BrowserWindow.getAllWindows();
+    const win = workbenchWindow;
     if (win) {
       if (win.isMinimized()) win.restore();
       win.focus();
@@ -184,15 +235,31 @@ if (!gotSingleInstanceLock) {
   void app.whenReady().then(async () => {
     applyContentSecurityPolicy();
     registerArtifactProtocol(registeredProjectRoots);
-    await coreDaemon.start(app.getPath("userData"));
+    const dataDir = app.getPath("userData");
+    const port = await taskBrowser.start(() => readFileSync(join(dataDir, "core.token"), "utf8").trim());
+    await coreDaemon.start(dataDir, port);
+    taskBrowser.register();
     registerIpcHandlers();
+    void workspaceAssistant.start().catch(error => console.error("Assistant startup:",error.message));
     createMainWindow();
 
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+      if (!workbenchWindow) createMainWindow();
     });
   });
 
+  let browserShutdownReady=false, browserShutdownPending=false;
+  app.on("before-quit", event => {
+    if(browserShutdownReady)return;
+    event.preventDefault();
+    if(browserShutdownPending)return;
+    browserShutdownPending=true;
+    workspaceAssistant.close();
+    void taskBrowser.close().catch(error=>console.error("Browser shutdown:",error.message)).finally(()=>{
+      browserShutdownReady=true;
+      app.quit();
+    });
+  });
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") {
       void coreDaemon.stop();

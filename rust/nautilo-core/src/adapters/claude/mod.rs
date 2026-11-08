@@ -2,6 +2,8 @@
 //! Spawns `claude -p --output-format stream-json --verbose` and parses the
 //! event stream, with the runtime MCP bridge for tools/permission prompts.
 
+mod native_experience;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -756,6 +758,11 @@ impl ClaudeCodeAdapter {
 
 #[async_trait::async_trait]
 impl AgentCliAdapter for ClaudeCodeAdapter {
+    fn native_capabilities(&self,instance:&Value)->Value {
+        let caps=self.capabilities();
+        let legacy=json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty});
+        agenthub_plugin_sdk::capabilities::describe(self.provider_id(),instance,&agenthub_plugin_sdk::capabilities::with_profile(legacy,native_experience::declarations()))
+    }
     fn provider_id(&self) -> &str {
         "claude-code"
     }
@@ -864,7 +871,7 @@ impl AgentCliAdapter for ClaudeCodeAdapter {
         if let Some(resume)=resume {args.extend(["--resume".into(),resume]);}
         args.push(String::new());let mut config=private_config::materialize(args).map_err(|error|crate::errors::invalid("terminal",&error.to_string()))?;config.args.pop();
         let mut env=request.env.unwrap_or_default();if request.reasoning_effort.is_some(){env.entry("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT".into()).or_insert_with(||"1".into());}
-        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("claude").into(),args:config.args.clone(),env:Some(env),cwd:request.cwd,resources:vec![Box::new(config),Box::new(proxy)]})
+        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("claude").into(),args:config.args.clone(),env:Some(env),cwd:request.cwd,resources:vec![Box::new(config),Box::new(proxy)],provider_session_id:None})
     }
 
 }

@@ -52,6 +52,7 @@ export type RuntimeEventType =
   | "provider.runtime_closed"
   | "provider.background_error"
   | "session.checkpoint_reverted"
+  | "session.native_history_synced"
   | "session.follow_up_queued"
   | "session.follow_up_cancelled"
   | "session.follow_up_steered"
@@ -84,6 +85,7 @@ export interface SubagentDispatch {
 }
 
 export interface RuntimeEventPayloadMap {
+  "session.native_history_synced": { providerSessionId: string; messageIds: string[]; messageCount: number };
   "provider.runtime_closed": { providerId: string; exitCode?: number | null; signal?: string | null };
   "provider.background_error": { providerId: string; message: string };
   "run.diff_updated": {

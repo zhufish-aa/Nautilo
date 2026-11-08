@@ -266,9 +266,9 @@ impl Translator {
 
 /// Byte-oriented SSE framing avoids corrupting split UTF-8 and supports multiline data.
 #[derive(Default)]
-pub(super) struct SseDecoder { pending: Vec<u8>, data: String }
+pub(crate) struct SseDecoder { pending: Vec<u8>, data: String }
 impl SseDecoder {
-    pub(super) fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
         self.pending.extend_from_slice(bytes);
         ensure!(self.pending.len() + self.data.len() <= 20 * 1024 * 1024, "SSE event exceeds limit");
         let mut events = vec![];

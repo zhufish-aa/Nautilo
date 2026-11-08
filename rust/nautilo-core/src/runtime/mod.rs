@@ -14,12 +14,16 @@ pub mod orchestration;
 pub mod run_diff_collector;
 pub mod run_log;
 pub mod run_service;
+mod desktop_browser;
 pub mod run_workspace_snapshot;
 pub mod runtime_tool_provider;
 pub mod security;
 pub mod terminal_service;
+pub mod source_control;
 pub mod session_run_queue;
 pub mod session_title;
+pub mod assistant_model;
+mod assistant_stream;
 pub mod subagent_detection;
 pub mod verification_engine;
 

@@ -28,6 +28,12 @@ pub struct EventService {
 }
 
 impl EventService {
+    pub fn publish_committed(&self,events:&[Value]) {
+        for event in events {
+            self.flush_pending_deltas(event["sessionId"].as_str());
+            let _=self.sender.send(event.clone());
+        }
+    }
     pub fn new(db: Arc<Mutex<Database>>, redaction: RedactionService) -> Self {
         let (sender, _) = broadcast::channel(1024);
         Self { db, redaction, sender, pending_deltas: Arc::new(Mutex::new((HashMap::new(), false))) }

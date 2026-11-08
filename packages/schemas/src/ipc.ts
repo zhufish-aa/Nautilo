@@ -1,4 +1,6 @@
+import type { AssistantModelStep, AssistantDecision, AssistantLookup, AssistantRead, AssistantSessionPage, AssistantExcerptPage } from "./assistant.js";
 import type { RuntimeConnection, RuntimeConnectionInput } from "@agenthub/domain";
+import type { HarnessPluginChange, HarnessPluginInventory, HarnessPluginOperation } from "@agenthub/provider-sdk";
 import type {
   AgentInstance,
   AgentRun,
@@ -27,6 +29,13 @@ import type {
 
 /** Missing permissionMode preserves the stored override; null explicitly resets inheritance. */
 export type SessionUpsertInput = Omit<Session, "permissionMode" | "connectionId" | "connectionRevision"> & { permissionMode?: string | null; connectionId?: string | null; connectionRevision?: number | null; confirmConnectionChange?: boolean };
+
+export interface NativeHistorySync {
+  status: "none" | "opening" | "running" | "syncing" | "synced" | "failed" | "unsupported";
+  messageCount?: number;
+  nativeBusy?: boolean;
+  error?: string | null;
+}
 
 export interface MessageAttachmentInput {
   path: string;
@@ -80,22 +89,96 @@ export interface ProjectPollSnapshot {
 
 export type ProjectPollResult = ProjectPollSnapshot | { fallback: true; projectRun: ProjectRun };
 
+export interface TerminalMetadata {
+  id: string; cwd: string; pid?: number; kind: "shell" | "harness"; tabId?: string;
+  exited?: boolean; exitCode?: number;
+}
+export interface SourceControlScope { sessionId?: string; projectId?: string }
+export interface CoreFeatures { sourceControl?: 1; sourceControlHistory?: 1; sourceControlHistoryPaging?: 1; sourceControlEditing?: 1; terminalTabs?: 1 }
+export interface SourceControlCommitSummary { hash: string; subject: string; author: string; committedAt: string }
+export interface SourceControlHistoryInput extends SourceControlScope { query?: string; cursor?: string; limit?: number }
+export interface SourceControlHistoryPage {
+  rootPath: string; reference: string; query: string; head?: string; currentHead?: string;
+  items: SourceControlCommitSummary[]; nextCursor?: string;
+}
+export interface SourceControlChange {
+  path: string; originalPath?: string; indexStatus: string; worktreeStatus: string;
+  untracked: boolean; conflict: boolean; submodule: boolean;
+  additions?: number; deletions?: number; binary?: boolean;
+}
+export interface SourceControlRepository {
+  schemaVersion: 1; available: true; workingDirectory: string; rootPath: string; token: string;
+  branch?: string; head?: string; upstream?: string; upstreamRemote?: string; pushRemote?: string; pushRef?: string;
+  ahead: number; behind: number; detached: boolean;
+  operation?: "merge" | "rebase" | "cherry-pick" | "revert";
+  changes: SourceControlChange[]; remotes: string[];
+  branches: Array<{ name: string; current: boolean; upstream?: string; worktree?: string }>;
+  recent: SourceControlCommitSummary[];
+}
+export type SourceControlStatus = SourceControlRepository | { schemaVersion: 1; available: false; workingDirectory: string };
+export interface SourceControlDiff {
+  path: string; source: "worktree" | "index" | "commit"; patch: string; binary: boolean; truncated: boolean; fileToken?: string; rootPath?: string;
+  patchToken?: string; hunks?: SourceControlHunk[]; partialReason?: string; editable?: boolean;
+  before?: string; after?: string; previewReason?: "binary" | "large" | "encoding" | "submodule" | "conflict"; commitHash?: string;
+}
+export interface SourceControlCommitFile { path: string; originalPath?: string; status: string; additions?: number; deletions?: number; binary: boolean }
+export interface SourceControlCommit {
+  rootPath: string; hash: string; parents: string[]; subject: string; body: string;
+  author: string; authorEmail: string; committedAt: string; files: SourceControlCommitFile[];
+}
+/** Patch row numbers are one-based; both boundaries include their rows. */
+export interface SourceControlHunk { id: string; header: string; startLine: number; endLine: number }
+export interface SourceControlFileVersion {
+  exists: boolean; content?: string; binary: boolean; truncated: boolean; mode?: string;
+}
+export interface SourceControlFile {
+  rootPath: string; path: string; token: string; conflict: boolean; editable: boolean; working: SourceControlFileVersion;
+  base: SourceControlFileVersion; ours: SourceControlFileVersion; theirs: SourceControlFileVersion;
+  index: SourceControlFileVersion;
+}
+export interface SourceControlSave extends SourceControlScope {
+  path: string; fileVersion: string; content?: string;
+  resolution?: "edited" | "ours" | "theirs" | "base" | "delete"; stage?: boolean;
+}
+export interface SourceControlSaveResult {
+  status?: SourceControlRepository; file?: SourceControlFile; saved: true; staged: boolean; error?: string;
+}
+export interface SourceControlMutation extends SourceControlScope {
+  action: "init" | "stage" | "unstage" | "stage-hunks" | "unstage-hunks" | "discard" | "commit" | "create-branch" | "switch-branch" | "fetch" | "pull" | "push";
+  token: string; paths?: string[]; message?: string; branch?: string; remote?: string; fileToken?: string;
+  patchToken?: string; hunkIds?: string[]; lines?: number[];
+}
 export interface IpcRequestMap {
-  "terminal.open": { input: { sessionId?: string; projectId?: string; cols?: number; rows?: number }; output: { id: string; cwd: string; pid?: number; kind: "shell" | "harness" } };
+  "scm.status": { input: SourceControlScope; output: SourceControlStatus };
+  "scm.diff": { input: SourceControlScope & { path: string; source: "worktree" | "index" }; output: SourceControlDiff };
+  "scm.commit": { input: SourceControlScope & { hash: string }; output: SourceControlCommit };
+  "scm.commitDiff": { input: SourceControlScope & { hash: string; path: string }; output: SourceControlDiff };
+  "scm.history": { input: SourceControlHistoryInput; output: SourceControlHistoryPage };
+  "scm.mutate": { input: SourceControlMutation; output: { status: SourceControlRepository; output?: string } };
+  "scm.file": { input: SourceControlScope & {path:string}; output: SourceControlFile };
+  "scm.save": { input: SourceControlSave; output: SourceControlSaveResult };
+  "terminal.open": { input: { sessionId?: string; projectId?: string; tabId?: string; restoreOnly?: boolean; cols?: number; rows?: number }; output: TerminalMetadata };
+  "terminal.list": { input: { sessionId?: string; projectId?: string }; output: { items: TerminalMetadata[] } };
   "terminal.native": { input: { sessionId: string; cols?: number; rows?: number }; output: { id: string; cwd: string; pid?: number; kind: "harness" } };
-  "terminal.read": { input: { terminalId: string; cursor: number }; output: { data: string; cursor: number; reset: boolean; exited: boolean; exitCode?: number } };
+  "terminal.read": { input: { terminalId: string; cursor: number; retrySync?: boolean }; output: { data: string; cursor: number; reset: boolean; exited: boolean; exitCode?: number; historySync?: NativeHistorySync } };
   "terminal.write": { input: { terminalId: string; data: string }; output: { ok: true } };
   "terminal.resize": { input: { terminalId: string; cols: number; rows: number }; output: { ok: true } };
-  "terminal.close": { input: { terminalId: string }; output: { ok: true } };
-  "terminal.status": { input: { sessionId: string }; output: { nativeActive: boolean; terminalId?: string } };
+  "terminal.close": { input: { terminalId: string } | { sessionId?: string; projectId?: string; tabId: string }; output: { ok: true; historySync?: NativeHistorySync } };
+  "terminal.stop": { input: { terminalId: string }; output: { ok: true; historySync?: NativeHistorySync } };
+  "terminal.status": { input: { sessionId: string; retrySync?: boolean }; output: { nativeActive: boolean; terminalId?: string; historySync?: NativeHistorySync } };
   "agent.runtimeCapabilities": { input: { sessionId?: string; agentInstanceId?: string }; output: import("@agenthub/provider-sdk").NativeRuntimeCapabilities };
+  "assistant.records": { input: { kind: "turn" | "settings" | "memory"; after?: number; before?: number; limit?: number; query?: string; oldest?: boolean }; output: Array<{seq:number;value:unknown}> };
+  "assistant.save": { input: { kind: "turn" | "settings" | "memory"; id: string; value: object }; output: {seq:number} };
+  "assistant.modelStep": { input: AssistantModelStep; output: AssistantDecision };
+  "assistant.sessions": { input: AssistantLookup; output: AssistantSessionPage };
+  "assistant.excerpts": { input: AssistantRead; output: AssistantExcerptPage };
   "connection.list": { input: Record<string, never>; output: RuntimeConnection[] };
   "connection.get": { input: { connectionId: string; revision?: number }; output: RuntimeConnection };
   "connection.upsert": { input: { connection: RuntimeConnectionInput; expectedRevision?: number; apiKey?: string; clearApiKey?: boolean }; output: RuntimeConnection };
   "connection.remove": { input: { connectionId: string }; output: { removed: boolean } };
   "connection.models": { input: { connectionId: string; revision?: number; agentInstanceId?: string }; output: ProviderModelCatalog };
 
-  "health.get": { input: undefined; output: { status: "ok"; version: string } };
+  "health.get": { input: undefined; output: { status: "ok"; version: string; features?: CoreFeatures } };
   "project.list": { input: undefined; output: Project[] };
   "project.add": { input: { rootPath: string; name?: string }; output: Project };
   "project.upsert": { input: Project; output: Project };
@@ -118,6 +201,10 @@ export interface IpcRequestMap {
   "capability.scanSkills": { input: { dir: string }; output: CapabilityScanResult };
   "capability.importMany": { input: { items: ProviderCapability[]; onConflict?: CapabilityImportConflictPolicy }; output: { results: CapabilityImportOutcome[] } };
   "provider.models": { input: { providerId: string; agentInstanceId?: string; executable?: string; baseUrl?: string; apiKey?: string; apiType?: string }; output: ProviderModelCatalog };
+  "provider.harnessPlugins": {
+    input: { agentInstanceId: string; connectionId?: string; operation: HarnessPluginOperation };
+    output: HarnessPluginInventory | HarnessPluginChange;
+  };
   "provider.modes": { input: { agentInstanceId: string; cwd?: string }; output: { modes: Array<{ id: string; name?: string; broken?: string; order?: number }>; defaultMode?: string } };
   "team.list": { input: undefined; output: TeamDefinition[] };
   "team.get": { input: { teamId: string }; output: TeamDefinition };

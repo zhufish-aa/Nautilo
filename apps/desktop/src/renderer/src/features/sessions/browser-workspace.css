@@ -1,0 +1,139 @@
+.detached-workspace-panel {
+  position: relative;
+  height: 100dvh;
+  display: flex;
+  overflow: hidden;
+  background: var(--canvas);
+}
+.detached-workspace-panel > .workspace-panel-right {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  border: 0;
+  box-shadow: none;
+}
+.browser-workspace {
+  container: browser-pane / inline-size;
+  background: var(--card);
+}
+.browser-workspace > header {
+  min-height: 42px;
+  padding: 5px 12px;
+}
+.browser-tabs {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px 0;
+  background: var(--panel);
+}
+.browser-tab-strip {
+  display: flex;
+  min-width: 0;
+  overflow-x: auto;
+  gap: 2px;
+  scrollbar-width: thin;
+}
+.browser-tab {
+  display: flex;
+  align-items: center;
+  min-width: 75px;
+  max-width: 176px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  color: var(--ink-3);
+}
+.browser-tab[data-selected="true"] {
+  background: var(--card);
+  color: var(--ink);
+  border-color: var(--line);
+}
+.browser-tab:hover {
+  background: var(--card-hover);
+}
+.browser-tab [role="tab"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 4px 7px 9px;
+  min-width: 0;
+  outline-offset: -2px;
+}
+.browser-tab .workspace-panel-icon {
+  width: 22px;
+  height: 22px;
+  margin-right: 3px;
+}
+.browser-tab .tab-icon {
+  flex: none;
+  color: var(--ink-3);
+}
+.browser-tab[data-busy="true"] .tab-icon {
+  color: var(--brand);
+}
+.browser-navigation {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+  background: var(--card);
+}
+.browser-history {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.browser-zoom {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.browser-zoom-reset {
+  min-width: 38px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.browser-zoom-reset:hover {
+  color: var(--ink);
+}
+.browser-navigation .workspace-panel-icon:disabled {
+  opacity: 0.35;
+}
+.browser-address {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 56px;
+  border-radius: 8px;
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  padding: 1px 4px 1px 6px;
+}
+.browser-address:focus-within {
+  border-color: var(--brand);
+}
+.browser-navigation button:focus-visible,
+.browser-tabs button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+@container browser-pane (max-width:440px) {
+  .browser-navigation {
+    gap: 2px;
+    padding-inline: 4px;
+  }
+  .browser-history .workspace-panel-icon {
+    width: 22px;
+  }
+  .browser-control-label {
+    display: none;
+  }
+}

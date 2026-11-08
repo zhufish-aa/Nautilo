@@ -38,6 +38,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agenthub-plugin-codex-plugins"
+version = "0.1.0"
+dependencies = [
+ "agenthub-plugin-sdk",
+ "anyhow",
+ "async-trait",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "agenthub-plugin-commandcode"
 version = "0.1.0"
 dependencies = [
@@ -61,6 +72,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -121,6 +133,7 @@ dependencies = [
  "sha2",
  "tokio",
  "toml",
+ "url",
 ]
 
 [[package]]
@@ -928,6 +941,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

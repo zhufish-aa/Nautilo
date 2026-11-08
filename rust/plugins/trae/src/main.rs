@@ -5,6 +5,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod native_experience;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -113,14 +115,14 @@ impl ProviderPlugin for TraePlugin {
         descriptor()
     }
 
-    fn capabilities(&self) -> Value {
-        json!({
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({
             "structuredOutput": true,
             "textOutput": true,
             "interactiveStdin": false,
             "nativeResume": true,
             "pty": false
-        })
+        }),native_experience::declarations())
     }
 
     fn set_interaction_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::InteractionChannel>) {

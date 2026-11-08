@@ -124,12 +124,23 @@ struct PluginClientInner {
     pending_calls: Mutex<HashMap<i64, oneshot::Sender<Value>>>,
     runs: Mutex<HashMap<String, RunChannel>>,
     sessions: Mutex<HashMap<String,SessionChannel>>,
+    terminal_bindings: Mutex<HashMap<String,String>>,
     reverse_calls: Mutex<HashMap<i64,tokio::task::AbortHandle>>,
     ready_sender: Mutex<Option<oneshot::Sender<(Value, Value)>>>,
     ready_receiver: Mutex<Option<oneshot::Receiver<(Value, Value)>>>,
 }
 
 impl PluginClientInner {
+    fn terminal_channel(&self,request:&AdapterStartRequest,replace:bool)->String {
+        let local=request.local_session_id.as_deref().unwrap_or("");
+        let mut bindings=self.terminal_bindings.lock().unwrap();
+        let binding=if !replace {bindings.get(local).cloned()}else{None}.unwrap_or_else(||format!("terminal:{}",uuid::Uuid::new_v4()));
+        bindings.insert(local.into(),binding.clone());
+        let mut sessions=self.sessions.lock().unwrap();
+        let held=sessions.get(&binding).is_some_and(|entry|entry.held);
+        sessions.insert(binding.clone(),SessionChannel{session_id:local.into(),held,events:request.session_events.clone(),interaction:request.session_interaction.clone(),tool:request.session_tool.clone()});
+        binding
+    }
     fn new(plugin_id: &str, stdin: ChildStdin, child: Child) -> Self {
         let (sender, receiver) = oneshot::channel();
         Self {
@@ -141,6 +152,7 @@ impl PluginClientInner {
             pending_calls: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            terminal_bindings: Mutex::new(HashMap::new()),
             reverse_calls: Mutex::new(HashMap::new()),
             ready_sender: Mutex::new(Some(sender)),
             ready_receiver: Mutex::new(Some(receiver)),
@@ -207,7 +219,8 @@ impl PluginClientInner {
         let (sender, receiver) = oneshot::channel();
         self.pending_calls.lock().unwrap().insert(id, sender);
         self.write(&json!({ "type": "call", "id": id, "method": method, "input": input })).await;
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(60), receiver)
+        let seconds = if method == "harnessPlugins" { 900 } else { 60 };
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(seconds), receiver)
             .await
             .map_err(|_| anyhow::anyhow!("plugin call {method} timed out"))??;
         if frame.get("ok").and_then(Value::as_bool) == Some(true) {
@@ -358,16 +371,45 @@ impl AgentCliAdapter for PluginClient {
         profile["evidence"]["pluginNativeExperienceVersion"]=self.capabilities["nativeExperienceVersion"].clone();profile
     }
     async fn release_session(&self,request:&AdapterStartRequest)->CoreResult<()> {
-        self.inner.sessions.lock().unwrap().retain(|_,entry|Some(entry.session_id.as_str())!=request.local_session_id.as_deref());
-        self.inner.call("releaseSession",crate::adapters::start_request_to_json(request)).await.map(|_|()).map_err(|error|crate::errors::invalid("terminal",&error.to_string()))
+        self.inner.call("releaseSession",crate::adapters::start_request_to_json(request)).await.map_err(|error|crate::errors::invalid("terminal",&error.to_string()))?;
+        self.inner.terminal_bindings.lock().unwrap().remove(request.local_session_id.as_deref().unwrap_or(""));
+        // Held bindings drain their final prefix before session_binding(false)
+        // removes them. A release failure must also retain its channel.
+        self.inner.sessions.lock().unwrap().retain(|_,entry|entry.held || Some(entry.session_id.as_str())!=request.local_session_id.as_deref());
+        Ok(())
     }
     async fn native_terminal(&self,request:AdapterStartRequest,resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
-        let plan=self.inner.call("terminalPlan",json!({"request":crate::adapters::start_request_to_json(&request),"resume":resume})).await.map_err(|error|crate::errors::invalid("terminal",&error.to_string()))?;
+        let mut wire_request=crate::adapters::start_request_to_json(&request);
+        if self.capabilities["sharedTerminalServer"]==true {wire_request["sessionBindingId"]=json!(self.inner.terminal_channel(&request,true));}
+        let plan=self.inner.call("terminalPlan",json!({"request":wire_request,"resume":resume})).await.map_err(|error|crate::errors::invalid("terminal",&error.to_string()))?;
         let mut resources:Vec<Box<dyn Send>>=vec![];
         if let Some(token)=plan["token"].as_str(){resources.push(Box::new(PluginTerminalLease{inner:self.inner.clone(),token:token.into()}));}
         Ok(crate::runtime::terminal_service::TerminalPlan{command:plan["command"].as_str().ok_or_else(||crate::errors::invalid("terminal","Plugin did not return an executable"))?.into(),
             args:plan["args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
-            env:plan["env"].as_object().map(|env|env.iter().filter_map(|(key,value)|value.as_str().map(|value|(key.clone(),value.into()))).collect()),cwd:request.cwd,resources})
+            env:plan["env"].as_object().map(|env|env.iter().filter_map(|(key,value)|value.as_str().map(|value|(key.clone(),value.into()))).collect()),cwd:request.cwd,resources,provider_session_id:plan["providerSessionId"].as_str().map(str::to_string)})
+    }
+    async fn read_session_history(&self,request:&AdapterStartRequest,session:&str)->CoreResult<Option<Value>> {
+        if !self.native_history_supported(&request.instance) {return Ok(None);}
+        let snapshot=self.inner.call("readSessionHistory",json!({"request":crate::adapters::start_request_to_json(request),"providerSessionId":session})).await.map_err(|error|crate::errors::invalid("nativeHistory",&error.to_string()))?;
+        if snapshot.is_null() {return Ok(None);}
+        agenthub_plugin_sdk::history::validate(&snapshot,session).map_err(|error|crate::errors::invalid("nativeHistory",&error.to_string()))?;
+        Ok(Some(snapshot))
+    }
+    fn native_history_supported(&self,instance:&Value)->bool {
+        self.capabilities["nativeHistory"]==true && self.native_capabilities(instance)["session"]["history"]=="native"
+    }
+    fn native_message_ids_supported(&self,instance:&Value)->bool {
+        self.capabilities["nativeEventIdentities"]==true && self.native_history_supported(instance)
+    }
+    async fn prepare_native_terminal(&self,request:AdapterStartRequest,resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
+        if self.capabilities["sharedTerminalServer"]!=true {self.release_session(&request).await?;}
+        self.native_terminal(request,resume).await
+    }
+    async fn resume_terminal_events(&self,request:&AdapterStartRequest,session:&str,snapshot:&Value)->CoreResult<()> {
+        if self.capabilities["sharedTerminalServer"]!=true {return Ok(());}
+        let mut wire_request=crate::adapters::start_request_to_json(request);
+        wire_request["sessionBindingId"]=json!(self.inner.terminal_channel(request,false));
+        self.inner.call("resumeTerminalEvents",json!({"request":wire_request,"providerSessionId":session,"snapshot":snapshot})).await.map(|_|()).map_err(|error|crate::errors::invalid("nativeHistory",&error.to_string()))
     }
     fn provider_id(&self) -> &str {
         self.descriptor.get("providerId").and_then(Value::as_str).unwrap_or("plugin")
@@ -443,6 +485,11 @@ struct PluginTerminalLease {inner:Arc<PluginClientInner>,token:String}
 impl Drop for PluginTerminalLease {fn drop(&mut self){let inner=self.inner.clone();let token=self.token.clone();tokio::spawn(async move{let _=inner.call("closeTerminal",json!({"token":token})).await;});}}
 
 impl PluginClient {
+    pub(crate) async fn harness_plugins(&self, input: Value) -> CoreResult<Value> {
+        self.inner.call("harnessPlugins", input).await
+            .map_err(|error| CoreError::reason(ErrorCode::IpcInternalError, error.to_string()))
+    }
+
     fn launch(&self, mut request: AdapterStartRequest, resume: Option<String>) -> CoreResult<AdapterRun> {
         let observer=if self.descriptor["observeApiOutput"]==true {crate::adapters::api_stream_observer::ApiStreamObserver::prepare(&mut request)?}else{None};
         let run_id = uuid::Uuid::new_v4().to_string();

@@ -42,6 +42,13 @@ export class PluginService {
   private readonly records = new Map<string, ProviderPluginRecord>();
   /** Ids currently registered by this service (plugins may be reloaded). */
   private readonly loadedIds = new Set<string>();
+  private readonly managers = new Map<string, AgentCliAdapter>();
+
+  managerFor(providerId: string): AgentCliAdapter | undefined {
+    const adapter = this.adapters.find(providerId);
+    if (adapter?.descriptor.harnessPlugins && adapter.harnessPlugins) return adapter;
+    return this.managers.get(providerId + "-plugins");
+  }
   /**
    * Adapters a loaded plugin replaced (typically built-ins), restored when
    * the plugin is disabled or uninstalled.
@@ -182,6 +189,12 @@ export class PluginService {
 
   private async unload(pluginId: string): Promise<void> {
     if (!this.loadedIds.delete(pluginId)) return;
+    const manager = this.managers.get(pluginId);
+    if (manager) {
+      this.managers.delete(pluginId);
+      await manager.dispose?.();
+      return;
+    }
     const adapter = this.adapters.find(pluginId);
     await adapter?.dispose?.();
     const previous = this.overridden.get(pluginId);
@@ -230,9 +243,17 @@ export class PluginService {
       // adapter from outside this service) so unload() can restore it. On a
       // plugin reload, unload() already restored the previous adapter, which
       // is exactly what we snapshot here.
-      const existing = this.adapters.find(manifest.id);
-      if (existing) this.overridden.set(manifest.id, existing);
-      this.adapters.register(adapter);
+      if (adapter.descriptor.pluginManagerFor) {
+        if (manifest.id !== adapter.descriptor.pluginManagerFor + "-plugins" || !adapter.harnessPlugins) {
+          await adapter.dispose?.();
+          throw new Error("Invalid native plugin manager");
+        }
+        this.managers.set(pluginId, adapter);
+      } else {
+        const existing = this.adapters.find(manifest.id);
+        if (existing) this.overridden.set(manifest.id, existing);
+        this.adapters.register(adapter);
+      }
       this.loadedIds.add(pluginId);
       const record: ProviderPluginRecord = { id: pluginId, enabled: true, status: "loaded", dir, manifest };
       this.records.set(pluginId, record);

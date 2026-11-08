@@ -1,4 +1,5 @@
 import { TerminalService } from "../runtime/terminal-service.js";
+import { SourceControl } from "../runtime/source-control.js";
 import { ConnectionService } from "./connection-service.js";
 import { CodexAdapter } from "../adapters/codex/adapter.js";
 import { homedir } from "node:os";
@@ -45,6 +46,7 @@ export class CoreDaemon {
   readonly events: EventService;
   readonly runs: RunService;
   readonly terminals = new TerminalService();
+  readonly sourceControl = new SourceControl();
   readonly projects: ProjectService;
   readonly agents: AgentService;
   readonly connections: ConnectionService;
@@ -119,7 +121,7 @@ export class CoreDaemon {
     this.plugins = new PluginService(dataDir, this.adapters);
     this.recovery.recoverInterrupted();
     this.gateway.setObserver((request, response) => {
-      if (["terminal.read", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities"].includes(request.method)) return;
+      if (["scm.status", "scm.diff", "terminal.list", "terminal.read", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities"].includes(request.method)) return;
       this.audit.ipc(
         request.method,
         request.input,
@@ -129,7 +131,7 @@ export class CoreDaemon {
     });
     registerIpcHandlers(this.gateway, this);
   }
-  health(): { service: "core-daemon"; status: "ok"; version: string } { return { service: "core-daemon", status: "ok", version: "0.1.0" }; }
+  health() { return { service: "core-daemon" as const, status: "ok" as const, version: "0.1.0", features: {sourceControl:1 as const,terminalTabs:1 as const} }; }
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     const runsStopped = this.runs.stop();

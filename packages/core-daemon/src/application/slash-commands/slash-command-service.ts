@@ -158,7 +158,7 @@ export class SlashCommandService {
     const failed = ["failed", "timed_out", "crashed"].includes(completion.run.status);
     this.record(context.session.id, command.id, failed ? "failed" : "completed", { runId: handle.runId });
     if (failed) {
-      throw new CoreError("RUN_START_FAILED", {
+      throw new CoreError("PROVIDER_COMMAND_FAILED", {
         commandId: command.id,
         failureCode: completion.run.failureCode ?? "PROVIDER_COMMAND_FAILED"
       });

@@ -1,10 +1,6 @@
 import { useEffect, useRef } from "react";
+import "../../lib/monaco-workers";
 import * as monaco from "monaco-editor";
-// Inlined so the worker also loads under the packaged app's file:// renderer.
-// (monaco's exports map roots subpaths at esm/vs, hence no "esm/vs" prefix.)
-import EditorWorker from "monaco-editor/editor/editor.worker.js?worker&inline";
-
-self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
 const SHARED_COLORS = {
   "editor.background": "#00000000",
@@ -59,9 +55,10 @@ function currentTheme(): string {
 
 /** Monaco language id for a file path, via the registered languages' extensions. */
 function languageForFile(filePath: string): string {
+  const fileName=filePath.split(/[\\/]/).at(-1)?.toLowerCase()??"";
   const extension = `.${filePath.split(/[\\/]/).at(-1)?.split(".").at(-1)?.toLowerCase() ?? ""}`;
   for (const language of monaco.languages.getLanguages()) {
-    if (language.extensions?.includes(extension)) return language.id;
+    if (language.extensions?.includes(extension)||language.filenames?.some(name=>name.toLowerCase()===fileName)) return language.id;
   }
   return "plaintext";
 }
@@ -85,14 +82,19 @@ const EDITOR_OPTIONS: monaco.editor.IStandaloneEditorConstructionOptions = {
  * out of the main chunk. When `before` is undefined the pre-change content
  * could not be reconstructed and a plain editor is shown instead.
  */
-export default function DiffCodeEditor({ before, value, onChange, filePath }: {
+export default function DiffCodeEditor({ before, value, onChange, filePath, readOnly = false, sideBySide = true, hideUnchanged = false }: {
   before?: string;
   value: string;
-  onChange: (value: string) => void;
+  onChange?: (value: string) => void;
   filePath?: string;
+  readOnly?: boolean;
+  sideBySide?: boolean;
+  hideUnchanged?: boolean;
 }): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const modifiedModelRef = useRef<monaco.editor.ITextModel | null>(null);
+  const originalModelRef = useRef<monaco.editor.ITextModel | null>(null);
+  const editorRef = useRef<monaco.editor.IStandaloneDiffEditor | monaco.editor.IStandaloneCodeEditor>();
   const suppressChangeRef = useRef(false);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
@@ -109,20 +111,25 @@ export default function DiffCodeEditor({ before, value, onChange, filePath }: {
     models.push(modifiedModel);
     modifiedModelRef.current = modifiedModel;
     modifiedModel.onDidChangeContent(() => {
-      if (!suppressChangeRef.current) onChangeRef.current(modifiedModel.getValue());
+      if (!suppressChangeRef.current) onChangeRef.current?.(modifiedModel.getValue());
     });
 
     if (before !== undefined) {
       const originalModel = monaco.editor.createModel(before, language);
+      originalModelRef.current = originalModel;
       models.push(originalModel);
       const diffEditor = monaco.editor.createDiffEditor(container, {
         ...EDITOR_OPTIONS,
         theme: currentTheme(),
         originalEditable: false,
-        readOnly: false,
-        renderSideBySide: true,
+        readOnly,
+        renderSideBySide: sideBySide,
+        useInlineViewWhenSpaceIsLimited: !readOnly,
+        enableSplitViewResizing: true,
+        renderIndicators: !readOnly,
+        ignoreTrimWhitespace: false,
         diffAlgorithm: "advanced",
-        hideUnchangedRegions: { enabled: false }
+        hideUnchangedRegions: { enabled: hideUnchanged }
       });
       diffEditor.setModel({ original: originalModel, modified: modifiedModel });
       // Reveal the first change once the (async) diff computation lands.
@@ -135,8 +142,9 @@ export default function DiffCodeEditor({ before, value, onChange, filePath }: {
       });
       editor = diffEditor;
     } else {
-      editor = monaco.editor.create(container, { ...EDITOR_OPTIONS, theme: currentTheme(), model: modifiedModel });
+      editor = monaco.editor.create(container, { ...EDITOR_OPTIONS, theme: currentTheme(), model: modifiedModel, readOnly });
     }
+    editorRef.current = editor;
 
     const themeObserver = new MutationObserver(() => monaco.editor.setTheme(currentTheme()));
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
@@ -146,6 +154,8 @@ export default function DiffCodeEditor({ before, value, onChange, filePath }: {
       editor.dispose();
       for (const model of models) model.dispose();
       modifiedModelRef.current = null;
+      originalModelRef.current = null;
+      editorRef.current = undefined;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -160,6 +170,8 @@ export default function DiffCodeEditor({ before, value, onChange, filePath }: {
       suppressChangeRef.current = false;
     }
   }, [value]);
+  useEffect(()=>{const model=originalModelRef.current;if(model&&before!==undefined&&model.getValue()!==before)model.setValue(before);},[before]);
+  useEffect(()=>{const editor=editorRef.current;if(!editor)return;if("getOriginalEditor" in editor)editor.updateOptions({readOnly,renderSideBySide:sideBySide,renderIndicators:!readOnly,hideUnchangedRegions:{enabled:hideUnchanged}});else editor.updateOptions({readOnly});},[readOnly,sideBySide,hideUnchanged]);
 
   return <div ref={containerRef} className="min-h-0 min-w-0 flex-1" />;
 }

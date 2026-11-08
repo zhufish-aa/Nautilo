@@ -1,6 +1,6 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { Orbit, Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2 } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { NautiloMark } from "../ui/IdentityAvatar";
 import { cn, formatRelativeTime } from "../../lib/utils";
@@ -132,6 +132,9 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
             className="rounded-md p-1.5 text-ink-2 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"><PanelLeftClose className="h-4 w-4" aria-hidden /></button>}
         </div>
         <div className="sidebar-primary-nav">
+          <NavLink to="/assistant" className={({isActive}) => cn(rowClass, isActive && "bg-card-hover font-medium")}>
+            <Orbit className="h-4 w-4 shrink-0" aria-hidden />{zh ? "助手" : "Assistant"}
+          </NavLink>
           <button className={cn(rowClass, new URLSearchParams(location.search).get("new") === "1" && "bg-card-hover")} onClick={() => newConversation()} data-tour="sessions-new" title={zh ? "新会话 · Ctrl/⌘ N" : "New chat · Ctrl/⌘ N"}>
             <Plus className="h-4 w-4 shrink-0" aria-hidden />{zh ? "新建任务" : "New task"}
           </button>
@@ -145,7 +148,7 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
         </div>
         <div className="sidebar-project-history" data-nav="sessions">
           <div className="sidebar-section-heading"><span>{zh ? "项目与任务" : "Projects & tasks"}</span><button onClick={() => setAddProjectOpen(true)} aria-label={t("projects.addTitle")}><Plus size={15} /></button></div>
-          <SessionListPanel embedded activeSessionId={new URLSearchParams(location.search).get("new") === "1" ? undefined : activeSessionId} onSelect={selectSession} onNew={newConversation} onDelete={setDeletingSession} />
+          <SessionListPanel embedded activeSessionId={location.pathname === "/assistant" || new URLSearchParams(location.search).get("new") === "1" ? undefined : activeSessionId} onSelect={selectSession} onNew={newConversation} onDelete={setDeletingSession} />
         </div>
         <div className="mx-3 mt-2 border-t border-line/60 py-3">
           <NavLink to="/settings" state={{ returnTo: location.pathname + location.search }} data-nav="settings" className={rowClass}><Settings className="h-4 w-4 shrink-0" aria-hidden />{t("nav.settings")}</NavLink>

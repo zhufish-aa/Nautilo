@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { useConversationSelection } from "../../lib/use-conversation-selection";
@@ -31,6 +32,13 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
     setShowAgents(true);
   }, [showAgents, closeAgents]);
   const openDrawer = useCallback((next: DrawerKind): void => { setPreview(undefined); setDrawer(next); }, []);
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    const panel = params.get("panel");
+    if (!active || !session || params.get("session") !== session.id || (panel !== "browser" && panel !== "source-control")) return;
+    openDrawer(panel);
+    const next = new URLSearchParams(params); next.delete("panel"); setParams(next,{replace:true});
+  },[active,session?.id,params,openDrawer,setParams]);
   const closeDrawer = useCallback((): void => setDrawer(null), []);
   const closePreview = useCallback((): void => setPreview(undefined), []);
   useEffect(() => {

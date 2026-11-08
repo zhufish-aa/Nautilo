@@ -1,3 +1,7 @@
+# 当前 Rust 桌面入口
+
+本目录是旧 Node 入口的最小 TypeScript 模板，仅演示发消息。当前 Electron + Rust 桌面中的新 harness 应使用 `rust/plugin-sdk::ProviderPlugin`，并按 [完整能力契约](../../docs/provider-plugins.md#rust-原生插件的完整能力契约) 实现、声明和检查常驻事件、子会话交互、取消、原生终端历史回读及安全释放。能力声明和协议解析应留在插件内，不能靠在主程序中加入 provider 名称分支来补全功能。
+
 # Nautilo Provider 插件模板
 
 把任意 agent CLI 包装成 Nautilo Provider 的最小可用示例。

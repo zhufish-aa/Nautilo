@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { MotionConfig } from "framer-motion";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AppShell } from "./components/layout/AppShell";
@@ -13,6 +13,9 @@ import { useSettingsStore } from "./stores/settings";
 import { initializeCoreState } from "./lib/core-bootstrap";
 import { buildThemeCss, getTheme, SYSTEM_THEME_ID } from "./lib/themes";
 
+import { getBridge } from "./lib/bridge";
+const AssistantPage = lazy(() => import("./features/assistant/AssistantPage"));
+const DetachedPanel = lazy(() => import("./features/sessions/DetachedPanel"));
 const AgentsPage = lazy(() => import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage })));
 const ProjectDetailPage = lazy(() => import("./features/projects/ProjectDetailPage").then((module) => ({ default: module.ProjectDetailPage })));
 const ProjectsPage = lazy(() => import("./features/projects/ProjectsPage").then((module) => ({ default: module.ProjectsPage })));
@@ -70,6 +73,16 @@ function useDocumentPreferences(): void {
 
 export default function App(): JSX.Element {
   useDocumentPreferences();
+  const panels = getBridge()?.panels;
+  const target = panels?.context;
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (target) return;
+    return panels?.onDock(panel => {
+      const route = panel.sessionId ? "/sessions?session="+encodeURIComponent(panel.sessionId)+"&" : "/projects/"+encodeURIComponent(panel.projectId!)+"?";
+      navigate(route+"panel="+panel.kind, {replace:false});
+    });
+  },[panels,target,navigate]);
   const reduceMotion = useSettingsStore((state) => state.reduceMotion);
   const locale = useSettingsStore((state) => state.locale);
 
@@ -79,13 +92,17 @@ export default function App(): JSX.Element {
   }, [reduceMotion]);
 
   useEffect(() => {
+    if (target) return;
     void initializeCoreState().catch((error) => console.error("Failed to initialize Core Daemon state", error));
-  }, []);
+    return getBridge()?.assistant?.onChange(sessionId => {
+      if (sessionId) void import("./lib/orchestration-runtime").then(m => m.refreshAssistantTarget(sessionId)).catch(console.error);
+    });
+  }, [target]);
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? "always" : "user"}>
       <TooltipProvider>
-        <AppShell>
+        {target ? <Suspense fallback={null}><DetachedPanel target={target}/></Suspense> : <AppShell>
           <Suspense fallback={<div role="status" aria-label={locale === "zh-CN" ? "正在加载" : "Loading"} className="p-6">
             <div className="h-5 w-32 rounded bg-panel motion-safe:animate-pulse" />
           </div>}>
@@ -96,6 +113,7 @@ export default function App(): JSX.Element {
                   neither route creates a second instance or changes saved modes. */}
               <Route path="/sessions" element={null} />
               <Route path="/work" element={null} />
+              <Route path="/assistant" element={<AssistantPage />} />
               <Route path="/projects" element={<ProjectsPage />} />
               <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
               <Route path="/agents" element={<Navigate to="/settings?section=agents" replace />} />
@@ -107,9 +125,9 @@ export default function App(): JSX.Element {
               <Route path="*" element={<Navigate to="/sessions" replace />} />
             </Routes>
           </Suspense>
-        </AppShell>
+        </AppShell>}
         <Toaster />
-        <OnboardingTour />
+        {!target && <OnboardingTour />}
         <ImageLightbox />
         <FilePreviewDrawer />
       </TooltipProvider>

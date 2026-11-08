@@ -3,25 +3,28 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import { resolve } from "node:path";
 import { markdownEntitiesPlugin } from "./markdown-worker.vite";
+import { serialWorkerBuilds } from "./worker-build.vite";
+
+const sourcemap = process.env.NAUTILO_BUILD_SOURCEMAP !== "0";
 
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
     build: {
       outDir: "out/main",
-      sourcemap: true
+      sourcemap
     }
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
     build: {
       outDir: "out/preload",
-      sourcemap: true
+      sourcemap
     }
   },
   renderer: {
     plugins: [react(), tailwindcss(), markdownEntitiesPlugin()],
-    worker: { plugins: () => [markdownEntitiesPlugin()] },
+    worker: { plugins: (chain:string[]=[]) => [markdownEntitiesPlugin(),serialWorkerBuilds(chain)] },
     resolve: {
       alias: {
         "@": resolve(__dirname, "src/renderer/src")
@@ -29,7 +32,7 @@ export default defineConfig({
     },
     build: {
       outDir: "out/renderer",
-      sourcemap: true
+      sourcemap
     }
   }
 });

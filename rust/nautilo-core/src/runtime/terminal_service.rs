@@ -4,7 +4,7 @@ use base64::Engine;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::{Read, Write},
     sync::{Arc, Mutex},
 };
@@ -55,7 +55,7 @@ impl Output {
                 break;
             }
         }
-        json!({"data":base64::engine::general_purpose::STANDARD.encode(&bytes),"cursor":cursor+bytes.len() as u64,"reset":reset,"exited":self.exit.is_some() && self.eof,"exitCode":self.exit})
+        json!({"data":base64::engine::general_purpose::STANDARD.encode(&bytes),"cursor":cursor+bytes.len() as u64,"reset":reset,"exited":self.exit.is_some() && self.eof && cursor+bytes.len() as u64==self.end,"exitCode":self.exit})
     }
 }
 
@@ -63,6 +63,8 @@ struct Terminal {
     id: String,
     key: String,
     owner: Option<String>,
+    scope: Option<String>,
+    tab_id: Option<String>,
     cwd: String,
     pid: Option<u32>,
     created: std::time::Instant,
@@ -73,16 +75,25 @@ struct Terminal {
     resources: Mutex<Vec<Box<dyn Send>>>,
 }
 impl Terminal {
-    fn close(&self) {
+    fn stop(&self) {
+        // ConPTY may still be waiting for its initial cursor-position reply
+        // when the drawer disconnected during startup. Complete that handshake
+        // before closing HPCON, otherwise ClosePseudoConsole can wait forever.
+        #[cfg(windows)]
+        if let Some(writer)=self.writer.lock().unwrap().as_mut() {let _=writer.write_all(b"\x1b[1;1R").and_then(|_|writer.flush());}
         let _ = self.killer.lock().unwrap().kill();
         self.writer.lock().unwrap().take();
         if let Some(master) = self.master.lock().unwrap().take() {
             std::thread::spawn(move || drop(master));
         }
+    }
+    fn close(&self) {
+        self.stop();
         self.resources.lock().unwrap().clear();
     }
     fn metadata(&self) -> Value {
-        json!({"id":self.id,"cwd":self.cwd,"pid":self.pid,"kind":if self.owner.is_some(){"harness"}else{"shell"}})
+        let output=self.output.lock().unwrap();
+        json!({"id":self.id,"cwd":self.cwd,"pid":self.pid,"kind":if self.owner.is_some(){"harness"}else{"shell"},"tabId":self.tab_id,"exited":output.exit.is_some()&&output.eof,"exitCode":output.exit})
     }
 }
 impl Drop for Terminal {
@@ -96,6 +107,7 @@ pub struct TerminalService {
     sessions: Mutex<HashMap<String, Arc<Terminal>>>,
     gates: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     opening: Mutex<()>,
+    closed_scopes: Mutex<HashSet<String>>,
 }
 pub struct TerminalPlan {
     pub command: String,
@@ -103,6 +115,7 @@ pub struct TerminalPlan {
     pub env: Option<HashMap<String, String>>,
     pub cwd: String,
     pub resources: Vec<Box<dyn Send>>,
+    pub provider_session_id: Option<String>,
 }
 fn size(cols: u16, rows: u16) -> PtySize {
     PtySize {
@@ -113,6 +126,36 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 impl TerminalService {
+    pub fn scope(session:Option<&str>,project:&str)->String {
+        match session {Some(session)=>json!(["session",session]).to_string(),None=>json!(["project",project]).to_string()}
+    }
+    pub fn list(&self,scope:&str)->Value {
+        let entries=self.sessions.lock().unwrap();let mut latest=HashMap::<String,&Arc<Terminal>>::new();
+        for entry in entries.values().filter(|entry|entry.scope.as_deref()==Some(scope)){
+            if latest.get(&entry.key).is_none_or(|prior|prior.created<entry.created){latest.insert(entry.key.clone(),entry);}
+        }
+        let mut entries=latest.into_values().collect::<Vec<_>>();entries.sort_by_key(|entry|entry.created);
+        json!({"items":entries.into_iter().map(|entry|entry.metadata()).collect::<Vec<_>>()})
+    }
+    pub fn open_shell(&self,scope:String,tab_id:String,restore_only:bool,plan:TerminalPlan,cols:u16,rows:u16)->CoreResult<Value> {
+        if tab_id.is_empty() || tab_id.len()>128 || !tab_id.chars().all(|c|c.is_ascii_alphanumeric()||matches!(c,'-'|'_'|'.')){
+            return Err(invalid("tabId","Invalid terminal tab identity"));
+        }
+        let key=json!(["shell",scope,tab_id]).to_string();
+        self.open_scoped(key,None,Some(scope),Some(tab_id),restore_only,plan,cols,rows)
+    }
+    pub fn owner(&self,id:&str)->Option<String> {self.sessions.lock().unwrap().get(id).and_then(|entry|entry.owner.clone())}
+    pub fn metadata(&self,id:&str)->Option<Value> {self.sessions.lock().unwrap().get(id).map(|entry|entry.metadata())}
+    pub fn exited(&self,id:&str)->Option<bool> {self.sessions.lock().unwrap().get(id).map(|entry|{let output=entry.output.lock().unwrap();output.exit.is_some() && output.eof})}
+    pub fn release_resources(&self,id:&str) {if let Some(entry)=self.sessions.lock().unwrap().get(id){entry.resources.lock().unwrap().clear();}}
+    pub async fn stop_and_wait(&self,id:&str)->CoreResult<()> {
+        let terminal=self.get(id)?;
+        terminal.stop();
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            loop {let exited={let output=terminal.output.lock().unwrap();output.exit.is_some() && output.eof};if exited{break;}tokio::time::sleep(std::time::Duration::from_millis(20)).await;}
+        }).await.map_err(|_|invalid("terminal","原生进程仍在退出，请稍后重试。"))?;
+        Ok(())
+    }
     pub async fn lock_session(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let gate = {
             let mut gates = self.gates.lock().unwrap();
@@ -155,9 +198,21 @@ impl TerminalService {
         cols: u16,
         rows: u16,
     ) -> CoreResult<Value> {
+        let scope=owner.as_deref().map(|owner|Self::scope(Some(owner),""));
+        let tab_id=owner.as_ref().map(|_|"native".into());
+        self.open_scoped(key,owner,scope,tab_id,false,plan,cols,rows)
+    }
+    fn open_scoped(&self,key:String,owner:Option<String>,scope:Option<String>,tab_id:Option<String>,restore_only:bool,plan:TerminalPlan,cols:u16,rows:u16)->CoreResult<Value>{
         let _opening = self.opening.lock().unwrap();
+        if scope.as_ref().is_some_and(|scope|self.closed_scopes.lock().unwrap().contains(scope)) {
+            return Err(not_found("terminalScope",scope.as_deref().unwrap_or("")));
+        }
         if let Some(existing) = self.existing(&key) {
             return Ok(existing);
+        }
+        if restore_only {
+            return self.sessions.lock().unwrap().values().filter(|entry|entry.key==key)
+                .max_by_key(|entry|entry.created).map(|entry|entry.metadata()).ok_or_else(||not_found("terminalTab",tab_id.as_deref().unwrap_or("")));
         }
         if self
             .sessions
@@ -217,6 +272,8 @@ impl TerminalService {
             id: uuid::Uuid::new_v4().to_string(),
             key,
             owner,
+            scope,
+            tab_id,
             cwd: plan.cwd,
             pid: child.process_id(),
             created: std::time::Instant::now(),
@@ -246,7 +303,7 @@ impl TerminalService {
         while sessions.len() >= 64 {
             let oldest = sessions
                 .values()
-                .filter(|entry| entry.output.lock().unwrap().exit.is_some())
+                .filter(|entry| {let output=entry.output.lock().unwrap();output.exit.is_some() && output.eof && entry.resources.lock().unwrap().is_empty()})
                 .min_by_key(|entry| entry.created)
                 .map(|entry| entry.id.clone());
             if let Some(id) = oldest {
@@ -295,10 +352,26 @@ impl TerminalService {
         Ok(json!({"ok":true}))
     }
     pub fn close(&self, id: &str) -> CoreResult<Value> {
-        if let Some(terminal) = self.sessions.lock().unwrap().remove(id) {
-            terminal.close();
-        }
+        let terminals={
+            let mut sessions=self.sessions.lock().unwrap();
+            let Some(key)=sessions.get(id).map(|entry|entry.key.clone()) else{return Ok(json!({"ok":true}));};
+            let ids=sessions.values().filter(|entry|entry.key==key).map(|entry|entry.id.clone()).collect::<Vec<_>>();
+            ids.into_iter().filter_map(|id|sessions.remove(&id)).collect::<Vec<_>>()
+        };
+        for terminal in terminals{terminal.close();}
         Ok(json!({"ok":true}))
+    }
+    pub fn close_shell(&self,scope:&str,tab_id:&str)->CoreResult<Value>{
+        let _opening=self.opening.lock().unwrap();
+        let key=json!(["shell",scope,tab_id]).to_string();
+        let id=self.sessions.lock().unwrap().values().find(|entry|entry.key==key).map(|entry|entry.id.clone());
+        match id{Some(id)=>self.close(&id),None=>Ok(json!({"ok":true}))}
+    }
+    pub fn close_scope(&self,scope:&str) {
+        let _opening=self.opening.lock().unwrap();
+        self.closed_scopes.lock().unwrap().insert(scope.into());
+        let terminals={let mut sessions=self.sessions.lock().unwrap();let ids=sessions.values().filter(|entry|entry.scope.as_deref()==Some(scope)).map(|entry|entry.id.clone()).collect::<Vec<_>>();ids.into_iter().filter_map(|id|sessions.remove(&id)).collect::<Vec<_>>()};
+        for terminal in terminals{terminal.close();}
     }
     pub fn close_all(&self) {
         for (_, terminal) in self.sessions.lock().unwrap().drain() {
@@ -310,6 +383,47 @@ impl TerminalService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn shell_plan() -> TerminalPlan {
+        TerminalPlan { command: if cfg!(windows){"cmd.exe"}else{"sh"}.into(), args: if cfg!(windows){vec!["/Q".into()]}else{vec![]}, env:None,
+            cwd:std::env::temp_dir().to_string_lossy().into(), resources:vec![], provider_session_id:None }
+    }
+    #[tokio::test]
+    async fn shell_tabs_restore_output_without_starting_or_stopping_siblings() {
+        let service=TerminalService::default();let scope=TerminalService::scope(Some("session:one"),"project");
+        let open=|tab:&str,restore|service.open_shell(scope.clone(),tab.into(),restore,shell_plan(),80,24);
+        assert!(open("missing",true).is_err());
+        assert!(open("bad:tab",false).is_err());
+        let first=open("default",false).unwrap();let second=open("other",false).unwrap();
+        let other_scope=TerminalService::scope(Some("other-session"),"project");
+        let unrelated=service.open_shell(other_scope.clone(),"default".into(),false,shell_plan(),80,24).unwrap();
+        let first_id=first["id"].as_str().unwrap();let second_id=second["id"].as_str().unwrap();
+        assert_ne!(first_id,second_id);assert_ne!(first["pid"],second["pid"]);
+        assert_eq!(open("default",true).unwrap()["id"],first["id"]);
+        service.write(first_id,"\x1b[1;1R").unwrap();service.write(second_id,"\x1b[1;1R").unwrap();
+        service.write(first_id,"echo nautilo-tab-one\r\n").unwrap();
+        let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
+        loop {
+            let frame=service.read(first_id,0).unwrap();let bytes=base64::engine::general_purpose::STANDARD.decode(frame["data"].as_str().unwrap()).unwrap();
+            if String::from_utf8_lossy(&bytes).contains("nautilo-tab-one"){break;}
+            assert!(std::time::Instant::now()<until,"shell output was not retained");tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        service.stop_and_wait(first_id).await.unwrap();
+        assert_eq!(service.list(&scope)["items"].as_array().unwrap().len(),2);
+        assert_eq!(open("default",true).unwrap()["id"],first["id"]);
+        assert_eq!(open("default",true).unwrap()["exited"],true);
+        assert!(!service.read(first_id,0).unwrap()["data"].as_str().unwrap().is_empty());
+        assert_eq!(service.exited(second_id),Some(false));
+        let restarted=open("default",false).unwrap();assert_ne!(restarted["id"],first["id"]);
+        assert_eq!(service.list(&scope)["items"].as_array().unwrap().len(),2);
+        service.close_shell(&scope,"default").unwrap();
+        assert!(service.metadata(first_id).is_none());assert!(service.metadata(restarted["id"].as_str().unwrap()).is_none());
+        assert!(open("default",true).is_err());assert_eq!(service.exited(second_id),Some(false));
+        assert_eq!(service.list(&scope)["items"].as_array().unwrap().len(),1);
+        assert_eq!(service.list(&TerminalService::scope(None,"session:one"))["items"],json!([]));
+        service.close_scope(&scope);assert!(service.metadata(second_id).is_none());assert!(open("default",false).is_err());
+        assert_eq!(service.list(&other_scope)["items"].as_array().unwrap().len(),1);assert!(service.metadata(unrelated["id"].as_str().unwrap()).is_some());
+        service.close_all();
+    }
     #[test]
     fn cursor_and_retention_preserve_binary_boundaries() {
         let mut output = Output::default();
@@ -342,6 +456,7 @@ mod tests {
                     env: None,
                     cwd: std::env::temp_dir().to_string_lossy().into(),
                     resources: vec![],
+                    provider_session_id: None,
                 },
                 80,
                 24,

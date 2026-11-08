@@ -143,6 +143,35 @@ export interface AdapterCapabilities {
   interactiveStdin: boolean;
   nativeResume: boolean;
   pty: boolean;
+  sessionBackgroundEvents?: boolean;
+  nativeHistory?: boolean;
+  /** Stream message/call IDs are provider-owned and stable across resume/processes. */
+  nativeEventIdentities?: boolean;
+  sharedTerminalServer?: boolean;
+  nativeExperience?: import("./native-capabilities.js").NativeExperienceDeclarations;
+}
+
+export interface NativeHistorySnapshot {
+  schemaVersion: 1;
+  providerSessionId: string;
+  settled: boolean;
+  messages: Array<NativeHistoryEntry & {
+    role: "user" | "assistant";
+    text: string;
+    files?: Array<{ id: string; url: string; mime?: string; filename?: string }>;
+  }>;
+  activities: Array<NativeHistoryEntry & {
+    event: Extract<AdapterEvent, { kind: "thinking" | "tool" | "command" | "usage" }>;
+  }>;
+}
+
+export interface NativeHistoryEntry {
+  id: string;
+  messageId: string;
+  nativeTurnId?: string;
+  timestampMs?: number | null;
+  completed: boolean;
+  turnStatus?: "running" | "completed" | "failed" | "cancelled";
 }
 
 export interface AdapterDetectionResult {
@@ -176,6 +205,7 @@ export interface AgentCliAdapter {
   readonly capabilities: AdapterCapabilities;
   detect(instance: AgentInstance): Promise<AdapterDetectionResult>;
   listModels?(instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<ProviderModelCatalog>;
+  harnessPlugins?(instance: AgentInstance, context: AdapterDiscoveryContext, operation: import("./harness-plugins.js").HarnessPluginOperation): Promise<import("./harness-plugins.js").HarnessPluginInventory | import("./harness-plugins.js").HarnessPluginChange>;
   listModes?(instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<{ modes: Array<{ id: string; name?: string; broken?: string; order?: number }>; defaultMode?: string }>;
   /** Optional plugin-owned wire selection for the installed CLI version. */
   connectionProtocol?(request: AdapterStartRequest): Promise<"responses" | "anthropic" | undefined>;

@@ -86,11 +86,26 @@ pub fn prepare(request: &Value) -> anyhow::Result<Config> {
                     .map(str::to_string)
             })
             .ok_or_else(|| anyhow::anyhow!("Select a configured model for DeepSeek Harness"))?;
+        let api = options["apiType"].as_str().unwrap_or("openai-completions");
         let mut model_entries: Vec<Value> = instance["models"].as_array().into_iter().flatten().filter(|m|m["enabled"]!=false).map(|m| {
             let mut entry = json!({"id":m["id"],"name":m["name"].as_str().or(m["displayName"].as_str()).unwrap_or(m["id"].as_str().unwrap_or(""))});
             if m["contextWindow"].is_number() { entry["contextWindow"]=m["contextWindow"].clone(); }
             if let Some(efforts)=m["reasoningEfforts"].as_array().filter(|v|!v.is_empty()) {
-                entry["reasoningEfforts"]=Value::Object(efforts.iter().filter_map(|v|v.as_str().map(|s|(s.to_string(),json!(s)))).collect());
+                let mut levels = serde_json::Map::new();
+                for level in efforts.iter().filter_map(Value::as_str) {
+                    // DSH calls the disabled level "off"; the Responses API accepts "none".
+                    let (native, wire) = if api == "openai-responses" && matches!(level, "off" | "none") {
+                        ("off", "none")
+                    } else {
+                        (level, level)
+                    };
+                    levels.insert(native.into(), json!(wire));
+                }
+                entry["reasoningEfforts"] = if levels.len() == 1 && levels.contains_key("off") {
+                    json!(false)
+                } else {
+                    Value::Object(levels)
+                };
             }
             if m["inputModalities"].is_array() { entry["input"]=m["inputModalities"].clone(); }
             entry
@@ -109,7 +124,7 @@ pub fn prepare(request: &Value) -> anyhow::Result<Config> {
             })?;
         env.insert(credential_ref.clone(), key);
         entries[0]["config"]["connection"] = json!({"provider":route,"profile":{
-            "api":options["apiType"].as_str().unwrap_or("openai-completions"), "baseURL":options["baseUrl"],
+            "api":api, "baseURL":options["baseUrl"],
             "apiKeyEnv":credential_ref, "models":model_entries
         }});
         (Some(route), Some(selected))
@@ -118,10 +133,16 @@ pub fn prepare(request: &Value) -> anyhow::Result<Config> {
     } else {
         (None, selected)
     };
+    let mut patches = vec![json!({"insert": entries})];
+    // Only the short-lived package editor uses the native no-HMR path. A change
+    // is written to the selected profile, not hot-applied to this disposable process.
+    if request["pluginManagementWrite"] == true {
+        patches.push(json!({"id": "hmr", "disabled": true}));
+    }
     let patch = root.join("nautilo.patch.json");
     std::fs::write(
         &patch,
-        serde_json::to_vec_pretty(&json!([{"insert":entries}]))?,
+        serde_json::to_vec_pretty(&patches)?,
     )?;
     let mut args: Vec<String> = instance["baseArgs"]
         .as_array()

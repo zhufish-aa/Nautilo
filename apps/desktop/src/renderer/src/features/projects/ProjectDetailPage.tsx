@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -28,6 +28,8 @@ import { toast } from "../../stores/toast";
 import { VerificationTemplatesCard } from "./VerificationTemplatesCard";
 import { WorkspaceModeCard } from "./WorkspaceModeCard";
 import { NonGitDiffModeCard } from "./NonGitDiffModeCard";
+import { SourceControlDrawer } from "../sessions/SourceControlDrawer";
+import { useCoreFeatures } from "../../lib/use-core-features";
 
 function InfoRow({
   icon: Icon,
@@ -55,6 +57,7 @@ const riskStyles: Record<ProjectRisk["level"], { icon: typeof Info; color: strin
 };
 
 export function ProjectDetailPage(): JSX.Element {
+  const coreFeatures = useCoreFeatures();
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
   const { projectId } = useParams<{ projectId: string }>();
@@ -64,6 +67,7 @@ export function ProjectDetailPage(): JSX.Element {
   const removeProject = useProjectsStore((state) => state.removeProject);
   const touchProject = useProjectsStore((state) => state.touchProject);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [sourceControlOpen, setSourceControlOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [error, setError] = useState("");
   const [removeError, setRemoveError] = useState("");
@@ -88,7 +92,15 @@ export function ProjectDetailPage(): JSX.Element {
     setError("");
     setRemoveError("");
     setConfirmRemove(false);
+    setSourceControlOpen(false);
   }, [projectId]);
+
+  const [params,setParams] = useSearchParams();
+  useEffect(()=>{
+    if (params.get("panel") !== "source-control") return;
+    setSourceControlOpen(true);
+    const next=new URLSearchParams(params);next.delete("panel");setParams(next,{replace:true});
+  },[params,setParams]);
 
   if (!project)
     return (
@@ -158,6 +170,7 @@ export function ProjectDetailPage(): JSX.Element {
           <p className="mt-2 break-all font-mono text-sm text-ink-3">{project.rootPath}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {coreFeatures.sourceControl === 1 && <Button variant="outline" onClick={() => setSourceControlOpen(true)}><GitBranch className="h-4 w-4" aria-hidden />{zh ? "源码管理" : "Source control"}</Button>}
           <Button
             variant="outline"
             onClick={() => void handleRescan()}
@@ -178,6 +191,7 @@ export function ProjectDetailPage(): JSX.Element {
           </Button>
         </div>
       </header>
+      {sourceControlOpen && coreFeatures.sourceControl === 1 && <div className="scm-project-panel"><SourceControlDrawer open onClose={() => setSourceControlOpen(false)} projectId={project.id} /></div>}
       {error && (
         <div
           role="alert"

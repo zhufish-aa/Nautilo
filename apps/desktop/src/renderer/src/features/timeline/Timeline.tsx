@@ -359,6 +359,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
                 >
                   <FileText className="h-4 w-4 shrink-0" aria-hidden />
                   <span className="truncate text-xs">{attachment.name}</span>
+                  {attachment.unavailable && <span className="shrink-0 text-xs text-ink-3">{locale === "zh-CN" ? "请在原生会话中查看" : "View in native session"}</span>}
                 </div>
               ))}
             </div>

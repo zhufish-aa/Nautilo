@@ -25,3 +25,5 @@ pub use team_service::TeamService;
 
 pub mod connection_service;
 pub use connection_service::ConnectionService;
+pub mod source_control;
+pub mod harness_plugins;

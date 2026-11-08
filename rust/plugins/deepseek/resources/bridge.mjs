@@ -2,9 +2,11 @@
 // presets, tools, model adapters, permissions, plugins and session persistence.
 import { createServer } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
+import { isAbsolute, relative } from 'node:path';
 
 export const name = 'nautilo-transport';
-export const inject = ['sessionController', 'agents', 'sessions', 'agentPresets', 'permissionPresets', 'llm', 'tools', 'loader'];
+export const inject = ['sessionController', 'workspaceRegistry', 'agents', 'sessions', 'agentPresets', 'permissionPresets', 'llm', 'tools', 'loader'];
 const emit = (kind, data) => process.stdout.write(`@nautilo-dsh:${JSON.stringify({ kind, ...data })}\n`);
 
 export async function apply(ctx, config = {}) {
@@ -135,7 +137,59 @@ export async function apply(ctx, config = {}) {
     if (malformedCalls.has(agent.session.id)) throw new Error('上游把工具调用作为 DSML 文本返回，原生 Harness 未执行这段代码。请重试。');
   }
 
+  async function managePlugins(operation) {
+    const manager = ctx.get('pluginManager');
+    if (!manager) throw new Error('This DeepSeek profile has no native plugin manager');
+    const bundles = await manager.listBundles();
+    const entries = await manager.listPlugins();
+    const items = [];
+    const targets = new Map();
+    for (const bundle of bundles) {
+      const present = bundle.availability !== 'missing';
+      const actions = [];
+      if (!bundle.readOnlyReason && !bundle.error) {
+        if (present) actions.push(bundle.enabled ? 'disable' : 'enable');
+        else if (bundle.installTarget) actions.push('install');
+      }
+      if (bundle.removable && !bundle.readOnlyReason) actions.push('remove');
+      const id = 'bundle:' + bundle.name;
+      items.push({ id, name: bundle.name, version: bundle.version, description: bundle.description,
+        source: 'Bundle', installed: present, enabled: bundle.enabled, actions });
+      targets.set(id, { bundle, actions });
+    }
+    for (const entry of entries) {
+      // Address editable rows by their persistent profile patch, not by a loader instance's ID.
+      if (entry.patchId === 'nautilo-transport' || entry.moduleName === import.meta.url) continue;
+      const id = entry.patchId ? 'entry:' + entry.patchId : 'readonly:' + entry.entryId;
+      const actions = entry.patchId && !entry.readOnlyReason ? [entry.enabled ? 'disable' : 'enable'] : [];
+      items.push({ id, name: entry.moduleName, source: entry.patchId ?? entry.entryId, installed: true, enabled: entry.enabled, actions });
+      targets.set(id, { entry, actions });
+    }
+    if (operation.action === 'list') return { items, installBySpec: true };
+    let result;
+    if (operation.action === 'install' && typeof operation.spec === 'string') {
+      const spec = operation.spec.trim();
+      if (!spec || spec.length > 2048) throw new Error('Invalid DeepSeek package spec');
+      result = await manager.installBundle(spec);
+    } else {
+      const target = targets.get(operation.id);
+      // The maintenance overlay disables its own HMR process. The user's HMR
+      // preference is still editable through the native profile patch API.
+      const editingHmr = target?.entry?.patchId === 'hmr' && !target.entry.readOnlyReason && ['enable', 'disable'].includes(operation.action);
+      if (!target || !(editingHmr || target.actions.includes(operation.action))) throw new Error('This native plugin action is unavailable');
+      if (operation.action === 'install') result = await manager.installBundle(target.bundle.installTarget.spec);
+      else if (operation.action === 'remove') result = await manager.removeBundle(target.bundle.name);
+      else if (target.entry) result = await manager.setPluginEnabled(target.entry.entryId, operation.action === 'enable');
+      else result = await manager.setBundleEnabled(target.bundle.name, operation.action === 'enable');
+    }
+    if (result.error || !['applied', 'restart-required', 'overridden'].includes(result.application)) {
+      throw new Error(result.error?.diagnostic || result.error?.code || result.packageResult?.kind || result.application || 'DeepSeek plugin operation failed');
+    }
+    return { application: result.application };
+  }
+
   async function route(path, body) {
+    if (path === '/plugins') return managePlugins(body);
     if (path === '/drain') {
       await new Promise(resolve => process.stdout.write(`@nautilo-dsh:${JSON.stringify({kind:'barrier',id:body.id})}\n`,resolve));
       return {};
@@ -153,14 +207,24 @@ export async function apply(ctx, config = {}) {
       return { accepted: true };
     }
     if (path === '/open') {
+      if (typeof body.cwd !== 'string' || !isAbsolute(body.cwd)) throw new Error('缺少该会话的工作区目录');
       await bindConnection();
       let sessionId = body.sessionId;
       if (!body.resume) {
-        const created = await ctx.sessionController.create({ sessionId, cwd: body.cwd, agentPreset: body.agentMode || undefined });
+        const workspace = await ctx.workspaceRegistry.create(body.cwd);
+        const created = await ctx.sessionController.create({ sessionId, workspaceId: workspace.id, agentPreset: body.agentMode || undefined });
         sessionId = created.sessionId;
       }
       const { agent } = await ctx.sessionController.resolveAgent(sessionId);
       if (!agent) throw new Error('DeepSeek did not restore the requested agent');
+      if (body.resume) {
+        const stored = agent.session.header.cwd;
+        if (!stored || relative(await realpath(body.cwd), await realpath(stored)) !== '') {
+          throw new Error(`DeepSeek 会话目录（${stored ?? '未知'}）与当前工作区（${body.cwd}）不一致`);
+        }
+        const workspace = await ctx.workspaceRegistry.create(body.cwd);
+        if (!workspace.sessionIds.includes(sessionId)) await workspace.attachSession(sessionId);
+      }
       const selectedMode = ctx.agentPresets.composedPreset(agent.ctx);
       if (body.agentMode && body.agentMode !== selectedMode) await ctx.agentPresets.select(agent, body.agentMode);
       if (body.model) await ctx.sessionController.selectModel({ sessionId, provider: body.provider, model: body.model,
@@ -168,7 +232,8 @@ export async function apply(ctx, config = {}) {
       if (body.permissionMode) ctx.permissionPresets.set(agent.session, body.permissionMode);
       sessions.add(sessionId);
       const compaction = ctx.agentPresets.serviceFor(agent, 'compaction') ?? ctx.get('compaction');
-      return { sessionId, agentMode: ctx.agentPresets.composedPreset(agent.ctx), supportsCompact: typeof compaction?.compactNow === 'function' };
+      return { sessionId, agentMode: ctx.agentPresets.composedPreset(agent.ctx), permissionMode: ctx.permissionPresets.current(agent.session),
+        supportsCompact: typeof compaction?.compactNow === 'function' };
     }
     if (!sessions.has(body.sessionId)) throw new Error('Session is not owned by this Nautilo connection');
     if (path === '/cancel') return ctx.sessionController.cancel({ sessionId: body.sessionId });
@@ -183,7 +248,17 @@ export async function apply(ctx, config = {}) {
     if (path === '/compact') {
       const compaction = ctx.agentPresets.serviceFor(agent, 'compaction') ?? ctx.get('compaction');
       if (!compaction?.compactNow) throw new Error('This DeepSeek mode has no manual compaction capability');
-      await compaction.compactNow(agent, lifetime.signal);
+      try {
+        await compaction.compactNow(agent, lifetime.signal);
+      } catch (error) {
+        // DSH wraps the model's error in a generic ManualCompactionError.
+        const messages = new Set();
+        for (let cause = error, depth = 0; cause != null && depth < 8; cause = cause.cause, depth++) {
+          const message = typeof cause === 'string' ? cause : cause.message;
+          if (message) messages.add(message);
+        }
+        throw new Error([...messages].join('\n') || String(error));
+      }
       await idleTree(agent);
       return {};
     }

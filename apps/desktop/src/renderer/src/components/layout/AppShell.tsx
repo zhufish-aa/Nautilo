@@ -1,6 +1,7 @@
 import { useSettingsStore } from "../../stores/settings";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useState, type ReactNode } from "react";
+import { useState, type ReactNode, type CSSProperties } from "react";
+import {ResizeHandle,useRememberedWidth} from "../ui/ResizeHandle";
 import { PanelLeftOpen } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { useI18n } from "../../lib/i18n";
@@ -56,9 +57,11 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const { t } = useI18n();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem("nautilo.sidebar.collapsed") === "true"; } catch { return false; } });
+  const sidebarWidth=useRememberedWidth("nautilo.sidebar.width",window.innerWidth<=780?180:window.innerWidth<=1100?240:280,180,480);
   const toggleSidebar = (value: boolean): void => { setCollapsed(value); try { localStorage.setItem("nautilo.sidebar.collapsed", String(value)); } catch { /* Storage can be disabled. */ } };
   // The chat-first workbench uses the full width/height; other pages stay centered.
   const fullBleed = location.pathname.startsWith("/sessions") || location.pathname.startsWith("/work");
+  const isAssistant = location.pathname === "/assistant";
   const isSettings = location.pathname.startsWith("/settings");
 
   return (
@@ -72,25 +75,26 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
       <TitleBar />
       <div className="relative z-10 flex min-h-0 flex-1">
         {!isSettings && (
-          <div className="sidebar-slot" data-collapsed={collapsed}>
+          <div className="sidebar-slot" data-collapsed={collapsed} style={{"--sidebar-width":`${sidebarWidth.width}px`,position:"relative",overflow:collapsed?"hidden":"visible",transition:"none"} as CSSProperties}>
             <Sidebar collapsed={collapsed} onCollapse={() => {
               toggleSidebar(true);
               requestAnimationFrame(() => document.getElementById("sidebar-expand")?.focus());
             }} />
+            {!collapsed&&<ResizeHandle label="调整侧栏宽度" value={sidebarWidth.width} min={180} max={480} onChange={sidebarWidth.resize} onCommit={sidebarWidth.save} reset={280}/>}
           </div>
         )}
         <main
           id="main-content"
           data-sidebar-collapsed={collapsed && !isSettings ? "true" : undefined}
           tabIndex={-1}
-          className={cn("workspace-main relative min-w-0 flex-1 outline-none", fullBleed || isSettings ? "overflow-hidden" : "overflow-y-auto")}
+          className={cn("workspace-main relative min-w-0 flex-1 outline-none", fullBleed || isSettings || isAssistant ? "overflow-hidden" : "overflow-y-auto")}
         >
           {collapsed && !isSettings && <button id="sidebar-expand" type="button" onClick={() => { toggleSidebar(false); requestAnimationFrame(() => document.getElementById("sidebar-collapse")?.focus()); }} aria-label="展开侧栏" title="展开侧栏" className="absolute left-3 top-3 z-30 rounded-lg bg-canvas p-2 text-ink-2 hover:bg-panel focus-visible:ring-2 focus-visible:ring-accent"><PanelLeftOpen className="h-4 w-4" /></button>}
           {/* One mounted workspace for /sessions and the legacy /work URL. */}
           <div className={cn("relative h-full overflow-hidden", !fullBleed && "hidden")} aria-hidden={!fullBleed}>
             <SessionsPage active={fullBleed} />
           </div>
-          {isSettings ? children : !fullBleed ? (
+          {isSettings || isAssistant ? children : !fullBleed ? (
             <div className={cn("mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
               {/* NOTE: do NOT pass initial={false} here. With it, framer-motion
                   mounts the incoming page at its animate values (opacity 1)

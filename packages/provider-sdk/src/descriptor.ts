@@ -76,6 +76,10 @@ export interface ProviderDescriptor {
   configProfile?: boolean;
   /** Native, extensible per-conversation modes, discovered from the runtime. */
   modeDiscovery?: boolean;
+  /** The Nautilo plugin supplies native plugin inventory and item-specific operations. */
+  harnessPlugins?: boolean;
+  /** Companion package for a harness whose run adapter remains built in. */
+  pluginManagerFor?: string;
   /** Static model id suggestions shown before discovery runs. */
   modelSuggestions?: string[];
   /**

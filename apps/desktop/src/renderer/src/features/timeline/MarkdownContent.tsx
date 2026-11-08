@@ -59,16 +59,18 @@ export const MarkdownContent = memo(function MarkdownContent({
   inverted = false,
   onOpenLocalFile,
   streaming = false,
+  scrollableTableLabel,
   onContentLayout
 }: {
   source: string;
   inverted?: boolean;
   onOpenLocalFile?: OpenLocalFile;
   streaming?: boolean;
+  scrollableTableLabel?: string;
   onContentLayout?: () => void;
 }): JSX.Element {
   const { t, locale } = useI18n();
-  const components = useMemo(() => createMarkdownComponents(inverted, onOpenLocalFile, t), [inverted, onOpenLocalFile, t]);
+  const components = useMemo(() => createMarkdownComponents(inverted, onOpenLocalFile, t, scrollableTableLabel), [inverted, onOpenLocalFile, t, scrollableTableLabel]);
   const rawRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const streamed = useRef(streaming);
@@ -159,7 +161,7 @@ function CodeBlock({ children }: { children?: ReactNode }): JSX.Element {
   );
 }
 
-function createMarkdownComponents(inverted: boolean, onOpenLocalFile: OpenLocalFile | undefined, t: Translate): Components {
+function createMarkdownComponents(inverted: boolean, onOpenLocalFile: OpenLocalFile | undefined, t: Translate, scrollableTableLabel?: string): Components {
   const linkProps = (href: string | undefined): Record<string, unknown> => {
     const classification = classifyLocalHref(href);
     if (classification.kind === "local") {
@@ -206,7 +208,12 @@ function createMarkdownComponents(inverted: boolean, onOpenLocalFile: OpenLocalF
         // table-fixed keeps column widths driven by the container (never the
         // widest cell), so a long path/code cell wraps instead of blowing the
         // table past the message bubble / timeline width.
-        table: ({ children }) => <table className="my-3 w-full table-fixed border-collapse text-left text-[12px]">{children}</table>,
+        table: ({ children }) => {
+          const table = <table className="my-3 w-full table-fixed border-collapse text-left text-[12px]">{children}</table>;
+          return scrollableTableLabel
+            ? <div className="markdown-table-scroll" role="region" aria-label={scrollableTableLabel} tabIndex={0}>{table}</div>
+            : table;
+        },
         th: ({ children }) => <th className="break-words border border-line bg-card-hover px-2.5 py-2 font-semibold">{children}</th>,
         td: ({ children }) => <td className="break-words border border-line px-2.5 py-2 align-top">{renderWithFileRefs(children, inverted, onOpenLocalFile)}</td>,
         hr: () => <hr className="my-4 border-line" />,

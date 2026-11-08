@@ -10,34 +10,95 @@ use crate::errors::{not_found, now_iso, CoreResult};
 use crate::ipc_gateway::Router;
 
 pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
-    router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION })) });
+    for method in ["scm.status","scm.diff","scm.mutate","scm.commit","scm.commitDiff","scm.history","scm.file","scm.save"] {
+        let daemon=daemon.clone();
+        router.register(method,move|input|{let daemon=daemon.clone();async move{
+            let cwd=crate::application::source_control::working_directory(&daemon,&input)?;
+            let result=match method {"scm.status"=>daemon.source_control.status(&cwd).await,"scm.diff"=>daemon.source_control.diff(&cwd,&input).await,"scm.commit"=>daemon.source_control.commit_details(&cwd,&input).await,"scm.commitDiff"=>daemon.source_control.commit_diff(&cwd,&input).await,"scm.history"=>daemon.source_control.history(&cwd,&input).await,"scm.file"=>daemon.source_control.file(&cwd,&input).await,"scm.save"=>daemon.source_control.save(&cwd,&input).await,_=>daemon.source_control.mutate(&cwd,&input).await};
+            result.map(|mut result|{if let Some(error)=result["error"].as_str(){let redacted=daemon.redaction.text(error);result["error"]=json!(redacted);}result}).map_err(|error|anyhow::Error::new(crate::errors::invalid("sourceControl",&daemon.redaction.text(&error.to_string()))))
+        }});
+    }
+    router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION, "features":{"sourceControl":1,"sourceControlHistory":1,"sourceControlHistoryPaging":1,"sourceControlEditing":1,"terminalTabs":1} })) });
     reg(router,daemon,"terminal.open",|d,input| {
         let session=input["sessionId"].as_str().map(|id|Repositories::new(&d.db.lock().unwrap().raw).sessions().get(id)).transpose()?.flatten();
         let project_id=input["projectId"].as_str().or_else(||session.as_ref().and_then(|session|session["projectId"].as_str())).unwrap_or("");
         let project=Repositories::new(&d.db.lock().unwrap().raw).projects().get(project_id)?.ok_or_else(||not_found("project",project_id))?;
-        let key=format!("shell:{}",input["sessionId"].as_str().unwrap_or(project_id));
+        let scope=crate::runtime::terminal_service::TerminalService::scope(input["sessionId"].as_str(),project_id);
         let command=if cfg!(windows){"powershell.exe".to_string()}else{std::env::var("SHELL").unwrap_or_else(|_|"/bin/sh".into())};
         let cwd=session.as_ref().and_then(|session|session["nativeWorkingDirectory"].as_str()).unwrap_or_else(||project["rootPath"].as_str().unwrap_or(""));
-        d.terminals.open(key,None,crate::runtime::terminal_service::TerminalPlan{command,args:if cfg!(windows){vec!["-NoLogo".into()]}else{vec![]},env:None,cwd:cwd.into(),resources:vec![]},input["cols"].as_u64().unwrap_or(100).min(1000) as u16,input["rows"].as_u64().unwrap_or(24).min(500) as u16)
+        d.terminals.open_shell(scope,input["tabId"].as_str().unwrap_or("default").into(),input["restoreOnly"]==true,crate::runtime::terminal_service::TerminalPlan{command,args:if cfg!(windows){vec!["-NoLogo".into()]}else{vec![]},env:None,cwd:cwd.into(),resources:vec![],provider_session_id:None},input["cols"].as_u64().unwrap_or(100).min(1000) as u16,input["rows"].as_u64().unwrap_or(24).min(500) as u16)
     });
-    reg(router,daemon,"terminal.read",|d,input|d.terminals.read(input["terminalId"].as_str().unwrap_or(""),input["cursor"].as_u64().unwrap_or(0)));
+    reg(router,daemon,"terminal.list",|d,input|{
+        let scope=crate::runtime::terminal_service::TerminalService::scope(input["sessionId"].as_str(),input["projectId"].as_str().unwrap_or(""));
+        Ok(d.terminals.list(&scope))
+    });
     reg(router,daemon,"terminal.write",|d,input|d.terminals.write(input["terminalId"].as_str().unwrap_or(""),input["data"].as_str().unwrap_or("")));
     reg(router,daemon,"terminal.resize",|d,input|d.terminals.resize(input["terminalId"].as_str().unwrap_or(""),input["cols"].as_u64().unwrap_or(80).min(1000) as u16,input["rows"].as_u64().unwrap_or(24).min(500) as u16));
-    reg_str(router,daemon,"terminal.close","terminalId",|d,id|d.terminals.close(id));
-    reg_str(router,daemon,"terminal.status","sessionId",|d,id|Ok(d.terminals.status(id)));
+    {
+        let daemon=daemon.clone();
+        router.register("terminal.read",move |input|{let daemon=daemon.clone();async move {
+            let id=input["terminalId"].as_str().unwrap_or("");
+            let mut frame=daemon.terminals.read(id,input["cursor"].as_u64().unwrap_or(0))?;
+            if let Some(owner)=daemon.terminals.owner(id) {
+                // A history RPC may wait for disk/protocol I/O. Keep terminal
+                // keystrokes and screen output independent of that work.
+                frame["historySync"]=if input["retrySync"]==true {daemon.runs.reconcile_native_history(&owner,true).await?}
+                    else {daemon.runs.native_terminal_status(&owner)?["historySync"].clone()};
+            }
+            Ok(frame)
+        }});
+    }
+    {
+        let daemon=daemon.clone();
+        router.register("terminal.stop",move|input|{let daemon=daemon.clone();async move{
+            let id=input["terminalId"].as_str().unwrap_or("");daemon.terminals.stop_and_wait(id).await?;
+            let mut result=json!({"ok":true});
+            if let Some(owner)=daemon.terminals.owner(id){result["historySync"]=daemon.runs.reconcile_native_history(&owner,true).await?;}
+            Ok(result)
+        }});
+    }
+    {
+        let daemon=daemon.clone();
+        router.register("terminal.close",move |input|{let daemon=daemon.clone();async move {
+            if let Some(tab)=input["tabId"].as_str(){
+                let scope=crate::runtime::terminal_service::TerminalService::scope(input["sessionId"].as_str(),input["projectId"].as_str().unwrap_or(""));
+                return daemon.terminals.close_shell(&scope,tab).map_err(anyhow::Error::new);
+            }
+            let id=input["terminalId"].as_str().unwrap_or("");
+            if let Some(owner)=daemon.terminals.owner(id) {
+                daemon.terminals.stop_and_wait(id).await?;
+                let sync=daemon.runs.reconcile_native_history(&owner,true).await?;
+                Ok(json!({"ok":true,"historySync":sync}))
+            }else{daemon.terminals.close(id).map_err(anyhow::Error::new)}
+        }});
+    }
+    {
+        let daemon=daemon.clone();
+        router.register("terminal.status",move |input|{let daemon=daemon.clone();async move {
+            let id=input["sessionId"].as_str().unwrap_or("");
+            daemon.runs.reconcile_native_history(id,input["retrySync"]==true).await?;
+            daemon.runs.native_terminal_status(id).map_err(anyhow::Error::new)
+        }});
+    }
     {
         let daemon=daemon.clone();
         router.register("terminal.native",move |input|{let daemon=daemon.clone();async move {
             let session_id=input["sessionId"].as_str().unwrap_or("");
             let _ownership=daemon.terminals.lock_session(session_id).await;
-            let key=format!("harness:{session_id}");if let Some(existing)=daemon.terminals.existing(&key){return Ok(existing);}
-            if daemon.runs.session_busy(session_id){anyhow::bail!("请先等待或停止当前一轮，再交接到原生终端。");}
-            let(session,request)=daemon.runs.native_request(session_id)?;
-            let adapter=daemon.adapters.get(request.instance["providerId"].as_str().unwrap_or(""))?;
-            adapter.release_session(&request).await?;
-            let plan=adapter.native_terminal(request,session["providerSessionId"].as_str().map(str::to_string)).await?;
-            daemon.terminals.open(key,Some(session_id.into()),plan,input["cols"].as_u64().unwrap_or(100).min(1000) as u16,input["rows"].as_u64().unwrap_or(24).min(500) as u16).map_err(anyhow::Error::new)
+            daemon.runs.open_native_terminal_locked(session_id,input["cols"].as_u64().unwrap_or(100).min(1000) as u16,input["rows"].as_u64().unwrap_or(24).min(500) as u16).await.map_err(anyhow::Error::new)
         }});
+    }
+
+    reg(router, daemon, "assistant.records", |d, input| crate::database::assistant::records(&d.db.lock().unwrap().raw,&input));
+    reg(router, daemon, "assistant.save", |d, input| crate::database::assistant::save(&d.db.lock().unwrap().raw,&input));
+    reg(router, daemon, "assistant.sessions", |d, input| crate::database::assistant::sessions(&d.db.lock().unwrap().raw,&input));
+    reg(router, daemon, "assistant.excerpts", |d, input| crate::database::assistant::excerpts(&d.db.lock().unwrap().raw,&input));
+    {
+        let daemon = daemon.clone();
+        router.register("assistant.modelStep", move |input| {
+            let daemon = daemon.clone();
+            async move { crate::runtime::assistant_model::step(&daemon,&input).await.map_err(anyhow::Error::new) }
+        });
     }
 
     // ---- projects
@@ -191,7 +252,7 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             for id in result["sessionIds"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                 if let Some(session)=snapshots.iter().find(|session|session["id"]==id) {
                     if let Err(error)=daemon.runs.release_native_session(session).await {eprintln!("Native session release failed: {error}");}
-                    if let Some(terminal)=daemon.terminals.status(id)["terminalId"].as_str() {let _=daemon.terminals.close(terminal);}
+                    daemon.terminals.close_scope(&crate::runtime::terminal_service::TerminalService::scope(Some(id),""));
                 }
             }
             Ok(result)
@@ -320,9 +381,21 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             .map(Value::Array)
     });
 
+    let plugin_daemon = daemon.clone();
+    router.register("provider.harnessPlugins", move |input| {
+        let daemon = plugin_daemon.clone();
+        async move { super::harness_plugins::manage(&daemon, input).await.map_err(anyhow::Error::new) }
+    });
+
     // ---- provider detection / catalog / model discovery
     reg(router, daemon, "provider.catalog", |d, _| {
-        Ok(Value::Array(d.adapters.list().iter().map(|adapter| adapter.descriptor()).collect()))
+        Ok(Value::Array(d.adapters.list().iter().map(|adapter| {
+            let mut descriptor = adapter.descriptor();
+            if d.plugins.manager_for(adapter.provider_id()).is_some() {
+                descriptor["harnessPlugins"] = json!(true);
+            }
+            descriptor
+        }).collect()))
     });
     {
         let daemon = daemon.clone();

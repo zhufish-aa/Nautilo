@@ -90,7 +90,7 @@ export function ContextUsageIndicator({
 
   return (
     <span
-      className="relative inline-flex shrink-0"
+      className="composer-context-control relative inline-flex shrink-0"
       onMouseEnter={() => { cancelClose(); setOpen(true); }}
       onMouseLeave={scheduleClose}
       onFocus={() => { cancelClose(); setOpen(true); }}

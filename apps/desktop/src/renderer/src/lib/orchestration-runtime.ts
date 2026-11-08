@@ -280,6 +280,24 @@ export async function hydrateWorkbenchSessions({ hydrateActiveProjectRuns = true
   }
 }
 
+/** A delivery from the persistent assistant enters the same live workbench as a composer submission. */
+export async function refreshAssistantTarget(sessionId: string): Promise<void> {
+  const page = await requestCore<import("@agenthub/schemas").AssistantSessionPage>("assistant.sessions", {sessionId});
+  const entry = page.items[0];
+  if (!entry) return;
+  const sessions = await requestCore<DomainSession[]>("session.list", {projectId:entry.projectId});
+  const session = sessions.find(item => item.id === sessionId);
+  if (!session) return;
+  if (session.projectRunId) {
+    await hydrateProjectRun(session.projectRunId);
+    schedulePoll(session.projectRunId);
+  } else {
+    const ui = toStandaloneUiSession(session);
+    useSessionsStore.getState()._upsertExternalSession(ui);
+    scheduleStandalonePoll(sessionId, undefined, true);
+  }
+}
+
 export async function sendWorkbenchMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], editMessageId?: string): Promise<void> {
   const state = useSessionsStore.getState();
   const initialSession = state.sessions.find((item) => item.id === sessionId);
@@ -1704,6 +1722,7 @@ function needsStandalonePersistenceSync(events: RuntimeEvent[]): boolean {
   // messages/artifacts for each snapshot defeats structural render batching.
   // Message/terminal syncs still load the final raw diff artifact.
   return events.some((event) => event.type === "agent.message"
+    || event.type === "session.native_history_synced"
     || (event.type === "artifact.created" && event.payload.kind !== "diff")
     || event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled");
 }
@@ -1847,6 +1866,9 @@ function appendRuntimeEvents(
   const terminalRuns = new Map(events
     .filter((event) => event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled")
     .map((event) => [String(event.runId ?? ""), event.type === "run.failed" ? "failed" as const : "done" as const]));
+  const latestTerminalEvents = new Map(events
+    .filter((event) => event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled")
+    .map((event) => [String(event.runId ?? ""), event.eventId]));
   const streaming = new Map<string, number>();
   const deltaSegments = new Map<string, string[]>();
   const reasoning = new Map<string, number>();
@@ -1927,6 +1949,8 @@ function appendRuntimeEvents(
     if (nativeDiff && (event.type === "file.changed" || (event.type === "run.diff_updated" && nativeDiff !== event))) continue;
     if (subagentDispatchIdOf(event)) continue;
     if (hiddenInternalRuns.has(runId)) continue;
+    if ((event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled")
+      && latestTerminalEvents.get(runId) !== event.eventId) continue;
     if (event.type === "run.completed" && hiddenCompletions.has(runId)) continue;
     if (event.type === "agent.message_delta") {
       // The model has moved on to final text output: whatever reasoning
@@ -2148,7 +2172,8 @@ function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact
         text: message.text,
         messageId: message.id,
         editedAt: message.editedAt,
-        attachments: message.attachmentIds?.flatMap((id) => {
+        streaming: message.sender === "agent" && message.nativeIdentity?.turnStatus === "running" && !message.nativeIdentity.completed,
+        attachments: [...(message.attachmentIds?.flatMap((id) => {
           const artifact = artifactsById.get(id);
           return artifact ? [{
             id: artifact.id,
@@ -2158,7 +2183,7 @@ function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact
             mimeType: typeof artifact.metadata?.mimeType === "string" ? artifact.metadata.mimeType : undefined,
             sizeBytes: typeof artifact.metadata?.sizeBytes === "number" ? artifact.metadata.sizeBytes : undefined
           }] : [];
-        })
+        }) ?? []), ...(message.nativeFiles?.map(file => ({ id: file.id, name: file.name, kind: "file" as const, unavailable: true })) ?? [])]
       }
     };
   });

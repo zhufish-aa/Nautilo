@@ -2,6 +2,9 @@
 //! mcp-config,provider-config,models}.ts. The run loops live in
 //! app_server.rs / chat_compat.rs; event parsers in events.rs.
 
+mod native_experience;
+mod history;
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -18,6 +21,7 @@ pub mod app_server;
 mod elicitation;
 pub mod chat_compat;
 mod anthropic_compat;
+pub(crate) use anthropic_compat::SseDecoder;
 pub mod events;
 pub mod image_gen;
 
@@ -142,7 +146,7 @@ pub fn build_codex_mcp_config_args(servers: &[Value]) -> Vec<String> {
                         .map(|(k, v)| format!("{} = {}", toml_key(k), toml_string(v.as_str().unwrap_or(""))))
                         .collect();
                     args.push("-c".to_string());
-                    args.push(format!("{key}.headers={{ {} }}", pairs.join(", ")));
+                    args.push(format!("{key}.http_headers={{ {} }}", pairs.join(", ")));
                 }
             }
         }
@@ -563,6 +567,11 @@ impl Default for CodexAdapter {
 
 #[async_trait::async_trait]
 impl AgentCliAdapter for CodexAdapter {
+    fn native_capabilities(&self,instance:&Value)->Value {
+        let caps=self.capabilities();
+        let legacy=json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty});
+        agenthub_plugin_sdk::capabilities::describe(self.provider_id(),instance,&agenthub_plugin_sdk::capabilities::with_profile(legacy,native_experience::declarations()))
+    }
     fn provider_id(&self) -> &str {
         "codex"
     }
@@ -687,7 +696,16 @@ impl AgentCliAdapter for CodexAdapter {
         }
         app_server::start_codex_app_server(request, None)
     }
-    async fn release_session(&self,request:&AdapterStartRequest)->CoreResult<()> {app_server::release_session(request).await}
+    async fn release_session(&self,request:&AdapterStartRequest)->CoreResult<()> {app_server::release_session(request).await?;history::release(request).await;Ok(())}
+    fn native_history_supported(&self,_instance:&Value)->bool {true}
+    fn native_message_ids_supported(&self,instance:&Value)->bool {base_args(instance).is_empty()}
+    async fn read_session_history(&self,request:&AdapterStartRequest,session:&str)->CoreResult<Option<Value>> {
+        history::read(request,session).await.map(Some).map_err(|error|crate::errors::invalid("nativeHistory",&error.to_string()))
+    }
+    async fn resume_terminal_events(&self,request:&AdapterStartRequest,_session:&str,snapshot:&Value)->CoreResult<()> {
+        if snapshot["settled"]==true {history::release(request).await;}Ok(())
+    }
+    async fn dispose(&self){history::shutdown().await;app_server::shutdown_codex_app_server_pools().await;}
     async fn native_terminal(&self,mut request:AdapterStartRequest,resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
         let mut resources:Vec<Box<dyn Send>>=vec![];
         if matches!(resolve_codex_wire_api(&request.instance),"chat"|"anthropic") {
@@ -704,7 +722,7 @@ impl AgentCliAdapter for CodexAdapter {
         if let Some(model)=request.model {args.extend(["--model".into(),model]);}
         if let Some(effort)=request.reasoning_effort{args.extend(["--config".into(),format!("model_reasoning_effort={}",json!(effort))]);}
         if let Some(resume)=resume{args.extend(["resume".into(),resume]);}
-        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("codex").into(),args,env:request.env,cwd:request.cwd,resources})
+        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("codex").into(),args,env:request.env,cwd:request.cwd,resources,provider_session_id:None})
     }
 
     fn resume(&self, request: AdapterResumeRequest) -> CoreResult<AdapterRun> {

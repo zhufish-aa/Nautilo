@@ -1,5 +1,33 @@
 # Provider 插件开发指南
 
+当前桌面主线为 **Electron + React + Rust core**。新增 harness 使用 `rust/plugin-sdk` 的 `ProviderPlugin` 契约，参考 `rust/plugins/opencode`、`pi`、`omp`、`commandcode`、`trae`、`deepseek`。下文的 TypeScript 模板和 Node 加载说明保留给旧入口，不能用它们推断 Rust 原生插件已经完成某项能力。
+
+现有内置 Codex、Claude Code、Kimi Code 保持内置接入，不进行插件化迁移。插件式 harness 的协议、启动参数、账号资源合并、能力声明及新增功能均由各自插件维护；主程序只处理统一接口、事件归属、持久化和界面展示。
+
+## Rust 原生插件的完整能力契约
+
+接入新 harness 不需要向主程序或公共 SDK 增加 provider 名称判断。`capabilities.nativeExperience` 在插件中提供默认能力和基于实例 JSON pointer 的可选变体，主程序只解释声明。未提供证据的能力使用 `unknown`，不能由“支持续聊”推断“支持历史同步”或“支持后台子会话”。各插件的声明位于自己的 `src/native_experience.rs`。
+
+| 能力 | 插件负责实现 | 主程序负责 |
+|---|---|---|
+| 单轮、续聊、引导、取消 | `start`、`steer`、`cancel`；保留真正的原生会话 ID | 输入、调度、统一事件与结果 |
+| 常驻与后台子会话 | 持有原生协议进程；通过 `session_sink`、`SessionDaemonChannel` 保留来源；请求结束后再释放绑定 | 按来源轮次保存事件，显示子会话和交互 |
+| 交互 | `DaemonChannel` 的问题/工具请求；等待用户回答；原生撤销时结束等待 | 展示统一交互并路由回应 |
+| 原生终端 | `terminal_plan`、`release_session`、`close_terminal`；需要共享 server 时声明 `sharedTerminalServer` | PTY、输出、窗口挂接和终端生命周期 |
+| 原生消息同步 | `read_session_history`；声明 `nativeHistory` 且 `session.history = native` | 运行中轮询、原生 ID 去重、事务导入、刷新聊天 |
+| 交接后的事件恢复 | `resume_terminal_events`；仅在终端退出后将交互归还宿主 | 完成回读后允许聊天继续 |
+| 安全释放 | 核实子会话、交互、后台任务及终端租约，再实现 `release_session` / `dispose` | 等待退出和输出尾部，保留失败的待同步记录 |
+
+`read_session_history` 返回 `history::validate` 认可的 v1 快照，包含真实原生 `providerSessionId`、消息/活动 ID、父消息 ID、轮次 ID、文本/附件、完成标记及可选 `turnStatus`。原生格式没有事件 ID 时，可使用其持久化记录的稳定文件位置；不能用文本相同、屏幕终端转义文本或猜测最近会话来确定身份。读取期间不得启动新轮次、恢复写会话、切换账号或中断正在使用的原生 CLI。
+
+快照可以是运行中的前缀：`settled = false` 不会阻止已持久化的用户消息和部分回答进入界面。完成、取消、失败分别保留原生状态。`request.nativeTerminalLive` 是宿主观测到的 PTY 状态，只供历史读取参考；插件不能将它转成 CLI 启动选项。对仅落盘读取的插件，宿主确认终端退出后，缺少完成标记的输出应保留为未完成，而不是永远等待或假报成功。
+
+历史可读与前台事件 ID 稳定是两项独立声明。只有前台输出使用真正的原生消息 ID、且跨轮和进程恢复仍保持唯一时，插件才能声明 `nativeEventIdentities: true`。仅有历史读取的插件仍可同步终端消息，但宿主不会用可能复用的 `message-1` 等流式编号覆盖其他轮次的消息。
+
+通用 JSONL 读取和限定目录查找在 `rust/plugin-sdk/src/history_files.rs`；格式、目录、树分支、角色、工具与原生状态解析仍在插件自己的 `history.rs`。目前 OpenCode、Pi、OMP、Command Code 分别提供对应实现。Trae 尚未声明原生终端/历史读取能力；DeepSeek 原生 Web 交接按用户要求排除。这些缺口不能因为统一接口已经具备就标成已实现。
+
+新插件至少需要使用离线协议夹具检查：同文不同 ID 不被合并；跨轮子会话不会串入其他轮次；问题可回答和撤销；取消不会结束其他会话；终端运行时可回读；重试不重复导入；退出后尾部输出和资源完成回收。真实安装版本的验证应单独记录，不能把离线格式检查称为所有版本兼容。
+
 Nautilo 的 Provider（agent CLI 接入层）是插件式的。内置的 codex / kimi-code / claude-code / custom 四个 Provider 与第三方插件走**同一套契约**：`@agenthub/provider-sdk` 定义的 `AgentCliAdapter` 接口 + `ProviderDescriptor` 元数据。OpenCode 和 Trae 不内置，分别由 `packages/provider-plugin-opencode/`、`packages/provider-plugin-trae/` 插件提供——它们是本指南之外最好的参考实现。
 
 本文档基于以下源码整理，引用类型时以这些文件为准：
@@ -401,6 +429,15 @@ CLI 支持在一轮运行中追加输入时，实现 `AdapterRun.steer(input)`�
 ```
 
 上架 = 向 [registry 仓库](https://github.com/zhufish-aa/nautilo-provider-registry)提 PR：官方插件把 `.tgz` 放进 PR 的 `packages/` 目录（raw URL 直接可下载），第三方插件把 tar 球托管在自己仓库的 Release 里；条目需带 `sha256`（缺失会跳过校验，不建议）。详细流程和自检清单见 registry 仓库的 README 与 PR 模板。
+
+## 管理 Harness 的原生插件
+
+支持原生扩展的 Harness 可以在自己的 Nautilo 插件中声明 `descriptor.harnessPlugins: true`，并实现 TypeScript 的 `harnessPlugins(instance, context, operation)` 或 Rust 的 `ProviderPlugin::harness_plugins`。宿主会在该 Harness 的配置页显示「原生插件」。其他 Harness 可以省略这项能力。
+
+- `list` 读取当前配置的清单，返回 `{ items, installBySpec? }`。每项提供稳定的 `id`、名称、安装状态和当前允许的 `actions`。受保护的条目返回空操作列表。
+- 列表操作通过 `{ action, id }` 发送，支持的动作有 `install`、`remove`、`enable` 和 `disable`。支持按包名或来源安装的插件还可以接收 `{ action: "install", spec }`。实现应调用 Harness 的原生管理接口并检查操作是否仍然有效。
+- 宿主传入用户配置的可执行文件和所选账号的环境。管理进程须使用此环境。修改成功返回 `{ application }`，取值为 `applied`、`restart-required` 或 `overridden`。操作失败时向宿主返回原生错误。
+- 给内置 Harness 添加管理能力时，可提供独立的 Nautilo 插件，ID 为 `<providerId>-plugins`，在 descriptor 中声明 `pluginManagerFor` 指向该 Harness。Codex 使用这种方式，DeepSeek 的实现直接在其现有 Harness 插件中。
 
 ## 调试与常见问题
 

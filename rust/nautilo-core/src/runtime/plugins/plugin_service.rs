@@ -35,7 +35,8 @@ pub struct PluginService {
     loaded: Mutex<std::collections::HashSet<String>>,
     /// Adapters a loaded plugin replaced (restored on disable/uninstall).
     overridden: Mutex<Map<String, Value>>,
-    clients: Mutex<Map<String, Value>>,
+    clients: Mutex<std::collections::HashMap<String, Arc<PluginClient>>>,
+    bundled_managers: Mutex<std::collections::HashMap<String, Arc<PluginClient>>>,
 }
 
 impl PluginService {
@@ -46,7 +47,8 @@ impl PluginService {
             records: Mutex::new(Map::new()),
             loaded: Mutex::new(std::collections::HashSet::new()),
             overridden: Mutex::new(Map::new()),
-            clients: Mutex::new(Map::new()),
+            clients: Mutex::new(Default::default()),
+            bundled_managers: Mutex::new(Default::default()),
         }
     }
 
@@ -69,6 +71,46 @@ impl PluginService {
             }
             self.load_one(&id).await;
         }
+        self.load_bundled_managers().await;
+    }
+
+    // A companion contributes settings without replacing the harness's chat adapter.
+    async fn load_bundled_managers(&self) {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let Some(parent) = exe.parent() else { return };
+        let bundle = if parent.file_name().is_some_and(|name| name == "core-daemon") {
+            parent.parent().unwrap_or(parent)
+        } else { parent };
+        let root = bundle.join("plugins");
+        let Ok(entries) = std::fs::read_dir(&root) else { return };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            let Ok(manifest) = self.read_manifest(&dir) else { continue };
+            let Some(target) = manifest.pointer("/descriptor/pluginManagerFor").and_then(Value::as_str) else { continue };
+            let id = format!("{target}-plugins");
+            if manifest["id"] != id || entry.file_name().to_str() != Some(id.as_str())
+                || validate_manifest(&manifest, &dir.to_string_lossy()).is_err()
+                || validate_plugin_target(&root, &dir).is_err() { continue; }
+            let executable = resolve_executable(&dir, manifest["main"].as_str().unwrap_or(""));
+            if let Ok(client) = launch_plugin(&id, &executable, &dir).await {
+                if client.provider_id() == id && client.descriptor()["pluginManagerFor"] == target {
+                    self.bundled_managers.lock().unwrap().insert(target.to_owned(), Arc::new(client));
+                } else { client.dispose().await; }
+            }
+        }
+    }
+
+    pub fn manager_for(&self, target: &str) -> Option<Arc<PluginClient>> {
+        let id = format!("{target}-plugins");
+        let clients = self.clients.lock().unwrap();
+        if let Some(client) = clients.get(target).filter(|c| c.descriptor()["harnessPlugins"] == true) {
+            return Some(client.clone());
+        }
+        if let Some(client) = clients.get(&id).filter(|c| c.descriptor()["pluginManagerFor"] == target) {
+            return Some(client.clone());
+        }
+        if self.records.lock().unwrap().contains_key(&id) { return None; }
+        self.bundled_managers.lock().unwrap().get(target).cloned()
     }
 
     pub fn list(&self) -> Vec<Value> {
@@ -278,6 +320,8 @@ impl PluginService {
         for id in ids {
             self.unload(&id).await;
         }
+        let bundled = std::mem::take(&mut *self.bundled_managers.lock().unwrap());
+        for (_, manager) in bundled { manager.dispose().await; }
     }
 
     async fn unload(&self, plugin_id: &str) {
@@ -286,7 +330,11 @@ impl PluginService {
         }
         // The plugin process exits on dispose; the client adapter is removed
         // from the registry either way.
-        self.clients.lock().unwrap().remove(plugin_id);
+        let client = self.clients.lock().unwrap().remove(plugin_id);
+        if let Some(manager) = client.filter(|c| c.descriptor()["pluginManagerFor"].is_string()) {
+            manager.dispose().await;
+            return;
+        }
         // Terminate the plugin process BEFORE anyone touches its files — a
         // live process keeps the exe locked on Windows, so uninstall and
         // reinstall would fail with os error 32.
@@ -348,10 +396,19 @@ impl PluginService {
                     return Ok(record);
                 }
                 // Snapshot whatever the plugin replaces so unload restores it.
-                if self.registry.find(plugin_id).is_some() {
-                    self.overridden.lock().unwrap().insert(plugin_id.to_string(), json!(true));
+                let client = Arc::new(client);
+                if let Some(target) = client.descriptor()["pluginManagerFor"].as_str() {
+                    if plugin_id != format!("{target}-plugins") {
+                        client.dispose().await;
+                        return Err(plugin_fail(ErrorCode::PluginInvalid, &dir.to_string_lossy(), "Invalid companion plugin ID"));
+                    }
+                } else {
+                    if self.registry.find(plugin_id).is_some() {
+                        self.overridden.lock().unwrap().insert(plugin_id.to_string(), json!(true));
+                    }
+                    self.registry.register(client.clone());
                 }
-                self.registry.register(Arc::new(client));
+                self.clients.lock().unwrap().insert(plugin_id.to_string(), client);
                 self.loaded.lock().unwrap().insert(plugin_id.to_string());
                 let record = record(plugin_id, true, "loaded", None, &dir, Some(&manifest));
                 self.records.lock().unwrap().insert(plugin_id.to_string(), record.clone());

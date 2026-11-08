@@ -12,6 +12,8 @@ import { useAgentsStore } from "../../stores/agents";
 import { useConnectionsStore } from "../../stores/connections";
 import { toast } from "../../stores/toast";
 import { ProviderCard } from "./ProvidersPanel";
+import { HarnessPluginsPanel } from "./HarnessPluginsPanel";
+import { useProvidersStore } from "../../stores/providers";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 
 export function HarnessPanel(): JSX.Element {
@@ -31,6 +33,7 @@ export function HarnessPanel(): JSX.Element {
   const selected = providers.find((item) => item.id === selectedId);
   const profile = instances.find((item) => item.configurationKind === "harness" && item.providerId === selected?.id);
   const installation = installations.find((item) => item.providerId === selected?.id);
+  const managesPlugins = useProvidersStore(state => state.catalog.some(item => item.providerId === selected?.id && item.harnessPlugins));
   const [form, setForm] = useState({ executable: "", permissionMode: "", envPolicyId: "env-standard", poolSize: "", imageAccount: "", enabled: true });
   useEffect(() => {
     if (!selected || profile || installation?.status !== "ready") return;
@@ -103,6 +106,9 @@ export function HarnessPanel(): JSX.Element {
           <p className="mt-2 text-xs leading-5 text-ink-2">{zh ? "图片使用此官方账号，聊天使用会话模型。" : "Images use this account; chat uses the session model."}</p>
         </Field>}
         </section>}
+        {managesPlugins && (profile ? <HarnessPluginsPanel key={profile.id + ":" + profile.updatedAt} instanceId={profile.id}
+          accounts={connections.filter(item => item.enabled && item.kind === "login" && item.harness === selected.id)} />
+          : <p className="text-sm text-ink-2">{zh ? "保存可执行文件后即可管理原生插件。" : "Save the executable to manage native plugins."}</p>)}
         {installation?.status !== "ready" && <p className="text-sm text-ink-3">{installation?.message || (zh ? "安装对应 CLI 后点击检测。" : "Install the CLI, then detect it.")}</p>}
         {error && <p role="alert" className="text-sm text-danger">{error}</p>}
       </div>}

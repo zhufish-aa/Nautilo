@@ -11,3 +11,4 @@ export * from "./types.js";
 export * from "./descriptor.js";
 export * from "./native-config.js";
 export * from "./native-capabilities.js";
+export * from "./harness-plugins.js";

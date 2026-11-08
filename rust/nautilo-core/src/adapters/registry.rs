@@ -32,8 +32,8 @@ pub struct AdapterRegistry {
 }
 
 impl AdapterRegistry {
-    /// OpenCode is deliberately NOT built in: it ships as a provider plugin
-    /// and is registered by the plugin service.
+    /// Existing built-ins keep their current integration. Additional harnesses
+    /// register through the provider plugin service.
     pub fn with_builtins() -> Self {
         let registry = Self::default();
         registry.register(Arc::new(CodexAdapter));

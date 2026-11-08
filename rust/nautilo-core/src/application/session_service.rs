@@ -287,6 +287,7 @@ impl SessionService {
     /// session.send — validates, persists the user message, and launches a run.
     pub async fn send(&self, input: &Value) -> CoreResult<Value> {
         let session_id = input.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        self.runs()?.ensure_native_history(session_id).await?;
         let text = input.get("text").and_then(Value::as_str).unwrap_or("");
         // Heal replayed zombie queue entries before this run's events make the
         // renderer re-read the journal (see heal_follow_ups).
@@ -409,6 +410,7 @@ impl SessionService {
                         Some(turn_context.local_image_paths)
                     },
                     synchronize_provider_context: turn_context.recovered,
+                    user_message_id: message["id"].as_str().map(str::to_string),
                     ..Default::default()
                 },
             )
@@ -420,6 +422,7 @@ impl SessionService {
     /// otherwise queue as the next turn.
     pub async fn follow_up(&self, input: &Value) -> CoreResult<Value> {
         let session_id = input.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        self.runs()?.ensure_native_history(session_id).await?;
         let text = input.get("text").and_then(Value::as_str).unwrap_or("").trim().to_string();
         if text.is_empty() {
             return Err(invalid("text", "Guidance cannot be empty."));

@@ -12,6 +12,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod native_experience;
+mod history;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -164,6 +167,7 @@ impl OmpPlugin {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for OmpPlugin {
+    async fn read_session_history(&self,request:&Value,session:&str)->anyhow::Result<Option<Value>>{history::read(request,session).await.map(Some)}
     fn native_terminal_supported(&self)->bool {true}
     async fn release_session(&self,request:&Value)->anyhow::Result<()> {if let Some(native)=self.pool.retire(request["localSessionId"].as_str().unwrap_or("")){native.close().await;}Ok(())}
     async fn terminal_plan(&self,request:&Value,resume:Option<String>)->anyhow::Result<Value> {
@@ -175,15 +179,16 @@ impl ProviderPlugin for OmpPlugin {
         descriptor()
     }
 
-    fn capabilities(&self) -> Value {
-        json!({
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({
+            "nativeHistory": true,
             "structuredOutput": false,
             "textOutput": true,
             "interactiveStdin": true,
             "sessionBackgroundEvents": true,
             "nativeResume": true,
             "pty": false
-        })
+        }),native_experience::declarations())
     }
 
     fn set_daemon_channel(&self, channel: Arc<dyn DaemonChannel>) {

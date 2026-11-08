@@ -51,3 +51,43 @@ test('terminal resize, maximize and theme preserve the native process and restor
     w.qa.render();await tick();assert.equal(panel().style.height,'502px');assert.equal(w.document.querySelector('.native-terminal').dataset.appearance,'light');
   }finally{w.qa?.close();w.close();}
 });
+
+test('native history failure retains the terminal and retry unlocks chat without another CLI', {skip:!JSDOM}, async()=>{
+  const desktop=fileURLToPath(new URL('..',import.meta.url));
+  const {build}=createRequire(require.resolve('vite/package.json'))('esbuild');
+  const bundle=await build({stdin:{resolveDir:desktop,loader:'tsx',contents:`
+    import React from 'react';import{createRoot}from'react-dom/client';import{flushSync}from'react-dom';
+    import{I18nProvider}from'./src/renderer/src/lib/i18n';
+    import{NativeTerminal}from'./src/renderer/src/features/sessions/NativeTerminal';
+    import{useNativeTerminalState}from'./src/renderer/src/lib/use-native-terminal';
+    const root=createRoot(document.getElementById('root'));function View(){const state=useNativeTerminalState('s');return <><NativeTerminal sessionId='s' kind='harness'/><button id='compose' disabled={state.nativeActive}>发送</button></>}
+    window.qa={calls:[],render(){flushSync(()=>root.render(<I18nProvider><View/></I18nProvider>));},close(){flushSync(()=>root.unmount());}};
+  `},bundle:true,platform:'browser',format:'iife',jsx:'automatic',write:false,nodePaths:[join(desktop,'node_modules')],define:{'process.env.NODE_ENV':'"test"'},loader:{'.css':'empty'},plugins:[{name:'xterm-fixture',setup(b){
+    b.onResolve({filter:/^@xterm\/(xterm|addon-fit)$/},args=>({path:args.path,namespace:'fixture'}));
+    b.onLoad({filter:/.*/,namespace:'fixture'},args=>({contents:args.path.endsWith('addon-fit')?`export class FitAddon{fit(){}}`:`export class Terminal{cols=90;rows=12;options={};loadAddon(){}open(){}focus(){}onData(){return{dispose(){}}}onResize(){return{dispose(){}}}attachCustomKeyEventHandler(){}write(data,done){done?.()}reset(){}dispose(){}}`}));
+  }}]});
+  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost',runScripts:'outside-only',pretendToBeVisual:true});const w=dom.window;
+  w.ResizeObserver=class{observe(){}disconnect(){}};
+  w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){},addListener(){},removeListener(){}});
+  let phase='running';
+  w.agenthub={core:{request:async({method,input})=>{
+    w.qa.calls.push({method,input});const historySync={status:phase,messageCount:2,error:phase==='failed'?'fixture sync failure':null};
+    if(method==='terminal.native')return{id:'pty-same'};
+    if(method==='terminal.status')return{nativeActive:phase!=='synced',historySync};
+    if(method==='terminal.read') {if(input.retrySync){phase='synced';historySync.status='synced';historySync.error=null;}return{data:'',cursor:0,exited:phase!=='running',historySync};}
+    return{};
+  }}};
+  const until=async(predicate)=>{const end=Date.now()+5000;while(!predicate()){assert.ok(Date.now()<end,'UI state did not settle');await new Promise(resolve=>setTimeout(resolve,20));}};
+  try{
+    w.eval(bundle.outputFiles[0].text);w.qa.render();await until(()=>w.document.getElementById('compose').disabled&&w.qa.calls.some(c=>c.method==='terminal.read'));
+    phase='syncing';await until(()=>w.document.body.textContent.includes('同步历史中'));
+    assert.equal(w.document.getElementById('compose').disabled,true);
+    phase='failed';await until(()=>w.document.querySelector('button[aria-label="重试历史同步"]'));
+    assert.equal(w.document.getElementById('compose').disabled,true);assert.match(w.document.body.textContent,/fixture sync failure/);
+    w.document.querySelector('button[aria-label="重试历史同步"]').click();
+    await until(()=>w.document.body.textContent.includes('已同步 2 条消息')&&!w.document.getElementById('compose').disabled);
+    assert.equal(w.qa.calls.filter(c=>c.method==='terminal.native').length,1);
+    assert.equal(w.qa.calls.filter(c=>c.method==='terminal.close').length,0);
+    assert.ok(w.qa.calls.some(c=>c.method==='terminal.read'&&c.input.retrySync===true));
+  }finally{w.qa?.close();w.close();}
+});

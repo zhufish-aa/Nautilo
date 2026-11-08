@@ -148,6 +148,10 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                             Ok(()) => emit::response(id,serde_json::json!({"accepted":true})),
                             Err(error) => emit::failure(id,&error.to_string()),
                         },
+                        "harnessPlugins" => match plugin.harness_plugins(&input["instance"], &input["context"], &input["operation"]).await {
+                            Ok(value) => emit::response(id, value),
+                            Err(error) => emit::failure(id, &error.to_string()),
+                        },
                         "listModes" => match plugin.list_modes(&input["instance"], &input["context"]).await {
                             Ok(value) => emit::response(id, value),
                             Err(error) => emit::failure(id, &error.to_string()),
@@ -167,6 +171,8 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                             Err(error) => emit::failure(id, &error.to_string()),
                         },
                         "releaseSession" => match plugin.release_session(&input).await {Ok(())=>emit::response(id,Value::Null),Err(error)=>emit::failure(id,&error.to_string())},
+                        "readSessionHistory" => match plugin.read_session_history(&input["request"],input["providerSessionId"].as_str().unwrap_or("")).await {Ok(history)=>emit::response(id,history.unwrap_or(Value::Null)),Err(error)=>emit::failure(id,&error.to_string())},
+                        "resumeTerminalEvents" => match plugin.resume_terminal_events(&input["request"],input["providerSessionId"].as_str().unwrap_or(""),&input["snapshot"]).await {Ok(())=>emit::response(id,Value::Null),Err(error)=>emit::failure(id,&error.to_string())},
                         "terminalPlan" => match plugin.terminal_plan(&input["request"],input["resume"].as_str().map(str::to_string)).await {Ok(plan)=>emit::response(id,plan),Err(error)=>emit::failure(id,&error.to_string())},
                         "closeTerminal" => {plugin.close_terminal(input["token"].as_str().unwrap_or("")).await;emit::response(id,Value::Null)},
                         "dispose" => {

@@ -1,10 +1,10 @@
 // Opt-in integration test against an installed official dsh CLI. No real key
 // or model endpoint is used; all native state belongs to a temporary DSH_HOME.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
@@ -39,6 +39,7 @@ let warmHostRequested = false;
 let fileToolRequested = false;
 let hostToolRequested = false;
 let codeRequested = false;
+let sandboxListRequested = false;
 const server = createServer(async (req, res) => {
   let text = ''; for await (const chunk of req) text += chunk;
   if (req.method !== 'POST') { res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ data: [{ id: 'nautilo-test' }] })); return; }
@@ -58,7 +59,12 @@ const server = createServer(async (req, res) => {
   const host = body.tools?.find(tool => tool.function.name === 'nautilo_test_echo');
   const codeTool = body.tools?.find(tool => tool.function.name === 'run_code');
   let tool;
-  if (read && !fileToolRequested) {
+  if (codeTool && !sandboxListRequested && messages.some(m => m.role === 'user' && JSON.stringify(m.content).includes('LIST_WINDOWS_WORKSPACE'))) {
+    sandboxListRequested = true;
+    tool = { id: 'sandbox_list', type: 'function', function: { name: 'run_code', arguments: JSON.stringify({
+      description: 'Check workspace limits', code: 'const r = await tools.pwsh({description:"Check workspace access",command:"Get-ChildItem -Name; try { Set-Content -LiteralPath ../outside-probe.txt -Value probe -ErrorAction Stop; Write-Output OUTSIDE_ALLOWED } catch { Write-Output OUTSIDE_DENIED }"}); console.log(r.kind === "foreground" ? r.stdout.text : JSON.stringify(r));'
+    }) } };
+  } else if (read && !fileToolRequested) {
     fileToolRequested = true;
     const property = Object.keys(read.function.parameters.properties).find(name => /path|file/.test(name));
     tool = { id: 'native_read', type: 'function', function: { name: 'read', arguments: JSON.stringify({ [property]: join(workspace, 'fixture.txt') }) } };
@@ -93,7 +99,11 @@ createInterface({ input: child.stdout }).on('line', line => {
   if (frame.event?.kind === 'message' && frame.event.phase === 'delta' && timings[frame.runId]?.firstTextMs === undefined) timings[frame.runId].firstTextMs = Math.round(performance.now() - timings[frame.runId].start);
   if (frame.type === 'tool_call') hostToolRuns.push(frame.runId);
   if (frame.type === 'tool_call') send({ type: 'tool_response', id: frame.id, result: { success: true, content: 'HOST_TOOL_OK' } });
-  if (frame.type === 'interaction') send({ type: 'interaction_response', id: frame.id, response: { outcome: 'selected', optionId: 'once' } });
+  if (frame.type === 'interaction') {
+    const folderGrant = frame.input?.options?.some(option => option.id === 'authorize-workspace');
+    const optionId = folderGrant ? (frame.runId === 'acl-deny' ? 'reject' : 'authorize-workspace') : 'once';
+    send({ type: 'interaction_response', id: frame.id, response: { outcome: 'selected', optionId } });
+  }
   for (const check of [...waiting]) check();
 });
 const send = frame => {
@@ -110,6 +120,14 @@ const base = { instance: { providerId: 'deepseek', executable: dsh, baseArgs: []
   cwd: workspace, localSessionId: 'native-smoke', model: 'nautilo-test', reasoningEffort: 'high', agentMode: 'standard', permissionMode: 'workspace-write',
   env: { DSH_HOME: join(root, 'home'), NAUTILO_CONNECTION_API_KEY: 'fake-nautilo-test-key' }, timeoutMs: 90000 };
 base.runtimeTools = [{ name: 'nautilo_test_echo', description: 'Return the test fixture receipt', inputSchema: { type: 'object', properties: {} } }];
+async function assertWorkspace(folder, sessionId) {
+  const registry = JSON.parse(await readFile(join(base.env.DSH_HOME, 'storages', 'workspace.json'), 'utf8'));
+  const canonical = await realpath(folder);
+  const memberships = Object.entries(registry.tables.workspaces).filter(([, item]) => item.sessionIds.includes(sessionId));
+  assert.equal(memberships.length, 1, 'the native session belongs to exactly one workspace');
+  assert.ok(registry.global.workspaceIds.includes(memberships[0][0]));
+  assert.equal(relative(canonical, await realpath(memberships[0][1].path)), '');
+}
 try {
   send({ type: 'handshake', apiVersion: 1 }); await wait(f => f.type === 'ready');
   let session;
@@ -122,6 +140,7 @@ try {
     assert.equal(done.event.exitCode, 0);
     const id = events.find(e => e.kind === 'session')?.providerSessionId;
     assert.ok(id); if (session) assert.equal(id, session); session = id;
+    await assertWorkspace(workspace, session);
     assert.ok(events.some(e => e.kind === 'message' && e.phase === 'delta' && e.text.includes('NATIVE_OK')));
     assert.equal(events.filter(e => e.kind === 'message' && e.phase === 'completed' && e.text.includes('NATIVE_OK')).length, 1, 'every streamed reply needs one durable completion event');
     assert.ok(events.some(e => e.kind === 'thinking' && e.text?.includes('Thinking')));
@@ -191,6 +210,45 @@ try {
   const malformed = await wait(f => f.type === 'event' && f.runId === 'malformed' && f.event.kind === 'exit');
   assert.equal(malformed.event.exitCode, 1, 'unexecuted DSML must not appear as a successful run');
   assert.ok(!frames.some(f => f.runId === 'malformed' && f.event?.kind === 'tool'), 'never execute tool-looking assistant text');
+  const other = join(root, 'other-workspace');
+  await mkdir(other);
+  const callsBeforeMismatch = requests.length;
+  send({ type: 'start', runId: 'wrong-folder', resume: session, request: { ...base, cwd: other, prompt: 'Wrong folder' } });
+  assert.equal((await wait(f => f.type === 'event' && f.runId === 'wrong-folder' && f.event.kind === 'exit')).event.exitCode, 1);
+  assert.equal(requests.length, callsBeforeMismatch, 'a resume in another project must stop before inference');
+  send({ type: 'start', runId: 'other', request: { ...base, cwd: other, localSessionId: 'other-project', prompt: 'Use the second project' } });
+  send({ type: 'start', runId: 'parallel', request: { ...base, localSessionId: 'parallel-project', prompt: 'Use the original project' } });
+  assert.equal((await wait(f => f.type === 'event' && f.runId === 'other' && f.event.kind === 'exit')).event.exitCode, 0);
+  assert.equal((await wait(f => f.type === 'event' && f.runId === 'parallel' && f.event.kind === 'exit')).event.exitCode, 0);
+  const otherSession = frames.find(f => f.runId === 'other' && f.event?.kind === 'session').event.providerSessionId;
+  const parallelSession = frames.find(f => f.runId === 'parallel' && f.event?.kind === 'session').event.providerSessionId;
+  await assertWorkspace(workspace, parallelSession);
+  await assertWorkspace(other, otherSession);
+  await assertWorkspace(workspace, session);
+  if (process.platform === 'win32') {
+    const folder = join(root, 'requires-authorization');
+    await mkdir(folder);
+    const marker = 'workspace-permission-ok.txt';
+    await writeFile(join(folder, marker), '');
+    const sid = execFileSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true }).match(/S-1-[0-9-]+/)[0];
+    execFileSync('icacls.exe', [folder, '/inheritance:r', '/grant:r', '*' + sid + ':(OI)(CI)M', '/grant', '*' + sid + ':(WDAC)'], { windowsHide: true });
+    const run = async (runId, permissionMode, prompt) => {
+      send({ type: 'start', runId, request: { ...base, localSessionId: runId, cwd: folder, agentMode: 'ptc', permissionMode, prompt } });
+      return (await wait(f => f.type === 'event' && f.runId === runId && f.event.kind === 'exit')).event.exitCode;
+    };
+    const before = requests.length;
+    assert.equal(await run('acl-deny', 'workspace-write', 'Refuse the grant'), 1);
+    assert.equal(requests.length, before);
+    assert.equal(await run('acl-read', 'read-only', 'Read only'), 0);
+    assert.equal(await run('acl-full', 'danger-full-access', 'Full access'), 0);
+    assert.equal(await run('acl-allow', 'workspace-write', 'LIST_WINDOWS_WORKSPACE'), 0);
+    assert.ok(requests.some(r => r.messages.some(m => m.role === 'tool' && JSON.stringify(m.content).includes(marker))), 'the real confined PowerShell tool must list the project file');
+    assert.ok(requests.some(r => r.messages.some(m => m.role === 'tool' && JSON.stringify(m.content).includes('OUTSIDE_DENIED'))));
+    await assert.rejects(readFile(join(root, 'outside-probe.txt')), { code: 'ENOENT' });
+    assert.equal(await run('acl-reuse', 'workspace-write', 'Use the authorized workspace'), 0);
+    const grants = frames.filter(f => f.type === 'interaction' && f.runId.startsWith('acl-') && f.input.options?.some(o => o.id === 'authorize-workspace'));
+    assert.deepEqual(grants.map(f => f.runId), ['acl-deny', 'acl-allow']);
+  }
   console.log(JSON.stringify({ ok: true, requests: requests.length, session, root, timings: Object.fromEntries(Object.entries(timings).map(([run, { start, ...timing }]) => [run, timing])), runtimes: diagnostics() }));
 } finally {
   child.stdin.end();
