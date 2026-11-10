@@ -2,7 +2,7 @@
   "id": "pi",
   "apiVersion": 1,
   "main": "agenthub-plugin-pi",
-  "version": "0.2.5",
+  "version": "0.2.14",
   "descriptor": {
     "providerId": "pi",
     "name": "Pi",

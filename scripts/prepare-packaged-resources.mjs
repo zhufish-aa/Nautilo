@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, rmSync, chmodSync } from "node:fs";
+import { dirname, join, relative, resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativePackaging } from "./native-packaging.mjs";
 
 /**
  * Prepares the platform-specific resources that electron-builder places under
@@ -19,18 +20,15 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const stagingDirectory = resolve(repositoryRoot, process.argv[2] ?? "build/packaged");
 
-if (!relative(repositoryRoot, stagingDirectory).startsWith("build")) {
+const relativeStaging = relative(join(repositoryRoot, "build"), stagingDirectory);
+if (!relativeStaging || relativeStaging === ".." || relativeStaging.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(relativeStaging)) {
   throw new Error(`Refusing to write outside the build directory: ${stagingDirectory}`);
 }
 
 rmSync(stagingDirectory, { recursive: true, force: true });
 mkdirSync(stagingDirectory, { recursive: true });
 
-// The Rust toolchain is pinned to x86_64-pc-windows-gnu with the repository's
-// own mingw; make sure cargo can find the linker without relying on the
-// caller's environment.
-const mingwBin = join(repositoryRoot, ".toolchains", "mingw64", "bin");
-const env = { ...process.env, PATH: `${mingwBin};${process.env.PATH ?? ""}` };
+const { env, target, targetDirectory, executableExtension, plugins } = nativePackaging();
 
 function run(command, args, cwd) {
   const result = process.platform === "win32"
@@ -41,32 +39,34 @@ function run(command, args, cwd) {
 }
 
 // Daemon + first-party provider plugins, all release executables.
-run("cargo", ["build", "--release", "-p", "nautilo-core"], join(repositoryRoot, "rust"));
-run("cargo", ["build", "--release", "-p", "agenthub-plugin-commandcode", "-p", "agenthub-plugin-pi", "-p", "agenthub-plugin-trae", "-p", "agenthub-plugin-opencode", "-p", "agenthub-plugin-omp", "-p", "agenthub-plugin-deepseek", "-p", "agenthub-plugin-codex-plugins"], join(repositoryRoot, "rust"));
+run("cargo", ["build", "--release", "--locked", "--workspace", "--target", target], join(repositoryRoot, "rust"));
 
-const profileDirectory = join(repositoryRoot, "rust", "target", "x86_64-pc-windows-gnu", "release");
-const daemonExecutable = join(profileDirectory, "nautilo-core.exe");
+const profileDirectory = join(targetDirectory, target, "release");
+const daemonName = `nautilo-core${executableExtension}`;
+const daemonExecutable = join(profileDirectory, daemonName);
 if (!existsSync(daemonExecutable)) throw new Error(`Rust daemon build output missing: ${daemonExecutable}`);
 
 const coreDaemonDirectory = join(stagingDirectory, "core-daemon");
 mkdirSync(coreDaemonDirectory, { recursive: true });
-copyFileSync(daemonExecutable, join(coreDaemonDirectory, "nautilo-core.exe"));
+copyFileSync(daemonExecutable, join(coreDaemonDirectory, daemonName));
+if (process.platform !== "win32") chmodSync(join(coreDaemonDirectory, daemonName), 0o755);
 
 // Bundled for manual "install from local folder": plugins/<id>/ carrying the
 // manifest + native executable, mirroring the Tauri package layout.
 const pluginsDirectory = join(stagingDirectory, "plugins");
-for (const id of ["opencode", "trae", "pi", "omp", "commandcode", "deepseek", "codex-plugins"]) {
+for (const id of plugins) {
   const source = join(repositoryRoot, "rust", "plugins", id);
   const manifest = join(source, "agenthub-plugin.json");
-  const exe = join(profileDirectory, `agenthub-plugin-${id}.exe`);
+  const executableName = `agenthub-plugin-${id}${executableExtension}`;
+  const exe = join(profileDirectory, executableName);
   if (!existsSync(manifest) || !existsSync(exe)) {
-    console.warn(`skip plugin ${id}: manifest or executable missing`);
-    continue;
+    throw new Error(`Required plugin ${id} is missing its manifest or executable`);
   }
   const target = join(pluginsDirectory, id);
   mkdirSync(target, { recursive: true });
   copyFileSync(manifest, join(target, "agenthub-plugin.json"));
-  copyFileSync(exe, join(target, `agenthub-plugin-${id}.exe`));
+  copyFileSync(exe, join(target, executableName));
+  if (process.platform !== "win32") chmodSync(join(target, executableName), 0o755);
 }
 
 console.log(JSON.stringify({ stagingDirectory }, null, 2));

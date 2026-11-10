@@ -2,7 +2,7 @@
   "id": "commandcode",
   "apiVersion": 1,
   "main": "agenthub-plugin-commandcode",
-  "version": "0.1.0",
+  "version": "0.2.14",
   "descriptor": {
     "providerId": "commandcode",
     "name": "Command Code",

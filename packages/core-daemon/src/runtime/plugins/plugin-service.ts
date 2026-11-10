@@ -29,6 +29,15 @@ export interface ProviderPluginRecord {
 const DISABLED_MARKER = ".disabled";
 const MANIFEST_FILE = "agenthub-plugin.json";
 
+export function selectRegistryPackage(entry: ProviderRegistryEntry, platform = process.platform, arch = process.arch): ProviderRegistryEntry | undefined {
+  if (!entry?.id) return undefined;
+  if (entry.platforms) {
+    const selected = entry.platforms[`${platform}-${arch}`];
+    return selected?.tarball && selected.sha256 ? { ...entry, ...selected } : undefined;
+  }
+  return entry.tarball ? entry : undefined;
+}
+
 /**
  * Loads provider plugins from `<dataDir>/plugins/<id>/` and registers their
  * adapters. One broken plugin never blocks the daemon — it is recorded with
@@ -96,7 +105,10 @@ export class PluginService {
     const data = await response.json().catch((error) => {
       throw new CoreError("PLUGIN_REGISTRY_UNAVAILABLE", { url, reason: `registry JSON 解析失败：${errorMessage(error)}` });
     }) as { plugins?: ProviderRegistryEntry[] };
-    return (data.plugins ?? []).filter((entry) => entry?.id && entry.tarball);
+    return (data.plugins ?? []).flatMap((entry) => {
+      const selected = selectRegistryPackage(entry);
+      return selected ? [selected] : [];
+    });
   }
 
   /** Installs a plugin from the marketplace registry (download → sha256 → extract → load). */

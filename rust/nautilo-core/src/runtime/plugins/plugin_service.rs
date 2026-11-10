@@ -160,13 +160,14 @@ impl PluginService {
             .json()
             .await
             .map_err(|e| registry_unavailable(&url, format!("registry JSON 解析失败：{e}")))?;
+        let platform = format!("{}-{}", match std::env::consts::OS { "windows" => "win32", "macos" => "darwin", other => other }, match std::env::consts::ARCH { "x86_64" => "x64", "aarch64" => "arm64", other => other });
         let plugins: Vec<Value> = data
             .get("plugins")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter(|entry| entry.get("id").is_some() && entry.get("tarball").is_some())
+            .filter_map(|entry| registry_entry_for_platform(entry, &platform))
             .collect();
         Ok(Value::Array(plugins))
     }
@@ -617,9 +618,36 @@ fn find_plugin_root(dir: &Path) -> CoreResult<PathBuf> {
     Err(plugin_fail(ErrorCode::PluginManifestMissing, &dir.to_string_lossy(), "插件包中缺少 agenthub-plugin.json"))
 }
 
+fn registry_entry_for_platform(mut entry: Value, platform: &str) -> Option<Value> {
+    entry.get("id")?.as_str()?;
+    if entry.get("platforms").is_some() {
+        let package = entry.get("platforms")?.get(platform)?.clone();
+        package.get("tarball")?.as_str()?;
+        package.get("sha256")?.as_str()?;
+        entry["tarball"] = package["tarball"].clone();
+        entry["sha256"] = package["sha256"].clone();
+    }
+    entry.get("tarball")?.as_str()?;
+    Some(entry)
+}
+
 #[cfg(test)]
 mod boundary_tests {
     use super::*;
+
+    #[test]
+    fn plugin_registry_selects_native_platform_without_windows_fallback() {
+        let entry = json!({"id":"pi", "tarball":"windows.tgz", "sha256":"windows", "platforms":{
+            "win32-x64":{"tarball":"windows.tgz","sha256":"windows"},
+            "darwin-arm64":{"tarball":"mac-arm.tgz","sha256":"mac"},
+            "linux-x64":{"tarball":"linux.tgz","sha256":"linux"}
+        }});
+        let mac = registry_entry_for_platform(entry.clone(), "darwin-arm64").unwrap();
+        assert_eq!(mac["tarball"], "mac-arm.tgz");
+        assert_eq!(mac["sha256"], "mac");
+        assert!(registry_entry_for_platform(entry, "linux-arm64").is_none());
+        assert!(registry_entry_for_platform(json!({"id":"legacy","tarball":"legacy.tgz"}), "linux-x64").is_some());
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {

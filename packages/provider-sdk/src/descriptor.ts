@@ -114,6 +114,8 @@ export interface ProviderRegistryEntry {
   tarball: string;
   /** Expected sha256 of the tarball (hex, lowercase); verified before install. */
   sha256?: string;
+  /** Native packages keyed by Node platform and architecture, e.g. darwin-arm64. */
+  platforms?: Record<string, { tarball: string; sha256: string }>;
   minAppVersion?: string;
 }
 
