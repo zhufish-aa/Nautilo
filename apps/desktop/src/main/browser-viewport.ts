@@ -9,6 +9,9 @@ export type BrowserReadOptions = {
   selector?: string;
   limit?: number;
   jsonPath?: string;
+  format?: "text" | "refs";
+  view_id?: string;
+  root?: string;
 };
 
 type Clip = { left: number; top: number; right: number; bottom: number };
@@ -309,12 +312,12 @@ export async function readBrowserViewport(
       frame === wc.mainFrame
         ? await browserDeadline(
             wc.executeJavaScriptInIsolatedWorld(1001, [{ code: script }]),
-            5000,
+            10000,
             "read document text",
           )
         : await browserDeadline(
             frame.executeJavaScript(script),
-            5000,
+            10000,
             "read embedded frame text",
           );
     length += result.length;

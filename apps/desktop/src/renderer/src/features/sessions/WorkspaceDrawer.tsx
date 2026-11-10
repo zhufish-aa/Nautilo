@@ -7,9 +7,10 @@ import { getBridge } from "../../lib/bridge";
 import { toast } from "../../stores/toast";
 import type { PanelTarget } from "../../../../shared/panel-window";
 import {ResizeHandle,useRememberedWidth} from "../../components/ui/ResizeHandle";
+import { WindowControls } from "../../components/layout/TitleBar";
 
 /** Contextual, non-modal workspace panel: chat and its controls stay available. */
-export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defaultWidth = 580, minWidth = 420, adjacentMinWidth = 0, placement = "right", headerContent, headerActions, resizable = false, defaultHeight = 320, storageKey, keepMounted = false, className = "", nativePanel, moveDisabled = false, beforeMove }: {
+export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defaultWidth = 580, minWidth = 420, adjacentMinWidth = 0, placement = "right", headerContent, headerActions, resizable = false, defaultHeight = 320, defaultMaximized = false, storageKey, keepMounted = false, className = "", nativePanel, moveDisabled = false, beforeMove, windowChrome = false, hideHeader = false }: {
   open: boolean; onClose: () => void; title: string; subtitle?: string; children: ReactNode;
   defaultWidth?: number; minWidth?: number; adjacentMinWidth?: number; placement?: "right" | "bottom";
   headerContent?: ReactNode; headerActions?: ReactNode; resizable?: boolean; defaultHeight?: number; storageKey?: string;
@@ -18,6 +19,10 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
   moveDisabled?: boolean;
   beforeMove?: () => void;
   className?: string;
+  defaultMaximized?: boolean;
+  windowChrome?: boolean;
+  /** A custom workbench can own its toolbar and close action. */
+  hideHeader?: boolean;
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const panel = useRef<HTMLElement>(null);
@@ -28,7 +33,7 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
     return defaultHeight;
   });
   const [availableHeight, setAvailableHeight] = useState(defaultHeight + 180);
-  const [maximized, setMaximized] = useState(false);
+  const [maximized, setMaximized] = useState(defaultMaximized);
   const [availableWidth,setAvailableWidth]=useState(window.innerWidth);
   // At the split-view breakpoint the panel may use its minimum width. As
   // space grows, reserve a usable conversation column before widening Git.
@@ -109,17 +114,17 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
       onPointerUp={event => { if (!drag.current) return; const next = clamp(drag.current.height + drag.current.y - event.clientY); setHeight(next); saveHeight(next); finishDrag(); event.currentTarget.releasePointerCapture(event.pointerId); }}
       onLostPointerCapture={finishDrag}
       onKeyDown={event => { const next = event.key === "ArrowUp" ? renderedHeight + 32 : event.key === "ArrowDown" ? renderedHeight - 32 : event.key === "Home" ? minHeight : event.key === "End" ? maxHeight : undefined; if (next === undefined) return; event.preventDefault(); const value = clamp(next); setHeight(value); saveHeight(value); }} />}
-    <header className={adjustable ? "workspace-panel-toolbar" : "flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3"}>
+    {!hideHeader && <header className={windowChrome ? "browser-window-caption drag-region" : adjustable ? "workspace-panel-toolbar" : "flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3"}>
       {headerContent ?? <h2 className="text-sm font-medium" title={subtitle}>{title}</h2>}
-      <div className="workspace-panel-actions">
+      <div className="workspace-panel-actions no-drag">
         {headerActions}
-        {nativePanel && panelApi && <button type="button" className="workspace-panel-icon" title={moveLabel} aria-label={moveLabel} disabled={moving||moveDisabled} onClick={()=>void moveWindow()}>{detached?<PanelRightClose size={15}/>:<ExternalLink size={15}/>}</button>}
+        {!windowChrome && nativePanel && panelApi && <button type="button" className="workspace-panel-icon" title={moveLabel} aria-label={moveLabel} disabled={moving||moveDisabled} onClick={()=>void moveWindow()}>{detached?<PanelRightClose size={15}/>:<ExternalLink size={15}/>}</button>}
         {resizable && !detached && <button type="button" onClick={() => setMaximized(value => !value)} aria-label={locale === "zh-CN" ? (maximized ? `还原${adjustable?"终端":title}` : `最大化${adjustable?"终端":title}`) : (maximized ? `Restore ${adjustable?"terminal":title}` : `Maximize ${adjustable?"terminal":title}`)} title={locale === "zh-CN" ? (maximized ? "还原" : "最大化") : (maximized ? "Restore" : "Maximize")} className="workspace-panel-icon">
           {maximized ? <Minimize2 size={15} aria-hidden /> : <Maximize2 size={15} aria-hidden />}
         </button>}
-        <button type="button" onClick={onClose} aria-label={t("common.close")} title={t("common.close")} className="workspace-panel-icon"><X size={16} aria-hidden /></button>
+        {windowChrome ? <WindowControls /> : <button type="button" onClick={onClose} aria-label={t("common.close")} title={t("common.close")} className="workspace-panel-icon"><X size={16} aria-hidden /></button>}
       </div>
-    </header>
+    </header>}
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
   </aside>;
 }

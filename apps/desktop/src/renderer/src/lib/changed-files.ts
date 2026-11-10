@@ -1,6 +1,6 @@
 import type { ToolFileDiff } from "@agenthub/event-protocol";
 import type { ChangedFile, TimelineEvent } from "./types";
-import { toolInputFileDiff } from "./tool-display";
+import { toolActivityKind, toolInputFileDiff } from "./tool-display";
 
 /** Derives +/- line counts from unified diff text (skips the +++/--- headers). */
 export function diffLineCounts(diff: string): { additions: number; deletions: number } {
@@ -29,7 +29,7 @@ export function fileChangeCounts(file: Pick<ChangedFile, "additions" | "deletion
  *
  * Two sources, unified by path (last write wins, edit count kept):
  * - `file_change` timeline events (codex emits `file.changed`) → textual patch.
- * - `fileDiff` attached to tool events, or parsed from edit/write tool input
+ * - Known before/after edits on completed tool events
  *   (kimi adapters never emit `file.changed`) → before/after structure.
  *
  * Tool groups are recursed into so grouped tool calls are covered too.
@@ -51,24 +51,30 @@ export type ChangedFileEntry =
   | { kind: "fileDiff"; path: string; diff: ToolFileDiff; diffs: ToolFileDiff[]; edits: number };
 
 type ToolActivity = Extract<TimelineEvent["data"], { kind: "tool_activity" }>;
-const toolDiffCache = new WeakMap<ToolActivity, { input: ToolActivity["input"]; name: string; explicit: ToolFileDiff | undefined; result: ToolFileDiff | undefined }>();
-function activityDiff(data: ToolActivity): ToolFileDiff | undefined {
-  const cached = toolDiffCache.get(data);
-  if (cached && cached.input === data.input && cached.name === data.toolName && cached.explicit === data.fileDiff) return cached.result;
-  const result = data.fileDiff ?? toolInputFileDiff(data.toolName, data.input);
-  toolDiffCache.set(data, { input: data.input, name: data.toolName, explicit: data.fileDiff, result });
-  return result;
+
+/** A write request's body is not a diff. An empty old body on Write means
+ * "not captured", not "new file"; actual creations come from file_change. */
+export function isRecordedFileEdit(diff: ToolFileDiff, toolName?: string): boolean {
+  if (typeof diff.before !== "string" || typeof diff.after !== "string" || diff.before === diff.after) return false;
+  const operation = diff.operation ?? (toolName ? toolActivityKind(toolName) : undefined);
+  return !(operation === "write" && diff.before === "");
 }
 
-// Badge-only reads retain paths, not parsed before/after file bodies.
-const toolPathCache = new WeakMap<ToolActivity, { input: ToolActivity["input"]; name: string; path: string | undefined }>();
-function activityPath(data: ToolActivity): string | undefined {
-  if (data.fileDiff) return data.fileDiff.path;
-  const cached = toolPathCache.get(data);
-  if (cached && cached.input === data.input && cached.name === data.toolName) return cached.path;
-  const path = toolInputFileDiff(data.toolName, data.input)?.path;
-  toolPathCache.set(data, { input: data.input, name: data.toolName, path });
-  return path;
+export function hasRecordedFileChange(entry: ChangedFileEntry): boolean {
+  return entry.kind === "patch" || entry.diffs.some(diff => isRecordedFileEdit(diff));
+}
+
+const toolDiffCache = new WeakMap<ToolActivity, { input: ToolActivity["input"]; name: string; explicit: ToolFileDiff | undefined; result: ToolFileDiff | undefined }>();
+function activityDiff(data: ToolActivity): ToolFileDiff | undefined {
+  // Legacy persisted rows have no status; explicit in-flight/failed requests
+  // must never become filesystem changes just because they carry an input.
+  if (data.status === "running" || data.status === "failed") return undefined;
+  const cached = toolDiffCache.get(data);
+  if (cached && cached.input === data.input && cached.name === data.toolName && cached.explicit === data.fileDiff) return cached.result;
+  const candidate = data.fileDiff ?? toolInputFileDiff(data.toolName, data.input);
+  const result = candidate && isRecordedFileEdit(candidate, data.toolName) ? candidate : undefined;
+  toolDiffCache.set(data, { input: data.input, name: data.toolName, explicit: data.fileDiff, result });
+  return result;
 }
 
 /** Text/reasoning updates cannot change a file projection. Discard them before
@@ -101,7 +107,7 @@ export function countChangedFiles(events: TimelineEvent[]): number {
     if (event.data.kind === "file_change") {
       for (const file of event.data.files) paths.add(file.path);
     } else if (event.data.kind === "tool_activity") {
-      const path = activityPath(event.data);
+      const path = activityDiff(event.data)?.path;
       if (path) paths.add(path);
     }
   }

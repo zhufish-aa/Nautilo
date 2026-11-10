@@ -69,6 +69,10 @@ export interface BrowserTab {
   busy: boolean;
   queued?: number;
   zoomFactor?: number;
+  ownership?: "agent" | "user" | "ready" | "stopped";
+  activity?: string;
+  label?: string;
+  favicon?: string;
 }
 
 export interface BrowserPanelState {
@@ -84,6 +88,10 @@ export interface BrowserPanelState {
   canGoBack?: boolean;
   canGoForward?: boolean;
   tabs?: BrowserTab[];
+  ownership?: "agent" | "user" | "ready" | "stopped";
+  thumbnails?: Record<string, string>;
+  workspaceName?: string;
+  workspaceSource?: "session" | "window";
 }
 
 /** Mirrors the preload bridge. Kept in sync with src/preload/index.ts. */
@@ -96,9 +104,16 @@ export interface AgentHubBridge {
     context?: import("../../../shared/panel-window").PanelTarget;
     open(target:import("../../../shared/panel-window").PanelTarget, focusOnly?:boolean):Promise<boolean>;
     dock():Promise<void>;
+    cycle():Promise<void>;
+    current():Promise<import("../../../shared/panel-window").PanelTarget|undefined>;
+    onBrowserTarget(callback:(target:import("../../../shared/panel-window").PanelTarget)=>void):()=>void;
     onDock(callback:(target:import("../../../shared/panel-window").PanelTarget)=>void):()=>void;
   };
-  browser?: { panel(id:string,command:"state"|"control"|"open"|"layout"|"hide"|"release"|"new"|"select"|"close"|"back"|"forward"|"reload"|"zoom",value?:unknown): Promise<BrowserPanelState|undefined> };
+  browser?: {
+    spaces(command:"list"|"create"|"rename", input?:import("../../../shared/browser-spaces").BrowserSpacesInput):Promise<import("../../../shared/browser-spaces").BrowserSpacesState>;
+    profile(command:"inspect"|"import"|"login",input:import("../../../shared/browser-profile").BrowserProfileInput):Promise<import("../../../shared/browser-profile").BrowserProfileResult>;
+    panel(id:string,command:"state"|"control"|"open"|"home"|"layout"|"hide"|"release"|"new"|"select"|"close"|"back"|"forward"|"reload"|"zoom"|"overview"|"preview",value?:unknown): Promise<BrowserPanelState|undefined>;
+  };
   window: {
     minimize(): Promise<void>;
     toggleMaximize(): Promise<void>;

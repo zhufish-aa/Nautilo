@@ -90,9 +90,17 @@ function threadOptions(request: AdapterStartRequest | AdapterResumeRequest, incl
 
 export function buildCodexTurnStartParams(request: AdapterStartRequest | AdapterResumeRequest, threadId: string): RecordValue {
   const permission = codexPermissionConfig(request.instance, request) ?? { approvalPolicy: "never" as const, sandbox: "workspace-write" as const };
+  const browser = request.mcpServers?.find(server => "desktopBrowser" in server && server.desktopBrowser === true);
+  const browserName = browser?.name?.trim();
   return {
     threadId,
     input: buildCodexTurnInput(request.prompt, request.localImagePaths),
+    ...(browserName ? { additionalContext: { "nautilo.desktop_browser": { kind: "application", value:
+      `This session runs in Nautilo. Nautilo's built-in desktop browser is configured through MCP server ${JSON.stringify(browserName)}, with browser_tabs, browser_run, browser_read, browser_session and the other browser_* tools. ` +
+      "Use that MCP server for browser tasks in Nautilo unless the user explicitly requests another browser. If its tools are deferred, discover them in the current tool catalog by server name or browser_run before concluding they are unavailable. " +
+      "Codex CUA / ChatGPT in-app browser (iab) and ego-browser are separate browser runtimes; they do not control Nautilo's built-in browser. When the user asks for Nautilo's browser, use the configured MCP tools rather than substituting one of those runtimes. " +
+      "If the MCP connection cannot load its tools, report that connection failure accurately."
+    } } } : {}),
     cwd: request.cwd,
     model: request.model || undefined,
     serviceTier: request.serviceTier || undefined,

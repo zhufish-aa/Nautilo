@@ -1,13 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useUsageStore } from "../../stores/usage";
-import { motion } from "framer-motion";
-import { Loader2, Shrink } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import { ArrowUpRight, Layers3, Loader2, Shrink, X } from "lucide-react";
 import type { SlashCommandDefinition } from "@agenthub/domain";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { useAgentsStore } from "../../stores/agents";
 import { useSessionsStore } from "../../stores/sessions";
+import { UI_EASE_OUT, useUiReducedMotion } from "../../lib/ui-motion";
+import "./context-usage.css";
 
 const RADIUS = 8;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -54,6 +57,11 @@ export function ContextUsageIndicator({
   const { t, locale } = useI18n();
   const { used, limit, percentage } = useContextUsage(sessionId);
   const sessionUsage = useUsageStore(state => sessionId ? state.summaries[sessionId] : undefined);
+  const reducedMotion = useUiReducedMotion();
+  const panelId = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ left: number; top: number }>();
 
   // Interactive popover: stays open while hovered, closes with a small delay
   // after leaving trigger or panel, and on Escape.
@@ -65,13 +73,35 @@ export function ContextUsageIndicator({
     closeTimerRef.current = window.setTimeout(() => setOpen(false), CLOSE_DELAY_MS);
   };
   useEffect(() => () => window.clearTimeout(closeTimerRef.current), []);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const anchor = trigger.current?.getBoundingClientRect();
+      const surface = panel.current;
+      if (!anchor || !surface) return;
+      const width = surface.offsetWidth;
+      const height = surface.offsetHeight;
+      const left = Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8));
+      const above = anchor.top - height - 10;
+      const top = above >= 8 ? above : Math.max(8, Math.min(anchor.bottom + 10, window.innerHeight - height - 8));
+      setPosition(current => current?.left === left && current.top === top ? current : { left, top });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
+  }, [open, compactLoading, compactCommand, used, limit]);
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); }
+    };
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !trigger.current?.contains(event.target) && !panel.current?.contains(event.target)) setOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("pointerdown", dismiss);
+    return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("pointerdown", dismiss); };
   }, [open]);
 
   const sessionExists = useSessionsStore((state) => state.sessions.some((item) => item.id === sessionId));
@@ -89,18 +119,22 @@ export function ContextUsageIndicator({
   const tone = percentage === undefined ? "text-ink-3" : percentage >= 90 ? "text-danger" : percentage >= 75 ? "text-warn" : "text-accent";
 
   return (
-    <span
+    <div
       className="composer-context-control relative inline-flex shrink-0"
       onMouseEnter={() => { cancelClose(); setOpen(true); }}
       onMouseLeave={scheduleClose}
-      onFocus={() => { cancelClose(); setOpen(true); }}
-      onBlur={scheduleClose}
     >
-      <span
+      <button
+        type="button"
+        ref={trigger}
         className={cn("relative grid h-8 w-8 place-items-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-accent/45", tone)}
-        role="img"
-        tabIndex={0}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
         aria-label={tooltip}
+        onClick={() => { cancelClose(); setOpen(true); }}
+        onKeyDown={event => { if (event.key === "ArrowDown" && open) { event.preventDefault(); panel.current?.querySelector<HTMLElement>("a, button:not(:disabled)")?.focus(); } }}
+        onBlur={scheduleClose}
       >
         {compactLoading ? (
           <Loader2 className="h-4.5 w-4.5 animate-spin" aria-hidden />
@@ -119,44 +153,64 @@ export function ContextUsageIndicator({
                 strokeDasharray={CIRCUMFERENCE}
                 initial={false}
                 animate={{ strokeDashoffset: CIRCUMFERENCE * (1 - percentage / 100) }}
-                transition={{ type: "spring", stiffness: 260, damping: 32 }}
+                transition={{ duration: reducedMotion ? 0 : 0.2, ease: UI_EASE_OUT }}
               />
             ) : (
               <circle cx="12" cy="12" r="1.5" fill="currentColor" opacity="0.55" />
             )}
           </svg>
         )}
-      </span>
+      </button>
 
-      {open && (
-        <span
-          role="tooltip"
-          className="animate-pop-in absolute bottom-full right-0 z-50 mb-2 w-60 rounded-lg border border-line bg-card-hover px-3 py-2 text-xs text-ink shadow-pop"
+      {createPortal(<AnimatePresence>
+        {open && <motion.div
+          ref={panel}
+          id={panelId}
+          role="dialog"
+          aria-label={zh ? "上下文用量" : "Context usage"}
+          className="context-usage-popover"
+          style={position ?? { left: 0, top: 0, visibility: "hidden" }}
+          initial={{ opacity: 0, transform: "translateY(5px) scale(0.98)" }}
+          animate={{ opacity: 1, transform: "translateY(0px) scale(1)" }}
+          exit={{ opacity: 0, transform: "translateY(3px) scale(0.985)" }}
+          transition={{ duration: reducedMotion ? 0 : 0.16, ease: UI_EASE_OUT }}
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
+          onFocus={cancelClose}
+          onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) scheduleClose(); }}
           onClick={(event) => event.stopPropagation()}
         >
-          <span className="block leading-relaxed">{tooltip}</span>
-          <span className="mt-2 block border-t border-line pt-2 leading-relaxed text-muted">
-            {zh ? "累计 Token" : "Total tokens"}: {sessionUsage?.totalTokens === undefined ? "—" : tokenLabel(sessionUsage.totalTokens)}
-          </span>
-          <Link to={`/settings?section=usage&session=${encodeURIComponent(sessionId)}`} className="mt-1 inline-block text-accent hover:underline">{zh ? "查看会话用量与费用 →" : "View session usage & costs →"}</Link>
+          <header className="context-usage-heading">
+            <span><Layers3 size={15} strokeWidth={1.7} aria-hidden />{zh ? "上下文" : "Context"}</span>
+            <button type="button" aria-label={zh ? "关闭上下文用量" : "Close context usage"} onClick={() => { setOpen(false); trigger.current?.focus(); }}><X size={15}/></button>
+          </header>
+          <div className="context-usage-value"><strong>{used === undefined ? "—" : tokenLabel(used)}</strong><span>/ {limit ? tokenLabel(limit) : zh ? "上限未知" : "Unknown limit"}</span></div>
+          {percentage !== undefined && <div className="context-usage-meter"><div className="context-usage-track" role="progressbar" aria-label={zh ? "上下文占用" : "Context used"} aria-valuenow={Math.round(percentage)} aria-valuemin={0} aria-valuemax={100}>
+            <span style={{ transform: `scaleX(${percentage / 100})` }} data-level={percentage >= 90 ? "high" : undefined} />
+          </div><span>{Math.round(percentage)}%</span></div>}
+          <dl className="context-usage-stats">
+            <div><dt>{zh ? "可用空间" : "Available context"}</dt><dd>{limit && used !== undefined ? tokenLabel(Math.max(0, limit - used)) : "—"}</dd></div>
+            <div><dt>{zh ? "累计用量" : "Total usage"}</dt><dd>{sessionUsage?.totalTokens === undefined ? "—" : tokenLabel(sessionUsage.totalTokens)}</dd></div>
+          </dl>
+          <footer className="context-usage-actions">
+          <Link to={`/settings?section=usage&session=${encodeURIComponent(sessionId)}`} onClick={() => setOpen(false)}>{zh ? "会话用量" : "Session usage"}<ArrowUpRight size={13} aria-hidden /></Link>
           {compactCommand && (
             <button
               type="button"
-              disabled={compactDisabled}
+              disabled={compactDisabled || compactLoading || !onCompact}
               onClick={(event) => {
                 event.stopPropagation();
                 onCompact?.();
               }}
-              className="mt-2 flex h-7 items-center gap-1.5 rounded-full border border-line-strong bg-card px-2.5 text-[11px] font-medium text-ink-2 transition-colors hover:bg-card hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:cursor-not-allowed disabled:opacity-40"
+              className="context-usage-compact"
             >
               {compactLoading ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Shrink className="h-3 w-3" aria-hidden />}
-              {t("sessions.composer.compact")}
+              {t(compactLoading ? "sessions.composer.compacting" : "sessions.composer.compact")}
             </button>
           )}
-        </span>
-      )}
-    </span>
+          </footer>
+        </motion.div>}
+      </AnimatePresence>, document.body)}
+    </div>
   );
 }

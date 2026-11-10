@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nautilo.dev/schemas/step.schema.json",
+  "title": "Nautilo Step",
+  "description": "browser_run 的批量单元。省略 id 时按顺序生成 s1、s2；失败时用 id 精确定位，绝不重放已完成的步骤。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,40}$"
+    },
+    "action": {
+      "enum": [
+        "open",
+        "goto",
+        "reload",
+        "back",
+        "forward",
+        "read",
+        "click",
+        "dblclick",
+        "fill",
+        "press",
+        "select",
+        "hover",
+        "drag",
+        "scroll",
+        "scroll_into_view",
+        "scroll_to_text",
+        "wait",
+        "assert",
+        "eval",
+        "screenshot",
+        "zoom",
+        "wait_for_control"
+      ]
+    },
+    "target": {
+      "$ref": "https://nautilo.dev/schemas/target.schema.json"
+    },
+    "text": {
+      "type": "string",
+      "description": "fill/open 的值或 wait 的内容"
+    },
+    "key": {
+      "type": "string",
+      "description": "press 的键，如 Enter / ControlOrMeta+A"
+    },
+    "url": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "selector": {
+      "type": "string"
+    },
+    "script": {
+      "type": "string"
+    },
+    "arg": {},
+    "scope": {
+      "enum": [
+        "viewport",
+        "document",
+        "main"
+      ]
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 256,
+      "maximum": 24000
+    },
+    "expect": {
+      "$ref": "https://nautilo.dev/schemas/expect.schema.json"
+    },
+    "follow": {
+      "enum": [
+        "auto",
+        "new_tab",
+        "same_tab"
+      ],
+      "default": "auto"
+    },
+    "optional": {
+      "type": "boolean",
+      "default": false
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 120000
+    },
+    "label": {
+      "type": "string",
+      "maxLength": 60
+    },
+    "to": {
+      "$ref": "target.schema.json",
+      "description": "Drag destination locator. Source is target; coordinate toX/toY remains supported."
+    },
+    "toX": {
+      "type": "number"
+    },
+    "toY": {
+      "type": "number"
+    }
+  },
+  "x-batch-semantics": {
+    "ordering": "顺序执行，遇到 failed 且 optional=false 时停止",
+    "recovery": "回 failed_step + executed_steps + remaining_steps，调用方只重放 remaining_steps",
+    "max_steps": 30
+  }
+}

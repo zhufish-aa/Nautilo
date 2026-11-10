@@ -98,6 +98,7 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
     ...helperModules,
     "./provider-ui": { applyLiveProviderUi() {} },
     "./bridge": { getBridge: () => bridgeAvailable ? bridge : undefined, requestCore },
+    "./ui-motion": { markOutgoingMessage() {} },
     "./utils": { newId: (prefix) => `${prefix}-${nextMessage++}` },
     "./core-mappers": Object.fromEntries(["toDomainProject", "toDomainAgent", "toDomainTeam", "toStandaloneUiSession"].map((name) => [name, (value) => value])),
     "../stores/usage": { useUsageStore: { getState: () => ({ ingest() {} }) } },

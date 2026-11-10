@@ -586,7 +586,11 @@ impl RunService {
             sessions.save(&Value::Object(running))?;
         }
         if context.presentation.as_deref() != Some("provider_command") {
-            let _ = self.events.append(&run, session, "run.started", json!({ "runId": run_id }));
+            let mut started = json!({ "runId": run_id });
+            if let Some(message_id) = context.user_message_id.as_deref().or(context.queue_key.as_deref()) {
+                started["userMessageId"] = json!(message_id);
+            }
+            let _ = self.events.append(&run, session, "run.started", started);
         }
 
         let provider_command = context.presentation.as_deref() == Some("provider_command");

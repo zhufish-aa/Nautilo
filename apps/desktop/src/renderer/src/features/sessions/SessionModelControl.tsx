@@ -1,22 +1,29 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import type { RuntimeConnection } from "@agenthub/domain";
 import { Dialog } from "../../components/ui/Dialog";
 import { SelectField } from "../../components/ui/Select";
 import { Button } from "../../components/ui/Button";
+import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { useTeamsStore } from "../../stores/teams";
 import { connectionModelKey, useConnectionsStore } from "../../stores/connections";
 import { connectionSupportsAgent } from "../../lib/session-connections";
 import { connectionModelCatalog, type ConnectionModelSelection } from "../../lib/connection-models";
-import { Box, Check, ChevronDown, Search } from "lucide-react";
+import { ArrowUpRight, Box, Check, ChevronDown, Search, Server, SlidersHorizontal } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { configureWorkbenchSession } from "../../lib/orchestration-runtime";
 import { useAgentsStore } from "../../stores/agents";
 import { useSessionsStore } from "../../stores/sessions";
 import { toast } from "../../stores/toast";
+import "./model-picker.css";
 
 export type ComposerConfiguration = ConnectionModelSelection;
 type Draft = { instanceId: string; configuration: ComposerConfiguration; onChange: (patch: ComposerConfiguration) => void; onInstanceChange?: (id: string) => void };
 const effortLabel = (value: string) => ({ low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max", ultra: "Ultra" }[value] ?? value);
+function ModelMark({ name }: { name: string }): JSX.Element {
+  const provider = /deepseek/i.test(name) ? "deepseek" : /claude/i.test(name) ? "claude-code" : /(?:^|[/\s-])(?:gpt|o[134])(?:[/\s.-]|$)/i.test(name) ? "codex" : /kimi|moonshot/i.test(name) ? "kimi-code" : undefined;
+  return provider ? <ProviderAvatar providerId={provider} size="sm"/> : <Box size={17} aria-hidden/>;
+}
 
 /** Conversation identity is fixed. Only supported model/effort choices belong here. */
 export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?: string; disabled?: boolean; draft?: Draft }): JSX.Element | null {
@@ -157,28 +164,29 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
   };
   return <div ref={root} className="composer-model-control">
     <Dialog open={!!pendingConnection && pendingConnection.sourceSessionId === sessionId} onOpenChange={open => { if (!open && !saving) setPendingConnection(undefined); }} title={zh ? "切换下一轮的账号 / 供应商？" : "Switch account / provider for the next message?"} description={zh ? "下一条消息会向下方账号/端点发送本会话已保存的聊天文本和最近 8 个产物的名称/路径，其中可能包含此前发给其他供应商的信息。原生推理、缓存、工具事件与旧图片不迁移，图片请重新附加。聊天记录保留，但不是无损上下文迁移；文本超限时会拒绝发送，不会静默截断。" : "The next message will share saved conversation text and names/paths of the latest 8 artifacts with the account/endpoint below. This may include information previously sent to other providers. Native reasoning, cache, tool events and previous images do not transfer; reattach images. History is retained, but this is not lossless context transfer. Oversized text is rejected rather than silently truncated."} footer={<><Button variant="ghost" disabled={saving} onClick={() => setPendingConnection(undefined)}>{zh ? "取消" : "Cancel"}</Button><Button disabled={locked} onClick={confirmConnection}>{zh ? "切换下一轮" : "Switch next message"}</Button></>}><p className="text-sm font-medium text-ink">{pendingConnection?.name}</p><p className="mt-1 break-all text-xs text-muted">{pendingConnection?.destination}</p></Dialog>
-    {menu && <div role="dialog" aria-label={zh ? "模型设置" : "Model settings"} className="composer-model-menu">
-      <div className="model-menu-heading"><span>{zh ? "选择模型" : "Choose model"}</span><span>{hint}</span></div>
+    {menu && <div role="dialog" aria-label={zh ? "模型设置" : "Model settings"} className="composer-model-menu model-picker-surface" data-design-frame="o7KjQn-82u">
+      <div className="model-menu-heading" title={hint}><span>{zh ? "选择模型" : "Choose model"}</span><Link to="/settings?section=accounts" aria-label={zh ? "管理模型" : "Manage models"} onClick={() => setMenu(false)}><SlidersHorizontal size={16}/></Link></div>
       {draft?.onInstanceChange && <div className="model-menu-agent">
         <span>Agent</span>
         <SelectField value={instance.id} disabled={locked} onValueChange={(id) => { setQuery(""); draft.onInstanceChange?.(id); }} options={instances.filter((item) => item.enabled && item.configurationKind === "harness").map((item) => ({ value: item.id, label: item.displayName }))} aria-label={zh ? "选择 Agent" : "Choose an agent"} />
       </div>}
       <div className="model-menu-search"><Search size={15} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={zh ? "搜索模型" : "Search models"} aria-label={zh ? "搜索模型" : "Search models"} /></div>
+      <section className="model-picker-connection" aria-label={zh ? "账号与供应商" : "Account & provider"}>
+        <Server size={16} aria-hidden/>
+        <SelectField value={connectionId ?? (instance.configurationKind === "harness" ? undefined : "__instance")} placeholder={zh ? "选择供应商或账号" : "Choose a provider or account"} disabled={locked} onValueChange={chooseConnection} options={connectionOptions} aria-label={zh ? "选择账号或供应商" : "Choose account or provider"}/>
+        {selectedConnection && <span className="model-picker-protocol">{selectedConnection.kind === "login" ? (zh ? "账号" : "Account") : selectedConnection.protocol === "responses" ? "Responses" : selectedConnection.protocol === "chat" ? "Chat" : "Anthropic"}</span>}
+      </section>
       <div className="model-menu-list">
         {visibleModels.map((item) => <button type="button" key={item.id} title={item.id} disabled={locked} className="model-menu-option" aria-pressed={item.id === modelId} onClick={() => void configure({ model: item.id, reasoningEffort: item.defaultReasoningEffort ?? item.reasoningEfforts[0] ?? "", serviceTier: item.defaultServiceTier ?? "" }).then((saved) => { if (saved) triggerRef.current?.focus(); })}>
-          <Box size={16} aria-hidden /><span><strong>{item.displayName}</strong></span>{item.id === modelId && <Check size={15} />}
+          <ModelMark name={`${item.id} ${item.displayName}`}/><span><strong>{item.displayName}</strong></span>{item.id === modelId && <Check size={15} />}
         </button>)}
         {!visibleModels.length && <p className="model-menu-empty">{connectionKey && connectionModelsLoading[connectionKey] ? (zh ? "正在获取账号模型…" : "Discovering models…") : loadError ? (zh ? "模型读取失败，请在供应商设置中刷新。" : "Models could not be loaded. Refresh in provider settings.") : query ? (zh ? "没有匹配的模型" : "No matching models") : unavailable}</p>}
       </div>
       {efforts.length > 0 && <div className="model-menu-efforts"><span>{zh ? "推理强度" : "Reasoning effort"}</span><div>{efforts.map((item) => <button type="button" key={item} disabled={locked} aria-pressed={item === effort} onClick={() => void configure({ reasoningEffort: item })}>{effortLabel(item)}</button>)}</div></div>}
-      <section className="model-menu-connections" aria-label={zh ? "账号与供应商" : "Account & provider"}>
-        <div className="model-connections-heading"><span>{zh ? "账号与供应商" : "Account & provider"}</span><span>{zh ? "点击下方切换" : "Select below to switch"}</span></div>
-        <SelectField value={connectionId ?? (instance.configurationKind === "harness" ? undefined : "__instance")} placeholder={zh ? "选择供应商或账号" : "Choose a provider or account"} disabled={locked} onValueChange={chooseConnection} options={connectionOptions} aria-label={zh ? "选择账号或供应商" : "Choose account or provider"} />
-        {connectionId && <p className="model-connection-caption">{selectedConnection?.kind === "login" ? (zh ? "登录账号" : "Signed-in account") : (zh ? "API 供应商" : "API provider")}{selectedConnection?.kind === "api" && selectedConnection.protocol ? ` · ${selectedConnection.protocol === "responses" ? "Responses" : selectedConnection.protocol === "chat" ? "Chat Completions" : "Anthropic"}` : ""}</p>}
-        {sessionId && currentHead && currentHead.revision !== connectionRevision && connectionSupportsAgent(currentHead, instance) && <button type="button" disabled={locked} onClick={() => chooseConnection(currentHead.id)}>{zh ? `更新到 v${currentHead.revision}` : `Update to v${currentHead.revision}`}</button>}
-      </section>
+      {sessionId && currentHead && currentHead.revision !== connectionRevision && connectionSupportsAgent(currentHead, instance) && <button type="button" className="model-picker-revision" disabled={locked} onClick={() => chooseConnection(currentHead.id)}>{zh ? `更新到 v${currentHead.revision}` : `Update to v${currentHead.revision}`}</button>}
       {connectionCatalog?.warning && <p className="model-menu-empty">{connectionCatalog.warning}</p>}
       {connectionError && <p role="alert" className="model-menu-empty text-danger">{zh ? "绑定连接读取失败，请重试。" : "Unable to load the bound connection. Please retry."}</p>}
+      <footer className="model-picker-footer"><span>{models.length} {zh ? "个可用模型" : "available models"}</span><Link to="/settings?section=accounts" onClick={() => setMenu(false)}><SlidersHorizontal size={13}/>{zh ? "管理模型" : "Manage models"}<ArrowUpRight size={12}/></Link></footer>
     </div>}
     <button ref={triggerRef} type="button" disabled={locked} className="composer-model-trigger" aria-label={zh ? "选择模型" : "Choose model"} aria-expanded={menu} aria-description={modelDescription} title={modelDescription} onClick={() => { setMenu(!menu); setQuery(""); }}>
       <Box size={16} aria-hidden /><span>{modelId === "default" ? `${instance.displayName} / ${zh ? "默认" : "Default"}` : label}</span>{effort && <span className="composer-effort-label" aria-label={`${zh ? "推理强度" : "Reasoning effort"} ${effortLabel(effort)}`}>· {effortLabel(effort)}</span>}<ChevronDown size={12} aria-hidden />

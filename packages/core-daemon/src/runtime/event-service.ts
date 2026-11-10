@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentRun, ProjectRunId, Session, TaskId } from "@agenthub/domain";
 import type { RuntimeEvent, RuntimeEventPayloadMap, RuntimeEventType } from "@agenthub/event-protocol";
+import {browserRunUpdate} from "@agenthub/event-protocol";
 import { Database } from "../database/index.js";
 import { RedactionService } from "./security/redaction-service.js";
 
@@ -61,6 +62,10 @@ export class EventService {
     } catch (error) {
       try { this.database.connection.raw.exec("ROLLBACK"); } catch { /* nothing to roll back */ }
       throw error;
+    }
+    if(process.env.NAUTILO_BROWSER_STREAM === "1") {
+      const update=browserRunUpdate(event);
+      if(update)process.stdout.write(JSON.stringify({event:"browser.run",...update})+"\n");
     }
     for (const listener of this.listeners) listener(event);
     return event;

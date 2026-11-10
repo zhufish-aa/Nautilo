@@ -11,11 +11,17 @@ import {
   Trash2,
   ZoomIn,
   ZoomOut,
+  LayoutGrid,
+  MousePointer2,
+  House,
+  LockKeyhole,
+  MoreHorizontal,
 } from "lucide-react";
 import { getBridge } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
 import type { BrowserPanelState, BrowserTab } from "../../types/bridge";
 import { WorkspaceDrawer } from "./WorkspaceDrawer";
+import { BrowserTabs } from "./BrowserTabs";
 
 function tabTitle(tab: BrowserTab, blank: string) {
   if (!tab.url || tab.url === "about:blank") return blank;
@@ -25,15 +31,23 @@ function tabTitle(tab: BrowserTab, blank: string) {
 export function BrowserDrawer({
   sessionId,
   onClose,
+  onOverview,
+  surfaceSuspended = false,
 }: {
   sessionId: string;
   onClose: () => void;
+  onOverview?: (keyboard?:boolean) => void;
+  surfaceSuspended?: boolean;
 }) {
   const { locale } = useI18n(),
     zh = locale === "zh-CN";
-  const bridge = getBridge()!.browser!;
+  const app = getBridge()!;
+  const bridge = app.browser!;
+  const windowChrome = app.panels?.context?.kind === "browser" || app.panels?.context?.kind === "browser-spaces";
   const viewport = useRef<HTMLDivElement>(null);
   const [address, setAddress] = useState("");
+  const [overview, setOverview] = useState(false);
+  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   const [state, setState] = useState<BrowserPanelState>({
     manual: false,
     title: "",
@@ -87,7 +101,7 @@ export function BrowserDrawer({
 
   useEffect(() => {
     const element = viewport.current;
-    if (!livePage || !element) return;
+    if (!livePage || !element || overview || surfaceSuspended) return;
     const update = () => {
       const r = element.getBoundingClientRect();
       const obscured =
@@ -125,12 +139,13 @@ export function BrowserDrawer({
         .panel(sessionId, "hide", { tabId: state.tabId })
         .catch(() => {});
     };
-  }, [livePage, state.tabId, sessionId, bridge]);
+  }, [livePage, overview, state.tabId, sessionId, bridge, surfaceSuspended]);
 
   async function command(
     action:
       | "control"
       | "open"
+      | "home"
       | "new"
       | "select"
       | "close"
@@ -140,6 +155,7 @@ export function BrowserDrawer({
       | "zoom",
     value?: unknown,
   ) {
+    setOverview(false);
     const version = ++generation.current;
     setError("");
     try {
@@ -149,41 +165,57 @@ export function BrowserDrawer({
         if (!editing.current || visibleTab.current !== next.tabId)
           setAddress(next.url === "about:blank" ? "" : next.url);
         visibleTab.current = next.tabId;
-        if (action === "new") addressInput.current?.focus();
+        if (action === "new" || action === "home") requestAnimationFrame(() => addressInput.current?.focus());
       }
     } catch (e) {
       report(e);
     }
   }
-  const controlsLabel = state.tabs
-    ? state.manual
-      ? zh
-        ? "恢复 AI 操作"
-        : "Resume AI actions"
-      : zh
-        ? "暂停 AI 操作"
-        : "Pause AI actions"
-    : state.manual
+  useEffect(() => {
+    if (state.tabId && state.url === "about:blank") addressInput.current?.focus();
+  }, [state.tabId]);
+  const tabOverview = () => {
+    if (overview) { setOverview(false); return; }
+    setOverview(true);
+    void bridge.panel(sessionId, "overview").then(next => { if (next?.thumbnails) setThumbnails(next.thumbnails); }).catch(report);
+  };
+  const more = async () => {
+    const action = await app.menu.popup([
+      {id:"zoom-out",label:zh ? "缩小" : "Zoom out",enabled:(state.zoomFactor ?? 1) > .25},
+      {id:"zoom-reset",label:zh ? `缩放 ${Math.round((state.zoomFactor ?? 1)*100)}% · 恢复 100%` : `Zoom ${Math.round((state.zoomFactor ?? 1)*100)}% · Reset to 100%`},
+      {id:"zoom-in",label:zh ? "放大" : "Zoom in",enabled:(state.zoomFactor ?? 1) < 3},
+      {id:"separator",label:"",type:"separator"},
+      {id:"tabs",label:zh ? "此窗口的标签页总览" : "Tabs in this window"},
+      ...(state.workspaceSource !== "window" ? [{id:"dock",label:zh ? "放回工作台" : "Dock in workbench"}] : []),
+    ]);
+    if (action === "tabs") tabOverview();
+    if (action === "zoom-reset") await command("zoom",{tabId:state.tabId,factor:1});
+    if (action === "zoom-in" || action === "zoom-out") await command("zoom",{tabId:state.tabId,factor:Math.min(3,Math.max(.25,Math.round(((state.zoomFactor ?? 1)+(action === "zoom-in" ? .25 : -.25))*100)/100))});
+    if (action === "dock") { await bridge.panel(sessionId,"hide"); await app.panels?.dock(); }
+  };
+  const controlsLabel = state.manual
       ? zh
         ? "交还 AI"
         : "Return to AI"
       : zh
         ? "接管"
         : "Take control";
-  const title = zh ? "浏览器" : "Browser";
+  const title = state.workspaceName || (zh ? "浏览器" : "Browser");
   return (
     <WorkspaceDrawer
       open
       onClose={onClose}
       title={title}
-      className="browser-workspace"
+      className={`browser-workspace${windowChrome ? " browser-window-native" : ""}`}
+      windowChrome={windowChrome}
       nativePanel={{ kind: "browser", sessionId }}
       defaultWidth={760}
+      defaultMaximized
       minWidth={360}
       adjacentMinWidth={384}
       resizable
       storageKey="nautilo.browser.width"
-      headerContent={
+      headerContent={windowChrome ? <BrowserTabs tabs={state.tabs ?? []} selectedId={state.tabId} strip={tabStrip} zh={zh} onAction={(action,value) => void command(action,value)}/> :
         <span className="flex items-center gap-2 text-sm font-medium">
           <Globe size={16} />
           {title}
@@ -191,7 +223,11 @@ export function BrowserDrawer({
       }
       headerActions={
         <>
-          {state.zoomFactor !== undefined && (
+          {windowChrome && <button type="button" className="browser-windows-button" title={zh ? "窗口总览" : "All windows"} aria-label={zh ? "窗口总览" : "All windows"} onClick={event => onOverview ? onOverview(event.detail === 0) : void app.panels?.open({kind:"browser-spaces"}).catch(report)}><LayoutGrid size={17}/></button>}
+          {!windowChrome && state.tabs && <button type="button" className={`workspace-panel-icon${overview ? " is-active" : ""}`}
+            title={zh ? "网页总览" : "Tab overview"} aria-label={zh ? "网页总览" : "Tab overview"} aria-pressed={overview}
+            onClick={tabOverview}><LayoutGrid size={16}/></button>}
+          {!windowChrome && state.zoomFactor !== undefined && (
             <div className="browser-zoom">
               <button
                 type="button"
@@ -242,7 +278,7 @@ export function BrowserDrawer({
               </button>
             </div>
           )}
-          {!state.tabs && (
+          {!windowChrome && !state.tabs && (
             <button
               type="button"
               className="workspace-panel-icon"
@@ -259,67 +295,8 @@ export function BrowserDrawer({
         </>
       }
     >
-      {state.tabs && (
-        <div className="browser-tabs">
-          <div
-            ref={tabStrip}
-            className="browser-tab-strip"
-            role="tablist"
-            aria-label={zh ? "网页标签" : "Browser tabs"}
-          >
-            {state.tabs.map((tab) => {
-              const label = tabTitle(tab, zh ? "新标签页" : "New tab");
-              const selected = tab.id === state.tabId;
-              return (
-                <div
-                  key={tab.id}
-                  className="browser-tab"
-                  data-selected={selected}
-                  data-busy={tab.busy}
-                  title={
-                    tab.queued
-                      ? zh
-                        ? `${tab.queued} 个操作等待中`
-                        : `${tab.queued} queued operations`
-                      : undefined
-                  }
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={selected}
-                    className="min-w-0 flex-1 truncate py-1.5 pl-2.5 pr-1 text-left text-xs"
-                    title={tab.url || label}
-                    onClick={() => void command("select", { tabId: tab.id })}
-                  >
-                    <Globe size={12} aria-hidden className="tab-icon" />
-                    <span className="truncate">{label}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="workspace-panel-icon shrink-0"
-                    title={zh ? "关闭标签页" : "Close tab"}
-                    aria-label={(zh ? "关闭标签页 " : "Close tab ") + label}
-                    onClick={() => void command("close", { tabId: tab.id })}
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-          <button
-            type="button"
-            className="workspace-panel-icon shrink-0"
-            title={zh ? "新建标签页" : "New tab"}
-            aria-label={zh ? "新建标签页" : "New tab"}
-            onClick={() => void command("new")}
-          >
-            <Plus size={15} />
-          </button>
-        </div>
-      )}
-      <div className="browser-navigation">
+      {!windowChrome && state.tabs && !overview && <BrowserTabs tabs={state.tabs} selectedId={state.tabId} strip={tabStrip} zh={zh} onAction={(action,value) => void command(action,value)}/>}
+      {!overview && <div className="browser-navigation">
         {state.tabs && (
           <div className="browser-history">
             {(
@@ -353,14 +330,14 @@ export function BrowserDrawer({
             ))}
           </div>
         )}
+        {windowChrome && <button type="button" className="workspace-panel-icon" title={zh ? "主页" : "Home"} aria-label={zh ? "主页" : "Home"} onClick={() => void command("home",{tabId:state.tabId})}><House size={17}/></button>}
         <form
           className="browser-address"
           onSubmit={(event) => {
             event.preventDefault();
             if (address.trim()) {
-              const url = /^[a-z][\w+.-]*:\/\//i.test(address)
-                ? address.trim()
-                : "https://" + address.trim();
+              const value = address.trim();
+              const url = /^[a-z][\w+.-]*:\/\//i.test(value) ? value : /^(localhost|127\.0\.0\.1)(:|\/|$)/i.test(value) ? "http://"+value : /^[^\s/]+\.[^\s]+/.test(value) ? "https://"+value : "https://www.baidu.com/s?wd="+encodeURIComponent(value);
               addressInput.current?.blur();
               void command(
                 "open",
@@ -369,11 +346,12 @@ export function BrowserDrawer({
             }
           }}
         >
+          {windowChrome && <span className="browser-site-icon" title={state.url.startsWith("https:") ? "HTTPS" : undefined}>{state.url.startsWith("https:") ? <LockKeyhole size={14}/> : <Globe size={14}/>}</span>}
           <input
             ref={addressInput}
             className="min-w-0 flex-1 bg-transparent p-1 text-xs outline-none"
             aria-label={zh ? "网址" : "URL"}
-            placeholder="https://"
+            placeholder={zh ? "搜索或输入网址" : "Search or enter address"}
             value={address}
             onFocus={() => {
               editing.current = true;
@@ -394,7 +372,8 @@ export function BrowserDrawer({
         </form>
         <button
           type="button"
-          className="flex items-center gap-1.5 rounded-lg border border-line px-2 py-1.5 text-xs"
+          className="browser-control-button flex items-center gap-1.5 rounded-lg border border-line px-2 py-1.5 text-xs"
+          data-manual={state.manual}
           aria-label={controlsLabel}
           title={
             state.tabs
@@ -415,7 +394,8 @@ export function BrowserDrawer({
           {state.manual ? <Play size={13} /> : <Hand size={13} />}
           <span className="browser-control-label">{controlsLabel}</span>
         </button>
-      </div>
+        {windowChrome && <button type="button" className="workspace-panel-icon browser-more" aria-label={zh ? "浏览器菜单" : "Browser menu"} title={zh ? "浏览器菜单" : "Browser menu"} onClick={() => void more().catch(report)}><MoreHorizontal size={19}/></button>}
+      </div>}
       {error && (
         <div role="alert" className="px-3 py-1 text-xs text-danger">
           {error}
@@ -423,9 +403,24 @@ export function BrowserDrawer({
       )}
       <div
         ref={viewport}
-        className="relative min-h-0 flex-1 overflow-hidden bg-surface"
+        data-browser-viewport=""
+        className={`relative min-h-0 flex-1 overflow-hidden bg-surface${overview ? " browser-overview" : ""}`}
       >
-        {!livePage &&
+        {overview ? <>
+          <div className="browser-overview-heading"><h3>{zh ? "网页总览" : "Tabs"}<span>{state.tabs?.length ?? 0}</span></h3>
+            <button className="workspace-panel-icon" aria-label={zh ? "返回网页" : "Back to page"} onClick={() => setOverview(false)}><X size={18}/></button>
+          </div>
+          <div className="browser-space-grid">
+            {state.tabs?.map(tab => <button key={tab.id} className="browser-space" data-active={tab.ownership === "agent"} onClick={() => void command("select", {tabId: tab.id})}>
+              <div className="browser-space-preview">
+                {thumbnails[tab.id] ? <img src={thumbnails[tab.id]} alt=""/> : <div className="browser-space-placeholder"><Globe size={34}/><span>{tab.url !== "about:blank" ? tab.url : (zh ? "新标签页" : "New tab")}</span></div>}
+                {tab.ownership === "agent" && <span className="browser-space-running"><MousePointer2 size={12}/>{zh ? "AI 控制中" : "Agent in control"}</span>}
+              </div>
+              <div className="browser-space-caption"><span>{tabTitle(tab, zh ? "新标签页" : "New tab")}</span><span>{tab.manual ? (zh ? "你正在控制" : "Your control") : tab.label}</span></div>
+            </button>)}
+            <button className="browser-space browser-space-new" onClick={() => void command("new")} aria-label={zh ? "新建标签页" : "New tab"}><Plus size={36}/></button>
+          </div>
+        </> : !livePage &&
           (state.image ? (
             <img
               src={state.image}

@@ -1,5 +1,3 @@
-import { useSettingsStore } from "../../stores/settings";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useState, type ReactNode, type CSSProperties } from "react";
 import {ResizeHandle,useRememberedWidth} from "../ui/ResizeHandle";
 import { PanelLeftOpen } from "lucide-react";
@@ -9,27 +7,24 @@ import { cn } from "../../lib/utils";
 import { SessionsPage } from "../../features/sessions/SessionsPage";
 import { Sidebar } from "./Sidebar";
 import { TitleBar } from "./TitleBar";
+import { useSurfaceEntrance } from "../../lib/ui-motion";
 
 export function PageTransition({
   children,
-  className
+  className,
+  transitionKey
 }: {
   children: ReactNode;
   className?: string;
+  transitionKey?: string;
 }): JSX.Element {
-  const systemReducedMotion = useReducedMotion();
-  const appReducedMotion = useSettingsStore((state) => state.reduceMotion);
-  const reduceMotion = systemReducedMotion || appReducedMotion;
+  const ref = useSurfaceEntrance<HTMLDivElement>(transitionKey);
   return (
-    <motion.div
-      initial={reduceMotion ? false : { opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: reduceMotion ? 1 : 0 }}
-      transition={{ duration: reduceMotion ? 0 : 0.16 }}
+    <div ref={ref}
       className={cn("min-h-full", className)}
     >
       {children}
-    </motion.div>
+    </div>
   );
 }
 
@@ -63,6 +58,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const fullBleed = location.pathname.startsWith("/sessions") || location.pathname.startsWith("/work");
   const isAssistant = location.pathname === "/assistant";
   const isSettings = location.pathname.startsWith("/settings");
+  const isRuns = location.pathname === "/runs";
 
   return (
     <div className="app-shell flex h-screen flex-col overflow-hidden bg-canvas text-ink">
@@ -95,17 +91,8 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
             <SessionsPage active={fullBleed} />
           </div>
           {isSettings || isAssistant ? children : !fullBleed ? (
-            <div className={cn("mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
-              {/* NOTE: do NOT pass initial={false} here. With it, framer-motion
-                  mounts the incoming page at its animate values (opacity 1)
-                  for the first frame and only then applies the initial state
-                  and plays the entrance — the page visibly flashes fully
-                  rendered before sliding/fading in. Default (initial=true)
-                  renders the first frame at opacity 0 so the switch is a pure
-                  entrance animation. */}
-              <AnimatePresence mode="wait">
-                <PageTransition key={location.pathname}>{children}</PageTransition>
-              </AnimatePresence>
+            <div className={cn(isRuns ? "runs-route-surface min-h-full w-full" : "mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
+              <PageTransition transitionKey={location.pathname}>{children}</PageTransition>
             </div>
           ) : null}
         </main>

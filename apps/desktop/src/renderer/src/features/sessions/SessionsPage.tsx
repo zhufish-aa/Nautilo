@@ -57,7 +57,7 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
   }, [showAgents, active, session?.target.teamId]);
   const previewPath = requestedWorkspaceFile(preview, session?.id);
   if (missingSession) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-ink-2"><p>{locale === "zh-CN" ? "此会话不存在或已移除" : "This conversation is unavailable"}</p><a href="#/sessions?new=1" className="rounded-lg border border-line px-4 py-2 text-ink hover:bg-panel">{locale === "zh-CN" ? "新会话" : "New conversation"}</a></div>;
-  if (!session) return <NewConversation mode="code" onCreated={openSession} />;
+  if (!session) return <NewConversation mode="code" onCreated={openSession} active={active} />;
   return (
     <div className="relative flex h-full min-h-0">
       <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden" aria-label={locale === "zh-CN" ? "对话" : "Conversation"}>

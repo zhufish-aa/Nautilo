@@ -1,0 +1,187 @@
+{
+  "version": "1.0",
+  "generated": "2026-11-09",
+  "source": "Nautilo × ego-lite 对齐设计 DESIGN.md §5",
+  "codes": [
+    {
+      "code": "SCROLL_NO_EFFECT",
+      "retryable": false,
+      "trigger": "滚轮与受控 DOM 滚动后，页面或目标滚动容器的实际位置均未按请求方向变化",
+      "recovery": "检查 scroll_target、scroll_before/scroll_after、at_boundary 与 wheel_error；到达边界应换方向或区域，不盲目重试",
+      "issue": "retest-6-scroll-reliability"
+    },
+    {
+      "code": "INPUT_NOT_DELIVERED",
+      "retryable": false,
+      "trigger": "原生按键已派发，但观测到事件落在其他元素，而不是请求目标；closed shadow 观测不完整时不能据此断言失败",
+      "recovery": "检查 point、hit 与当前页面状态；原生事件可能已触发其他元素，不盲目重放点击",
+      "issue": "retest-6-click-receipt"
+    },
+    {
+      "code": "TARGET_NOT_FOUND",
+      "retryable": true,
+      "trigger": "目标解析后 0 个匹配",
+      "recovery": "重新 read 取新 ref，或改用 text/css 定位",
+      "observed_in": "B1: textarea#kw / #kw 均无匹配",
+      "issue": "P1-2"
+    },
+    {
+      "code": "TARGET_HIDDEN",
+      "retryable": true,
+      "trigger": "存在匹配但全部不可见/不可交互（滚动重判两轮后仍如此）",
+      "recovery": "已尝试滚动进视口；建议先 scroll_to_text 或关闭遮罩层",
+      "observed_in": "B3: matches:0, hiddenMatches:1",
+      "issue": "P1-2"
+    },
+    {
+      "code": "TARGET_AMBIGUOUS",
+      "retryable": true,
+      "trigger": "目标匹配数 > 1",
+      "recovery": "从 error.matches 候选中挑一个 ref 重试",
+      "issue": "P1-2"
+    },
+    {
+      "code": "TARGET_NOT_ACTIONABLE",
+      "retryable": true,
+      "trigger": "唯一匹配但被遮挡、禁用或零尺寸",
+      "recovery": "先关闭弹窗/浮层，或滚动使目标完整可见",
+      "issue": "P1-2"
+    },
+    {
+      "code": "STALE_REF",
+      "retryable": true,
+      "trigger": "ref 所属 view 已失效且 (role,name,css_hint) 重绑定失败",
+      "recovery": "重新 read 获取新 view 的 refs",
+      "observed_in": "B2: 不带 @ 前缀即 stale_ref",
+      "issue": "P1-1"
+    },
+    {
+      "code": "INVALID_TARGET",
+      "retryable": false,
+      "trigger": "target 不满足 schema 或同时给出多种寻址",
+      "recovery": "按 target.schema.json 修正",
+      "issue": "P1-2"
+    },
+    {
+      "code": "NAVIGATED_TO_NEW_TAB",
+      "retryable": false,
+      "trigger": "期望的导航未在主标签达成，但出现了新标签",
+      "recovery": "动作已成功派发，不要重复点击；后续步骤使用 error.tab_id 指定的新标签",
+      "observed_in": "B5: 点百度结果后主标签未变，wait urlIncludes 超时",
+      "issue": "P0-2"
+    },
+    {
+      "code": "NAVIGATION_TIMEOUT",
+      "retryable": true,
+      "trigger": "导航类等待超过 navigation 超时(30s)",
+      "recovery": "检查是否被重定向到活动页/登录页；可先 read 当前 URL",
+      "issue": "P0-3"
+    },
+    {
+      "code": "POPUP_TIMEOUT",
+      "retryable": true,
+      "trigger": "expect.popup=true 时 popup 超时(10s)内未出现",
+      "recovery": "确认目标确实是会开新窗口的链接；必要时改用 open 直接导航",
+      "issue": "P0-2"
+    },
+    {
+      "code": "OPERATION_TIMEOUT",
+      "retryable": true,
+      "trigger": "单一操作超过其类别阈值（见 DESIGN §6.3）",
+      "recovery": "查看 error.operation 与 timeout_ms；重页面可加大 timeout_ms 后重试",
+      "observed_in": "B6: 5s 一刀切，viewport metrics 亦超时",
+      "issue": "P0-3"
+    },
+    {
+      "code": "RENDERER_UNRESPONSIVE",
+      "retryable": true,
+      "trigger": "轻探测连续 2 次失败，判定渲染进程卡死",
+      "recovery": "已尝试 stopLoading + reload；见 error.recovered。仍失败请换标签或重建会话",
+      "issue": "P0-3"
+    },
+    {
+      "code": "CONTROL_TAKEN",
+      "retryable": true,
+      "trigger": "用户明确点击接管、停止或发起登录交接；普通页面输入不自动接管",
+      "recovery": "批次已暂停；调用 browser_wait_for_control 后仅重放 remaining_steps",
+      "observed_in": "B7: 仅鼠标移动即触发，共 3 次",
+      "issue": "P1-3"
+    },
+    {
+      "code": "BROWSER_CLOSED",
+      "retryable": true,
+      "trigger": "全部浏览器窗口在当前请求执行中关闭，当前批次已中断",
+      "recovery": "下一次浏览器工具调用自动重新开窗；仅续接未完成步骤，不等待用户交还，不重放已派发动作",
+      "issue": "retest-3-window-lifecycle"
+    },
+    {
+      "code": "TAB_CLOSED",
+      "retryable": false,
+      "trigger": "目标标签已不存在",
+      "recovery": "重新建立标签或 open 目标 URL",
+      "issue": "P2-4"
+    },
+    {
+      "code": "TAB_OWNERSHIP",
+      "retryable": false,
+      "trigger": "尝试关闭/接管不属于 agent 的标签",
+      "recovery": "只允许操作 opened_by=agent 的标签；用户标签请 request 用户确认",
+      "issue": "P2-4"
+    },
+    {
+      "code": "SESSION_CONFLICT",
+      "retryable": false,
+      "trigger": "会话名已被用户或其他进程占用",
+      "recovery": "询问用户是否 claim，或换一个会话名",
+      "issue": "P2-4"
+    },
+    {
+      "code": "SCRIPT_ERROR",
+      "retryable": true,
+      "trigger": "browser_eval 中脚本抛异常或返回不可序列化值",
+      "recovery": "查看 error.stack 前 5 行；确保返回 JSON 可序列化",
+      "issue": "P0-1"
+    },
+    {
+      "code": "ASSERT_FAILED",
+      "retryable": true,
+      "trigger": "expect 轮询至超时仍未满足",
+      "recovery": "对比 error.actual 与 error.expected，修正断言或等待条件",
+      "issue": "P0-1"
+    },
+    {
+      "code": "FILE_INPUT_NOT_FOUND",
+      "retryable": true,
+      "trigger": "页面无可用的 file input",
+      "recovery": "先 wait_for_filechooser 或点击上传按钮触发选择器",
+      "issue": "P2-1"
+    },
+    {
+      "code": "DOWNLOAD_FAILED",
+      "retryable": true,
+      "trigger": "下载被取消或失败",
+      "recovery": "查看 error.message；确认目标文件是否需登录",
+      "issue": "P2-1"
+    },
+    {
+      "code": "WINDOW_MINIMIZED",
+      "retryable": true,
+      "trigger": "截图时窗口最小化或不可见",
+      "recovery": "恢复窗口后重试，或改用 DOM 断言代替截图",
+      "observed_in": "ego-lite 第二轮：Cannot capture a screenshot while the window is minimized",
+      "issue": "P2-2"
+    }
+  ],
+  "timeouts_ms": {
+    "probe": 3000,
+    "action": 15000,
+    "navigation": 30000,
+    "popup": 10000,
+    "eval": 5000,
+    "read": 10000
+  },
+  "control_signals": {
+    "takes_over": ["key_down", "mouse_down", "wheel", "user_navigation", "user_new_tab"],
+    "ignored": ["mousemove", "hover", "focus_change", "window_activate"]
+  }
+}

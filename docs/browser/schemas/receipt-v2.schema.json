@@ -1,0 +1,22 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://nautilo.dev/schemas/receipt-v2.schema.json",
+  "title":"Nautilo Browser Receipt v2",
+  "type":"object","additionalProperties":false,
+  "required":["version","ok","status","verified","steps","data"],
+  "properties":{
+    "version":{"const":2},"ok":{"type":"boolean"},"status":{"enum":["completed","failed","paused"]},"verified":{"type":"boolean"},
+    "steps":{"type":"array","items":{"$ref":"#/$defs/step"}},
+    "tab_id":{"type":"string"},"current_tab_id":{"type":"string"},"view_id":{"type":"string"},
+    "failed_step":{"type":"integer","minimum":1},"executed_steps":{"type":"array","items":{"type":"integer","minimum":1}},"remaining_steps":{"type":"array","items":{"type":"integer","minimum":1}},
+    "error":{"$ref":"#/$defs/error"},"data":{"type":"object"}
+  },
+  "allOf":[
+    {"if":{"properties":{"ok":{"const":true}}},"then":{"properties":{"status":{"const":"completed"}}}},
+    {"if":{"properties":{"ok":{"const":false}}},"then":{"required":["failed_step","error","executed_steps","remaining_steps"],"properties":{"status":{"enum":["failed","paused"]}}}}
+  ],
+  "$defs":{
+    "error":{"type":"object","additionalProperties":false,"required":["code","message","retryable","details"],"properties":{"code":{"type":"string","pattern":"^[A-Z][A-Z0-9_]+$"},"message":{"type":"string"},"retryable":{"type":"boolean"},"recovery":{"type":"string"},"details":{"type":"object"}}},
+    "step":{"type":"object","additionalProperties":false,"required":["step","id","status"],"properties":{"step":{"type":"integer","minimum":1},"id":{"type":"string"},"status":{"enum":["completed","skipped","failed"]},"action":{"type":"string"},"dispatched":{"type":"object"},"observed":{"type":"object"},"result":{},"verification":{"type":"object"},"ref_rebound":{"type":"boolean"},"error":{"$ref":"#/$defs/error"},"url_after":{"type":"string"}}}
+  }
+}

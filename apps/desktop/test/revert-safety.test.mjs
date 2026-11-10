@@ -35,7 +35,7 @@ function createHandler(read) {
       writeText: async (input) => { mutations.push(['write', input]); return { ok: true }; },
       delete: async (input) => { mutations.push(['delete', input]); return { ok: true }; }
     } } }, projectRoot: '/fixture', locale: 'en',
-    setReverting() {}, setRevertArmed() {},
+    setReverting() {}, setRevertArmed() {}, setRefreshVersion() {},
     toast: { error(value) { errors.push(value); }, success() {} }, t: (key) => key,
     revertFileDiffs, reverseApplyUnifiedPatch,
     sameContent: () => true, patchFileImages: () => ({ before: 'old', after: 'new' })

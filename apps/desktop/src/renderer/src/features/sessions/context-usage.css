@@ -1,0 +1,25 @@
+.context-usage-popover { position: fixed; z-index: 80; width: 320px; max-width: calc(100vw - 16px); color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 14px 40px #00000012, 0 3px 8px #00000005; font: 500 14px/1.6 var(--app-font-sans); transform-origin: bottom right; overflow: hidden; }
+.dark .context-usage-popover { box-shadow: 0 14px 40px #0005; }
+.context-usage-heading { padding: 17px 19px 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.context-usage-heading > span { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
+.context-usage-heading > button { display: grid; place-items: center; width: 25px; height: 25px; color: var(--ink-2); border-radius: 5px; }
+.context-usage-heading > button:hover { background: var(--card-hover); }
+.context-usage-value { display: flex; gap: 9px; align-items: baseline; margin: 0 22px; font-variant-numeric: tabular-nums; }
+.context-usage-value strong { font-size: 34px; font-weight: 550; line-height: 1.3; letter-spacing: -1px; }
+.context-usage-value > span { font-size: 14px; color: var(--ink-2); }
+.context-usage-meter { display: flex; align-items: center; gap: 13px; margin: 17px 22px 21px; }
+.context-usage-meter > span { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.context-usage-track { height: 5px; background: var(--card-hover); flex: 1; overflow: hidden; border-radius: 4px; }
+.context-usage-track > span { display: block; width: 100%; height: 100%; border-radius: 4px; transform-origin: left center; background: var(--ink); transition: transform 180ms ease; }
+.context-usage-track > span[data-level="high"] { background: var(--warn); }
+.context-usage-stats { margin: 18px 22px 19px; display: grid; gap: 11px; }
+.context-usage-stats > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.context-usage-stats dt { font-size: 13px; font-weight: 500; color: var(--ink-2); }
+.context-usage-stats dd { margin: 0; font-size: 14px; font-weight: 550; color: var(--ink); font-variant-numeric: tabular-nums; }
+.context-usage-actions { padding: 7px 19px 17px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.context-usage-actions > a { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.context-usage-actions > a:hover { color: var(--ink); }
+.context-usage-actions .context-usage-compact { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 11px; border-radius: 7px; background: var(--ink); color: var(--card); font: 550 13px/1.5 var(--app-font-sans); box-shadow: 0 1px 2px #0001; }
+.context-usage-compact:disabled { opacity: .45; cursor: default; }
+.context-usage-popover button:focus-visible, .context-usage-popover a:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .context-usage-track > span { transition: none; } }

@@ -15,7 +15,9 @@ export async function browserDeadline<T>(
   operation: Promise<T>,
   milliseconds: number,
   label: string,
+  timeoutClass?: string,
 ): Promise<T> {
+  const started = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -27,7 +29,8 @@ export async function browserDeadline<T>(
               new BrowserToolError(
                 "browser_operation_timeout",
                 "The browser did not answer the requested operation in time.",
-                { operation: label, timeoutMs: milliseconds },
+                { operation: label, timeoutMs: milliseconds, timeout_ms: milliseconds,
+                  timeout_class: timeoutClass ?? browserTimeoutClass(label), elapsed_ms: Date.now() - started },
                 "Inspect the current tab before retrying; a navigation or page dialog may still be pending.",
               ),
             ),
@@ -41,7 +44,16 @@ export async function browserDeadline<T>(
   }
 }
 
-export function browserError(error: unknown) {
+export function browserTimeoutClass(operation: string) {
+  if (/viewport|content.type|probe|position/i.test(operation)) return "probe";
+  if (/eval|Runtime\./i.test(operation)) return "eval";
+  if (/popup|new.tab/i.test(operation)) return "popup";
+  if (/navigat|loadURL|reload/i.test(operation)) return "navigation";
+  if (/read|snapshot|Accessibility|DOM\.(get|describe)/i.test(operation)) return "read";
+  return "action";
+}
+
+export function browserError(error: unknown): {code:string;message:string;retryable:boolean;recovery?:string;[key:string]:any} {
   if (error instanceof BrowserToolError) {
     return {
       code: error.code,

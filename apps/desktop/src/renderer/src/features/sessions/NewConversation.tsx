@@ -18,12 +18,15 @@ import { PermissionModeSelect } from "./PermissionModeSelect";
 import { Composer } from "./Composer";
 import { HarnessModeControl } from "./HarnessModeControl";
 import { AddProjectDialog } from "../projects/AddProjectDialog";
+import { useSurfaceEntrance } from "../../lib/ui-motion";
 
 /** A draft becomes a real conversation only when the first message is sent. */
-export function NewConversation({ mode = "code", onCreated }: {
+export function NewConversation({ mode = "code", onCreated, active = true }: {
   mode?: "code" | "work";
   onCreated: (id: string) => void;
+  active?: boolean;
 }): JSX.Element {
+  const entranceRef = useSurfaceEntrance<HTMLDivElement>("new-conversation", active);
   const { locale } = useI18n();
   const zh = locale === "zh-CN";
   const navigate = useNavigate();
@@ -105,7 +108,7 @@ export function NewConversation({ mode = "code", onCreated }: {
         {project && <span className="workspace-project-name"><Folder size={14} />{project.name}</span>}
         <button type="button" onClick={openAgentSettings} aria-label={zh ? "助理设置" : "Assistant settings"} title={zh ? "助理设置" : "Assistant settings"}><Settings2 size={16} /></button>
       </header>
-      <div className="new-conversation-body">
+      <div ref={entranceRef} className="new-conversation-body">
         <div className="new-conversation-start">
         <div className="new-conversation-welcome">
           <h2>{zh ? "今天有什么可以帮你？" : "How can I help today?"}</h2>

@@ -1,4 +1,27 @@
 use super::*;
+#[test]
+fn untracked_directory_records_preserve_path_validation() {
+    let state = parse_status("? doop/\0? 中文 folder/\0? file.txt\0").unwrap();
+    assert_eq!(state["changes"][0]["path"], "doop");
+    assert_eq!(state["changes"][0]["directory"], true);
+    assert_eq!(state["changes"][2]["directory"], false);
+    for record in ["? ../escape/\0", "? nested//\0", "? /outside/\0", "? .git/\0"] {
+        assert!(parse_status(record).is_err(), "{record}");
+    }
+}
+#[tokio::test]
+async fn nested_repository_keeps_status_and_directory_preview_available() {
+    let fixture = Fixture::new().await;
+    std::fs::create_dir(fixture.root.join("nested")).unwrap();
+    checked(fixture.root.join("nested").to_str().unwrap(), &["init"], None).await.unwrap();
+    fixture.write("nested/keep.txt", "untouched");
+    let service = SourceControl::default();
+    let status = service.status(fixture.cwd()).await.unwrap();
+    assert!(status["changes"].as_array().unwrap().iter().any(|item| item["path"] == "nested" && item["directory"] == true));
+    let diff = service.diff(fixture.cwd(), &json!({"path":"nested","source":"worktree"})).await.unwrap();
+    assert_eq!(diff["previewReason"], "directory");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("nested/keep.txt")).unwrap(), "untouched");
+}
 async fn editor_conflict(binary:bool)->Fixture{
     let fixture=Fixture::new().await;
     if binary{std::fs::write(fixture.root.join("file.txt"),[0,1,2]).unwrap();}else{fixture.write("file.txt","base\n");}fixture.write("other.txt","unchanged\n");fixture.commit().await;

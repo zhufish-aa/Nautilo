@@ -97,6 +97,8 @@ export interface RuntimeEventPayloadMap {
   "run.started": {
     runId: AgentRunId;
     providerSessionId?: string;
+    /** Exact submitted input consumed by this turn, including queued follow-ups. */
+    userMessageId?: string;
   };
   "provider.extension_ui": { method: string; key?: string; text: string; raw?: unknown };
   "provider.runtime_ready": { providerId: string; transport: string; pid?: number; reused: boolean; attachMs: number };
@@ -343,3 +345,14 @@ export interface EventEnvelope<TType extends RuntimeEventType = RuntimeEventType
 export type RuntimeEvent = {
   [TType in RuntimeEventType]: EventEnvelope<TType>;
 }[RuntimeEventType];
+
+/** Compact, journal-backed lifecycle signal for the owning desktop's browser UI. */
+export interface BrowserRunUpdate {
+  sessionId: string; runId: string; sequence: number;
+  state: "running" | "waiting" | "completed" | "cancelled" | "failed";
+}
+export function browserRunUpdate(event:Pick<RuntimeEvent,"sessionId"|"runId"|"sequence"|"type">):BrowserRunUpdate|undefined {
+  const states:Record<string,BrowserRunUpdate["state"]>={"run.started":"running","run.waiting":"waiting","run.completed":"completed","run.cancelled":"cancelled","run.failed":"failed"};
+  const state=states[event.type];
+  return state && event.sessionId && event.runId ? {sessionId:event.sessionId,runId:event.runId,sequence:event.sequence,state} : undefined;
+}

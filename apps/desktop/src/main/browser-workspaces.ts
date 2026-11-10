@@ -7,12 +7,20 @@ export type SavedBrowserTab = {
   zoom: number;
   scrollX: number;
   scrollY: number;
+  title?: string;
+  favicon?: string;
 };
 export type SavedBrowserWorkspace = {
   id: string;
   viewed?: string;
   agent?: string;
   tabs: SavedBrowserTab[];
+  name?: string;
+  source?: "session" | "window";
+  parentId?: string;
+  suspended?: boolean;
+  profileId?:string;
+  isolated?:boolean;
 };
 
 export async function loadBrowserWorkspaces(
@@ -43,6 +51,8 @@ export async function loadBrowserWorkspaces(
           tabs.push({
             id: tab.id,
             url,
+            title: typeof tab.title === "string" ? tab.title.slice(0, 300) : undefined,
+            favicon: typeof tab.favicon === "string" && tab.favicon.startsWith("data:image/") && tab.favicon.length < 66000 ? tab.favicon : undefined,
             zoom:
               Number.isFinite(tab.zoom) && tab.zoom >= 0.25 && tab.zoom <= 3
                 ? tab.zoom
@@ -61,6 +71,12 @@ export async function loadBrowserWorkspaces(
       if (tabs.length)
         result.set(workspace.id, {
           id: workspace.id,
+          name: typeof workspace.name === "string" ? workspace.name.slice(0, 120) : undefined,
+          source: workspace.source === "window" ? "window" : "session",
+          parentId: typeof workspace.parentId === "string" && /^[\w-]{1,160}$/.test(workspace.parentId) ? workspace.parentId : undefined,
+          suspended: workspace.suspended === true,
+          profileId:typeof workspace.profileId === "string" && /^[\w-]{1,80}$/.test(workspace.profileId) ? workspace.profileId : undefined,
+          isolated:workspace.isolated === true,
           tabs,
           viewed: tabs.some((t) => t.id === workspace.viewed)
             ? workspace.viewed

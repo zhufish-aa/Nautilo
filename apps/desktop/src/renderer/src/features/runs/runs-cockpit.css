@@ -1,0 +1,70 @@
+.runs-route-surface { background: #fafafa; }
+.dark .runs-route-surface { background: #171717; }
+.run-cockpit { padding: 39px 48px 30px; width: 100%; min-height: calc(100dvh - 30px); color: var(--ink); font: 500 14px/1.6 var(--app-font-sans); }
+.cockpit-heading, .cockpit-heading > div, .cockpit-top-actions, .cockpit-top-actions label { display: flex; align-items: center; gap: 12px; }
+.cockpit-heading { justify-content: space-between; }
+.cockpit-heading h1 { font-size: 28px; font-weight: 600; letter-spacing: -.7px; }
+.cockpit-top-actions label { font-size: 13px; color: var(--ink-2); }
+.cockpit-icon { display: inline-grid; place-items: center; height: 32px; width: 32px; color: var(--ink-2); border-radius: 7px; }
+.cockpit-icon:hover { background: var(--card-hover); color: var(--ink); }
+.cockpit-filterbar { margin-top: 30px; display: flex; justify-content: space-between; align-items: center; gap: 20px; padding-bottom: 16px; }
+.cockpit-filterbar > div { display: flex; gap: 6px; flex-wrap: wrap; }
+.cockpit-filterbar > div button { height: 35px; padding: 0 12px; font-size: 13px; border-radius: 7px; color: var(--ink-2); display: flex; align-items: center; gap: 9px; }
+.cockpit-filterbar > div button[aria-pressed="true"] { background: var(--ink); color: var(--card); }
+.cockpit-filterbar b { font-size: 11px; font-weight: 500; opacity: .7; font-variant-numeric: tabular-nums; }
+.cockpit-search { height: 36px; width: 232px; border: 1px solid var(--line); border-radius: 8px; display: flex; align-items: center; gap: 9px; padding: 0 11px; background: var(--card); color: var(--ink-2); }
+.cockpit-search input { background: none; outline: 0; min-width: 0; width: 100%; font-size: 13px; color: var(--ink); }
+.cockpit-grid { display: grid; grid-template-columns: minmax(0, 1fr) 316px; gap: 34px; margin-top: 28px; }
+.cockpit-primary { min-width: 0; }
+.cockpit-section { margin-top: 30px; }
+.cockpit-section-heading { display: flex; align-items: center; gap: 9px; margin-bottom: 16px; }
+.cockpit-section-heading h2 { font-size: 15px; font-weight: 550; letter-spacing: -.2px; }
+.cockpit-section-heading > span { color: var(--ink-2); font-size: 12px; }
+.cockpit-section-heading > button { margin-left: auto; font-size: 12px; color: var(--ink-2); }
+.cockpit-inbox { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--card); }
+.cockpit-inbox-row { padding: 18px 20px; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 14px; }
+.cockpit-inbox-row + .cockpit-inbox-row { border-top: 1px solid var(--line); }
+.cockpit-inbox-row .provider-avatar, .cockpit-run-head .provider-avatar { width: 34px; height: 34px; background: var(--card-hover); border: 1px solid var(--line); border-radius: 9px; }
+.cockpit-item-title { display: flex; align-items: center; gap: 9px; }
+.cockpit-item-title h3 { font-size: 14px; font-weight: 550; line-height: 1.5; }
+.cockpit-attention-label { font-size: 11px; font-weight: 500; color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent); background: color-mix(in srgb, var(--warn) 5%, var(--card)); padding: 2px 6px; border-radius: 5px; white-space: nowrap; }
+.cockpit-item-meta { font-size: 12px; color: var(--ink-2); margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cockpit-item-note { margin-top: 11px; font-size: 13px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cockpit-button { min-height: 31px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); font-size: 12px; font-weight: 500; white-space: nowrap; }
+.cockpit-button.primary { background: var(--ink); color: var(--card); border-color: var(--ink); }
+.cockpit-running-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.cockpit-run-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; min-width: 0; }
+.cockpit-run-head { display: flex; align-items: center; justify-content: space-between; }
+.cockpit-run-head > span { font-size: 12px; display: flex; align-items: center; gap: 8px; color: var(--ink-2); }
+.cockpit-run-head i { width: 5px; height: 5px; border-radius: 50%; background: var(--ink); box-shadow: 0 0 0 4px var(--card-hover); }
+.cockpit-run-card h3 { font-size: 15px; font-weight: 550; margin-top: 18px; }
+.cockpit-run-activity { display: flex; align-items: center; gap: 8px; margin-top: 21px; padding-top: 7px; font-size: 13px; color: var(--ink-2); }
+.cockpit-run-activity > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cockpit-run-card footer, .cockpit-run-card footer > div { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.cockpit-run-card footer { margin-top: 20px; font-size: 12px; color: var(--ink-2); }
+.cockpit-run-card footer > span { font-variant-numeric: tabular-nums; }
+.cockpit-recent { align-self: start; padding: 20px; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.cockpit-recent-item { display: block; width: 100%; padding: 16px 8px; text-align: left; border-radius: 7px; }
+.cockpit-recent-item > div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.cockpit-recent-item h3 { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cockpit-recent-item time { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.cockpit-recent-item .cockpit-item-meta { font-size: 12px; }
+.cockpit-recent-state { font-size: 12px; color: var(--ink-2); display: flex; align-items: center; gap: 5px; margin-top: 9px; }
+.cockpit-history { border: 1px solid var(--line); background: var(--card); border-radius: 12px; padding: 8px; }
+.cockpit-history-head, .cockpit-history-row { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(120px, .55fr) minmax(150px, .55fr) 18px; gap: 20px; align-items: center; }
+.cockpit-history-head { padding: 12px 14px; font-size: 12px; color: var(--ink-2); }
+.cockpit-history-row { width: 100%; padding: 13px 14px; text-align: left; font-size: 14px; border-radius: 7px; }
+.cockpit-history-row:hover, .cockpit-recent-item:hover { background: var(--card-hover); }
+.cockpit-history-row > span:first-child { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.cockpit-history-row strong { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cockpit-history-row > span:not(:first-child), .cockpit-history-row time { font-size: 12px; color: var(--ink-2); }
+.cockpit-empty { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 25px; font-size: 13px; color: var(--ink-2); }
+.run-cockpit button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 3px; }
+.cockpit-pagination { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 16px; font-size: 13px; color: var(--ink-2); }
+.cockpit-pagination > div { display: flex; align-items: center; gap: 14px; }
+.cockpit-pagination button { border: 1px solid var(--line); padding: 5px 12px; border-radius: 7px; background: var(--card); }
+.cockpit-pagination button:disabled { opacity: .4; cursor: default; }
+@media (max-width: 1350px) { .run-cockpit { padding: 28px; } .cockpit-grid { grid-template-columns: minmax(0, 1fr) 250px; gap: 24px; } }
+@media (max-width: 1150px) { .cockpit-running-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1000px) { .cockpit-grid { grid-template-columns: 1fr; } .cockpit-recent { padding-left: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; } .cockpit-recent .cockpit-section-heading { grid-column: 1/-1; } .cockpit-filterbar { flex-wrap: wrap; } }
+@media (max-width: 680px) { .run-cockpit { padding: 20px; } .cockpit-heading { align-items: flex-start; } .cockpit-heading h1 { font-size: 22px; } .cockpit-top-actions label { font-size: 12px; } .cockpit-history-head, .cockpit-history-row { grid-template-columns: minmax(0, 1fr) 90px 16px; gap: 8px; } .cockpit-history-row time, .cockpit-history-head > span:nth-child(3) { display: none; } .cockpit-inbox-row { padding: 14px; gap: 10px; } }

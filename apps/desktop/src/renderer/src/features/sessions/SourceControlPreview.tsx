@@ -42,6 +42,7 @@ function PreviewBody({diff,loading,error,zh,locale,disabled,onApply,path,headerA
   const reason=diff.previewReason;
   return <>{toolbar}<span className="scm-diff-source sr-only">{sourceLabel}</span>
     {diff.binary||reason==="binary"?<div className="scm-empty"><FileDiff size={26}/><p>{zh?"二进制文件已更改":"Binary file changed"}</p><span>{zh?"可通过文件前的复选框选择提交。":"Use the file checkbox to include it in your commit."}</span></div>:
+      reason==="directory"?<div className="scm-empty"><p>{zh?"未跟踪的目录或嵌套仓库":"Untracked directory or nested repository"}</p></div>:
       reason==="encoding"?<div className="scm-empty"><p>{zh?"此文件使用其他文本编码":"This file uses another text encoding"}</p><span>{zh?"请在原编辑器中查看；文件仍可选择提交。":"View it in its original editor. It can still be selected for commit."}</span></div>:
       reason==="large"?<div className="scm-empty"><p>{zh?"文件较大，已停止加载完整代码":"File is too large for a full code preview"}</p><span>{zh?"文件仍可选择提交，完整内容保留在本地。":"The local file is unchanged and can still be selected for commit."}</span></div>:
       textReady&&view==="code"?<div ref={codeSurface} className="scm-code-preview" aria-label={zh?"代码差异":"Code diff"}>

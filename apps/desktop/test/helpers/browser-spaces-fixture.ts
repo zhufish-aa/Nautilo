@@ -1,0 +1,118 @@
+import assert from "node:assert/strict";
+import { app, BrowserWindow } from "electron";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createHmac } from "node:crypto";
+import { TaskBrowser } from "../../src/main/task-browser";
+import { registerPanelWindows } from "../../src/main/panel-windows";
+
+const root=__dirname, site=process.env.NAUTILO_SPACES_SITE!;
+app.setPath("userData",root);app.setPath("sessionData",root);app.setPath("crashDumps",root);app.setAppLogsPath(root);
+const phase=(value:string)=>writeFileSync(join(root,"spaces-phase.txt"),value);
+void app.whenReady().then(async()=>{
+  const browser=new TaskBrowser(), key="space-isolation-fixture", port=await browser.start(()=>key);
+  browser.register();
+  const options={show:false,focusable:false,opacity:0,skipTaskbar:true,webPreferences:{sandbox:true,preload:join(root,"preload.cjs")}};
+  const owner=new BrowserWindow(options);browser.attachWindow(owner);
+  await owner.loadURL("data:text/html,<title>Workbench</title>");
+  let host!:BrowserWindow, creations=0;
+  const windows=registerPanelWindows(()=>owner,()=>{
+    creations++;host=new BrowserWindow(options);browser.attachBrowserHost(host);return host;
+  },win=>win.loadURL('data:text/html,<title>Browser shell</title><script>window.targets=[]</script>'),(win,target,userInitiated)=>browser.selectBrowserSpace(win,target.sessionId,userInitiated));
+  browser.setWindowOpener(id=>windows.open({kind:"browser",sessionId:id}));
+  let calls=0;
+  const callFor=async(id:string,name:string,args:unknown)=>{
+    const token=createHmac("sha256",key).update(`nautilo-browser-v1/${port}/${id}`).digest("base64url");
+    const response=await fetch(`http://127.0.0.1:${port}/mcp/${id}`,{method:"POST",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:++calls,method:"tools/call",params:{name,arguments:args}})});
+    const result=(await response.json()).result;return result.structuredContent??JSON.parse(result.content[0].text);
+  };
+  const invoke=(win:BrowserWindow,method:string,...args:unknown[])=>win.webContents.executeJavaScript(`window.fixture.${method}(...${JSON.stringify(args)})`);
+  const panel=(id:string,command:string,input?:unknown)=>invoke(host,"panel",id,command,input);
+  const open=async(id:string)=>{await invoke(host,"open",{kind:"browser",sessionId:id});assert.equal(creations,1);assert.equal(browser["hostSpace"],id);};
+  if(process.env.NAUTILO_SPACES_PHASE === "write") {
+    phase("the first agent navigation opens the browser without a user click");
+    const initial=await callFor("AutoOpen","browser_run",{steps:[{action:"open",url:site+"/auto"}],snapshot:false});
+    assert.equal(initial.ok,true,JSON.stringify(initial));
+    assert.ok(host,"the first browser operation must open its visible shell");assert.equal(creations,1);
+    assert.equal(browser["hostSpace"],"AutoOpen");
+    await callFor("AutoOpen","browser_read",{scope:"main"});assert.equal(creations,1,"later calls reuse the shell");
+    browser.release("AutoOpen");
+  } else {
+    phase("an agent read reopens a workspace saved with a window-close pause");
+    const saved=JSON.parse(readFileSync(join(root,"spaces-data.json"),"utf8"));
+    const restored=await callFor(saved.one,"browser_read",{scope:"main"});
+    assert.notEqual(restored.ok,false,JSON.stringify(restored));assert.match(restored.url,/\/one-extra$/);assert.ok(host);assert.equal(creations,1);
+  }
+  await invoke(owner,"open",{kind:"browser-spaces"});assert.ok(host);assert.equal(creations,1);
+  if(process.env.NAUTILO_SPACES_PHASE === "write") {
+    phase("an open overview is still a browser window");
+    const otherPanel=new BrowserWindow(options);browser.attachPanelWindow("other-browser-panel",otherPanel);
+    const otherClosed=new Promise<void>(resolve=>otherPanel.once("closed",()=>resolve()));otherPanel.close();await otherClosed;
+    assert.equal(browser["allWindowsStopped"],false,"closing another panel must not stop an open overview");
+    phase("one native host, independent space tabs");
+    const one=(await invoke(host,"spaces","create",{name:"Window One"})).createdId;
+    const two=(await invoke(host,"spaces","create",{name:"Window Two"})).createdId;
+    assert.notEqual(one,two);
+    await open(one);const firstTab=(await panel(one,"state")).tabId;
+    await panel(one,"open",{tabId:firstTab,url:site+"/one"});
+    const added=(await panel(one,"new")).tabId;await panel(one,"open",{tabId:added,url:site+"/one-extra"});
+    await panel(one,"layout",{tabId:added,x:0,y:0,width:900,height:650});
+    const firstPage=browser["groups"].get(one)!.tabs.get(added)!;
+    await open(two);assert.equal(firstPage.view.webContents.isDestroyed(),false);
+    const secondTab=(await panel(two,"state")).tabId;assert.notEqual(firstTab,secondTab);
+    await panel(two,"open",{tabId:secondTab,url:site+"/two"});
+    await panel(two,"layout",{tabId:secondTab,x:0,y:0,width:900,height:650});
+    await panel(one,"layout",{tabId:added,x:0,y:0,width:900,height:650});
+    assert.equal(browser["visible"].get(host)!.page.id,secondTab,"late layout cannot steal the selected space");
+    assert.equal((await panel(one,"state")).tabs.length,2);assert.equal((await panel(two,"state")).tabs.length,1);
+    await assert.rejects(()=>panel(one,"new"),/Select this browser space/);
+    phase("MCP ownership remains conversation scoped");
+    const call=(name:string,args:unknown)=>callFor(one,name,args);
+    assert.equal((await call("browser_read",{tabId:secondTab})).ok,false);
+    await open(one);await panel(one,"control",{tabId:added,manual:false});
+    await invoke(host,"open",{kind:"browser-spaces"});assert.equal(creations,1);assert.equal(browser["visible"].has(host),false);
+    assert.equal(firstPage.manual,false,"viewing overview must not take control");
+    const background=await call("browser_run",{tabId:added,steps:[{action:"eval",script:"() => document.title"}]});assert.equal(background.ok,true,JSON.stringify(background));
+    const list=await invoke(host,"spaces","list",{previews:true,ids:[one,two]});
+    assert.equal(list.spaces.length,2);assert.equal(list.spaces.find((item:any)=>item.id===one).tabCount,2);
+    assert.ok(list.spaces.every((item:any)=>item.preview?.startsWith("data:image/jpeg;base64,")));
+    await open(one);assert.equal((await panel(one,"state")).tabId,added);
+    await invoke(host,"spaces","rename",{id:one,name:"Independent A"});
+    writeFileSync(join(root,"spaces-data.json"),JSON.stringify({one,two,added,secondTab}));
+    phase("closing the only host stops every space, not their persisted tabs");
+    const pending=call("browser_run",{tabId:added,steps:[{action:"assert",expect:{eval:{script:"() => false"}},timeoutMs:5000},{action:"eval",script:"() => {window.afterCloseExecuted=true;}"}],snapshot:false});
+    await new Promise(resolve=>setTimeout(resolve,100));
+    const closed=new Promise<void>(resolve=>host.once("closed",()=>resolve()));host.close();await closed;assert.equal(host.isDestroyed(),true);
+    assert.equal(firstPage.view.webContents.isDestroyed(),false);
+    assert.ok([...browser["groups"].values()].every(group=>group.suspended));
+    phase("the next call automatically reopens but cannot revive the interrupted batch");
+    const resumed=await call("browser_run",{tabId:added,steps:[{action:"eval",script:"() => document.title"}]});
+    assert.equal(resumed.ok,true,JSON.stringify(resumed));assert.equal(creations,2);
+    const stopped=await pending;assert.equal(stopped.status,"paused");assert.equal(stopped.error?.code,"BROWSER_CLOSED");assert.deepEqual(stopped.remaining_steps,[2]);
+    assert.notEqual(await firstPage.view.webContents.executeJavaScript("window.afterCloseExecuted"),true);
+    assert.ok([...browser["groups"].values()].every(group=>!group.suspended));
+    assert.equal(firstPage.manual,false,"reopening restores the previously available tab");
+    assert.equal(browser["groups"].get(two)!.tabs.get(secondTab)!.manual,true,"reopening must preserve user control of another tab");
+    assert.equal((await call("browser_session",{action:"open",show:true})).ok,true);assert.equal(creations,2);
+    await invoke(host,"open",{kind:"browser",sessionId:one});
+    await panel(one,"control",{tabId:added,manual:true});
+    const finalClosed=new Promise<void>(resolve=>host.once("closed",()=>resolve()));host.close();await finalClosed;
+    const userRead=await call("browser_read",{tabId:added,scope:"main"});assert.notEqual(userRead.ok,false);assert.match(userRead.url,/\/one-extra$/);assert.equal(creations,3);
+    assert.equal(firstPage.manual,true,"an explicit takeover survives closing and reopening the shell");
+    assert.equal(firstPage.control?.kind,"takeover_button");
+    host.close();
+  } else {
+    phase("restoring independent names, selections and previews into the same host");
+    const saved=JSON.parse(readFileSync(join(root,"spaces-data.json"),"utf8"));
+    const list=await invoke(host,"spaces","list",{previews:true,ids:[saved.one,saved.two]});
+    assert.equal(list.spaces.length,2);
+    const first=list.spaces.find((item:any)=>item.id===saved.one);assert.equal(first.name,"Independent A");assert.equal(first.tabCount,2);assert.equal(first.selectedTabId,saved.added);assert.ok(first.preview.startsWith("data:image/jpeg;base64,"));
+    await open(saved.one);const a=await panel(saved.one,"state");await open(saved.two);const b=await panel(saved.two,"state");
+    assert.ok([...browser["groups"].values()].every(group=>!group.suspended),"restored window-close flags clear on a user-opened shell");
+    assert.equal(a.tabId,saved.added);assert.equal(b.tabId,saved.secondTab);assert.equal(a.tabs.length,2);assert.equal(b.tabs.length,1);
+    assert.match(a.url,/\/one-extra$/);assert.match(b.url,/\/two$/);assert.equal(creations,1);
+    host.close();
+  }
+  await browser.close();owner.destroy();app.exit(0);
+}).catch(error=>{writeFileSync(join(root,"spaces-error.txt"),error.stack||String(error));app.exit(1);});
+process.on("uncaughtException",error=>{writeFileSync(join(root,"spaces-error.txt"),error.stack??String(error));app.exit(1);});

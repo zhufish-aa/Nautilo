@@ -7,6 +7,7 @@ import { createServer } from "node:http";
 import { registerPanelWindows } from "../../src/main/panel-windows";
 import { TaskBrowser } from "../../src/main/task-browser";
 import { browserCommand } from "../../src/main/browser-protocol";
+import { recoverBrowserRenderer } from "../../src/main/browser-health";
 
 const dir = __dirname;
 const checkpoint = (phase: string) =>
@@ -210,10 +211,9 @@ void app
       ).result.protocolVersion,
       "2025-06-18",
     );
-    assert.equal(
-      (await (await rpc("A", "tools/list", {})).json()).result.tools.length,
-      7,
-    );
+    const advertisedTools = (await (await rpc("A", "tools/list", {})).json()).result.tools;
+    for (const name of ["browser_run", "browser_read", "browser_state", "browser_tabs", "browser_scroll", "browser_screenshot", "browser_wait_for_control", "browser_eval", "browser_assert", "browser_wait", "browser_session"])
+      assert.ok(advertisedTools.some((tool: { name: string }) => tool.name === name), name);
     await win.webContents.executeJavaScript(
       "draft.focus();draft.value='my draft'",
     );
@@ -938,7 +938,8 @@ void app
     );
     await panel("A", "control", true);
     assert.ok((await pending).isError);
-    assert.ok(!(await call("A", { steps: [] })).isError);
+    const readingDuringHandoff = await call("A", { steps: [] });
+    assert.ok(!readingDuringHandoff.isError, JSON.stringify(readingDuringHandoff));
     assert.ok((await call("A", { steps: [navigate] })).isError);
     await panel("A", "layout", { x: 10, y: 20, width: 300, height: 200 });
     assert.equal(win.contentView.children.length, 1);
@@ -1033,6 +1034,109 @@ void app
       "source-control",
     );
     await panel("B", "hide");
+    checkpoint("schema v2 evaluation and popup receipts");
+    const v2 = async (name: string, args: object) => {
+      const result = await call("V2", args, name);
+      assert.ok(!result.isError, JSON.stringify(result.structuredContent ?? result.content));
+      return result.structuredContent ?? JSON.parse(result.content.at(-1).text);
+    };
+    await v2("browser_run", {steps:[{id:"open",action:"goto",url,expect:{url:{includes:url}}}], snapshot:false});
+    const v2id = browser["groups"].get("V2")!.agent!;
+    const v2wc = browser["groups"].get("V2")!.tabs.get(v2id)!.view.webContents;
+    const scriptValue = await v2("browser_eval", {script:"() => ({title:document.title, paused:false, t:4})", expect:{paused:false,t:{gt:0}}});
+    assert.equal(scriptValue.verified, true);
+    assert.equal(scriptValue.value.t, 4);
+    const controls = await v2("browser_run", {steps:[{id:"controls",action:"read"}]});
+    const shortRef = controls.reads[0].match(/(@[\w.-]+) textbox Query/)?.[1];
+    assert.ok(shortRef);
+    await v2("browser_run", {steps:[{id:"optional-at",action:"fill",target:{ref:shortRef.slice(1)},text:"ref-without-at"}],snapshot:false});
+    const stepRead = await v2("browser_run", {steps:[{id:"read-value",action:"read",selector:"form"}],snapshot:false});
+    assert.match(stepRead.steps[0].result.text, /Query/);
+    await v2("browser_run", { steps:[{id:"type", action:"fill",target:{role:"textbox",name:"Query"},text:"schema-test"}, {id:"verify", action:"assert",expect:{eval:{script:"() => document.querySelector('input').value",expect:{$:{eq:"schema-test"}}}}}], snapshot:false });
+    const assertionFailure = await call("V2", {expect:{url:{includes:"never-match"}},timeout_ms:100}, "browser_assert");
+    assert.equal(assertionFailure.structuredContent.error.code, "ASSERT_FAILED");
+    assert.ok(assertionFailure.structuredContent.error.actual);
+    const skipped = await v2("browser_run", {steps:[{id:"skip",action:"click",target:{css:"#absent"},optional:true},{id:"continue",action:"assert",expect:{url:{includes:url}}}],snapshot:false});
+    assert.equal(skipped.steps[0].status, "skipped");
+    assert.equal(skipped.steps[1].id, "continue");
+
+    checkpoint("viewing and hovering do not take control");
+    await panel("V2", "layout", {tabId:v2id,x:0,y:0,width:1000,height:700});
+    v2wc.focus();
+    v2wc.sendInputEvent({type:"mouseMove",x:20,y:20});
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal((await panel("V2", "state")).manual, false);
+    await v2("browser_run", {steps:[{action:"fill",target:{role:"textbox",name:"Query"},text:"still-in-control"}],snapshot:false});
+    assert.equal((await panel("V2", "state")).manual, false, "CDP typing must not masquerade as human input");
+    v2wc.emit("input-event", {} as Electron.Event, {type:"mouseDown",x:700,y:250});
+    assert.equal((await panel("V2", "state")).manual, false);
+    await panel("V2","control",{manual:true});
+    assert.equal((await panel("V2", "state")).manual, true);
+    await v2("browser_assert", {expect:{url:{includes:url}}});
+    const blocked = await call("V2", {script:"() => 1",controlTimeoutMs:0}, "browser_eval");
+    assert.ok(blocked.isError);
+    checkpoint("native floating controls round trip");
+    const floatingButton = async (action: string) => {
+      let point: {x:number;y:number} | undefined;
+      for (let attempt=0; attempt<20 && !point; attempt++) {
+        point = await v2wc.executeJavaScriptInIsolatedWorld(1002, [{code:`(() => { const button=globalThis.__nautiloPresence?.root.querySelector('[data-action="${action}"]'); if(!button || button.hidden)return null; const r=button.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`}]);
+        if (!point) await new Promise(resolve => setTimeout(resolve, 30));
+      }
+      assert.ok(point, "Floating control missing: " + action);
+      await browserCommand(v2wc, "Input.dispatchMouseEvent", {type:"mousePressed", ...point, button:"left", clickCount:1});
+      await browserCommand(v2wc, "Input.dispatchMouseEvent", {type:"mouseReleased", ...point, button:"left", clickCount:1});
+      await new Promise(resolve => setTimeout(resolve, 60));
+    };
+    await floatingButton("resume");
+    assert.equal((await panel("V2", "state")).manual, false, "Floating Resume must return real agent control");
+    await new Promise(resolve=>setTimeout(resolve,40));
+    assert.equal(await v2wc.executeJavaScriptInIsolatedWorld(1002,[{code:"globalThis.__nautiloPresence.host.dataset.mode"}]),"ready","Idle permission must not be displayed as active browser work");
+    const stopWait=call("V2",{expect:{url:{includes:"waiting-for-stop"}},timeoutMs:5000},"browser_wait");
+    await new Promise(resolve=>setTimeout(resolve,40));
+    await floatingButton("stop");
+    assert.equal((await stopWait).structuredContent.status,"paused");
+    assert.equal((await panel("V2", "state")).ownership, "stopped");
+    await floatingButton("resume");
+    assert.equal((await panel("V2", "state")).manual, false);
+    const beforePopup = await v2("browser_run", {steps:[{id:"popup",action:"click",target:{role:"link",name:"Discuss"},expect:{popup:true,url:{includes:"comments"}},follow:"new_tab"},{id:"follow",action:"assert",expect:{selector:{css:"body",state:"visible"}}}],snapshot:false});
+    assert.equal(beforePopup.popups.length, 1);
+    assert.notEqual(beforePopup.tab_id, v2id);
+    assert.equal(beforePopup.tab_id, beforePopup.popups[0].tab_id);
+    assert.match(beforePopup.url, /comments/);
+    assert.equal((await call("B", {tab_id:beforePopup.tab_id,script:"() => document.title"}, "browser_eval")).isError, true);
+
+    checkpoint("finish protects user-created and edited tabs");
+    const userCreated = (await panel("V2", "new")).tabId;
+    await panel("V2", "control", {tabId:userCreated,manual:false});
+    const userClose = await call("V2", {action:"close",tabId:userCreated}, "browser_tabs");
+    assert.equal(userClose.structuredContent.error.code, "TAB_OWNERSHIP");
+    const expendable = (await v2("browser_tabs", {action:"new"})).tabId;
+    const finished = await v2("browser_session", {action:"finish",keep:[beforePopup.tab_id]});
+    assert.ok(finished.tabs.some((tab: {id:string}) => tab.id === userCreated));
+    assert.ok(finished.tabs.some((tab: {id:string}) => tab.id === beforePopup.tab_id));
+    assert.ok(finished.tabs.some((tab: {id:string}) => tab.id === v2id), "A tab edited by the user remains protected after returning control");
+    assert.ok(finished.closed.includes(expendable));
+    browser.release("V2");
+    checkpoint("renderer watchdog ownership policy");
+    await run("Health", [{action:"open",url}]);
+    const healthPage = browser["groups"].get("Health")!.tabs.values().next().value!.view.webContents;
+    const originalSend = healthPage.debugger.sendCommand.bind(healthPage.debugger);
+    let failedProbes = 0;
+    healthPage.debugger.sendCommand = ((method: string, params: any) => method === "Runtime.evaluate" && params.expression === "1" && failedProbes++ < 2
+      ? Promise.reject(new Error("Fixture unresponsive probe")) : originalSend(method, params)) as typeof healthPage.debugger.sendCommand;
+    let reloads = 0;
+    const observeReload = () => reloads++;
+    healthPage.on("did-start-loading", observeReload);
+    const protectedHealth = await recoverBrowserRenderer(healthPage, () => false, () => {});
+    assert.equal(protectedHealth?.recovered, false);
+    assert.equal(reloads, 0, "User/edited pages must never be reloaded by the watchdog");
+    failedProbes = 0;
+    const recoveredHealth = await recoverBrowserRenderer(healthPage, () => true, () => {});
+    assert.equal(recoveredHealth?.recovered, true);
+    assert.equal(reloads, 1, "Recover an agent page exactly once without replaying actions");
+    healthPage.debugger.sendCommand = originalSend;
+    browser.release("Health");
+    await panel("A", "select", {tabId:first});
     checkpoint("batch performance");
     const single: number[] = [],
       batch: number[] = [],
@@ -1089,3 +1193,5 @@ void app
     writeFileSync(join(dir, "error.txt"), error.stack || String(error));
     app.exit(1);
   });
+
+process.on("uncaughtException",error=>{require("node:fs").writeFileSync(require("node:path").join(__dirname,"error.txt"),error.stack??String(error));app.exit(1);});

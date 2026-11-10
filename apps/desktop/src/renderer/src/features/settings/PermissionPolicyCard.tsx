@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -8,6 +8,12 @@ import {
   Play,
   Plus,
   Save,
+  Search,
+  Pencil,
+  Folder,
+  X,
+  MoreHorizontal,
+  Check,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -26,7 +32,8 @@ import { requestCore } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
 import { cn, newId } from "../../lib/utils";
 import { toast } from "../../stores/toast";
-import { EmptyHint, SectionHeader } from "./parts";
+import { EmptyHint } from "./parts";
+import "./permission-policy.css";
 
 type RuleSource = "agent" | "verification" | "system";
 
@@ -93,7 +100,11 @@ function evaluateLocally(
 
 /** Real Core-backed permission policy management surface. */
 export function PermissionPolicyCard(): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const zh = locale === "zh-CN";
+  const [query, setQuery] = useState("");
+  const [activeSection, setActiveSection] = useState("rules");
+  const surface = useRef<HTMLElement>(null);
   const [policies, setPolicies] = useState<PermissionPolicy[]>([]);
   const [draft, setDraft] = useState<PermissionPolicy | undefined>();
   const [loading, setLoading] = useState(true);
@@ -103,6 +114,9 @@ export function PermissionPolicyCard(): JSX.Element {
   const [testSource, setTestSource] = useState<RuleSource>("agent");
   const [testResult, setTestResult] = useState<EvaluationResult | undefined>();
   const [testing, setTesting] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [newPath, setNewPath] = useState("");
+  const pathInput = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (selectId?: string): Promise<void> => {
     setLoading(true);
@@ -268,391 +282,41 @@ export function PermissionPolicyCard(): JSX.Element {
       ? [...policies, draft]
       : policies;
 
-  return (
-    <section
-      className="settings-detail-card bg-card lg:col-span-2"
-      aria-busy={loading}
-    >
-      <div className="py-1">
-        <SectionHeader
-          icon={ShieldCheck}
-          title={t("settings.policy.title")}
-          description={t("settings.policy.desc")}
-          actions={
-            <Button
-              size="sm"
-              variant="subtle"
-              disabled={saving}
-              onClick={() => setDraft(blankPolicy())}
-            >
-              <Plus className="h-3.5 w-3.5" aria-hidden />
-              {t("settings.policy.newPolicy")}
-            </Button>
-          }
-        />
+  const policyName = (policy: PermissionPolicy): string => zh && policy.id === "default" && policy.name === "Default local safety policy" ? "默认安全策略" : policy.name || t("settings.policy.untitled");
+  const addPath = (): void => {
+    const value = newPath.trim();
+    if (!draft || !value) return;
+    if (!draft.allowedPaths.includes(value)) patch({ allowedPaths: [...draft.allowedPaths, value] });
+    setNewPath("");
+  };
 
-        <div className="mt-6 space-y-6">
-          <Field label={t("settings.policy.listTitle")}>
-            <SelectField
-              aria-label={t("settings.policy.listTitle")}
-              value={draft?.id ?? ""}
-              disabled={loading || saving}
-              options={listedPolicies.map((policy) => ({
-                value: policy.id,
-                label:
-                  (policy.name || t("settings.policy.untitled")) +
-                  (policy.id === "default"
-                    ? ` · ${t("settings.policy.defaultBadge")}`
-                    : ""),
-              }))}
-              onValueChange={(id) => {
-                const selected = listedPolicies.find(
-                  (policy) => policy.id === id,
-                );
-                if (selected) setDraft(structuredClone(selected));
-              }}
-            />
-          </Field>
-          {listedPolicies.length === 0 && !loading && (
-            <EmptyHint>{t("common.none")}</EmptyHint>
-          )}
-
-          {draft && (
-            <fieldset disabled={saving} className="min-w-0 space-y-4">
-              <div>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <Field
-                    label={t("settings.policy.nameLabel")}
-                    htmlFor="policy-name"
-                  >
-                    <Input
-                      id="policy-name"
-                      value={draft.name}
-                      onChange={(event) => patch({ name: event.target.value })}
-                      placeholder={t("settings.policy.namePlaceholder")}
-                    />
-                  </Field>
-                  <Field label={t("settings.policy.defaultAction")}>
-                    <SelectField
-                      aria-label={t("settings.policy.defaultAction")}
-                      value={draft.defaultCommandAction}
-                      onValueChange={(value) =>
-                        patch({
-                          defaultCommandAction: value as CommandPolicyAction,
-                        })
-                      }
-                      options={ACTIONS.map((action) => ({
-                        value: action,
-                        label: actionLabel(action),
-                      }))}
-                    />
-                  </Field>
-                </div>
-
-                <div className="mt-4 border-t border-line pt-4">
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <div>
-                      <h3 className="flex items-center gap-2 text-sm font-medium text-ink">
-                        {t("settings.policy.rulesTitle")}
-                        <Tooltip content={t("settings.policy.rulesHint")}>
-                          <button
-                            type="button"
-                            aria-label={t("settings.policy.rulesHint")}
-                            className="rounded text-ink-3 outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                          >
-                            <HelpCircle className="h-3.5 w-3.5" aria-hidden />
-                          </button>
-                        </Tooltip>
-                      </h3>
-                    </div>
-                    <Button variant="subtle" size="sm" onClick={addRule}>
-                      <Plus className="h-3.5 w-3.5" aria-hidden />
-                      {t("settings.policy.addRule")}
-                    </Button>
-                  </div>
-                  <div className="divide-y divide-line">
-                    {draft.commandRules.map((rule, index) => (
-                      <div key={rule.id} className="py-4">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className="flex h-9 w-5 shrink-0 items-center justify-center font-mono text-xs text-ink-3"
-                            aria-hidden
-                          >
-                            {index + 1}
-                          </span>
-                          <div className="w-32 shrink-0">
-                            <SelectField
-                              aria-label={t("settings.policy.defaultAction")}
-                              value={rule.action}
-                              onValueChange={(value) =>
-                                patchRule(index, {
-                                  action: value as CommandPolicyAction,
-                                })
-                              }
-                              options={ACTIONS.map((action) => ({
-                                value: action,
-                                label: actionLabel(action),
-                              }))}
-                            />
-                          </div>
-                          <div className="w-40 shrink-0">
-                            <Input
-                              aria-label={t(
-                                "settings.policy.ruleExecutablePlaceholder",
-                              )}
-                              value={rule.executable ?? ""}
-                              onChange={(event) =>
-                                patchRule(index, {
-                                  executable:
-                                    event.target.value.trim() || undefined,
-                                })
-                              }
-                              placeholder={t(
-                                "settings.policy.ruleExecutablePlaceholder",
-                              )}
-                              className="font-mono text-[13px]"
-                            />
-                          </div>
-                          <Input
-                            aria-label={t(
-                              "settings.policy.ruleArgsPrefixPlaceholder",
-                            )}
-                            value={rule.argsPrefix?.join(", ") ?? ""}
-                            onChange={(event) => {
-                              const argsPrefix = event.target.value
-                                .split(",")
-                                .map((value) => value.trim())
-                                .filter(Boolean);
-                              patchRule(index, {
-                                argsPrefix: argsPrefix.length
-                                  ? argsPrefix
-                                  : undefined,
-                              });
-                            }}
-                            placeholder={t(
-                              "settings.policy.ruleArgsPrefixPlaceholder",
-                            )}
-                            className="min-w-40 flex-1 font-mono text-[13px]"
-                          />
-                          <div className="flex items-center gap-0.5">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              aria-label={t("settings.policy.moveUp")}
-                              disabled={index === 0}
-                              onClick={() => moveRule(index, -1)}
-                            >
-                              <ArrowUp className="h-4 w-4" aria-hidden />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              aria-label={t("settings.policy.moveDown")}
-                              disabled={index === draft.commandRules.length - 1}
-                              onClick={() => moveRule(index, 1)}
-                            >
-                              <ArrowDown className="h-4 w-4" aria-hidden />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              aria-label={t("common.remove")}
-                              onClick={() => removeRule(index)}
-                            >
-                              <Trash2
-                                className="h-4 w-4 text-ink-3"
-                                aria-hidden
-                              />
-                            </Button>
-                          </div>
-                        </div>
-                        <details className="group/rule mt-2 pl-7">
-                          <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded py-1 text-xs text-ink-3 outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
-                            <ChevronDown
-                              className="h-3.5 w-3.5 transition-transform group-open/rule:rotate-180"
-                              aria-hidden
-                            />
-                            {t("settings.policy.testerSource")} ·{" "}
-                            {t("settings.policy.ruleDescriptionPlaceholder")}
-                          </summary>
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <div
-                              className="flex items-center gap-1.5"
-                              role="group"
-                              aria-label={t("settings.policy.testerSource")}
-                            >
-                              {SOURCES.map((source) => {
-                                const active =
-                                  rule.sources?.includes(source) ?? false;
-                                return (
-                                  <button
-                                    key={source}
-                                    type="button"
-                                    aria-pressed={active}
-                                    onClick={() =>
-                                      toggleRuleSource(index, source)
-                                    }
-                                    className={cn(
-                                      "h-7 rounded-lg border px-2.5 text-xs font-medium transition-colors duration-150 outline-none",
-                                      "focus-visible:ring-2 focus-visible:ring-accent/70",
-                                      active
-                                        ? "border-line-strong bg-card-hover text-ink"
-                                        : "border-line bg-card text-ink-3 hover:border-line-strong hover:text-ink-2",
-                                    )}
-                                  >
-                                    {sourceLabel(source)}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                            <Input
-                              aria-label={t(
-                                "settings.policy.ruleDescriptionPlaceholder",
-                              )}
-                              value={rule.description ?? ""}
-                              onChange={(event) =>
-                                patchRule(index, {
-                                  description: event.target.value || undefined,
-                                })
-                              }
-                              placeholder={t(
-                                "settings.policy.ruleDescriptionPlaceholder",
-                              )}
-                              className="min-w-48 flex-1 text-[13px]"
-                            />
-                          </div>
-                        </details>
-                      </div>
-                    ))}
-                    {draft.commandRules.length === 0 && (
-                      <EmptyHint>{t("common.none")}</EmptyHint>
-                    )}
-                  </div>
-                </div>
-
-                <div className="mt-4 grid grid-cols-1 gap-4 border-t border-line pt-4 sm:grid-cols-2">
-                  <Field label={t("settings.policy.envAllowlist")}>
-                    <TagInput
-                      aria-label={t("settings.policy.envAllowlist")}
-                      values={draft.environmentAllowlist}
-                      onChange={(environmentAllowlist) =>
-                        patch({ environmentAllowlist })
-                      }
-                      placeholder={t("settings.policy.envAllowlistPlaceholder")}
-                    />
-                  </Field>
-                  <Field label={t("settings.policy.allowedPaths")}>
-                    <TagInput
-                      aria-label={t("settings.policy.allowedPaths")}
-                      values={draft.allowedPaths}
-                      onChange={(allowedPaths) => patch({ allowedPaths })}
-                      placeholder={t("settings.policy.allowedPathsPlaceholder")}
-                    />
-                  </Field>
-                </div>
-              </div>
-
-              <section
-                className="border-t border-line pt-5"
-                aria-label={t("settings.policy.testerTitle")}
-              >
-                <h3 className="mb-3 text-sm font-medium text-ink">
-                  {t("settings.policy.testerTitle")}
-                </h3>
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="w-44 shrink-0">
-                    <Input
-                      aria-label={t("settings.policy.testerCommandPlaceholder")}
-                      value={testCommand}
-                      onChange={(event) => setTestCommand(event.target.value)}
-                      placeholder={t(
-                        "settings.policy.testerCommandPlaceholder",
-                      )}
-                      className="font-mono text-[13px]"
-                    />
-                  </div>
-                  <Input
-                    aria-label={t("settings.policy.testerArgsPlaceholder")}
-                    value={testArgs}
-                    onChange={(event) => setTestArgs(event.target.value)}
-                    placeholder={t("settings.policy.testerArgsPlaceholder")}
-                    className="min-w-48 flex-1 font-mono text-[13px]"
-                  />
-                  <div className="w-32 shrink-0">
-                    <SelectField
-                      aria-label={t("settings.policy.testerSource")}
-                      value={testSource}
-                      onValueChange={(value) =>
-                        setTestSource(value as RuleSource)
-                      }
-                      options={SOURCES.map((source) => ({
-                        value: source,
-                        label: sourceLabel(source),
-                      }))}
-                    />
-                  </div>
-                  <Button
-                    size="sm"
-                    onClick={() => void runTest()}
-                    disabled={testing || !testCommand.trim()}
-                  >
-                    {testing ? (
-                      <Loader2
-                        className="h-3.5 w-3.5 motion-safe:animate-spin"
-                        aria-hidden
-                      />
-                    ) : (
-                      <Play className="h-3.5 w-3.5" aria-hidden />
-                    )}
-                    {t("settings.policy.testerRun")}
-                  </Button>
-                </div>
-                <div className="mt-3">
-                  {testResult ? (
-                    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-card px-3 py-2">
-                      <StatusChip
-                        tone={ACTION_TONE[testResult.action]}
-                        label={actionLabel(testResult.action)}
-                      />
-                      <span className="text-xs text-ink-3">
-                        {testResult.reason}
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="sr-only">
-                      {t("settings.policy.testerEmpty")}
-                    </span>
-                  )}
-                </div>
-              </section>
-              <div className="mt-4 flex items-center justify-end gap-3 border-t border-line pt-4">
-                {unsaved && (
-                  <StatusChip
-                    tone="warn"
-                    label={t("settings.policy.dirtyBadge")}
-                  />
-                )}
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => void save()}
-                  disabled={saving}
-                >
-                  {saving ? (
-                    <Loader2
-                      className="h-3.5 w-3.5 motion-safe:animate-spin"
-                      aria-hidden
-                    />
-                  ) : (
-                    <Save className="h-3.5 w-3.5" aria-hidden />
-                  )}
-                  {t("settings.policy.save")}
-                </Button>
-              </div>
-            </fieldset>
-          )}
+  const jump = (section: string): void => { setActiveSection(section); surface.current?.querySelector(`[data-policy-section="${section}"]`)?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth", block: "nearest" }); };
+  return <section className="policy-workspace" ref={surface} aria-busy={loading} data-design-frame="wKIWyUaqck">
+    <header className="policy-page-heading"><h2>{zh ? "权限与安全" : "Permissions & safety"}</h2><Button size="sm" disabled={saving} onClick={() => setDraft(blankPolicy())}><Plus size={14}/>{t("settings.policy.newPolicy")}</Button></header>
+    <div className="policy-layout">
+      <aside className="policy-navigation"><label className="policy-search"><Search size={15}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder={zh ? "搜索策略" : "Search policies"} aria-label={zh ? "搜索策略" : "Search policies"}/></label>
+        <div className="policy-list">{listedPolicies.filter(policy => `${policyName(policy)} ${policy.name}`.toLowerCase().includes(query.toLowerCase())).map(policy => <button type="button" key={policy.id} className="policy-list-item" aria-current={draft?.id === policy.id ? "true" : undefined} disabled={saving} onClick={() => { setDraft(structuredClone(policy)); setActiveSection("rules"); setEditingName(false); }}><span><strong>{policyName(policy)}</strong>{policy.id === "default" && <span className="policy-badge">{t("settings.policy.defaultBadge")}</span>}</span><small>{policy.commandRules.length} {zh ? "条命令规则" : "command rules"}</small></button>)}</div>
+        {loading && <Loader2 size={17} className="animate-spin"/>}
+      </aside>
+      {draft ? <fieldset disabled={saving} className="policy-editor">
+        <header className="policy-editor-heading"><div className="policy-title">{editingName ? <Input autoFocus value={draft.name} aria-label={t("settings.policy.nameLabel")} placeholder={t("settings.policy.namePlaceholder")} onChange={event => patch({ name: event.target.value })} onBlur={() => setEditingName(false)} onKeyDown={event => { if (event.key === "Enter") setEditingName(false); }}/> : <button type="button" title={zh ? "编辑策略名称" : "Edit policy name"} onClick={() => setEditingName(true)}><h3>{policyName(draft)}</h3></button>}{draft.id === "default" && <span className="policy-badge"><ShieldCheck size={11}/>{t("settings.policy.defaultBadge")}</span>}</div><details className="policy-heading-options"><summary aria-label={zh ? "策略选项" : "Policy options"}><MoreHorizontal size={17}/></summary><div><label>{zh ? "默认动作" : "Default action"}<SelectField value={draft.defaultCommandAction} aria-label={t("settings.policy.defaultAction")} onValueChange={value => patch({ defaultCommandAction: value as CommandPolicyAction })} options={ACTIONS.map(action => ({ value: action, label: actionLabel(action) }))}/></label></div></details></header>
+        <nav className="policy-section-tabs" aria-label={zh ? "策略内容" : "Policy sections"}><button type="button" aria-current={activeSection === "rules" ? "page" : undefined} onClick={() => jump("rules")}>{t("settings.policy.rulesTitle")}<span>{draft.commandRules.length}</span></button><button type="button" aria-current={activeSection === "environment" ? "page" : undefined} onClick={() => jump("environment")}>{zh ? "环境与路径" : "Environment & paths"}</button><button type="button" aria-current={activeSection === "test" ? "page" : undefined} onClick={() => jump("test")}>{t("settings.policy.testerTitle")}</button></nav>
+        <div className="policy-editor-body">
+          <section data-policy-section="rules"><div className="policy-section-heading"><div><h3>{t("settings.policy.rulesTitle")}</h3><Tooltip content={t("settings.policy.rulesHint")}><button type="button" aria-label={t("settings.policy.rulesHint")}><HelpCircle size={14}/></button></Tooltip></div><Button variant="subtle" size="sm" onClick={addRule}><Plus size={14}/>{t("settings.policy.addRule")}</Button></div>
+            <div className="policy-rules" role="table" aria-label={t("settings.policy.rulesTitle")}><div className="policy-rule-labels" role="row"><span/><span>{zh ? "动作" : "Action"}</span><span>{zh ? "命令" : "Command"}</span><span>{zh ? "参数" : "Arguments"}</span><span/></div>
+              {draft.commandRules.map((rule, index) => <div className="policy-rule" role="row" key={rule.id}><span className="policy-rule-number">{String(index + 1).padStart(2, "0")}</span><div data-action={rule.action}><SelectField value={rule.action} aria-label={`${zh ? "规则" : "Rule"} ${index + 1} ${zh ? "动作" : "action"}`} onValueChange={value => patchRule(index, { action: value as CommandPolicyAction })} options={ACTIONS.map(action => ({ value: action, label: actionLabel(action) }))}/></div>
+                <Input aria-label={t("settings.policy.ruleExecutablePlaceholder")} value={rule.executable ?? ""} placeholder="*" onChange={event => patchRule(index, { executable: event.target.value.trim() || undefined })}/>
+                <Input aria-label={t("settings.policy.ruleArgsPrefixPlaceholder")} value={rule.argsPrefix?.join(", ") ?? ""} placeholder="—" onChange={event => { const argsPrefix = event.target.value.split(",").map(value => value.trim()).filter(Boolean); patchRule(index, { argsPrefix: argsPrefix.length ? argsPrefix : undefined }); }}/>
+                <div className="policy-rule-actions"><button type="button" title={zh ? "编辑规则" : "Edit rule"} aria-label={zh ? "编辑规则" : "Edit rule"} onClick={event => event.currentTarget.closest(".policy-rule")?.querySelector<HTMLInputElement>("input")?.focus()}><Pencil size={13}/></button><details><summary title={zh ? "规则选项" : "Rule options"} aria-label={zh ? "规则选项" : "Rule options"}><MoreHorizontal size={15}/></summary><div className="policy-rule-options"><div className="policy-move-options"><button type="button" disabled={index === 0} onClick={() => moveRule(index, -1)}><ArrowUp size={13}/>{t("settings.policy.moveUp")}</button><button type="button" disabled={index === draft.commandRules.length - 1} onClick={() => moveRule(index, 1)}><ArrowDown size={13}/>{t("settings.policy.moveDown")}</button></div><div className="policy-source-options" role="group" aria-label={t("settings.policy.testerSource")}>{SOURCES.map(source => <button key={source} type="button" aria-pressed={rule.sources?.includes(source) ?? false} onClick={() => toggleRuleSource(index, source)}>{sourceLabel(source)}</button>)}</div><Input value={rule.description ?? ""} aria-label={t("settings.policy.ruleDescriptionPlaceholder")} placeholder={t("settings.policy.ruleDescriptionPlaceholder")} onChange={event => patchRule(index, { description: event.target.value || undefined })}/><button className="policy-delete-rule" type="button" onClick={() => removeRule(index)}><Trash2 size={13}/>{t("common.remove")}</button></div></details></div>
+              </div>)}
+              {!draft.commandRules.length && <EmptyHint>{t("common.none")}</EmptyHint>}
+            </div>
+          </section>
+          <section data-policy-section="environment" className="policy-environment"><Field label={t("settings.policy.envAllowlist")} className="policy-environment-tags"><TagInput aria-label={t("settings.policy.envAllowlist")} values={draft.environmentAllowlist} onChange={environmentAllowlist => patch({ environmentAllowlist })} placeholder={t("settings.policy.envAllowlistPlaceholder")}/></Field><div className="policy-paths"><div className="policy-path-heading"><h3>{t("settings.policy.allowedPaths")}</h3><button type="button" onClick={() => pathInput.current?.focus()}><Plus size={13}/>{zh ? "添加路径" : "Add path"}</button></div>{draft.allowedPaths.map((path, index) => <div key={index} className="policy-path-row"><Folder size={14}/><input aria-label={`${zh ? "路径" : "Path"} ${index + 1}`} value={path} onChange={event => patch({ allowedPaths: draft.allowedPaths.map((value, at) => at === index ? event.target.value : value) })}/><button type="button" aria-label={`${t("common.remove")} ${path}`} onClick={() => patch({ allowedPaths: draft.allowedPaths.filter((_, at) => at !== index) })}><X size={13}/></button></div>)}<input ref={pathInput} className="policy-add-path" value={newPath} aria-label={zh ? "添加允许访问路径" : "Add allowed path"} placeholder={t("settings.policy.allowedPathsPlaceholder")} onChange={event => setNewPath(event.target.value)} onBlur={addPath} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); addPath(); } }}/></div></section>
+          <section data-policy-section="test" className="policy-command-test"><h3>{t("settings.policy.testerTitle")}</h3><div className="policy-test-fields"><Input value={testCommand} onChange={event => setTestCommand(event.target.value)} aria-label={t("settings.policy.testerCommandPlaceholder")} placeholder={t("settings.policy.testerCommandPlaceholder")}/><Input value={testArgs} onChange={event => setTestArgs(event.target.value)} aria-label={t("settings.policy.testerArgsPlaceholder")} placeholder={t("settings.policy.testerArgsPlaceholder")}/><SelectField value={testSource} onValueChange={value => setTestSource(value as RuleSource)} options={SOURCES.map(source => ({ value: source, label: sourceLabel(source) }))} aria-label={t("settings.policy.testerSource")}/><Button size="sm" onClick={() => void runTest()} disabled={testing || !testCommand.trim()}>{testing ? <Loader2 size={13} className="animate-spin"/> : <Play size={13}/>} {t("settings.policy.testerRun")}</Button></div>{testResult && <div className="policy-test-result" role="status"><StatusChip tone={ACTION_TONE[testResult.action]} label={actionLabel(testResult.action)}/><span>{testResult.reason}</span></div>}</section>
         </div>
-      </div>
-    </section>
-  );
+        <footer className="policy-savebar"><span>{unsaved ? t("settings.policy.dirtyBadge") : <><Check size={13}/>{zh ? "已保存" : "Saved"}</>}</span><div><Button size="sm" variant="ghost" onClick={() => { if (persistedPolicy) setDraft(structuredClone(persistedPolicy)); else setDraft(blankPolicy()); }} disabled={saving || !unsaved}>{zh ? "还原更改" : "Reset changes"}</Button><Button variant="primary" size="sm" onClick={() => void save()} disabled={saving}>{saving ? <Loader2 size={13} className="animate-spin"/> : <Save size={13}/>} {t("settings.policy.save")}</Button></div></footer>
+      </fieldset> : <div className="policy-empty">{loading ? <Loader2 size={20} className="animate-spin"/> : t("common.none")}</div>}
+    </div>
+  </section>;
 }

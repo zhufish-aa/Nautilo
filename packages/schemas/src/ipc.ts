@@ -104,7 +104,7 @@ export interface SourceControlHistoryPage {
 export interface SourceControlChange {
   path: string; originalPath?: string; indexStatus: string; worktreeStatus: string;
   untracked: boolean; conflict: boolean; submodule: boolean;
-  additions?: number; deletions?: number; binary?: boolean;
+  additions?: number; deletions?: number; binary?: boolean; directory?: boolean;
 }
 export interface SourceControlRepository {
   schemaVersion: 1; available: true; workingDirectory: string; rootPath: string; token: string;
@@ -119,7 +119,7 @@ export type SourceControlStatus = SourceControlRepository | { schemaVersion: 1; 
 export interface SourceControlDiff {
   path: string; source: "worktree" | "index" | "commit"; patch: string; binary: boolean; truncated: boolean; fileToken?: string; rootPath?: string;
   patchToken?: string; hunks?: SourceControlHunk[]; partialReason?: string; editable?: boolean;
-  before?: string; after?: string; previewReason?: "binary" | "large" | "encoding" | "submodule" | "conflict"; commitHash?: string;
+  before?: string; after?: string; previewReason?: "binary" | "large" | "encoding" | "submodule" | "conflict" | "directory"; commitHash?: string;
 }
 export interface SourceControlCommitFile { path: string; originalPath?: string; status: string; additions?: number; deletions?: number; binary: boolean }
 export interface SourceControlCommit {

@@ -1,5 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
+import { BrowserActivity } from "./BrowserActivity";
+import { isBrowserTool } from "../../lib/browser-display";
 import {
   AlertTriangle,
   Atom,
@@ -17,7 +19,7 @@ import {
   Pencil
 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
-import { connectionSendError } from "../../lib/session-connections";
+import { SessionErrorCard } from "./SessionErrorCard";
 import { getBridge } from "../../lib/bridge";
 import { cn, formatDateTime } from "../../lib/utils";
 import type { TimelineEvent } from "../../lib/types";
@@ -33,6 +35,7 @@ import { ToolActivityIcon } from "./ToolActivityIcon";
 import { ManagedApprovalCard } from "./ManagedApprovalCard";
 import { reasoningPreview } from "../../lib/process-display";
 import { useStreamingText } from "../../lib/streaming-text";
+import { useMessageEntrance, useSurfaceEntrance } from "../../lib/ui-motion";
 import { reconcileTimelineKeys, type TimelineKeySequence } from "../../lib/timeline-row-keys";
 import { ToolFileDiffView } from "./ToolFileDiffView";
 import { TimelineImage } from "./TimelineImage";
@@ -79,7 +82,7 @@ export function TimelineViewport({
   className?: string;
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const contentRef = useSurfaceEntrance<HTMLDivElement>(sessionKey, active);
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const previousForceFollowKeyRef = useRef(forceFollowKey);
@@ -293,6 +296,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
   const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
   const isSystem = sender === "system";
+  const entranceRef = useMessageEntrance(event.sessionId, isUser ? messageId : undefined);
   const visibleText = useStreamingText(text, Boolean(streaming), `${event.sessionId}:${event.id}`);
   if (isSystem) {
     return (
@@ -306,15 +310,13 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
     );
   }
   return (
-      <motion.div
-      initial={false}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ type: "spring", stiffness: 500, damping: 45 }}
+      <div
       className="group relative flex w-full"
     >
       <div className={cn("min-w-0 flex-1", isUser && "flex flex-col items-end")}>
         {isUser ? <span className="sr-only">{locale === "zh-CN" ? "你" : "You"}</span> : showAuthor && <div className="assistant-identity"><span className="assistant-mark"><Bot size={16} aria-hidden /></span><strong>{authorName ?? "Nautilo"}</strong></div>}
         <div
+          ref={entranceRef}
           className={cn(
             "text-[15px] leading-7 text-ink",
             isUser && "chat-bubble-user max-w-[88%] rounded-2xl bg-card-hover px-4 py-3"
@@ -397,7 +399,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
           </div>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -437,6 +439,7 @@ function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { 
   const details = Boolean(resolvedFileDiff || input || output);
   const zh = locale === "zh-CN";
   const label = toolActivityLabel(toolName, status, input, locale);
+  if (isBrowserTool(toolName)) return <BrowserActivity name={toolName} status={status} input={input} output={output} zh={zh}/>;
   return (
     <article className="text-[13px]">
       <button
@@ -803,27 +806,9 @@ function ApprovalCard({ event }: { event: TimelineEvent & { data: { kind: "appro
   return <ManagedApprovalCard approval={event.data.approval} onResolve={(approved, scope) => resolveWorkbenchApproval(event.sessionId, event.data.approval.id, approved, scope)} />;
 }
 
-function ErrorCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "error" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
-  return (
-    <CardShell
-      icon={AlertTriangle}
-      tone="danger"
-      title={
-        <span className="inline-flex items-center gap-2">
-          {t("sessions.cards.error")}
-          <code className="rounded bg-danger/10 px-1.5 py-0.5 font-mono text-[11px] text-danger">{event.data.code}</code>
-          <StatusChip tone={event.data.retryable ? "info" : "muted"} label={t(event.data.retryable ? "sessions.cards.retryable" : "sessions.cards.notRetryable")} />
-        </span>
-      }
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      <p className="rounded-xl border border-danger/25 bg-danger/5 px-3.5 py-2.5 text-[13px] break-all whitespace-pre-wrap text-ink-2">
-        {connectionSendError(event.data.message, locale === "zh-CN")}
-      </p>
-    </CardShell>
-  );
+function ErrorCard({ event, locale }: { event: TimelineEvent & { data: { kind: "error" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
+  return <SessionErrorCard event={event} locale={locale}/>;
 }
-
 function HandoffCard({ event, t, locale, onOpenSession }: { event: TimelineEvent & { data: { kind: "handoff" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string; onOpenSession?: (id: string) => void }): JSX.Element {
   return (
     <CardShell

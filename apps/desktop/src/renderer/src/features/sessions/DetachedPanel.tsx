@@ -1,5 +1,5 @@
 import { getBridge } from "../../lib/bridge";
-import { BrowserDrawer } from "./BrowserDrawer";
+import { BrowserHost } from "./BrowserHost";
 import { SourceControlDrawer } from "./SourceControlDrawer";
 import type { PanelTarget } from "../../../../shared/panel-window";
 
@@ -9,8 +9,8 @@ export default function DetachedPanel({ target }: { target: PanelTarget }) {
   };
   return (
     <main className="detached-workspace-panel">
-      {target.kind === "browser" && target.sessionId ? (
-        <BrowserDrawer sessionId={target.sessionId} onClose={close} />
+      {target.kind === "browser-spaces" || target.kind === "browser" ? (
+        <BrowserHost initialTarget={target}/>
       ) : (
         <SourceControlDrawer
           open

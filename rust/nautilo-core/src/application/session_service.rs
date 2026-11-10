@@ -440,8 +440,16 @@ impl SessionService {
             runs.steer_session(session_id, &text).await?;
             let mut message = follow_up_message(&session, &text);
             if let Some(id) = input.get("messageId").and_then(Value::as_str).filter(|id| !id.is_empty()) { message["id"] = json!(id); }
-            let db = self.db.lock().unwrap();
-            Repositories::new(&db.raw).sessions().save_message(&message)?;
+            {
+                let db = self.db.lock().unwrap();
+                Repositories::new(&db.raw).sessions().save_message(&message)?;
+            }
+            if let Some(events) = self.events.read().unwrap().clone() {
+                let _ = events.append_for_session(&session, &json!({
+                    "projectRunId": session.get("projectRunId").cloned().unwrap_or(Value::Null),
+                    "taskId": session.get("taskId").cloned().unwrap_or(Value::Null)
+                }), "session.follow_up_steered", json!({ "messageId": message["id"] }));
+            }
             return Ok(json!({ "accepted": true, "mode": "steer" }));
         }
 

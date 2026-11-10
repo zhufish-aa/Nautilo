@@ -124,6 +124,10 @@ fn parse_status(raw: &str) -> anyhow::Result<Value> {
             }
             _ => anyhow::bail!("无法识别的 Git 状态记录"),
         };
+        // Porcelain keeps a trailing slash for untracked directories (notably
+        // nested repositories), even with --untracked-files=all.
+        let directory = kind == b'?' && name.ends_with('/');
+        let name = if directory { &name[..name.len() - 1] } else { name };
         path(name)?;
         if let Some(old) = original {
             path(old)?;
@@ -131,7 +135,7 @@ fn parse_status(raw: &str) -> anyhow::Result<Value> {
         if xy.len() != 2 {
             anyhow::bail!("Git 文件状态无效");
         }
-        state["changes"].as_array_mut().unwrap().push(json!({"path":name,"originalPath":original,"indexStatus":&xy[..1],"worktreeStatus":&xy[1..],"untracked":kind==b'?',"conflict":kind==b'u',"submodule":sub.starts_with('S')}));
+        state["changes"].as_array_mut().unwrap().push(json!({"path":name,"originalPath":original,"indexStatus":&xy[..1],"worktreeStatus":&xy[1..],"untracked":kind==b'?',"conflict":kind==b'u',"submodule":sub.starts_with('S'),"directory":directory}));
     }
     Ok(state)
 }
@@ -413,6 +417,9 @@ impl SourceControl {
             args.insert(1, "--cached");
         } else if source != "worktree" {
             anyhow::bail!("未知差异来源");
+        }
+        if change["directory"] == true {
+            return Ok(json!({"rootPath":root,"path":name,"source":source,"patch":"","binary":false,"truncated":false,"editable":false,"hunks":[],"partialReason":"directory","previewReason":"directory"}));
         }
         let token = if source == "worktree" && !change["submodule"].as_bool().unwrap_or(false) {
             Some(file_token(&root, name).await?)

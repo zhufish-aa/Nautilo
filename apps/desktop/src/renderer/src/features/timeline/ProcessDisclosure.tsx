@@ -1,5 +1,6 @@
 import { useId, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
+import { useSurfaceEntrance } from "../../lib/ui-motion";
 import "./ProcessDisclosure.css";
 
 export function ProcessDisclosure({ icon, label, preview, open, onToggle, running, failed, children, className = "", retainPreview = false }: {
@@ -8,6 +9,7 @@ export function ProcessDisclosure({ icon, label, preview, open, onToggle, runnin
   retainPreview?: boolean;
 }): JSX.Element {
   const contentId = useId();
+  const bodyRef = useSurfaceEntrance<HTMLDivElement>(contentId, open);
   return <div className={`process-disclosure ${className}`} data-open={open || undefined} data-running={running || undefined} data-failed={failed || undefined}>
     <button type="button" className="process-disclosure-row" aria-expanded={open} aria-controls={contentId} onClick={onToggle}>
       <span className="process-disclosure-leading" aria-hidden>{open ? <ChevronDown size={14} className="rotate-180" /> : icon}</span>
@@ -15,6 +17,6 @@ export function ProcessDisclosure({ icon, label, preview, open, onToggle, runnin
       {(!open || retainPreview) && preview && <><span className="process-disclosure-dot" aria-hidden>·</span><span className="process-disclosure-preview" title={preview}>{preview}</span></>}
       <ChevronDown size={12} className="process-disclosure-chevron" aria-hidden />
     </button>
-    {open && <div id={contentId} className="process-disclosure-body">{children}</div>}
+    {open && <div ref={bodyRef} id={contentId} className="process-disclosure-body">{children}</div>}
   </div>;
 }

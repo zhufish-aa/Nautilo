@@ -87,6 +87,13 @@ test('porcelain v2 retains path boundaries and native conflict identity',()=>{
   const parsed=parseSourceControlStatus(['# branch.oid (initial)','# branch.head main','? 中文 name.txt','2 R. N... 100644 100644 100644 a b R100 new.txt','old\nname.txt','u UU N... 1 1 1 1 a b c conflict.txt',''].join('\0'));
   assert.equal(parsed.branch,'main');assert.equal(parsed.head,undefined);assert.equal(parsed.changes[0].untracked,true);assert.equal(parsed.changes[1].originalPath,'old\nname.txt');assert.equal(parsed.changes[2].conflict,true);
 });
+test('untracked nested repositories keep directory previews without weakening path checks',async t=>{
+  for(const path of ['../escape/','nested//','/outside/','.git/'])assert.throws(()=>parseSourceControlStatus('? '+path+'\0'),/工作目录/);
+  const parsed=parseSourceControlStatus('? doop/\0? file.txt\0');assert.equal(parsed.changes[0].path,'doop');assert.equal(parsed.changes[0].directory,true);assert.equal(parsed.changes[1].directory,false);
+  const f=fixture(t);mkdirSync(join(f.root,'nested'));git(join(f.root,'nested'),'init');f.write('nested/keep.txt','untouched');
+  const status=await f.service.status(f.root);assert.ok(status.changes.some(file=>file.path==='nested'&&file.directory));
+  const diff=await f.service.diff(f.root,{path:'nested',source:'worktree'});assert.equal(diff.previewReason,'directory');assert.equal(readFileSync(join(f.root,'nested/keep.txt'),'utf8'),'untouched');
+});
 test('commit details and diffs retain native initial commits, rename identities and immutable contents',async t=>{
   const f=fixture(t),before=Array.from({length:30},(_,line)=>`line ${line}\n`).join('');f.write('old [x] 中文.txt',before);f.write('deleted.txt','removed later\n');f.write('binary.dat',Buffer.from([0,1,2]));f.commit();
   const first=git(f.root,'rev-parse','HEAD').trim(),initial=await f.service.commitDetails(f.root,{hash:first});assert.equal(initial.files.length,3);assert.equal(initial.parents.length,0);

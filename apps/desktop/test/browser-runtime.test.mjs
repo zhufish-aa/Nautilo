@@ -12,6 +12,55 @@ import { createServer } from "node:http";
 const require = createRequire(import.meta.url);
 const desktop = fileURLToPath(new URL("..", import.meta.url));
 
+test("browser MCP contracts, files, dialogs, login import and last-window stop",{
+  timeout:95000,
+  skip:process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY,
+},async()=>{
+  const root=await mkdtemp(join(tmpdir(),"nautilo-browser-contract-")),entry=join(root,"main.cjs");
+  await createRequire(require.resolve("vite/package.json"))("esbuild").build({entryPoints:[join(desktop,"test/helpers/browser-contract-fixture.ts")],outfile:entry,bundle:true,platform:"node",format:"cjs",external:["electron"],logLevel:"silent"});
+  const env={...process.env,APPDATA:root,LOCALAPPDATA:root};delete env.ELECTRON_RUN_AS_NODE;
+  try {await promisify(execFile)(require("electron"),["--user-data-dir="+root,"--disable-breakpad","--disable-background-networking",entry],{env,windowsHide:true,timeout:90000});}
+  catch(error){throw Error(await readFile(join(root,"contract-error.txt"),"utf8").catch(()=>String(error)));}
+  const report=JSON.parse(await readFile(join(root,"contract-results.json"),"utf8"));
+  const schema=JSON.parse(await readFile(new URL("../../../docs/browser/schemas/receipt-v2.schema.json",import.meta.url),"utf8"));
+  function validate(value,spec,path="$") {
+    if(spec.$ref)return validate(value,spec.$ref.split("/").slice(1).reduce((item,key)=>item[key],schema),path);
+    if(spec.const !== undefined)assert.deepEqual(value,spec.const,path);
+    if(spec.enum)assert.ok(spec.enum.includes(value),path);
+    if(spec.type === "object") {
+      assert.ok(value && typeof value === "object" && !Array.isArray(value),path);
+      for(const key of spec.required ?? [])assert.ok(Object.hasOwn(value,key),path+" requires "+key);
+      for(const [key,item] of Object.entries(value)){if(spec.additionalProperties === false)assert.ok(Object.hasOwn(spec.properties,key),path+" unknown "+key);if(spec.properties?.[key])validate(item,spec.properties[key],path+"."+key);}
+    }
+    if(spec.type === "array"){assert.ok(Array.isArray(value),path);value.forEach((item,index)=>validate(item,spec.items,path+"["+index+"]"));}
+    if(spec.type === "integer")assert.ok(Number.isInteger(value),path);
+    if(spec.type === "string"){assert.equal(typeof value,"string",path);if(spec.pattern)assert.match(value,new RegExp(spec.pattern),path);}
+    if(spec.type === "boolean")assert.equal(typeof value,"boolean",path);
+    if(spec.minimum !== undefined)assert.ok(value>=spec.minimum,path);
+  }
+  validate(report.strict,schema);validate(report.strictFailure,schema);
+});
+
+test("one browser host preserves independent tabs and restores through the overview", {
+  timeout:65000,
+  skip:process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(),"nautilo-browser-spaces-"));
+  const entry = join(root,"main.cjs");
+  await createRequire(require.resolve("vite/package.json"))("esbuild").build({entryPoints:[join(desktop,"test/helpers/browser-spaces-fixture.ts")],outfile:entry,bundle:true,platform:"node",format:"cjs",external:["electron"],logLevel:"silent"});
+  await writeFile(join(root,"preload.cjs"),'const {contextBridge,ipcRenderer}=require("electron");contextBridge.exposeInMainWorld("fixture",{panel:(...a)=>ipcRenderer.invoke("browser:panel",...a),spaces:(...a)=>ipcRenderer.invoke("browser:spaces",...a),open:(...a)=>ipcRenderer.invoke("panels:open",...a)});');
+  const server = createServer((req,res) => res.writeHead(200,{"content-type":"text/html"}).end('<title>'+req.url+'</title><label>Query<input></label><p>Window '+req.url+'</p>'));
+  await new Promise(resolve => server.listen(0,"127.0.0.1",resolve));
+  const env = {...process.env,APPDATA:root,LOCALAPPDATA:root,NAUTILO_SPACES_SITE:"http://127.0.0.1:"+server.address().port};
+  delete env.ELECTRON_RUN_AS_NODE;
+  try {
+    for (const phase of ["write","restore"]) {
+      try { await promisify(execFile)(require("electron"),["--user-data-dir="+root,"--disable-breakpad","--disable-background-networking",entry],{env:{...env,NAUTILO_SPACES_PHASE:phase},windowsHide:true,timeout:28000}); }
+      catch (error) { throw Error(phase+" — "+await readFile(join(root,"spaces-phase.txt"),"utf8").catch(()=>"startup")+" — "+await readFile(join(root,"spaces-error.txt"),"utf8").catch(()=>String(error))); }
+    }
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test(
   "embedded browser preserves tabs, reads live content, drives pages and moves between windows",
   {

@@ -33,13 +33,21 @@ if (configuredUserDataPath) {
 const appIcon = app.isPackaged
   ? join(process.resourcesPath, "app", "resources", "nautilo-icon.png")
   : join(__dirname, "../../resources/nautilo-icon-512.png");
-const coreDaemon = new CoreDaemonClient((stepId,text)=>workspaceAssistant.receiveText(stepId,text));
 const taskBrowser = new TaskBrowser();
+taskBrowser.trackRuns(true);
+const coreDaemon = new CoreDaemonClient((stepId,text)=>workspaceAssistant.receiveText(stepId,text),update=>taskBrowser.observeRun(update));
 const requestForAssistant: CoreRequest = (method, input) => coreDaemon.request({method,input}) as Promise<import("@agenthub/schemas").IpcRequestMap[typeof method]["output"]>;
 const workspaceAssistant = new WorkspaceAssistant(requestForAssistant, sessionId => {
   if (workbenchWindow && !workbenchWindow.isDestroyed()) workbenchWindow.webContents.send("assistant:changed",sessionId);
 },draft=>{if(workbenchWindow&&!workbenchWindow.isDestroyed())workbenchWindow.webContents.send("assistant:output",draft);});
 let closeSessionPanels: ((id:string)=>void) | undefined;
+let cycleBrowserWindows: (() => void) | undefined;
+taskBrowser.setSessionCatalog(async () => {
+  const projects = await coreDaemon.request({ method: "project.list" }) as Array<{id:string}>;
+  const results = await Promise.allSettled(projects.map(project => coreDaemon.request({method:"session.list",input:{projectId:project.id}})));
+  return results.flatMap(result => result.status === "fulfilled" && Array.isArray(result.value)
+    ? result.value.map((row: {id:string;title:string;status?:string}) => ({id:row.id,title:row.title,status:row.status})) : []);
+});
 registerArtifactScheme();
 
 /** Strict CSP for the packaged app; dev mode keeps Vite HMR working instead. */
@@ -129,7 +137,12 @@ function registerIpcHandlers(): void {
     importClipboardAttachment(app.getPath("userData"), input)
   );
 
-  closeSessionPanels = registerPanelWindows(() => workbenchWindow, createPanelWindow, loadWorkbenchRenderer);
+  const panelWindows = registerPanelWindows(() => workbenchWindow, createPanelWindow, loadWorkbenchRenderer,
+    (win,target,userInitiated) => taskBrowser.selectBrowserSpace(win,target.sessionId,userInitiated));
+  closeSessionPanels = panelWindows;
+  cycleBrowserWindows = panelWindows.cycle;
+  taskBrowser.setWindowCycle(panelWindows.cycle);
+  taskBrowser.setWindowOpener(id => panelWindows.open({kind:"browser",sessionId:id}));
   registerInteractionHandlers();
   registerProviderUpdateHandlers();
   registerAccountLoginHandlers();
@@ -151,16 +164,29 @@ function loadWorkbenchRenderer(win:BrowserWindow) {
 }
 
 function createPanelWindow(target:PanelTarget) {
+  const browser = target.kind === "browser" || target.kind === "browser-spaces";
   const win = new BrowserWindow({
-    width: target.kind === "browser" ? 1040 : 1220, height:780, minWidth:420, minHeight:320,
-    show:false, autoHideMenuBar:true, icon:appIcon, title:target.kind === "browser" ? "Nautilo · Browser" : "Nautilo · Git",
+    width: target.kind === "browser-spaces" ? 1480 : 1220, height:target.kind === "browser-spaces" ? 920 : 820, minWidth:500, minHeight:360,
+    frame: !browser, backgroundColor: browser ? "#eef3f8" : undefined,
+    show:false, autoHideMenuBar:true, icon:appIcon, title:browser ? "Nautilo · 浏览器" : "Nautilo · Git",
     webPreferences:{preload:join(__dirname,"../preload/index.js"),sandbox:true,contextIsolation:true,
       nodeIntegration:false,webSecurity:true,spellcheck:false,
       additionalArguments:["--nautilo-panel="+encodeURIComponent(JSON.stringify(target))]},
   });
   win.webContents.setWindowOpenHandler(()=>({action:"deny"}));
   win.webContents.on("will-navigate",event=>event.preventDefault());
-  if (target.kind === "browser") taskBrowser.attachPanelWindow(target.sessionId!,win);
+  if (browser) {
+    win.webContents.on("page-title-updated", event => event.preventDefault());
+    win.on("maximize", () => win.webContents.send("window:maximized-changed", true));
+    win.on("unmaximize", () => win.webContents.send("window:maximized-changed", false));
+    win.webContents.on("before-input-event", (event, input) => {
+      if (input.type === "keyDown" && input.alt && input.key.toLowerCase() === "s") {
+        event.preventDefault();
+        if (!input.isAutoRepeat) cycleBrowserWindows?.();
+      }
+    });
+  }
+  if (browser) taskBrowser.attachBrowserHost(win);
   return win;
 }
 

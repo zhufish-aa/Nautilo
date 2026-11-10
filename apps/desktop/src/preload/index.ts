@@ -41,6 +41,13 @@ const bridge = {
     context:panelContext,
     open:(target:import("../shared/panel-window").PanelTarget,focusOnly=false)=>ipcRenderer.invoke("panels:open",target,focusOnly),
     dock:()=>ipcRenderer.invoke("panels:dock"),
+    cycle:()=>ipcRenderer.invoke("panels:cycle"),
+    current:()=>ipcRenderer.invoke("panels:current"),
+    onBrowserTarget:(cb:(target:import("../shared/panel-window").PanelTarget)=>void)=>{
+      const listener=(_event:Electron.IpcRendererEvent,target:import("../shared/panel-window").PanelTarget)=>cb(target);
+      ipcRenderer.on("panels:browser-target",listener);
+      return ()=>{ipcRenderer.removeListener("panels:browser-target",listener);};
+    },
     onDock:(cb:(target:import("../shared/panel-window").PanelTarget)=>void)=>{
       const listener=(_event:Electron.IpcRendererEvent,target:import("../shared/panel-window").PanelTarget)=>cb(target);
       ipcRenderer.on("panels:docked",listener);
@@ -123,6 +130,8 @@ const bridge = {
     }
   },
   browser: {
+    profile: (command:"inspect"|"import"|"login",input:import("../shared/browser-profile").BrowserProfileInput) => ipcRenderer.invoke("browser:profile",command,input),
+    spaces: (command: "list" | "create" | "rename", input?: import("../shared/browser-spaces").BrowserSpacesInput) => ipcRenderer.invoke("browser:spaces", command, input),
     panel: (sessionId: string, command: string, value?: unknown) => ipcRenderer.invoke("browser:panel",sessionId,command,value)
   },
   core: {

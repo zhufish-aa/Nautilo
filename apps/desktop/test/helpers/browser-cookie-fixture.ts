@@ -50,3 +50,5 @@ void app
     );
     app.exit(1);
   });
+
+process.on("uncaughtException",error=>{require("node:fs").writeFileSync(require("node:path").join(__dirname,"cookie-error.txt"),error.stack??String(error));app.exit(1);});

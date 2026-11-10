@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nautilo.dev/schemas/receipt.schema.json",
+  "title": "Nautilo Receipt / Response",
+  "description": "动作回执与统一响应外壳。verified=false 表示仅派发成功，不代表状态达成。",
+  "oneOf": [{ "$ref": "#/$defs/ok" }, { "$ref": "#/$defs/failed" }, { "$ref": "#/$defs/paused" }],
+  "$defs": {
+    "popup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tab_id", "url"],
+      "properties": {
+        "tab_id": { "type": "string" },
+        "label": { "type": "string" },
+        "url": { "type": "string" }
+      }
+    },
+    "dialog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["alert", "confirm", "prompt", "beforeunload"] },
+        "message": { "type": "string" },
+        "default_value": { "type": "string" }
+      }
+    },
+    "observed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "popups": { "type": "array", "items": { "$ref": "#/$defs/popup" } },
+        "dialogs": { "type": "array", "items": { "$ref": "#/$defs/dialog" } },
+        "navigation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "from": { "type": "string" }, "to": { "type": "string" } }
+        }
+      }
+    },
+    "stepResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "status"],
+      "properties": {
+        "step": { "type": "integer", "minimum": 1 },
+        "id": { "type": "string" },
+        "status": { "enum": ["completed", "skipped", "failed"] },
+        "dispatched": { "type": "object" },
+        "observed": { "$ref": "#/$defs/observed" },
+        "ref_rebound": { "type": "boolean" },
+        "url_after": { "type": "string" },
+        "document_changed": { "type": "boolean" }
+      }
+    },
+    "ok": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "status", "steps"],
+      "properties": {
+        "ok": { "const": true },
+        "status": { "const": "completed" },
+        "verified": { "type": "boolean", "description": "是否经过 expect 验证" },
+        "steps": { "type": "array", "items": { "$ref": "#/$defs/stepResult" } },
+        "popups": { "type": "array", "items": { "$ref": "#/$defs/popup" } },
+        "tab_id": { "type": "string" },
+        "current_tab_id": { "type": "string" },
+        "view_id": { "type": "string" },
+        "url": { "type": "string" },
+        "title": { "type": "string" },
+        "control": { "$ref": "#/$defs/control" }
+      }
+    },
+    "failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "status", "failed_step", "error"],
+      "properties": {
+        "ok": { "const": false },
+        "status": { "const": "failed" },
+        "failed_step": { "type": "integer", "minimum": 1 },
+        "executed_steps": { "type": "array", "items": { "type": "integer" } },
+        "remaining_steps": { "type": "array", "items": { "type": "integer" } },
+        "steps": { "type": "array", "items": { "$ref": "#/$defs/stepResult" } },
+        "error": { "$ref": "#/$defs/error" },
+        "view_id": { "type": "string" },
+        "snapshot": { "type": "string", "description": "紧凑 refs 片段" },
+        "tab_id": { "type": "string" },
+        "control": { "$ref": "#/$defs/control" }
+      }
+    },
+    "paused": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "status", "failed_step", "error"],
+      "properties": {
+        "ok": { "const": false },
+        "status": { "const": "paused" },
+        "failed_step": { "type": "integer" },
+        "remaining_steps": { "type": "array", "items": { "type": "integer" } },
+        "error": { "$ref": "#/$defs/error" },
+        "url": { "type": "string" },
+        "title": { "type": "string" },
+        "tab_id": { "type": "string" }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["user_input", "user_click", "user_scroll", "user_navigation", "user_new_tab"] },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]+$" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "recovery": { "type": "string" },
+        "tab_id": { "type": "string" },
+        "operation": { "type": "string" },
+        "timeout_ms": { "type": "integer" },
+        "hidden_matches": { "type": "integer" },
+        "matches": { "type": "array", "items": { "type": "object" } },
+        "actual": { "type": "object" },
+        "expected": { "type": "object" },
+        "stack": { "type": "string" }
+      }
+    }
+  }
+}

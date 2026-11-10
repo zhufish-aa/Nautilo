@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, Fragment, lazy, Suspense } from "react";
-import { Bot, FileText, Loader2, Pencil, RotateCcw, SquareTerminal, TerminalSquare } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
+import { Bot, FileText, Loader2, SquareTerminal, TerminalSquare } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { collectChangedFiles, type ChangedFileEntry } from "../../lib/changed-files";
 import { patchFileImages, reverseApplyUnifiedPatch, revertFileDiffs, sameContent } from "../../lib/revert-change";
@@ -10,10 +10,10 @@ import { useProgressiveRows } from "../../lib/use-progressive-rows";
 import { cn } from "../../lib/utils";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
 import { WorkspaceDrawer as Drawer } from "./WorkspaceDrawer";
-import { TabBar } from "../../components/ui/Tabs";
+import { ChangeReview, type ReviewEditorState } from "./ChangeReview";
+import { buildReviewFiles, reviewBefore, type ReviewChangeGroup } from "../../lib/change-review";
 import { Button } from "../../components/ui/Button";
 import { StatusChip, Tag } from "../../components/ui/Badge";
-import { ToolFileDiffView } from "../timeline/ToolFileDiffView";
 import { MarkdownContent } from "../timeline/MarkdownContent";
 import { TimelineEventView } from "../timeline/Timeline";
 import { sessionTargetName } from "./SessionListPanel";
@@ -27,8 +27,6 @@ import type { NativeRuntimeCapabilities } from "@agenthub/provider-sdk";
 import { useNativeTerminalStatus } from "../../lib/use-native-terminal";
 import { toast } from "../../stores/toast";
 
-// Monaco is heavy; it only loads when the user actually opens the file editor.
-const DiffCodeEditor = lazy(() => import("../../components/ui/DiffCodeEditor"));
 const MultiTerminalDrawer = lazy(() => import("./TerminalWorkspace").then(module => ({ default: module.TerminalDrawer })));
 
 /* ---------------------------------------------------------------------------
@@ -191,48 +189,33 @@ export function ArtifactsDrawer({
   // file_change events — collectChangedFiles covers both.
   const changeGroups = useMemo(() => {
     if (!open) return [];
-    const groups: { label?: string; entries: ChangedFileEntry[] }[] = [
-      { entries: collectChangedFiles(events) }
+    const groups: ReviewChangeGroup[] = [
+      { id: sessionId ?? "main", entries: collectChangedFiles(events) }
     ];
     for (const sub of sessions.filter((item) => item.parentSessionId === sessionId)) {
       const entries = collectChangedFiles(allEvents[sub.id] ?? []);
-      if (entries.length > 0) groups.push({ label: sessionTargetName(sub, teams, instances), entries });
+      if (entries.length > 0) groups.push({ id: sub.id, label: sessionTargetName(sub, teams, instances), entries });
     }
     return groups;
   }, [open, events, sessions, sessionId, allEvents, teams, instances]);
 
-  const changedFiles = useMemo(() => changeGroups.flatMap((group) => group.entries), [changeGroups]);
-
-  const tabs = [
-    { value: "diff", label: t("sessions.drawers.tabs.diff") },
-    { value: "api_contract", label: t("sessions.drawers.tabs.contract") },
-    { value: "test_report", label: t("sessions.drawers.tabs.test") },
-    { value: "commit", label: t("sessions.drawers.tabs.commit") }
-  ];
-  const [tab, setTab] = useState("diff");
-  const [selectedFile, setSelectedFile] = useState(0);
-
-  // In-diff file editor, VS Code-style (monaco diff editor): left shows the
-  // reconstructed pre-change file (read-only), right the live file (editable).
-  // `before` is undefined when the pre-change content can no longer be
-  // reconstructed exactly; a plain editor is shown in that case.
-  const [editor, setEditor] = useState<{
-    path: string;
-    resolvedPath: string;
-    original: string;
-    value: string;
-    saving: boolean;
-    before?: string;
-  } | null>(null);
+  const reviewFiles = useMemo(() => buildReviewFiles(changeGroups, projectRoot), [changeGroups, projectRoot]);
+  const [selectedId, setSelectedId] = useState<string>();
+  const selectedFile = Math.max(0, reviewFiles.findIndex(file => file.id === selectedId));
+  const [editor, setEditor] = useState<ReviewEditorState | null>(null);
+  const editRequest = useRef(0);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [editLoading, setEditLoading] = useState(false);
   // Per-change revert: two-click confirm (撤回 → 确认撤回), then the recorded
   // change is reverse-applied to the live file (exact match; fails safely).
   const [revertArmed, setRevertArmed] = useState(false);
   const [reverting, setReverting] = useState(false);
   useEffect(() => {
+    editRequest.current += 1;
     setEditor(null);
+    setEditLoading(false);
     setRevertArmed(false);
-  }, [selectedFile, open]);
+  }, [reviewFiles[selectedFile]?.id, open, sessionId]);
 
   const revertChange = async (entry: ChangedFileEntry): Promise<void> => {
     const bridge = window.agenthub;
@@ -337,15 +320,18 @@ export function ArtifactsDrawer({
     } finally {
       setReverting(false);
       setRevertArmed(false);
+      setRefreshVersion(version => version + 1);
     }
   };
 
   const startEdit = async (entry: ChangedFileEntry): Promise<void> => {
     const bridge = window.agenthub;
     if (!bridge) return;
+    const request = ++editRequest.current;
     setEditLoading(true);
     try {
       const result = await bridge.files.readText({ path: entry.path, basePaths: projectRoot ? [projectRoot] : [] });
+      if (request !== editRequest.current) return;
       if (!result.ok) {
         toast.error(t("sessions.drawers.editReadFailed"));
         return;
@@ -354,23 +340,12 @@ export function ArtifactsDrawer({
         toast.error(t("sessions.drawers.editTooLarge"));
         return;
       }
-      // Reconstruct the pre-change content for the diff editor's left side.
-      const before = ((): string | undefined => {
-        if (entry.kind === "fileDiff") {
-          if (entry.diffs.some((diff) => diff.truncated)) return undefined;
-          const reverted = revertFileDiffs(result.content, entry.diffs);
-          return reverted.ok ? reverted.content : undefined;
-        }
-        if (!entry.diff) return undefined;
-        if (entry.changeType === "added") return "";
-        const reverted = reverseApplyUnifiedPatch(result.content, entry.diff);
-        return reverted.ok ? reverted.content : undefined;
-      })();
+      const before = reviewBefore(entry, result.content);
       setEditor({ path: entry.path, resolvedPath: result.resolvedPath, original: result.content, value: result.content, saving: false, before });
     } catch {
-      toast.error(t("sessions.drawers.editReadFailed"));
+      if (request === editRequest.current) toast.error(t("sessions.drawers.editReadFailed"));
     } finally {
-      setEditLoading(false);
+      if (request === editRequest.current) setEditLoading(false);
     }
   };
 
@@ -381,10 +356,17 @@ export function ArtifactsDrawer({
     const content = editor.original.includes("\r\n") ? editor.value.replace(/\r?\n/g, "\r\n") : editor.value;
     setEditor({ ...editor, saving: true });
     try {
+      const current = await bridge.files.readText({ path: editor.resolvedPath, basePaths: projectRoot ? [projectRoot] : [] });
+      if (!current.ok || current.truncated || !sameContent(current.content, editor.original)) {
+        toast.error(locale === "zh-CN" ? "文件已在外部更改，请重新打开后再编辑。" : "The file changed outside this editor. Reopen it before saving.");
+        setEditor(value => value ? { ...value, saving: false } : value);
+        return;
+      }
       const result = await bridge.files.writeText({ path: editor.resolvedPath, content });
       if (result.ok) {
         toast.success(t("sessions.drawers.editSaved"));
         setEditor(null);
+        setRefreshVersion(version => version + 1);
       } else {
         toast.error(result.message ?? t("sessions.drawers.editFailed"));
         setEditor({ ...editor, saving: false });
@@ -395,22 +377,20 @@ export function ArtifactsDrawer({
     }
   };
 
-  // Opening via a "view diff" entry jumps straight to the referenced file;
-  // timeline refreshes keep the user's selection whenever it is still valid.
-  useEffect(() => { if (open && focusPath) setTab("diff"); }, [open, focusPath]);
-  useEffect(() => { setTab("diff"); setSelectedFile(0); }, [sessionId]);
+  // A focus request is consumed once. New stream events must not pull selection back.
+  const focusedRequest = useRef("");
+  useEffect(() => { setSelectedId(undefined); focusedRequest.current = ""; }, [sessionId]);
   useEffect(() => {
-    if (!open) return;
-    setSelectedFile((current) => {
-      const index = focusPath ? changedFiles.findIndex((file) => file.path === focusPath) : -1;
-      if (index >= 0) return index;
-      return current < changedFiles.length ? current : 0;
-    });
-  }, [open, focusPath, changedFiles]);
+    if (!open) { focusedRequest.current = ""; return; }
+    if (!focusPath) return;
+    const request = JSON.stringify([sessionId, focusPath]);
+    if (focusedRequest.current === request) return;
+    const file = reviewFiles.find(item => item.entry.path.replace(/\\/g, "/") === focusPath.replace(/\\/g, "/"));
+    if (file) { setSelectedId(file.id); focusedRequest.current = request; }
+  }, [open, focusPath, sessionId, reviewFiles]);
 
   if (!open) return <></>;
 
-  const filtered = artifacts.filter((artifact) => artifact.kind === tab);
   const comparisonArtifacts = [
     ...artifacts,
     ...sessions.filter((item) => item.parentSessionId === sessionId)
@@ -422,206 +402,27 @@ export function ArtifactsDrawer({
     || sessions.some((item) => item.parentSessionId === sessionId
       && allArtifacts[item.id]?.some((artifact) => artifact.comparisonUnavailable));
 
-  return (
-    <Drawer open={open} onClose={onClose} title={t("sessions.drawers.artifacts")} defaultWidth={1200}>
-      <div className="flex h-full flex-col">
-        <div className="border-b border-line px-5 py-3">
-          <TabBar aria-label={t("sessions.drawers.artifacts")} value={tab} onValueChange={setTab} items={tabs} />
-        </div>
+  const reviewArtifacts = [
+    ...artifacts,
+    ...sessions.filter(item => item.parentSessionId === sessionId).flatMap(item => allArtifacts[item.id] ?? [])
+  ];
 
-        {tab === "diff" && filesystemComparisons.length > 0 && (
-          <ComparisonSourcePanel artifacts={filesystemComparisons} locale={locale} />
-        )}
-        {tab === "diff" && providerComparisons.length > 0 && (
-          <ComparisonSourcePanel artifacts={providerComparisons} locale={locale} source="provider" />
-        )}
-        {tab === "diff" && comparisonUnavailable && (
-          <p role="status" className="border-b border-line px-5 py-3 text-sm leading-relaxed text-ink-2">
-            {locale === "zh-CN"
-              ? "部分文件未采集基线或无法读取，不能确认其自动对比结果。工具提供的差异仍可查看。"
-              : "Some files lack a captured baseline or cannot be read, so their automatic comparison is unavailable. Tool-provided diffs remain available."}
-          </p>
-        )}
-        {tab === "diff" ? (
-          changedFiles.length === 0 ? (
-            <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{comparisonUnavailable
-              ? (locale === "zh-CN" ? "没有可查看的差异详情" : "No diff details available")
-              : t("sessions.drawers.noChanges")}</p>
-          ) : (
-            <div className="flex min-h-0 flex-1">
-              <ul className="w-40 shrink-0 space-y-1 overflow-y-auto border-r border-line p-3">
-                {(() => {
-                  let flatIndex = -1;
-                  return changeGroups.map((group, groupIndex) => (
-                    <Fragment key={group.label ?? "main"}>
-                      {group.label && (
-                        <li className={cn("px-2.5 pb-1 text-xs font-medium text-ink-3", groupIndex > 0 && "pt-2")}>
-                          {group.label}
-                        </li>
-                      )}
-                      {group.entries.map((entry) => {
-                        flatIndex += 1;
-                        const index = flatIndex;
-                        const stats = entry.kind === "patch"
-                          ? { added: entry.additions, removed: entry.deletions }
-                          : {
-                              added: entry.diff.after ? entry.diff.after.split(/\r?\n/).length : 0,
-                              removed: entry.diff.before ? entry.diff.before.split(/\r?\n/).length : 0
-                            };
-                        return (
-                          <li key={`${entry.path}-${index}`}>
-                            <button
-                              onClick={() => setSelectedFile(index)}
-                              aria-current={selectedFile === index}
-                              className={cn(
-                                "w-full truncate rounded-lg px-2.5 py-2 text-left font-mono text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
-                                selectedFile === index ? "bg-accent-soft text-accent" : "text-ink-2 hover:bg-card-hover"
-                              )}
-                              title={entry.path}
-                            >
-                              {entry.path.split(/[\\/]/).pop()}
-                              {entry.edits > 1 && <span className="ml-1 text-[10px] text-ink-3">×{entry.edits}</span>}
-                              {!(entry.kind === "patch" && entry.comparisonUnavailable) && <span className="ml-1.5 font-mono text-[10px]">
-                                <span className="text-ok">+{stats.added}</span>{" "}
-                                <span className="text-danger">-{stats.removed}</span>
-                              </span>}
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </Fragment>
-                  ));
-                })()}
-              </ul>
-              <div className="flex min-w-0 flex-1 flex-col">
-                {(() => {
-                  const selected = changedFiles[selectedFile];
-                  if (!selected) {
-                    return <p className="px-5 py-10 text-sm text-ink-3">{comparisonUnavailable
-              ? (locale === "zh-CN" ? "没有可查看的差异详情" : "No diff details available")
-              : t("sessions.drawers.noChanges")}</p>;
-                  }
-                  const diffContent = selected.kind === "patch" ? (
-                    selected.comparisonUnavailable ? (
-                      <p role="status" className="px-5 py-6 text-sm text-ink-2">{locale === "zh-CN" ? "此文件未采集或无法读取，对比结果未知。" : "This file was not captured or could not be read. Its comparison is unavailable."}</p>
-                    ) : selected.diff ? (
-                      <DiffView content={selected.diff} />
-                    ) : (
-                      <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noDiffDetail")}</p>
-                    )
-                  ) : (
-                    <div className="h-full overflow-y-auto">
-                      <ToolFileDiffView diff={selected.diff} locale={locale} scrollClassName="max-h-none" />
-                    </div>
-                  );
-                  if (editor) {
-                    const dirty = editor.value !== editor.original.replace(/\r\n/g, "\n");
-                    return (
-                      <>
-                        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
-                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3" title={editor.resolvedPath}>
-                            {editor.resolvedPath}
-                          </span>
-                          <Button variant="ghost" size="sm" disabled={editor.saving} onClick={() => setEditor(null)}>
-                            {t("common.cancel")}
-                          </Button>
-                          <Button variant="primary" size="sm" disabled={editor.saving || !dirty} onClick={() => void saveEdit()}>
-                            {editor.saving && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
-                            {t("common.save")}
-                          </Button>
-                        </div>
-                        {/* VS Code-style monaco diff editor: reconstructed
-                            pre-change file (read-only) | live file (editable). */}
-                        <div className="flex min-h-0 flex-1 flex-col">
-                          {editor.before === undefined ? (
-                            <p className="shrink-0 border-b border-line px-3 py-1 text-[11px] text-warn">
-                              {t("sessions.drawers.beforeUnavailable")}
-                            </p>
-                          ) : (
-                            <div className="flex shrink-0 border-b border-line text-xs font-medium text-ink-3">
-                              <span className="flex-1 border-r border-line px-3 py-1">{t("sessions.drawers.beforeLabel")}</span>
-                              <span className="flex-1 px-3 py-1">{t("sessions.drawers.afterLabel")}</span>
-                            </div>
-                          )}
-                          <Suspense
-                            fallback={
-                              <div className="flex flex-1 items-center justify-center gap-2 text-sm text-ink-3">
-                                <Loader2 className="h-4 w-4 animate-spin text-accent" aria-hidden />
-                                {t("sessions.filePreview.loading")}
-                              </div>
-                            }
-                          >
-                            <DiffCodeEditor
-                              key={`${editor.resolvedPath}|${editor.before === undefined ? "single" : "diff"}`}
-                              before={editor.before}
-                              value={editor.value}
-                              onChange={(next) => setEditor((current) => (current ? { ...current, value: next } : current))}
-                              filePath={editor.resolvedPath}
-                            />
-                          </Suspense>
-                        </div>
-                      </>
-                    );
-                  }
-                  return (
-                    <>
-                      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
-                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3" title={selected.path}>
-                          {selected.path}
-                        </span>
-                        <button
-                          type="button"
-                          disabled={reverting || (selected.kind === "patch" && (selected.comparisonUnavailable || selected.changeType === "deleted"))}
-                          title={selected.kind === "patch" && selected.changeType === "deleted" ? (locale === "zh-CN" ? "请手动恢复已删除文件，避免覆盖新内容" : "Restore manually to avoid overwriting newer content") : undefined}
-                          onClick={() => {
-                            if (!revertArmed) {
-                              setRevertArmed(true);
-                              return;
-                            }
-                            void revertChange(selected);
-                          }}
-                          className={cn(
-                            "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] transition-colors disabled:opacity-50",
-                            revertArmed ? "bg-warn/10 text-warn" : "text-ink-3 hover:bg-card-hover hover:text-ink"
-                          )}
-                        >
-                          {reverting ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden />}
-                          {revertArmed ? t("sessions.drawers.revertConfirm") : t("sessions.drawers.revert")}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={editLoading}
-                          onClick={() => void startEdit(selected)}
-                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-50"
-                        >
-                          {editLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Pencil className="h-3.5 w-3.5" aria-hidden />}
-                          {t("sessions.drawers.edit")}
-                        </button>
-                      </div>
-                      <div className="min-h-0 flex-1">{diffContent}</div>
-                    </>
-                  );
-                })()}
-              </div>
-            </div>
-          )
-        ) : filtered.length === 0 ? (
-          <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{t("sessions.drawers.noArtifacts")}</p>
-        ) : (
-          <div className="flex-1 space-y-3 overflow-y-auto p-5">
-            {filtered.map((artifact) => (
-              <section key={artifact.id} className="overflow-hidden rounded-xl border border-line">
-                <header className="border-b border-line bg-card-hover px-4 py-2.5 text-[13px] font-medium text-ink-2">
-                  {artifact.name}
-                </header>
-                <pre className="overflow-x-auto bg-card px-4 py-3 font-mono text-[13px] leading-6 whitespace-pre-wrap text-ink-2">
-                  {artifact.content}
-                </pre>
-              </section>
-            ))}
-          </div>
-        )}
-      </div>
+  return (
+    <Drawer open={open} onClose={onClose} title={locale === "zh-CN" ? "文件更改" : "File changes"} defaultWidth={1200} defaultMaximized hideHeader className="change-review-drawer">
+      <ChangeReview key={sessionId ?? "current"} groups={changeGroups} projectRoot={projectRoot} sessionId={sessionId}
+        selectedIndex={selectedFile} onSelect={index => setSelectedId(reviewFiles[index]?.id)} onClose={onClose}
+        editor={editor} onEditorChange={value => setEditor(current => current ? { ...current, value } : current)}
+        onEdit={entry => void startEdit(entry)} onCancelEdit={() => setEditor(null)} onSaveEdit={() => void saveEdit()}
+        onRevert={entry => { if (!revertArmed) setRevertArmed(true); else void revertChange(entry); }}
+        editLoading={editLoading} revertArmed={revertArmed} reverting={reverting} refreshVersion={refreshVersion}
+        artifacts={reviewArtifacts} sourceCount={filesystemComparisons.length + providerComparisons.length}
+        comparisonUnavailable={comparisonUnavailable}
+        sourceContent={<>
+          {filesystemComparisons.length > 0 && <ComparisonSourcePanel artifacts={filesystemComparisons} locale={locale} />}
+          {providerComparisons.length > 0 && <ComparisonSourcePanel artifacts={providerComparisons} locale={locale} source="provider" />}
+        </>}
+
+      />
     </Drawer>
   );
 }

@@ -26,6 +26,7 @@ import { compactOrchestrationTimeline, hiddenCompletionRunIds, hiddenInternalRun
 import { groupToolTimeline } from "./tool-timeline-groups";
 import { collectSubagentActivities, subagentDispatchIdOf } from "./subagent-activities";
 import { mergeCodeExecution } from "./process-display";
+import { markOutgoingMessage } from "./ui-motion";
 import { useAgentsStore } from "../stores/agents";
 import { ingestInteractionEvents, useInteractionsStore } from "../stores/interactions";
 import { useProjectsStore } from "../stores/projects";
@@ -84,12 +85,25 @@ const standaloneDisplayed = new Map<string, number>();
 // Sessions whose daemon queue has been fetched once; afterwards the
 // session.follow_up_queued/cancelled events keep the store list in sync.
 const followUpListSynced = new Set<string>();
+const deliveredFollowUps = new Map<string, Set<string>>();
+
+function followUpDelivered(sessionId: string, messageId: string): void {
+  const delivered = deliveredFollowUps.get(sessionId) ?? new Set<string>();
+  delivered.add(messageId);
+  // These fences only protect in-flight queue snapshots/acknowledgements.
+  if (delivered.size > 256) delivered.delete(delivered.values().next().value!);
+  deliveredFollowUps.set(sessionId, delivered);
+  const store = useSessionsStore.getState();
+  if (store.queuedFollowUps[sessionId]?.some(item => item.messageId === messageId)) markOutgoingMessage(sessionId, messageId);
+  store._removeQueuedFollowUp(sessionId, messageId);
+}
 // Keep outgoing bubbles until their exact durable IDs appear in history.
 // An older/in-flight history snapshot must never remove a just-sent message.
 const pendingMessages = new Map<string, Map<string, TimelineEvent>>();
 
 function appendPendingMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = []): string {
   const messageId = newId("msg");
+  markOutgoingMessage(sessionId, messageId);
   const event = useSessionsStore.getState()._append(sessionId, { kind: "message", sender: "user", text, messageId, attachments: attachments.map((item) => ({ ...item })) });
   const pending = pendingMessages.get(sessionId) ?? new Map<string, TimelineEvent>();
   pending.set(messageId, event);
@@ -394,8 +408,10 @@ export async function sendWorkbenchFollowUp(sessionId: string, text: string, mod
     store._append(sessionId, { kind: "error", code: "IPC_INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error), retryable: true });
     throw error;
   });
-  if (appliedMode === "queue") {
+  if (appliedMode === "queue" && !deliveredFollowUps.get(sessionId)?.has(messageId)) {
     store._addQueuedFollowUp(sessionId, { messageId, text, queuedAt: new Date().toISOString() });
+  } else if (appliedMode === "steer") {
+    followUpDelivered(sessionId, messageId);
   }
   return appliedMode;
 }
@@ -420,7 +436,7 @@ export async function cancelWorkbenchFollowUp(sessionId: string, messageId: stri
  * The daemon retains the queued turn if native steering fails. */
 export async function steerWorkbenchQueuedFollowUp(sessionId: string, messageId: string): Promise<"steer" | "queue"> {
   const { mode } = await requestCore<{ accepted: true; mode: "steer" | "queue" }>("session.followUp.steer", { sessionId, messageId });
-  if (mode === "steer") useSessionsStore.getState()._removeQueuedFollowUp(sessionId, messageId);
+  if (mode === "steer") followUpDelivered(sessionId, messageId);
   return mode;
 }
 
@@ -434,9 +450,11 @@ function ingestFollowUpEvents(sessionId: string, events: RuntimeEvent[]): void {
   const store = useSessionsStore.getState();
   for (const event of events) {
     if (event.type === "session.follow_up_queued") {
-      store._addQueuedFollowUp(sessionId, { messageId: event.payload.messageId, text: event.payload.text, queuedAt: event.timestamp });
+      if (!deliveredFollowUps.get(sessionId)?.has(event.payload.messageId)) store._addQueuedFollowUp(sessionId, { messageId: event.payload.messageId, text: event.payload.text, queuedAt: event.timestamp });
     } else if (event.type === "session.follow_up_cancelled" || event.type === "session.follow_up_steered") {
-      store._removeQueuedFollowUp(sessionId, event.payload.messageId);
+      followUpDelivered(sessionId, event.payload.messageId);
+    } else if (event.type === "run.started" && event.payload.userMessageId) {
+      followUpDelivered(sessionId, event.payload.userMessageId);
     }
   }
 }
@@ -448,8 +466,9 @@ async function syncQueuedFollowUps(sessionId: string): Promise<void> {
   followUpListSynced.add(sessionId);
   try {
     const { items } = await requestCore<{ items: QueuedFollowUp[] }>("session.followUp.list", { sessionId });
-    if (currentSessionGeneration(sessionId, generation)) useSessionsStore.getState()._replaceQueuedFollowUps(sessionId, items);
+    if (currentSessionGeneration(sessionId, generation)) useSessionsStore.getState()._replaceQueuedFollowUps(sessionId, items.filter(item => !deliveredFollowUps.get(sessionId)?.has(item.messageId)));
   } catch (error) {
+    followUpListSynced.delete(sessionId);
     console.warn(`Failed to load queued follow-ups for session ${sessionId}`, error);
   }
 }
@@ -593,6 +612,7 @@ export async function switchWorkbenchSessionInstance(sessionId: string, instance
 function clearSessionRuntime(sessionId: string): void {
   const idle=projectIdleStreams.get(sessionId);if(idle)idle.cancelled=true;projectIdleStreams.delete(sessionId);
   pendingMessages.delete(sessionId);
+  deliveredFollowUps.delete(sessionId);
   forgetSessionHistory(sessionId);
   const stream = standaloneStreams.get(sessionId);
   if (stream) stream.cancelled = true;
@@ -1802,6 +1822,7 @@ function buildStandaloneTimeline(messages: Message[], events: RuntimeEvent[], ar
   const timeline = messageTimeline(messages, undefined, artifacts);
   const changedFiles = diffArtifactsByScope(artifacts);
   appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, undefined, [], new Map(), new Map(artifacts.map((artifact) => [artifact.id, artifact])), new Map(), changedFiles));
+  positionDeliveredInputs(timeline, events);
   return groupToolTimeline(timeline
     .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence))
     .map((event, index) => ({ ...event, sequence: index + 1 }));
@@ -1831,6 +1852,7 @@ function buildTimeline(
   const changedFiles = diffArtifactsByScope(artifacts);
   const timeline = messageTimeline(messages, team, artifacts);
   appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, team, tasks, resolvedApprovals, artifactsById, verificationsById, changedFiles));
+  positionDeliveredInputs(timeline, events);
   if (isMain) {
     timeline.push({
       id: `project-run-${projectRun.id}-${projectRun.status}`,
@@ -1843,6 +1865,22 @@ function buildTimeline(
   return groupToolTimeline(compactOrchestrationTimeline(timeline, projectRun.mainSessionId)
     .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence))
     .map((event, index) => ({ ...event, sequence: index + 1 }));
+}
+
+/** A queued input belongs immediately before the turn that actually consumes it. */
+function positionDeliveredInputs(timeline: TimelineEvent[], events: RuntimeEvent[]): void {
+  const positions = new Map<string, RuntimeEvent>();
+  for (const event of events) {
+    const id = event.type === "run.started" ? event.payload.userMessageId
+      : event.type === "session.follow_up_steered" ? event.payload.messageId : undefined;
+    if (id) positions.set(id, event);
+  }
+  for (let index = 0; index < timeline.length; index++) {
+    const row = timeline[index]!;
+    if (row.data.kind !== "message" || row.data.sender !== "user" || !row.data.messageId) continue;
+    const position = positions.get(row.data.messageId);
+    if (position) timeline[index] = { ...row, timestamp: position.timestamp, sequence: position.sequence - 0.5 };
+  }
 }
 
 function appendRuntimeEvents(

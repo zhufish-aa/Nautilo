@@ -1,13 +1,16 @@
 import { useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { CornerDownRight, ListEnd, Loader2, Trash2 } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { cancelWorkbenchFollowUp, steerWorkbenchQueuedFollowUp } from "../../lib/orchestration-runtime";
 import { useSessionsStore } from "../../stores/sessions";
 import { toast } from "../../stores/toast";
+import { UI_EASE_OUT, useUiReducedMotion } from "../../lib/ui-motion";
 
 /** Pending turns keep their original identity when promoted to guidance. */
 export function QueuedFollowUpBar({ sessionId, disabled }: { sessionId: string; disabled?: boolean }): JSX.Element | null {
   const { t } = useI18n();
+  const reducedMotion = useUiReducedMotion();
   const items = useSessionsStore((state) => state.queuedFollowUps[sessionId]);
   const pending = useRef(new Set<string>());
   const [busyIds, setBusyIds] = useState(new Set<string>());
@@ -27,8 +30,13 @@ export function QueuedFollowUpBar({ sessionId, disabled }: { sessionId: string; 
     }
   };
 
-  if (!items?.length) return null;
   return (
+    <AnimatePresence initial={false}>
+      {!!items?.length && <motion.div key="pending-inputs"
+        initial={{ opacity: 0, transform: "translateY(5px)" }}
+        animate={{ opacity: 1, transform: "translateY(0px)" }}
+        exit={{ opacity: 0, transform: "translateY(-4px)" }}
+        transition={{ duration: reducedMotion ? 0 : 0.14, ease: UI_EASE_OUT }}>
     <div className="composer-queue mx-auto w-full px-3" aria-label={t("sessions.queue.title")}>
       <ul className="max-h-40 overflow-y-auto rounded-t-2xl border border-b-0 border-line bg-panel/50 px-2 py-1">
         {items.map((item) => (
@@ -49,5 +57,7 @@ export function QueuedFollowUpBar({ sessionId, disabled }: { sessionId: string; 
         ))}
       </ul>
     </div>
+      </motion.div>}
+    </AnimatePresence>
   );
 }

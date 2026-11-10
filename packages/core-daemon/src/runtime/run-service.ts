@@ -325,7 +325,10 @@ export class RunService {
     this.database.runs.save(run);
     this.audit?.record({ actorType: "agent", actorId: context.memberId ?? session.memberId, action: "run.started", resourceType: "run", resourceId: run.id, outcome: "success", details: { agentInstanceId: agent.id, sessionId: session.id, projectRunId: context.projectRunId, taskId: context.taskId } });
     this.database.sessions.save({ ...(this.database.sessions.get(session.id) ?? session), status: "running", updatedAt: startedAt });
-    if (context.presentation !== "provider_command") this.events.append(session, run, "run.started", { runId });
+    if (context.presentation !== "provider_command") {
+      const userMessageId = context.queueKey;
+      this.events.append(session, run, "run.started", { runId, ...(userMessageId ? { userMessageId } : {}) });
+    }
 
     const additions = {
       ...providerEnvironmentPassthrough(agent, process.env, this.adapters.find(agent.providerId)?.descriptor),

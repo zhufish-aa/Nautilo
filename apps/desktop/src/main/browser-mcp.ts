@@ -6,6 +6,24 @@ import {
 } from "node:http";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { browserError } from "./browser-errors";
+import { browserArguments, browserPublicResult, browserReceiptV2 } from "./browser-contract";
+import expectSpec from "../../../../docs/browser/schemas/expect.schema.json";
+import targetSpec from "../../../../docs/browser/schemas/target.schema.json";
+import stepSpec from "../../../../docs/browser/schemas/step.schema.json";
+
+// MCP clients receive self-contained schemas; they never fetch nautilo.dev $refs.
+function inlineSpec(value: any, root: any = value): any {
+  if (Array.isArray(value)) return value.map(item => inlineSpec(item, root));
+  if (!value || typeof value !== "object") return value;
+  if (value.$ref) {
+    const source: any = value.$ref.startsWith("#/") ? root : value.$ref.endsWith("target.schema.json") ? targetSpec : expectSpec;
+    const referenced = value.$ref.startsWith("#/") ? value.$ref.slice(2).split("/").reduce((node: any, key: string) => node[key], source) : source;
+    return inlineSpec(referenced, source);
+  }
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !key.startsWith("$") && !key.startsWith("x-")).map(([key, item]) => [key, inlineSpec(item, root)]));
+}
+const expectSchema = inlineSpec(expectSpec);
+const stepSchema = inlineSpec(stepSpec);
 
 const actionSchema = {
   type: "object",
@@ -32,6 +50,7 @@ const actionSchema = {
         "forward",
         "reload",
         "zoom",
+        "goto", "dblclick", "assert", "eval", "screenshot",
       ],
     },
     url: { type: "string" },
@@ -107,22 +126,44 @@ const actionSchema = {
     timeoutMs: {
       type: "integer",
       minimum: 100,
-      maximum: 60000,
+      maximum: 120000,
       description:
         "Timeout for open (default 20000), wait (5000), or locating scroll targets (5000).",
     },
   },
 };
+Object.assign(actionSchema.properties, Object.fromEntries(Object.entries(stepSchema.properties).filter(([key]) => !Object.hasOwn(actionSchema.properties, key))));
 const tabId = {
   type: "string",
   description:
     "Tab ID from browser_tabs. Omit for currentTabId consistently across tools, or use 'viewed' for the tab the user is viewing. Every result identifies the resolved tab.",
 };
-const tools = [
+const tools: any[] = [
+  {
+    name: "browser_eval",
+    description: "Evaluate a function/expression in the selected page and return up to 100 KB of JSON. Use for DOM/media state that rendered text cannot establish. Optional expect is a map of predicates, e.g. {paused:false,t:{gt:0}}; it polls the function until matched. Use only observational scripts when polling. Scripts may have side effects, so this tool requires agent control. Actions are never automatically replayed after a timeout.",
+    inputSchema: { type: "object", required: ["script"], additionalProperties: false, properties: {
+      tabId, tab_id: tabId, script: { type: "string", maxLength: 100000 }, arg: {}, expect: inlineSpec((expectSpec as any).$defs.predicateMap, expectSpec),
+      timeout_ms: { type: "integer", minimum: 100, maximum: 120000 }, controlTimeoutMs: { type: "integer", minimum: 0, maximum: 60000 },
+    } },
+  },
+  ...["browser_assert", "browser_wait"].map(name => ({
+    name, description: "Wait for explicit URL, title, selector, text, script, popup or network conditions, polling every 250 ms. All conditions must match; timeout returns ASSERT_FAILED with actual and expected state. Prefer a browser_run step with expect for popups/network so observation starts before the triggering action. Pure DOM assertions work during user control; arbitrary scripts require agent control.",
+    inputSchema: { type: "object", required: ["expect"], additionalProperties: false, properties: {
+      tabId, tab_id: tabId, expect: expectSchema, timeout_ms: { type: "integer", minimum: 100, maximum: 120000 },
+    } },
+  })),
+  {
+    name: "browser_session", description: "Manage this conversation's browser lifecycle. list/open inspect its workspace; claim marks an available tab as agent-owned without overriding a user handoff. handoff stops writes until the user returns control. finish({keep:[tabId or label]}) closes only unused agent-created tabs; user-created, restored or edited tabs are protected. It cannot access another conversation's workspace.",
+    inputSchema: { type: "object", required: ["action"], additionalProperties: false, properties: {
+      action: { enum: ["open", "list", "claim", "handoff", "finish"] }, tabId, tab_id: tabId,
+      keep: { type: "array", items: { type: "string" } },
+    } },
+  },
   {
     name: "browser_scroll",
     description:
-      "Scroll the current tab by pixels or scroll a text/selector/ref into view. For lazy comments use selector or text:'评论', then browser_run wait and browser_read. No hidden scrolling during reads.",
+      "Scroll the current tab by pixels or scroll a text/selector/ref into view. Pixel scrolling chooses a neutral point unless x/y are supplied, measures the document or nested scroll container, and returns moved, scroll_before/scroll_after, scroll_target and method. A bounded wheel attempt can fall back to absolute DOM scrolling; no movement returns SCROLL_NO_EFFECT, including boundaries, rather than completed. For lazy comments use selector or text:'评论', then browser_run wait and browser_read. No hidden scrolling during reads.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -215,13 +256,14 @@ const tools = [
   {
     name: "browser_run",
     description:
-      "Run steps on currentTabId or an explicit tab: open, read, click, fill, wait, scroll, scroll_into_view, scroll_to_text, hover, drag, press, select, back, forward, reload, zoom. Targets accept ref, selector, role+name, or exact visible text; click/hover also accept CSS-pixel x/y. Ref validity ends at navigation. Reads support scope/selector/offset/jsonPath. wait accepts text, selector or urlIncludes; alsoTryScroll:true explicitly enables lazy-load scrolling. Search example: fill textbox then press Enter then wait urlIncludes. Comments example: scroll_to_text 评论 then wait 回复 then read the comments selector. Zoom factor 1.5 enlarges QR codes. A batch pins its tab. Returns structured per-step reports on success AND failure, including completed steps, failedStep, remainingSteps, current URL and recovery. Completed side effects stay applied: never replay the whole batch blindly. Writes queue for control up to controlTimeoutMs (default 15000), with 0 for immediate feedback. snapshot:false omits the final compact control snapshot.",
+      "Run up to thirty ordered steps. Legacy flat locators/arguments remain supported. target accepts ref (with or without @), css, xpath, role/name, text, href or x/y. Refs survive repeat snapshots of the same document; navigation invalidates them. Optional id defaults to s1, s2. expect verifies the result without repeating the action. Popup receipts include tab_id/label/url. follow:new_tab waits for and follows a popup; auto follows new tabs for URL/popup expectations; same_tab stays pinned. optional:true skips a failed step, except control/cancellation failures. Failures return exact completed/failed/remaining steps. verified:false is an action receipt, not a business-state guarantee. Never blindly replay completed or dispatched steps. Writes queue for control for 15000 ms by default. snapshot:false omits the final read.",
     inputSchema: {
       type: "object",
       required: ["steps"],
       additionalProperties: false,
       properties: {
         tabId,
+        tab_id: tabId,
         steps: { type: "array", maxItems: 30, items: actionSchema },
         snapshot: { type: "boolean" },
         controlTimeoutMs: { type: "integer", minimum: 0, maximum: 60000 },
@@ -253,6 +295,42 @@ const tools = [
     },
   },
 ];
+tools.push(
+  {name:"browser_fetch",description:"Fetch in the current page with its cookies and relative URLs, respecting normal browser CORS. Returns response status, headers and bounded text/JSON. Non-GET requests can have side effects; requires agent control.",inputSchema:{type:"object",required:["url"],additionalProperties:false,properties:{tabId,url:{type:"string"},method:{type:"string"},headers:{type:"object",additionalProperties:{type:"string"}},body:{type:"string",maxLength:65536},response:{enum:["text","json"]},timeout_ms:{type:"integer",minimum:100,maximum:120000}}}},
+  {name:"browser_paste",description:"Paste text and/or HTML through the native browser paste command into an optional target or the focused editor. Sends a real paste event and restores the previous system clipboard if it was not changed by the user. Requires agent control; does not clear existing content first.",inputSchema:{type:"object",additionalProperties:false,properties:{tabId,target:inlineSpec(targetSpec),text:{type:"string",maxLength:100000},html:{type:"string",maxLength:100000}}}},
+  {name:"browser_events",description:"Watch, unwatch or read the selected page's bounded event journal. Watch Runtime.consoleAPICalled or Runtime.exceptionThrown for console output; unwatch stops recording the supplied methods. Page, Network, DOM and Log events are also supported. Download, filechooser and navigation events are recorded automatically. Use since/cursor for incremental reads.",inputSchema:{type:"object",required:["action"],additionalProperties:false,properties:{tabId,action:{enum:["list","watch","unwatch"]},methods:{type:"array",minItems:1,maxItems:10,items:{type:"string"}},since:{type:"integer",minimum:0},limit:{type:"integer",minimum:1,maximum:120}}}},
+  {name:"browser_dialog",description:"List, arm, accept or dismiss alert/confirm/prompt/beforeunload dialogs in this tab. Arm a one-shot rule BEFORE the action that opens a blocking dialog; inspect list for pending dialogs. Nothing is accepted automatically without an explicit rule.",inputSchema:{type:"object",required:["action"],additionalProperties:false,properties:{action:{enum:["list","arm","accept","dismiss","disarm"]},tabId,space_id:{type:"string"},accept:{type:"boolean"},prompt_text:{type:"string"},type:{enum:["alert","confirm","prompt","beforeunload"]},since:{type:"integer",minimum:0}}}},
+  {name:"browser_files",description:"Two download entry points: page-triggered downloads (including blob exports) are captured automatically; use list then save after clicking. action:download explicitly starts a known HTTP(S) URL; success there does not verify a page export button. Both share the source-tab download registry. list also returns recent page_errors when a page script failed before starting a download. Upload local files to a file input, arm/disarm a chooser, cancel downloads or save completed files. paths and save path must be absolute; save never overwrites an existing file. No automatic model-side file content dump.",inputSchema:{type:"object",required:["action"],additionalProperties:false,properties:{action:{enum:["list","upload","arm_chooser","disarm_chooser","download","save","cancel"]},tabId,space_id:{type:"string"},target:inlineSpec(targetSpec),paths:{type:"array",minItems:1,maxItems:20,items:{type:"string"}},url:{type:"string"},path:{type:"string"},download_id:{type:"string"},timeout_ms:{type:"integer",minimum:100,maximum:120000}}}},
+  {name:"browser_cdp",description:"Page-scoped CDP escape hatch. Send Runtime/DOM/Page/Accessibility/Input/Network/Emulation commands to the selected tab. Commands are not replayed. Browser-wide target, profile and process operations are unavailable here; they would bypass conversation ownership. Returns bounded JSON. Side-effecting commands require agent control.",inputSchema:{type:"object",required:["method"],additionalProperties:false,properties:{tabId,space_id:{type:"string"},method:{type:"string"},params:{type:"object"},timeout_ms:{type:"integer",minimum:100,maximum:120000}}}},
+);
+const sessionTool = tools.find(tool=>tool.name === "browser_session");
+Object.assign(sessionTool.inputSchema.properties,{action:{enum:["open","list","claim","handoff","finish","login"]},space_id:{type:"string"},name:{type:"string",minLength:1,maxLength:120},profile_id:{type:"string",pattern:"^[A-Za-z0-9_-]{1,80}$"},profileId:{type:"string",pattern:"^[A-Za-z0-9_-]{1,80}$"},isolated:{type:"boolean"},url:{type:"string"},show:{type:"boolean"}});
+sessionTool.inputSchema.properties.action.enum.push("inspect_login","import_login");
+Object.assign(sessionTool.inputSchema.properties,{endpoint:{type:"string",description:"Local Chrome debugging endpoint, e.g. http://127.0.0.1:9222"},origins:{type:"array",minItems:1,maxItems:20,items:{type:"string"}},target_id:{type:"string"}});
+sessionTool.description += " inspect_login lists sites in an explicitly supplied local Chrome CDP endpoint; import_login copies cookies ONLY for requested origins into Nautilo, without copying profile files, changing the source browser or returning cookie values. Invoke import_login only for sites the user selected. Server authentication must still be checked after import.";
+sessionTool.description += " Open with name creates/reuses an independent named browser space belonging to this conversation. Supply profile_id for a separate persistent login profile, or isolated:true for an in-memory context. Existing spaces never switch profiles implicitly. Pass space_id on subsequent tools to address it. Names owned by another conversation/user return SESSION_CONFLICT. login opens the supplied login URL, shows the window and hands control to the user; login persists in Nautilo's profile across restarts. It does not copy the user's other browser cookies.";
+// Publish the same aliases for every tool, including flat and batched calls.
+for (const tool of tools) {
+  const properties = tool.inputSchema.properties as Record<string,unknown>;
+  properties.space_id = {type:"string",description:"Named browser space returned by browser_session. Only spaces owned by this conversation are accessible."};
+  for (const [camel,snake] of Object.entries({tabId:"tab_id",spaceId:"space_id",timeoutMs:"timeout_ms",controlTimeoutMs:"control_timeout_ms",viewId:"view_id",jsonPath:"json_path"})) {
+    if (properties[camel] || properties[snake]) properties[camel] = properties[snake] = properties[camel] ?? properties[snake];
+  }
+  properties.contract_version = {type:"integer",enum:[1,2],default:1,description:"1 preserves existing responses; 2 returns the strict receipt envelope with uppercase errors and data payload."};
+}
+const readProperties=tools.find(tool=>tool.name === "browser_read").inputSchema.properties;
+Object.assign(readProperties,{format:{enum:["text","refs"],default:"text"},root:{type:"string"},view_id:{type:"string"},viewId:{type:"string"},limit:{type:"integer",minimum:1,maximum:24000,description:"Character limit for text; node count 1–200 for format:refs."}});
+Object.assign(actionSchema.properties,{expect:{anyOf:[expectSchema,inlineSpec((expectSpec as any).$defs.predicateMap,expectSpec)]}});
+Object.assign(actionSchema.properties,{format:{enum:["text","refs"]},root:{type:"string"},view_id:{type:"string"},limit:{type:"integer",minimum:1,maximum:24000}});
+
+export const browserCapabilities = {
+  version:"1.2.1",tools:tools.map(tool=>tool.name),
+  page_fetch:"browser_fetch",rich_text_paste:"browser_paste",
+  console:{tool:"browser_events",actions:["watch","unwatch","list"],methods:["Runtime.consoleAPICalled","Runtime.exceptionThrown"]},
+  contexts:{tool:"browser_session",action:"open",options:["name","profile_id","isolated"]},
+  downloads:{tool:"browser_files",page_exports:"automatically recorded; list then save",known_url:"download then save",page_errors:"recent script errors in list"},
+  windows:{first_call:"automatically opens",closed_during_request:"BROWSER_CLOSED",next_call:"automatically reopens"},
+};
 type Content =
   | { type: "text"; text: string }
   | { type: "image"; mimeType: "image/jpeg"; data: string };
@@ -370,7 +448,9 @@ export async function listenBrowserMcp(
               ? version
               : "2025-06-18",
             capabilities: { tools: {} },
-            serverInfo: { name: "Nautilo Browser", version: "1.0.0" },
+            serverInfo: { name: "Nautilo Browser", version: browserCapabilities.version },
+            instructions:"The browser opens automatically on use. Closing it stops in-flight requests with BROWSER_CLOSED; the next tool call reopens it. CONTROL_TAKEN is a separate user handoff. browser_fetch performs page-context requests; browser_paste sends native text/HTML paste; browser_events watch/unwatch/list exposes console and page events; browser_session open supports profile_id and isolated contexts. Page exports including blob downloads are captured automatically: use browser_files list then save. browser_files download starts a known HTTP(S) URL and does not verify a page's export button. Use browser_state or browser_session list for the current capabilities and refresh an older cached tools/list if needed.",
+            _meta:{"nautilo/browser_contract_versions":[1,2],"nautilo/browser_default_contract":1,"nautilo/browser_capabilities":browserCapabilities},
           },
         });
         break;
@@ -395,26 +475,43 @@ export async function listenBrowserMcp(
           break;
         }
         inFlight.set(callId, abort);
+        const argumentsInput = rpc.params?.arguments ?? {};
+        const version = argumentsInput.contract_version ?? 1;
+        const format = (result: any) => {
+          const blocks = "content" in result ? result.content : [result];
+          let structured: any;
+          const content = blocks.map((block: any) => {
+            if (block.type !== "text") return block;
+            try {
+              const value = browserPublicResult(JSON.parse(block.text));
+              structured = version === 2 ? browserReceiptV2(value) : value;
+              return {...block,text:JSON.stringify(structured)};
+            } catch { return block; }
+          });
+          return {content,...(result.isError?{isError:true}:{}),...(structured?{structuredContent:structured}:{})};
+        };
         try {
+          if (![1,2].includes(version)) throw Error("Supported contract_version values: 1, 2");
           const result = await execute(
             session,
             name,
-            rpc.params?.arguments ?? {},
+            browserArguments(argumentsInput),
             abort.signal,
           );
           reply({
-            result: "content" in result ? result : { content: [result] },
+            result: format(result),
           });
         } catch (error) {
+          const failure=browserError(error);
           const output = {
             ok: false,
-            status: "failed",
+            status: ["BROWSER_CLOSED","CONTROL_TAKEN","control_taken","cancelled"].includes(failure.code) ? "paused" : "failed",
             completed: 0,
             executedSteps: [],
-            error: browserError(error),
+            error: failure,
           };
           reply({
-            result: {
+            result: format({
               isError: true,
               structuredContent: output,
               content: [
@@ -423,7 +520,7 @@ export async function listenBrowserMcp(
                   text: JSON.stringify(output),
                 },
               ],
-            },
+            }),
           });
         } finally {
           inFlight.delete(callId);

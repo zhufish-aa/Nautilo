@@ -68,7 +68,9 @@ export class SessionService {
     // so Enter behaves the same across providers instead of erroring out.
     if (input.mode === "steer" && this.runs.canSteer(session.id)) {
       await this.runs.steerSession(session.id, text);
-      this.database.sessions.saveMessage(followUpMessage(session, text, input.messageId));
+      const message = followUpMessage(session, text, input.messageId);
+      this.database.sessions.saveMessage(message);
+      this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_steered", { messageId: message.id });
       return { accepted: true, mode: "steer" };
     }
 

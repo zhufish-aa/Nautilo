@@ -3,22 +3,35 @@ import { Link } from "react-router-dom";
 import {
   ArrowDown,
   ArrowUp,
+  ArrowUpRight,
+  Archive,
+  Check,
+  ChevronDown,
   ChevronRight,
+  Circle,
+  CircleAlert,
+  Clock3,
+  FileText,
+  Folder,
+  GitBranch,
   Activity,
   BellDot,
-  CornerDownRight,
   Layers3,
+  LoaderCircle,
+  MessageCircle,
   Workflow,
   PanelRightClose,
   PanelRightOpen,
   Settings2,
   CheckCheck,
+  ShieldCheck,
   Square,
 } from "lucide-react";
 import type { AssistantSessionPage, AssistantSession } from "@agenthub/schemas";
 import {
   activityOf,
   type AssistantLiveOutput,
+  type AssistantReceipt,
   type AssistantTurn,
   type AssistantView,
   type JournalRow,
@@ -30,6 +43,9 @@ import { MarkdownContent } from "../timeline/MarkdownContent";
 import { assistantError } from "./AssistantSettingsPanel";
 import { AssistantEffort } from "./AssistantEffort";
 import { useConnectionsStore } from "../../stores/connections";
+import { useProvidersStore } from "../../stores/providers";
+import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
+import { markOutgoingMessage, useMessageEntrance, useSurfaceEntrance } from "../../lib/ui-motion";
 import "./assistant.css";
 
 const states: Record<string, [string, string]> = {
@@ -60,6 +76,36 @@ function activityGroup(session: AssistantSession) {
   const status = activityOf(session);
   if (status === "waiting_input" || status === "waiting_approval") return "attention";
   return status === "running" ? "running" : "recent";
+}
+function HarnessMark({ name }: { name: string }) {
+  const catalog = useProvidersStore((state) => state.catalog);
+  const key = name.toLowerCase();
+  const provider = catalog.find(
+    (item) => item.providerId.toLowerCase() === key || item.name.toLowerCase() === key,
+  );
+  return (
+    <div className="as-harness-mark" aria-hidden>
+      <ProviderAvatar providerId={provider?.providerId ?? name} size="sm" />
+    </div>
+  );
+}
+function ActivityState({ status, zh }: { status: string; zh: boolean }) {
+  const icons: Record<string, typeof Circle> = {
+    running: LoaderCircle,
+    waiting_input: MessageCircle,
+    waiting_approval: ShieldCheck,
+    completed: Check,
+    cancelled: Square,
+    failed: CircleAlert,
+    archived: Archive,
+  };
+  const Icon = icons[status] ?? Circle;
+  return (
+    <span className="as-state" data-state={status}>
+      <Icon size={12} className="as-state-icon" aria-hidden />
+      {statusLabel(status, zh)}
+    </span>
+  );
 }
 function ShortTime({ at, zh }: { at: string; zh: boolean }) {
   const date = new Date(at);
@@ -140,6 +186,7 @@ function SessionRail({
   setAttention: (value: boolean) => void;
 }) {
   const ordered = [...items].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const attentionCount = ordered.filter((session) => activityGroup(session) === "attention").length;
   const groups = [
     { key: "attention", label: zh ? "需要你处理" : "Needs your attention" },
     { key: "running", label: zh ? "运行中" : "In progress" },
@@ -162,9 +209,15 @@ function SessionRail({
       <div className="as-tabs" role="group" aria-label={zh ? "筛选会话" : "Filter sessions"}>
         <button aria-pressed={!attention} onClick={() => setAttention(false)}>
           {zh ? "全部" : "All"}
+          <span className="as-filter-count" title={zh ? "已加载的会话" : "Loaded sessions"}>
+            {items.length}{more ? "+" : ""}
+          </span>
         </button>
         <button aria-pressed={attention} onClick={() => setAttention(true)}>
           {zh ? "待处理" : "Needs attention"}
+          {attentionCount > 0 && (
+            <span className="as-filter-count">{attentionCount}{more ? "+" : ""}</span>
+          )}
         </button>
       </div>
       <div className="as-session-list">
@@ -175,30 +228,54 @@ function SessionRail({
         )}
         {groups.map((group) => (
           <section className="as-session-group" key={group.key} data-group={group.key}>
-            {!attention && <h3>{group.label}</h3>}
+            {!attention && (
+              <h3>{group.label}<span className="as-group-count">{group.rows.length}</span></h3>
+            )}
             {group.rows.map((s) => {
               const status = activityOf(s);
+              const recent = group.key === "recent";
               return (
                 <Link
-                  className="as-session"
+                  className={`as-session ${recent ? "as-session-history" : "as-session-task"}`}
                   data-state={status}
                   key={s.id}
                   to={sessionLocation({ id: s.id })}
                   title={s.title}
                 >
-                  <span className="as-session-heading">
-                    <span className="as-session-title">{s.title}</span>
-                    <ShortTime at={s.updatedAt} zh={zh} />
-                  </span>
-                  <span className="as-session-meta">
-                    <span className="as-session-project">
-                      {[s.project || s.projectId, s.harness].filter(Boolean).join(" · ")}
-                    </span>
-                    <span className="as-state">
-                      <i aria-hidden />
-                      {statusLabel(status, zh)}
-                    </span>
-                  </span>
+                  {recent ? (
+                    <>
+                      <div className="as-history-avatar"><HarnessMark name={s.harness} /></div>
+                      <div className="as-history-body">
+                        <div className="as-session-heading">
+                          <span className="as-session-title">{s.title}</span>
+                          <ShortTime at={s.updatedAt} zh={zh} />
+                        </div>
+                        <div className="as-session-meta">
+                          <span className="as-session-project">
+                            {[s.project || s.projectId, s.harness].filter(Boolean).join(" · ")}
+                          </span>
+                          <ActivityState status={status} zh={zh} />
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="as-session-identity">
+                        <HarnessMark name={s.harness} />
+                        <span className="as-session-harness">{s.harness}</span>
+                        <ActivityState status={status} zh={zh} />
+                      </div>
+                      <div className="as-session-heading">
+                        <span className="as-session-title">{s.title}</span>
+                        <ArrowUpRight size={14} aria-hidden />
+                      </div>
+                      <div className="as-session-location">
+                        <Folder size={12} aria-hidden />
+                        <span className="as-session-project">{s.project || s.projectId}</span>
+                        <ShortTime at={s.updatedAt} zh={zh} />
+                      </div>
+                    </>
+                  )}
                 </Link>
               );
             })}
@@ -217,7 +294,7 @@ function SessionRail({
           </p>
         )}
         {more && (
-          <button className="as-text-button" onClick={onMore}>
+          <button className="as-text-button as-session-more" onClick={onMore}>
             {zh ? "加载更多会话" : "More sessions"}
             <ArrowDown size={13} />
           </button>
@@ -227,27 +304,84 @@ function SessionRail({
   );
 }
 
+function DeliveryReceipt({
+  receipt: r,
+  session,
+  zh,
+}: {
+  receipt: AssistantReceipt;
+  session?: AssistantSession;
+  zh: boolean;
+}) {
+  const Icon = { pending: Clock3, sent: Check, queued: Clock3, failed: CircleAlert }[r.delivery];
+  const label = {
+    pending: zh ? "送达待确认" : "Delivery unconfirmed",
+    sent: zh ? "已派发" : "Assigned",
+    queued: zh ? "已加入会话队列" : "Queued in session",
+    failed: zh ? "派发失败" : "Delivery failed",
+  }[r.delivery];
+  const location = sessionLocation({ id: r.sessionId });
+  return (
+    <section className="as-delivery" data-delivery={r.delivery} aria-label={zh ? "任务派发回执" : "Task delivery"}>
+      <Link className="as-receipt" to={location}>
+        <span className="as-receipt-symbol" aria-hidden><GitBranch size={19} /></span>
+        <div className="as-receipt-body">
+          <h3>{r.title}</h3>
+          <div className="as-receipt-context">
+            <Folder size={13} aria-hidden /><span>{r.project}</span>
+            {session?.harness && (
+              <>
+                <span className="as-context-divider" aria-hidden />
+                <HarnessMark name={session.harness} /><span>{session.harness}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <span className="as-delivery-state"><Icon size={13} aria-hidden />{label}</span>
+      </Link>
+      {r.error && <p className="as-delivery-error" role="alert">{r.error}</p>}
+      <div className="as-delivery-footer">
+        {r.task && (
+          <details className="as-delivery-detail">
+            <summary><FileText size={14} aria-hidden /><span>{zh ? "派发内容" : "Assignment"}</span><ChevronDown size={12} aria-hidden /></summary>
+            <p>{r.task}</p>
+          </details>
+        )}
+        <Link className="as-receipt-open" to={location}>
+          {zh ? "打开会话" : "Open session"}<ArrowUpRight size={14} aria-hidden />
+        </Link>
+      </div>
+    </section>
+  );
+}
+
 function Turn({
   row,
   zh,
   stage,
   liveText,
+  sessions,
   onStop,
 }: {
   row: JournalRow<AssistantTurn>;
   zh: boolean;
   stage?: string;
   liveText?: string;
+  sessions: ReadonlyMap<string, AssistantSession>;
   onStop: (id: string) => void;
 }) {
   const { value: t } = row,
     live = t.status === "running" || t.status === "queued";
+  const entranceRef = useMessageEntrance("workspace-assistant", t.id);
   return (
     <article className="as-turn">
-      <div className="as-user-message">{t.text}</div>
+      <div className="as-user-turn">
+        <div ref={entranceRef} className="as-user-message">{t.text}</div>
+        <ShortTime at={t.at} zh={zh} />
+      </div>
       <div className="as-response">
         <span className="as-avatar" aria-hidden>
-          <Workflow size={15} strokeWidth={1.9} />
+          <Workflow size={17} strokeWidth={1.9} />
         </span>
         <div className="as-response-body">
           <div className="as-turn-heading">
@@ -286,36 +420,7 @@ function Turn({
             </div>
           )}
           {t.receipts.map((r) => (
-            <div className="as-delivery" key={r.messageId} data-delivery={r.delivery}>
-              <Link className="as-receipt" to={sessionLocation({ id: r.sessionId })}>
-                <CornerDownRight size={16} />
-                <span>
-                  <strong>{r.title}</strong>
-                  <small>
-                    {r.project} ·{" "}
-                    {
-                      {
-                        pending: zh ? "送达待确认" : "Delivery unconfirmed",
-                        sent: zh ? "已派发" : "Assigned",
-                        queued: zh ? "已加入会话队列" : "Queued in session",
-                        failed: zh ? "派发失败" : "Delivery failed",
-                      }[r.delivery]
-                    }
-                    {r.error ? " · " + r.error : ""}
-                  </small>
-                </span>
-                <ChevronRight size={15} />
-              </Link>
-              {r.task && (
-                <details className="as-delivery-detail">
-                  <summary>
-                    <ChevronRight size={12} aria-hidden />
-                    {zh ? "查看派发内容" : "View assignment"}
-                  </summary>
-                  <p>{r.task}</p>
-                </details>
-              )}
-            </div>
+            <DeliveryReceipt key={r.messageId} receipt={r} session={sessions.get(r.sessionId)} zh={zh} />
           ))}
           {!live && typeof t.usage?.cached === "number" && (
             <small
@@ -346,7 +451,7 @@ export default function AssistantPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const rail = compact ? drawerOpen : railDocked;
   const setRail = compact ? setDrawerOpen : setRailDocked;
-  const pageRoot = useRef<HTMLElement>(null);
+  const pageRoot = useSurfaceEntrance<HTMLElement>("workspace-assistant");
   useLayoutEffect(() => {
     const el = pageRoot.current;
     if (!el) return;
@@ -362,6 +467,7 @@ export default function AssistantPage() {
   }, []);
   const [page, setPage] = useState<AssistantSessionPage>({ items: [], next: null }),
     [pageCount, setPageCount] = useState(1);
+  const sessionsById = useMemo(() => new Map(page.items.map((session) => [session.id, session])), [page.items]);
   const [attention, setAttention] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [activityError, setActivityError] = useState(""),
@@ -484,6 +590,7 @@ export default function AssistantPage() {
       const body = text.trim();
       if (pendingSubmission.current?.text !== body)
         pendingSubmission.current = { id: "turn_" + crypto.randomUUID(), text: body };
+      markOutgoingMessage("workspace-assistant", pendingSubmission.current.id);
       await api.submit(pendingSubmission.current.id, body);
       pendingSubmission.current = undefined;
       setDraft((current) => (current.trim() === body ? "" : current));
@@ -554,7 +661,7 @@ export default function AssistantPage() {
       <header className="as-header">
         <div className="as-header-identity">
           <span className="as-header-logo" aria-hidden>
-            <Workflow size={18} strokeWidth={1.8} />
+            <Workflow size={20} strokeWidth={1.8} />
           </span>
           <h1>{zh ? "工作区助手" : "Workspace assistant"}</h1>
         </div>
@@ -604,6 +711,7 @@ export default function AssistantPage() {
                     key={row.seq}
                     row={row}
                     zh={zh}
+                    sessions={sessionsById}
                     stage={view?.stage}
                     liveText={
                       stream?.turnId === row.value.id && view?.stage === "thinking" ? stream.text : undefined
@@ -646,13 +754,13 @@ export default function AssistantPage() {
               }}
             >
               <div className="as-entry">
-                <label className="as-input-label" htmlFor="assistant-message">
+                <label className="sr-only" htmlFor="assistant-message">
                   {zh ? "给助手" : "To assistant"}
                 </label>
                 <textarea
                   id="assistant-message"
                   ref={input}
-                  placeholder={zh ? "安排任务，或询问会话进展…" : "Assign work or ask about a session…"}
+                  placeholder={zh ? "给助手安排任务，或询问会话进展…" : "Assign work to the assistant, or ask about a session…"}
                   rows={1}
                   value={draft}
                   maxLength={16000}
@@ -671,7 +779,7 @@ export default function AssistantPage() {
                   state={{ returnTo: "/assistant" }}
                   title={view?.settings.model || (zh ? "选择助手模型" : "Choose an assistant model")}
                 >
-                  <Layers3 size={14} />
+                  <Layers3 size={17} />
                   <span>
                     {selectedModel?.displayName ||
                       view?.settings.model ||
@@ -696,7 +804,7 @@ export default function AssistantPage() {
                   aria-label={zh ? "发送指令" : "Send request"}
                   title={zh ? "Enter 发送，Shift + Enter 换行" : "Enter to send, Shift + Enter for a new line"}
                 >
-                  <ArrowUp size={18} />
+                  <ArrowUp size={20} />
                 </button>
               </div>
             </form>

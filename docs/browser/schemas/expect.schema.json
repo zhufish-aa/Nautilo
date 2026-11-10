@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nautilo.dev/schemas/expect.schema.json",
+  "title": "Nautilo Expect",
+  "description": "断言谓语。每组每 250ms 轮询，全部满足才通过，超时回 ASSERT_FAILED（带 actual vs expected）。",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "url": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "equals": {
+          "type": "string"
+        },
+        "includes": {
+          "type": "string"
+        },
+        "matches": {
+          "type": "string"
+        }
+      }
+    },
+    "title": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contains": {
+          "type": "string"
+        },
+        "matches": {
+          "type": "string"
+        }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "css": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "visible",
+            "attached",
+            "hidden",
+            "detached"
+          ],
+          "default": "attached"
+        },
+        "count": {
+          "$ref": "#/$defs/numberPredicate"
+        }
+      },
+      "required": [
+        "css"
+      ]
+    },
+    "text": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "css": {
+          "type": "string"
+        },
+        "contains": {
+          "type": "string"
+        },
+        "equals": {
+          "type": "string"
+        },
+        "matches": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "css"
+      ]
+    },
+    "eval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "script"
+      ],
+      "properties": {
+        "script": {
+          "type": "string",
+          "description": "函数体字符串，如 \"() => ({...})\""
+        },
+        "arg": {},
+        "expect": {
+          "$ref": "#/$defs/predicateMap"
+        }
+      }
+    },
+    "popup": {
+      "type": "boolean"
+    },
+    "navigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matches": {
+          "type": "string"
+        },
+        "includes": {
+          "type": "string"
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url_matches": {
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "GET",
+            "POST",
+            "PUT",
+            "DELETE",
+            "PATCH",
+            "HEAD",
+            "OPTIONS"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/numberPredicate"
+        }
+      }
+    },
+    "load_state": {
+      "enum": [
+        "domcontentloaded",
+        "load"
+      ]
+    },
+    "network_idle_ms": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 10000
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "since": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expect": {
+          "$ref": "#/$defs/predicateMap"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "numberPredicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eq": {
+          "type": "number"
+        },
+        "ne": {
+          "type": "number"
+        },
+        "gt": {
+          "type": "number"
+        },
+        "gte": {
+          "type": "number"
+        },
+        "lt": {
+          "type": "number"
+        },
+        "lte": {
+          "type": "number"
+        }
+      }
+    },
+    "valuePredicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eq": {},
+        "ne": {},
+        "gt": {
+          "type": "number"
+        },
+        "gte": {
+          "type": "number"
+        },
+        "lt": {
+          "type": "number"
+        },
+        "lte": {
+          "type": "number"
+        },
+        "contains": {
+          "type": "string"
+        },
+        "matches": {
+          "type": "string"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "length_gte": {
+          "type": "integer"
+        },
+        "in": {
+          "type": "array"
+        }
+      }
+    },
+    "predicateMap": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/valuePredicate"
+          },
+          {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null",
+              "array"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "x-evaluation": {
+    "interval_ms": 250,
+    "default_timeout_ms": 15000,
+    "on_timeout": "ASSERT_FAILED",
+    "payload": {
+      "actual": "object",
+      "expected": "object",
+      "diff": "string (<=200 chars)"
+    }
+  }
+}

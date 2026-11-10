@@ -33,6 +33,7 @@ import { BrowserDrawer } from "./BrowserDrawer";
 import { getBridge, requestCore } from "../../lib/bridge";
 import { SourceControlDrawer } from "./SourceControlDrawer";
 import { useCoreFeatures } from "../../lib/use-core-features";
+import { toast } from "../../stores/toast";
 
 const pendingTitles = new Map<string, Promise<{ title?: string }>>();
 
@@ -323,7 +324,11 @@ export function SessionWorkbench({
             </Button>
           )}
           {coreFeatures.sourceControl === 1 && <Button variant="ghost" size="sm" title={locale === "zh-CN" ? "源码管理" : "Source control"} aria-label={locale === "zh-CN" ? "源码管理" : "Source control"} onClick={() => onOpenDrawer("source-control")}><GitBranch className="h-4 w-4" aria-hidden /><span>Git</span></Button>}
-          {getBridge()?.browser && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "浏览器" : "Browser"} aria-label={locale === "zh-CN" ? "浏览器" : "Browser"} onClick={() => onOpenDrawer("browser")}><Globe className="h-4 w-4" aria-hidden /></Button>}
+          {getBridge()?.browser && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "浏览器" : "Browser"} aria-label={locale === "zh-CN" ? "浏览器" : "Browser"} onClick={() => {
+            const panels = getBridge()?.panels;
+            if (panels) void panels.open({kind:"browser",sessionId}).then(() => onCloseDrawer()).catch(error => toast.error(String(error)));
+            else onOpenDrawer("browser");
+          }}><Globe className="h-4 w-4" aria-hidden /></Button>}
           {headerActions}
           {onToggleAgents && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} aria-label={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} aria-pressed={agentsOpen} aria-expanded={agentsOpen} aria-controls={agentsOpen ? "session-agent-inspector" : undefined} onClick={onToggleAgents}>
             <Users className="h-4 w-4" aria-hidden />
@@ -357,7 +362,7 @@ export function SessionWorkbench({
 
       {<TerminalDrawer open={drawer === "terminal" && active} onClose={onCloseDrawer} sessionId={sessionId} />}
       </div>
-      {<ArtifactsDrawer open={drawer === "artifacts"} onClose={onCloseDrawer} sessionId={sessionId} focusPath={diffFocusPath} />}
+      {<ArtifactsDrawer open={drawer === "artifacts" && active} onClose={onCloseDrawer} sessionId={sessionId} focusPath={diffFocusPath} />}
       {drawer === "browser" && active && getBridge()?.browser && <BrowserDrawer key={sessionId} sessionId={sessionId} onClose={onCloseDrawer} />}
       <SourceControlDrawer open={drawer === "source-control" && active && coreFeatures.sourceControl === 1} onClose={onCloseDrawer} sessionId={sessionId} projectId={project?.id} />
       <DagDrawer open={drawer === "dag"} onClose={onCloseDrawer} tasks={tasks} />

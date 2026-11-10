@@ -1,5 +1,5 @@
 export interface PanelTarget {
-  kind: "browser" | "source-control";
+  kind: "browser" | "browser-spaces" | "source-control";
   sessionId?: string;
   projectId?: string;
 }

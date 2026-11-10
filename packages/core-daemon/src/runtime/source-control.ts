@@ -41,7 +41,8 @@ export function parseSourceControlStatus(raw:string):Pick<SourceControlRepositor
       for(let field=0;field<count-1;field++){const next=record.indexOf(" ",cursor);if(next<0)throw new Error("Git 状态记录不完整");fields.push(record.slice(cursor,next));cursor=next+1;}
       name=record.slice(cursor);xy=fields[1];sub=fields[2];if(kind==="2"){originalPath=records[++index];if(!originalPath)throw new Error("Git 重命名记录不完整");validPath(originalPath);}
     }else throw new Error("无法识别的 Git 状态记录");
-    validPath(name);if(xy.length!==2)throw new Error("Git 文件状态无效");state.changes.push({path:name,originalPath,indexStatus:xy[0],worktreeStatus:xy[1],untracked:kind==="?",conflict:kind==="u",submodule:sub.startsWith("S")});
+    const directory=kind==="?"&&name.endsWith("/");if(directory)name=name.slice(0,-1);
+    validPath(name);if(xy.length!==2)throw new Error("Git 文件状态无效");state.changes.push({path:name,originalPath,indexStatus:xy[0],worktreeStatus:xy[1],untracked:kind==="?",conflict:kind==="u",submodule:sub.startsWith("S"),directory});
   }return state;
 }
 async function repositoryRoot(cwd:string):Promise<string|undefined>{const result=await git(cwd,["rev-parse","--show-toplevel"],undefined,16384);return result.code===0?await realpath(result.stdout.trim()):undefined;}
@@ -86,6 +87,7 @@ export class SourceControl {
   private async readDiff(root:string,input:{path:string;source:"worktree"|"index"}):Promise<SourceControlDiff>{
       validPath(input.path);const state=parseSourceControlStatus(await checked(root,["status","--porcelain=v2","-z","--untracked-files=all"])),change=state.changes.find(item=>item.path===input.path);if(!change)throw new Error("文件状态已改变，请刷新后重试");
       if(input.source==="index"&&(change.untracked||change.conflict||[".","?"].includes(change.indexStatus)))throw new Error("此文件的暂存状态已改变，请刷新后重试。");
+      if(change.directory)return{rootPath:root,path:input.path,source:input.source,patch:"",binary:false,truncated:false,editable:false,hunks:[],partialReason:"directory",previewReason:"directory"};
       const token=input.source==="worktree"&&!change.submodule?await fileToken(root,input.path):undefined;
       const identity=await sourcePreviewIdentity(root,input.path,change,input.source,{git,checked},fileToken);
       if(change.untracked){const result=await git(root,["diff","--no-index","--no-ext-diff","--no-textconv","--no-color","--patch","--","/dev/null",input.path],undefined,LIMIT);if(result.code!==0&&result.code!==1)throw new Error(result.stderr);

@@ -113,6 +113,12 @@ fn turn_start_params(request: &AdapterStartRequest, thread_id: &str) -> anyhow::
         "effort": request.reasoning_effort.as_deref().filter(|e| !e.is_empty()),
         "summary": "auto"
     });
+    if let Some(browser) = codex_desktop_browser_context(request.mcp_servers.as_deref().unwrap_or(&[])) {
+        // Application context is supplied on warm turns too. Keep the native
+        // instructions and the user's message intact; this is environment
+        // metadata, not a replacement system prompt or a fabricated tool.
+        params["additionalContext"] = json!({ "nautilo.desktop_browser": { "kind": "application", "value": browser } });
+    }
     // A resumed, already-loaded thread keeps its prior turn settings unless
     // turn/start explicitly overrides them. Match the user's current selection.
     let (approval, sandbox) = codex_permission_config(&request.instance, Some(request)).unwrap_or(("never", "workspace-write"));
@@ -130,6 +136,18 @@ fn turn_start_params(request: &AdapterStartRequest, thread_id: &str) -> anyhow::
             .map_err(|error|anyhow::anyhow!("Unable to read output schema {}: {error}",path.display()))?)?;
     }
     Ok(params)
+}
+
+fn codex_desktop_browser_context(servers: &[Value]) -> Option<String> {
+    let browser = servers.iter().find(|server| server["desktopBrowser"] == true)?;
+    let name = browser["name"].as_str()?.trim();
+    if name.is_empty() { return None; }
+    Some(format!(
+        "This session runs in Nautilo. Nautilo's built-in desktop browser is configured through MCP server {name:?}, with browser_tabs, browser_run, browser_read, browser_session and the other browser_* tools. \
+         Use that MCP server for browser tasks in Nautilo unless the user explicitly requests another browser. If its tools are deferred, discover them in the current tool catalog by server name or browser_run before concluding they are unavailable. \
+         Codex CUA / ChatGPT in-app browser (iab) and ego-browser are separate browser runtimes; they do not control Nautilo's built-in browser. When the user asks for Nautilo's browser, use the configured MCP tools rather than substituting one of those runtimes. \
+         If the MCP connection cannot load its tools, report that connection failure accurately."
+    ))
 }
 
 /// Supplies a short-lived catalog for custom endpoints so the selected model
@@ -1206,6 +1224,32 @@ mod queue_tests {
     use super::*;
     use std::time::Duration;
     include!("session_events_tests.rs");
+
+    #[test]
+    fn codex_desktop_browser_context_identifies_the_actual_server_without_replacing_native_instructions() {
+        let mut request = AdapterStartRequest {
+            prompt: "使用 Nautilo 浏览器打开网页".into(),
+            mcp_servers: Some(vec![json!({
+                "name": "nautilo_browser_", "transport": "http", "desktopBrowser": true,
+                "url": "http://127.0.0.1:12345/mcp/private-session", "headers": { "Authorization": "Bearer private-key" }
+            })]),
+            ..Default::default()
+        };
+        let params = turn_start_params(&request, "existing-thread").unwrap();
+        assert_eq!(params["threadId"], "existing-thread");
+        assert_eq!(params["input"][0]["text"], request.prompt);
+        assert!(params.get("baseInstructions").is_none());
+        assert!(params.get("developerInstructions").is_none());
+        assert_eq!(params["additionalContext"]["nautilo.desktop_browser"]["kind"], "application");
+        let context = params["additionalContext"]["nautilo.desktop_browser"]["value"].as_str().unwrap();
+        assert!(context.contains("nautilo_browser_"));
+        assert!(context.contains("browser_run"));
+        assert!(!context.contains("12345"));
+        assert!(!context.contains("private-session"));
+        assert!(!context.contains("private-key"));
+        request.mcp_servers = Some(vec![json!({ "name": "unrelated", "transport": "http" })]);
+        assert!(turn_start_params(&request, "existing-thread").unwrap().get("additionalContext").is_none());
+    }
 
     #[test]
     fn resumed_turn_overrides_approval_and_sandbox_for_each_selection() {

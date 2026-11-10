@@ -1,6 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { Orbit, Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { motion } from "framer-motion";
+import { UI_EASE_OUT, useUiReducedMotion } from "../../lib/ui-motion";
+import { Orbit, BarChart3, Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2 } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { NautiloMark } from "../ui/IdentityAvatar";
 import { cn, formatRelativeTime } from "../../lib/utils";
@@ -10,6 +12,9 @@ import { useSessionsStore } from "../../stores/sessions";
 import { deleteWorkbenchSession } from "../../lib/orchestration-runtime";
 import { toast } from "../../stores/toast";
 import type { UiSession } from "../../lib/types";
+import { useInteractionsStore } from "../../stores/interactions";
+import { pendingCountsBySession } from "../../lib/notification-policy";
+import { groupSessionsForDashboard } from "../../lib/runs-dashboard";
 
 import { SessionListPanel } from "../../features/sessions/SessionListPanel";
 import { AddProjectDialog } from "../../features/projects/AddProjectDialog";
@@ -24,11 +29,22 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
   const location = useLocation();
+  const reducedMotion = useUiReducedMotion();
+  const isNewConversation = location.pathname === "/sessions" && new URLSearchParams(location.search).get("new") === "1";
+  const activeSurface = <motion.span layoutId="workspace-nav-active" className="nav-active-surface" aria-hidden
+    transition={{ duration: reducedMotion ? 0 : 0.18, ease: UI_EASE_OUT }} />;
   const navigate = useNavigate();
   const routeRef = useRef(location.pathname + location.search);
   routeRef.current = location.pathname + location.search;
   const projects = useProjectsStore((state) => state.projects);
   const sessions = useSessionsStore((state) => state.sessions);
+  const foreground = useSessionsStore(state => state.foreground);
+  const running = useSessionsStore(state => state.running);
+  const interactions = useInteractionsStore(state => state.bySession);
+  const attentionCount = useMemo(() => {
+    const groups = groupSessionsForDashboard({ sessions, foreground, running, pending: pendingCountsBySession(interactions) });
+    return groups.waiting.length + groups.running.length;
+  }, [sessions, foreground, running, interactions]);
   const activeSessionId = useSessionsStore((state) => state.activeSessionId);
   const setActiveSession = useSessionsStore((state) => state.setActiveSession);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -133,9 +149,11 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
         </div>
         <div className="sidebar-primary-nav">
           <NavLink to="/assistant" className={({isActive}) => cn(rowClass, isActive && "bg-card-hover font-medium")}>
+            {location.pathname === "/assistant" && activeSurface}
             <Orbit className="h-4 w-4 shrink-0" aria-hidden />{zh ? "助手" : "Assistant"}
           </NavLink>
-          <button className={cn(rowClass, new URLSearchParams(location.search).get("new") === "1" && "bg-card-hover")} onClick={() => newConversation()} data-tour="sessions-new" title={zh ? "新会话 · Ctrl/⌘ N" : "New chat · Ctrl/⌘ N"}>
+          <button className={rowClass} aria-current={isNewConversation ? "page" : undefined} onClick={() => newConversation()} data-tour="sessions-new" title={zh ? "新会话 · Ctrl/⌘ N" : "New chat · Ctrl/⌘ N"}>
+            {isNewConversation && activeSurface}
             <Plus className="h-4 w-4 shrink-0" aria-hidden />{zh ? "新建任务" : "New task"}
           </button>
           <button ref={searchTrigger} className={rowClass} onClick={() => setSearchOpen(true)} title={zh ? "搜索 · Ctrl/⌘ K" : "Search · Ctrl/⌘ K"}>
@@ -145,6 +163,10 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
         <div className="sidebar-feature-nav">
           <NavLink to="/settings?section=agents" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Boxes size={16} />{zh ? "Harness 管理" : "Harnesses"}</NavLink>
           <NavLink to="/settings?section=skills" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Puzzle size={16} />{zh ? "技能与连接器" : "Skills & connectors"}</NavLink>
+          <NavLink to="/runs" className={rowClass}>
+            {location.pathname === "/runs" && activeSurface}
+            <BarChart3 size={16} aria-hidden/>{t("runsPage.title")}{attentionCount > 0 && <span className="sidebar-run-count">{attentionCount}</span>}
+          </NavLink>
         </div>
         <div className="sidebar-project-history" data-nav="sessions">
           <div className="sidebar-section-heading"><span>{zh ? "项目与任务" : "Projects & tasks"}</span><button onClick={() => setAddProjectOpen(true)} aria-label={t("projects.addTitle")}><Plus size={15} /></button></div>

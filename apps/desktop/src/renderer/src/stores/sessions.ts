@@ -50,6 +50,7 @@ interface SessionsState {
   editingMessage?: { sessionId: string; messageId: string; text: string };
 
   setActiveSession: (id: string | undefined) => void;
+  markSessionsRead: (ids: string[]) => void;
   removeSessions: (sessionIds: string[]) => void;
   startEditingMessage: (sessionId: string, messageId: string, text: string) => void;
   cancelEditingMessage: () => void;
@@ -135,6 +136,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             session.id === id ? { ...session, unreadCount: 0 } : session
           )
         })),
+
+      markSessionsRead: (ids) => {
+        const selected = new Set(ids);
+        set(state => ({ sessions: state.sessions.map(session => selected.has(session.id) && session.unreadCount ? { ...session, unreadCount: 0 } : session) }));
+      },
 
       removeSessions: (sessionIds) =>
         set((state) => {

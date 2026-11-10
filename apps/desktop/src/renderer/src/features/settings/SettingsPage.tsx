@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { motion } from "framer-motion";
 import {
   Link,
   useLocation,
@@ -50,6 +51,7 @@ import { PermissionPolicyCard } from "./PermissionPolicyCard";
 import { UsagePanel } from "./UsagePanel";
 import { AssistantSettingsPanel } from "../assistant/AssistantSettingsPanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
+import { UI_EASE_OUT, useSurfaceEntrance, useUiReducedMotion } from "../../lib/ui-motion";
 
 type SettingsSection =
   | "teams"
@@ -160,6 +162,8 @@ export function SettingsPage(): JSX.Element {
       ? (requested as SettingsSection)
       : "general";
   const activeGroup = section;
+  const sectionRef = useSurfaceEntrance<HTMLDivElement>(section);
+  const reducedMotion = useUiReducedMotion();
   const settings = useSettingsStore();
   const {
     theme,
@@ -259,6 +263,8 @@ export function SettingsPage(): JSX.Element {
                     : "text-ink-2 hover:bg-card-hover/70 hover:text-ink",
                 )}
               >
+                {activeGroup === id && <motion.span layoutId="settings-nav-active" className="nav-active-surface" aria-hidden
+                  transition={{ duration: reducedMotion ? 0 : 0.18, ease: UI_EASE_OUT }} />}
                 <Icon
                   className="h-4 w-4 shrink-0"
                   strokeWidth={1.7}
@@ -276,6 +282,7 @@ export function SettingsPage(): JSX.Element {
         className="settings-content min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain bg-card px-8 py-10 max-[760px]:px-5 max-[560px]:px-4"
       >
         <div
+          ref={sectionRef}
           className={cn(
             "settings-content-inner mx-auto w-full",
             ["agents", "accounts", "skills", "mcp", "plugins", "permissions", "advanced", "usage", "teams"].includes(

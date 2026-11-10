@@ -35,7 +35,7 @@ function WindowButton({
   );
 }
 
-export function TitleBar(): JSX.Element {
+export function WindowControls(): JSX.Element | null {
   const { t } = useI18n();
   const bridge = getBridge();
   const [maximized, setMaximized] = useState(false);
@@ -46,6 +46,18 @@ export function TitleBar(): JSX.Element {
     return bridge.window.onMaximizedChange(setMaximized);
   }, [bridge]);
 
+  if (!bridge) return null;
+  return <div className="titlebar-controls no-drag flex items-stretch" role="group" aria-label="Window">
+    <WindowButton label={t("app.windowMinimize")} windowAction="minimize" onClick={() => void bridge.window.minimize()}><Minus className="h-4 w-4" aria-hidden /></WindowButton>
+    <WindowButton label={maximized ? t("app.windowRestore") : t("app.windowMaximize")} windowAction="maximize" onClick={() => void bridge.window.toggleMaximize()}>
+      {maximized ? <Copy className="h-3.5 w-3.5" aria-hidden /> : <Square className="h-3.5 w-3.5" aria-hidden />}
+    </WindowButton>
+    <WindowButton label={t("app.windowClose")} danger windowAction="close" onClick={() => void bridge.window.close()}><X className="h-4 w-4" aria-hidden /></WindowButton>
+  </div>;
+}
+
+export function TitleBar(): JSX.Element {
+  const { t } = useI18n();
   return (
     <header className="titlebar-root drag-region relative z-30 flex h-11 shrink-0 items-stretch justify-between bg-canvas">
       <div className="titlebar-brand flex items-center gap-2.5 pl-4">
@@ -60,27 +72,7 @@ export function TitleBar(): JSX.Element {
         )}
       </div>
 
-      {bridge && (
-        <div className="titlebar-controls flex items-stretch" role="group" aria-label="Window">
-          <WindowButton label={t("app.windowMinimize")} windowAction="minimize" onClick={() => void bridge.window.minimize()}>
-            <Minus className="h-4 w-4" aria-hidden />
-          </WindowButton>
-          <WindowButton
-            label={maximized ? t("app.windowRestore") : t("app.windowMaximize")}
-            windowAction="maximize"
-            onClick={() => void bridge.window.toggleMaximize()}
-          >
-            {maximized ? (
-              <Copy className="h-3.5 w-3.5" aria-hidden />
-            ) : (
-              <Square className="h-3.5 w-3.5" aria-hidden />
-            )}
-          </WindowButton>
-          <WindowButton label={t("app.windowClose")} danger windowAction="close" onClick={() => void bridge.window.close()}>
-            <X className="h-4 w-4" aria-hidden />
-          </WindowButton>
-        </div>
-      )}
+      <WindowControls />
     </header>
   );
 }

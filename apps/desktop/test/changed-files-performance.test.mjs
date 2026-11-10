@@ -40,3 +40,38 @@ test('immutable timeline cache refreshes same-length changed/native-cleared snap
   assert.equal(cachedChangedFileCount([native(1,[])]), 0);
   assert.equal(cachedChangedFileCount([native(1,['c'])]), 1);
 });
+
+test('file bodies, failed edits, pending edits and no-op edits are not changed files or badge counts', () => {
+  const events = [
+    row(1, { kind: 'tool_activity', toolName: 'Read', status: 'done', input: JSON.stringify({ path: 'read.ts', content: 'whole file' }) }),
+    row(2, { kind: 'tool_activity', toolName: 'Write', status: 'done', input: JSON.stringify({ path: 'write.ts', content: 'whole file' }) }),
+    row(3, { kind: 'tool_activity', toolName: 'write_file', status: 'done', fileDiff: { path: 'legacy-write.ts', before: '', after: 'whole file' } }),
+    row(4, { kind: 'tool_activity', toolName: 'Write', status: 'done', fileDiff: { operation: 'write', path: 'explicit-write.ts', before: '', after: 'whole file' } }),
+    row(5, { ...edit(5, 'failed.ts').data, status: 'failed' }),
+    row(6, { ...edit(6, 'running.ts').data, status: 'running' }),
+    row(7, { kind: 'tool_activity', toolName: 'Edit', status: 'done', fileDiff: { path: 'unchanged.ts', before: 'same', after: 'same' } }),
+    row(8, { kind: 'tool_activity', toolName: 'Edit', status: 'done', input: JSON.stringify({ path: 'noop.ts', old_string: 'same', new_string: 'same' }) })
+  ];
+  assert.equal(collectChangedFiles(events).length, 0);
+  assert.equal(countChangedFiles(events), 0);
+  assert.equal(cachedChangedFileCount(events), 0);
+});
+
+test('completed edits and writes with captured old content remain reviewable', () => {
+  const events = [
+    row(1, { kind: 'tool_activity', toolName: 'Edit', status: 'done', input: JSON.stringify({ path: 'edit.ts', old_string: 'old', new_string: 'new' }) }),
+    row(2, { kind: 'tool_activity', toolName: 'Write', status: 'done', fileDiff: { operation: 'write', path: 'captured.ts', before: 'old file', after: 'new file' } }),
+    row(3, { kind: 'file_change', files: [{ path: 'created.ts', changeType: 'added', additions: 1, deletions: 0, diff: '@@ -0,0 +1 @@\n+created' }] })
+  ];
+  assert.deepEqual(Array.from(collectChangedFiles(events), file => file.path), ['edit.ts', 'captured.ts', 'created.ts']);
+  assert.equal(countChangedFiles(events), 3);
+});
+
+test('changing a tool from pending to done does not reuse an excluded cached path', () => {
+  const activity = { ...edit(1).data, status: 'running' };
+  assert.equal(countChangedFiles([row(1, activity)]), 0);
+  activity.status = 'done';
+  assert.equal(countChangedFiles([row(1, activity)]), 1);
+  activity.status = 'failed';
+  assert.equal(collectChangedFiles([row(1, activity)]).length, 0);
+});

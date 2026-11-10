@@ -1,5 +1,5 @@
 import type { WebContents } from "electron";
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { showBrowserPointer } from "./browser-pointer";
 import { browserCommand, settleBrowserLayout } from "./browser-protocol";
 import {
@@ -7,6 +7,8 @@ import {
   type BrowserReadOptions,
 } from "./browser-viewport";
 import { browserTargetNode } from "./browser-dom";
+import {inspectClickTarget,observeClickTarget} from "./browser-click-observation";
+import {scrollBrowserPage} from "./browser-scroll";
 import {
   BrowserToolError,
   browserError,
@@ -25,6 +27,8 @@ type AXNode = {
 };
 export type BrowserStep = {
   action: string;
+  target?: { ref?: string; css?: string; xpath?: string; role?: string; name?: string; name_match?: "exact" | "contains" | "regex"; text?: string; exact?: boolean; href?: string; x?: number; y?: number; nth?: number; frame?:string|number; view_id?: string; root?: string };
+  to?: BrowserStep["target"];
   url?: string;
   ref?: string;
   role?: string;
@@ -51,6 +55,9 @@ export type BrowserStep = {
   urlIncludes?: string;
   visible?: boolean;
   waitUntil?: "domcontentloaded" | "load";
+  format?:"text"|"refs";
+  root?:string;
+  view_id?:string;
 };
 type Step = BrowserStep;
 
@@ -65,14 +72,15 @@ export type BrowserStepReport = {
 };
 
 export function webUrl(input: unknown): string {
-  if (typeof input !== "string") throw Error("Expected an HTTP or HTTPS URL");
+  if (typeof input !== "string") throw Error("Expected an HTTP, HTTPS or local file URL");
   const url = new URL(input);
   if (
-    !["http:", "https:"].includes(url.protocol) ||
+    !["http:", "https:", "file:"].includes(url.protocol) ||
     url.username ||
     url.password
   )
-    throw Error("Only HTTP and HTTPS pages are supported");
+    throw Error("Only HTTP, HTTPS and local file pages are supported");
+  if(url.protocol === "file:" && url.hostname && url.hostname !== "localhost")throw Error("Use a local file URL, not a network share");
   return url.href;
 }
 
@@ -103,14 +111,25 @@ const contentRoles = new Set([
   "rowheader",
   "img",
 ]);
+let nextBrowserRef = 0;
+let nativeInput = Promise.resolve();
+async function inputLease() {
+  const previous=nativeInput;
+  let release!:()=>void;
+  nativeInput=new Promise<void>(resolve=>{release=resolve;});
+  await previous;
+  return release;
+}
 
 /** One driver per page. Refs identify backend nodes in exactly one document. */
 export class BrowserActions {
   private epoch = 1;
-  private readonly refScope = randomUUID();
+  private readonly refScope = randomBytes(4).toString("base64url");
   private paintedEpoch = 0;
   private pointerReadyAt = 0;
+  private wheelUnavailable = false;
   private jsonResponse?: { epoch: number; body?: string; error?: string };
+  private contentType?: { epoch: number; value: string };
 
   surfaceChanged() {
     // Chromium on Windows can drop button presses immediately after a new
@@ -125,17 +144,24 @@ export class BrowserActions {
     check();
   }
   private refs = new Map<string, number>();
+  private nodeRefs = new Map<number, string>();
+  private refMetadata = new Map<string,{role:string;name:string;css_hint?:string;root?:string;epoch:number;url:string}>();
+  get viewId() { return this.refScope + "." + this.epoch; }
 
   constructor(
     private readonly page: WebContents,
     private readonly tabId = String(page.id),
+    private readonly prepareInput?:()=>boolean,
   ) {
     this.surfaceChanged();
     page.on("dom-ready", () => this.surfaceChanged());
     page.on("did-start-navigation", (_event, _url, inPage, main) => {
-      if (main && !inPage) this.invalidate();
+      if (main && !inPage) {this.invalidate();this.wheelUnavailable=false;}
     });
     page.on("render-process-gone", () => this.invalidate());
+    page.debugger.on("message",(_event,method,params,sessionId)=>{
+      if(method === "Page.frameNavigated" && (sessionId || params.frame?.parentId))this.invalidate();
+    });
     page.debugger.on("detach", () => this.invalidate());
   }
 
@@ -145,13 +171,9 @@ export class BrowserActions {
       this.jsonResponse.body !== undefined
     )
       return this.jsonResponse;
-    const type = await browserDeadline(
-      this.page.executeJavaScriptInIsolatedWorld(1001, [
-        { code: "document.contentType" },
-      ]),
-      5000,
-      "document content type",
-    );
+    const type = this.contentType?.epoch === this.epoch ? this.contentType.value :
+      (await browserCommand(this.page, "Runtime.evaluate", { expression: "document.contentType", returnByValue: true, timeout: 3000 }, 3000)).result.value as string;
+    this.contentType = { epoch: this.epoch, value: type };
     if (!/(?:application|text)\/(?:[\w.-]+\+)?json(?:;|$)/i.test(type))
       return undefined;
     const response: { epoch: number; body?: string; error?: string } = {
@@ -195,10 +217,16 @@ export class BrowserActions {
   private invalidate(): void {
     this.epoch++;
     this.refs.clear();
+    this.nodeRefs.clear();
+    this.refMetadata.clear();
     this.jsonResponse = undefined;
+    this.contentType = undefined;
   }
 
   async read(args: BrowserReadOptions = {}) {
+    if(args.format === "refs") return this.snapshot(args);
+    if(args.root && !args.selector)args={...args,selector:args.root};
+    if(args.view_id && args.view_id !== this.viewId)throw new BrowserToolError("STALE_VIEW","The requested view is no longer the current document.",{view_id:this.viewId},"Read a new snapshot before acting.");
     if (args.jsonPath && args.selector)
       throw new BrowserToolError(
         "invalid_read_options",
@@ -296,6 +324,7 @@ export class BrowserActions {
               }
             : undefined,
         documentVersion: this.epoch,
+        view_id: this.viewId,
       };
     }
     if (args.jsonPath)
@@ -322,7 +351,57 @@ export class BrowserActions {
             }
           : undefined,
       documentVersion: this.epoch,
+      view_id: this.viewId,
     };
+  }
+
+  private reference(node:AXNode) {
+    const backend=node.backendDOMNodeId;
+    if(!backend)return "";
+    const ref=this.nodeRefs.get(backend) ?? "@"+this.refScope+"."+ ++nextBrowserRef;
+    this.nodeRefs.set(backend,ref);this.refs.set(ref,backend);
+    return ref;
+  }
+
+  /** A paged, addressable AX view. Metadata is captured only for emitted nodes. */
+  async snapshot(args:BrowserReadOptions={}) {
+    if(args.view_id && args.view_id !== this.viewId)throw new BrowserToolError("STALE_VIEW","This view belongs to an earlier document.",{view_id:this.viewId});
+    const offset=args.offset ?? 0,limit=args.limit ?? 100;
+    if(!Number.isSafeInteger(offset)||offset<0||!Number.isInteger(limit)||limit<1||limit>200)throw new BrowserToolError("INVALID_READ_RANGE","refs snapshots accept a node offset and limit from 1 to 200.",{},undefined,false);
+    const epoch=this.epoch,root=args.root ?? args.selector;
+    const nodes:AXNode[]=(await browserCommand(this.page,"Accessibility.getFullAXTree",{},10000)).nodes;
+    const entries=[];
+    for(const node of nodes) {
+      const role=String(node.role?.value ?? ""),name=String(node.name?.value ?? "").replace(/\s+/g," ").trim();
+      if(node.ignored || !node.backendDOMNodeId || (!controlRoles.has(role) && role !== "heading"))continue;
+      const ref=this.reference(node);
+      let objectId:string|undefined;
+      try {
+        objectId=(await browserCommand(this.page,"DOM.resolveNode",{backendNodeId:node.backendDOMNodeId})).object.objectId;
+        const {result}=await browserCommand(this.page,"Runtime.callFunctionOn",{objectId,returnByValue:true,
+          arguments:[{value:{root,viewport:args.scope !== "document"}}],
+          functionDeclaration:`function(arg){
+            const r=this.getBoundingClientRect(),css=getComputedStyle(this);
+            const root=arg.root?document.querySelector(arg.root):null;
+            if(arg.root && (!root || !root.contains(this)))return null;
+            if(!this.getClientRects().length || css.visibility==='hidden' || css.display==='none' || css.opacity==='0')return null;
+            if(arg.viewport && !(r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth))return null;
+            let hint=this.id?'#'+CSS.escape(this.id):this.getAttribute('data-testid')?'[data-testid='+JSON.stringify(this.getAttribute('data-testid'))+']':null;
+            if(hint && document.querySelectorAll(hint).length!==1)hint=null;
+            return {css_hint:hint,tag:this.tagName.toLowerCase()};}`});
+        if(!result.value)continue;
+        const metadata={role,name,css_hint:result.value.css_hint ?? undefined,root,epoch,url:this.page.getURL()};
+        this.refMetadata.set(ref,metadata);
+        entries.push({ref,role,name:name.slice(0,480),...(metadata.css_hint?{css_hint:metadata.css_hint}:{}),
+          ...(node.value?.value !== undefined ? {value:node.properties?.some(p=>p.name === "protected" && p.value?.value)?"[redacted]":String(node.value.value).slice(0,480)}:{})});
+      }catch{/* Detached nodes are omitted, never rebound to another document. */}
+      finally{if(objectId)void browserCommand(this.page,"Runtime.releaseObject",{objectId},1000).catch(()=>{});}
+      if(entries.length>=offset+limit+1)break;
+    }
+    if(epoch !== this.epoch)throw new BrowserToolError("STALE_VIEW","The document changed during snapshot capture.",{view_id:this.viewId});
+    const refs=entries.slice(offset,offset+limit),truncated=entries.length>offset+limit;
+    return {ok:true,format:"refs",view_id:this.viewId,tab_id:this.tabId,scope:args.scope ?? "viewport",root,refs,truncated,next_offset:truncated?offset+limit:null,
+      url:this.page.getURL(),title:this.page.getTitle(),text:refs.map(item=>`${item.ref} ${item.role} ${item.name}`).join("\n")};
   }
 
   async viewport() {
@@ -332,7 +411,7 @@ export class BrowserActions {
           code: "({width:innerWidth,height:innerHeight,devicePixelRatio,scrollX,scrollY,pageHeight:document.scrollingElement?.scrollHeight??innerHeight,coordinateUnit:'css-pixels'})",
         },
       ]),
-      5000,
+      3000,
       "viewport metrics",
     );
   }
@@ -396,19 +475,23 @@ export class BrowserActions {
       background: boolean,
     ) => Promise<{ tabId: string; url: string }>,
   ) {
-    const steps = input?.steps;
+    const steps = Array.isArray(input?.steps) ? input.steps.map((step: Step) => ({ ...step,
+      ...(step?.target ? { ref: step.target.ref ?? step.ref, selector: step.target.css ?? step.selector,
+        role: step.target.role ?? step.role, name: step.target.name ?? step.name,
+        x: step.target.x ?? step.x, y: step.target.y ?? step.y } : {}) })) : input?.steps;
     if (!Array.isArray(steps) || steps.length > 30)
       throw Error("Provide up to 30 steps");
     if (!this.page.getURL() && steps[0]?.action !== "open")
       await this.page.loadURL("about:blank");
     const cleanup = (method: string, params: Record<string, unknown>) =>
       browserCommand(this.page, method, params, 1000);
+    let commandTimeout = 15000;
     const send = async (
       method: string,
       params: Record<string, unknown> = {},
     ) => {
       check();
-      return browserCommand(this.page, method, params);
+      return browserCommand(this.page, method, params, commandTimeout);
     };
     const scan = async (): Promise<AXNode[]> =>
       (await send("Accessibility.getFullAXTree")).nodes;
@@ -454,8 +537,10 @@ export class BrowserActions {
           continue;
         let ref = "";
         if (n.backendDOMNodeId && controlRoles.has(role)) {
-          ref =
-            "@" + this.refScope + "." + this.epoch + "." + n.backendDOMNodeId;
+          // A small view namespace prevents a ref from an old process or another tab
+          // accidentally matching a new node with the same numeric index.
+          ref = this.nodeRefs.get(n.backendDOMNodeId) ?? "@" + this.refScope + "." + ++nextBrowserRef;
+          this.nodeRefs.set(n.backendDOMNodeId, ref);
           this.refs.set(ref, n.backendDOMNodeId);
         }
         if (name.length > 480) shortened = true;
@@ -499,8 +584,20 @@ export class BrowserActions {
       return lines.join("\n");
     };
     const nodeId = async (s: Step) => {
+      const targetView=s.target?.view_id ?? s.view_id;
+      if(targetView && targetView !== this.viewId)throw new BrowserToolError("STALE_VIEW","Target belongs to another view.",{view_id:this.viewId});
+      const inside=async(id:number,root:string)=>{
+        const {object}=await send("DOM.resolveNode",{backendNodeId:id});
+        try{return (await send("Runtime.callFunctionOn",{objectId:object.objectId,arguments:[{value:root}],returnByValue:true,
+          functionDeclaration:"function(selector){const root=this.ownerDocument.querySelector(selector)??this.getRootNode().querySelector(selector);return !!root&&root.contains(this)}"})).result.value === true;}
+        finally{void cleanup("Runtime.releaseObject",{objectId:object.objectId}).catch(()=>{});}
+      };
+      if (s.target?.nth !== undefined && !Number.isSafeInteger(s.target.nth))
+        throw new BrowserToolError("INVALID_TARGET", "target.nth must be a zero-based integer; negative indices count from the end.", {}, undefined, false);
       if (s.ref) {
-        const id = this.refs.get(s.ref);
+        if(s.target?.view_id && s.target.view_id !== this.viewId)throw new BrowserToolError("STALE_VIEW","Target belongs to another view.",{view_id:this.viewId});
+        const ref=s.ref.startsWith("@")?s.ref:"@"+s.ref;
+        const id = this.refs.get(ref);
         if (!id)
           throw new BrowserToolError(
             "stale_ref",
@@ -508,29 +605,70 @@ export class BrowserActions {
             { ref: s.ref, documentVersion: this.epoch },
             "Use the returned fresh snapshot and retry only the remaining steps.",
           );
+        const metadata=this.refMetadata.get(ref);
+        const root=s.target?.root ?? metadata?.root;
+        if(metadata?.css_hint && metadata.epoch === this.epoch) {
+          const {object}=await send("DOM.resolveNode",{backendNodeId:id}).catch(()=>({object:undefined}));
+          let connected=false;
+          if(object?.objectId) {
+            try{connected=(await send("Runtime.callFunctionOn",{objectId:object.objectId,functionDeclaration:"function(){return this.isConnected}",returnByValue:true})).result.value === true;}
+            finally{void cleanup("Runtime.releaseObject",{objectId:object.objectId}).catch(()=>{});}
+          }
+          if(!connected) {
+            if(metadata.url !== this.page.getURL())throw new BrowserToolError("stale_ref","The page route changed; this ref cannot be rebound safely.",{ref});
+            const fresh=await browserTargetNode(this.page,{selector:metadata.css_hint,within:root});
+            const freshAx=(await scan()).find(node=>node.backendDOMNodeId === fresh && node.role?.value === metadata.role && String(node.name?.value ?? "").replace(/\s+/g," ").trim() === metadata.name);
+            if(!freshAx)throw new BrowserToolError("stale_ref","The replacement no longer has the same identity.",{ref});
+            this.refs.set(ref,fresh);this.nodeRefs.set(fresh,ref);
+            reports.at(-1)!.result={ref_rebound:true};
+            (reports.at(-1)! as BrowserStepReport & {ref_rebound?:boolean}).ref_rebound=true;
+            return fresh;
+          }
+        }
+        if(root && !await inside(id,root))throw new BrowserToolError("target_not_found","The ref is outside the requested snapshot root.",{ref,root});
         return id;
       }
-      if (s.selector || (s.text && !s.role))
+      if(s.target?.frame !== undefined)return browserTargetNode(this.page,{selector:s.selector,xpath:s.target.xpath,href:s.target.href,text:s.target.text,role:s.role,name:s.name,nth:s.target.nth,frame:s.target.frame,within:s.target.root});
+      if (s.selector || s.target?.xpath || s.target?.href || s.target?.text || (s.text && !s.role))
         return browserTargetNode(this.page, {
           selector: s.selector,
-          text: s.text,
+          xpath: s.target?.xpath,
+          href: s.target?.href,
+          text: s.target?.text ?? s.text,
+          exact: s.target ? s.target.exact ?? false : true,
+          nth: s.target?.nth,
+          within: s.target?.root,
+          frame:s.target?.frame,
         });
-      if (!s.role || typeof s.name !== "string")
-        throw Error("Use a ref or an exact role and name");
-      const matches = (await scan()).filter(
+      if (!s.role) throw Error("Use a ref, a locator or a role with an optional name");
+      let namePattern: RegExp | undefined;
+      if (s.target?.name_match === "regex") {
+        try { namePattern = new RegExp(s.name ?? ""); }
+        catch { throw new BrowserToolError("INVALID_TARGET", "Invalid name regular expression.", {}, undefined, false); }
+      }
+      let matches = (await scan()).filter(
         (n) =>
           !n.ignored &&
           n.role?.value === s.role &&
-          String(n.name?.value || "").trim() === s.name,
+          (s.name === undefined || (namePattern ? namePattern.test(String(n.name?.value ?? "")) :
+            s.target?.name_match === "contains" ? String(n.name?.value ?? "").includes(s.name) : String(n.name?.value || "").trim() === s.name)),
       );
-      if (matches.length !== 1 || !matches[0].backendDOMNodeId)
+      if(s.target?.root) {
+        const scoped:AXNode[]=[];
+        for(const match of matches)if(match.backendDOMNodeId && await inside(match.backendDOMNodeId,s.target.root))scoped.push(match);
+        matches=scoped;
+      }
+      if(!matches.length)return browserTargetNode(this.page,{role:s.role,name:s.name,frame:s.target?.frame,nth:s.target?.nth,within:s.target?.root});
+      const chosen = s.target?.nth === undefined ? matches.length === 1 ? matches[0] : undefined
+        : matches[s.target.nth < 0 ? matches.length + s.target.nth : s.target.nth];
+      if (!chosen?.backendDOMNodeId)
         throw new BrowserToolError(
-          matches.length ? "ambiguous_target" : "target_not_found",
+          matches.length && s.target?.nth === undefined ? "ambiguous_target" : "target_not_found",
           "Target missing or ambiguous. Read a new snapshot.",
           { target: { role: s.role, name: s.name }, matches: matches.length },
           "Read a fresh snapshot and choose an available unique target.",
         );
-      return matches[0].backendDOMNodeId;
+      return chosen.backendDOMNodeId;
     };
     const modifierMask = (names: Step["modifiers"]) => {
       const flags: Record<string, number> = {
@@ -601,11 +739,11 @@ export class BrowserActions {
       if (objectId) {
         const { result } = await send("Runtime.callFunctionOn", {
           objectId,
-          functionDeclaration:
-            "function(){const target=this,state={received:false};const listener=event=>{if(event.composedPath().includes(target))state.received=true};window.addEventListener('mousedown',listener,true);state.dispose=()=>window.removeEventListener('mousedown',listener,true);return state}",
+          functionDeclaration:observeClickTarget.toString(),
         });
         observation = result.objectId;
       }
+      let pressed=false;
       try {
         for (let clickCount = 1; clickCount <= count; clickCount++) {
           await send("Input.dispatchMouseEvent", {
@@ -613,6 +751,13 @@ export class BrowserActions {
             ...point,
             modifiers,
           });
+          if(objectId && !pressed){
+            const {result:hit}=await send("Runtime.callFunctionOn",{objectId,functionDeclaration:inspectClickTarget.toString(),returnByValue:true});
+            if(!hit.value?.actionable)throw new BrowserToolError("target_obstructed","The target is covered, disabled, or outside the viewport before the click.",
+              {point,target:hit.value?.target,hit:hit.value?.hit,actionability:hit.value,dispatched:false,inputDelivered:false},
+              "Inspect the hit element or dismiss the overlay, then locate the target again. No button press was sent.");
+          }
+          pressed=true;
           await send("Input.dispatchMouseEvent", {
             type: "mousePressed",
             ...point,
@@ -647,12 +792,10 @@ export class BrowserActions {
           this.epoch === version &&
           !this.page.isLoadingMainFrame()
         ) {
-          const { result } = await send("Runtime.callFunctionOn", {
-            objectId: observation,
-            functionDeclaration: "function(){return this.received}",
-            returnByValue: true,
-          });
-          if (!result.value)
+          let evidence:any;
+          try {evidence=(await send("Runtime.callFunctionOn",{objectId:observation,functionDeclaration:"function(){return this.receipt()}",returnByValue:true})).result.value;}
+          catch {check();return {point,dispatched:true,inputDelivered:null,delivery:"unknown",retrySafe:false};}
+          if (!evidence?.received && evidence?.nativeSeen && !evidence.closed)
             throw new BrowserToolError(
               "input_not_delivered",
               "The page did not receive the click on the requested target.",
@@ -663,9 +806,12 @@ export class BrowserActions {
                   text: step.text,
                 },
                 point,
+                hit:evidence.hit,dispatched:true,inputDelivered:false,retrySafe:false,
               },
-              "Inspect the current page before retrying this step. A moving layout or overlay may have intercepted it.",
+              "Native input was dispatched but the requested target was not observed receiving it. Inspect the hit element and page state before any retry; another element may already have acted.",false,
             );
+          if(!evidence?.received)return {point,dispatched:true,inputDelivered:null,delivery:"unknown",hit:evidence?.hit,retrySafe:false};
+          return {point,dispatched:true,inputDelivered:true,delivery:"target-event",events:evidence.events};
         }
         return { point, inputDelivered: true };
       } finally {
@@ -789,7 +935,7 @@ export class BrowserActions {
           step.timeoutMs !== undefined &&
           (!Number.isInteger(step.timeoutMs) ||
             step.timeoutMs < 100 ||
-            step.timeoutMs > 60000)
+            step.timeoutMs > 120000)
         )
           throw new BrowserToolError(
             "invalid_timeout",
@@ -810,6 +956,11 @@ export class BrowserActions {
           urlBefore: this.page.getURL(),
         };
         reports.push(report);
+        const isInput=["drag","click","fill","hover","select","scroll","scroll_into_view","scroll_to_text","press"].includes(step.action);
+        const releaseInput=isInput ? await inputLease() : undefined;
+        try {
+        check();
+        if(isInput && this.prepareInput?.())this.surfaceChanged();
         // Reject a known invalid ref before any layout or protocol work.
         if (step.ref) await nodeId(step);
         if (
@@ -828,6 +979,7 @@ export class BrowserActions {
           await settleBrowserLayout(check);
           this.paintedEpoch = epoch;
         }
+        commandTimeout = step.timeoutMs ?? 15000;
         switch (step.action) {
           case "open": {
             const waitUntil = step.waitUntil ?? "domcontentloaded";
@@ -835,7 +987,7 @@ export class BrowserActions {
               webUrl(step.url),
               check,
               waitUntil,
-              step.timeoutMs ?? 20000,
+              step.timeoutMs ?? 30000,
             );
             const { result } = await send("Runtime.evaluate", {
               expression: "document.readyState",
@@ -867,6 +1019,7 @@ export class BrowserActions {
                 Math.min(outputRemaining, step.limit ?? 16000),
               ),
               jsonPath: step.jsonPath,
+              format:step.format,root:step.root,view_id:step.view_id,
             });
             const { text, ...metadata } = visible;
             report.result = {
@@ -875,7 +1028,7 @@ export class BrowserActions {
             };
             readResults.push(report.result);
             if (visible.text) append(visible.text);
-            if (!step.scope && !step.selector && !step.jsonPath)
+            if (!step.scope && !step.selector && !step.jsonPath && step.format !== "refs")
               append(render(await scan(), step.text, true));
             break;
           }
@@ -894,7 +1047,7 @@ export class BrowserActions {
               throw Error("wait requires text, selector or urlIncludes");
             const deadline =
               Date.now() +
-              Math.min(60000, Math.max(100, Number(step.timeoutMs) || 5000));
+              Math.min(120000, Math.max(100, Number(step.timeoutMs) || 15000));
             let scrollAttempts = 0;
             while (true) {
               check();
@@ -1093,7 +1246,7 @@ export class BrowserActions {
           case "scroll_into_view":
           case "scroll_to_text":
           case "scroll": {
-            if (step.ref || step.selector || step.text) {
+            if (step.ref || step.selector || step.text || step.target?.text || step.target?.href || step.target?.xpath) {
               const deadline = Date.now() + (step.timeoutMs ?? 5000);
               let id: number;
               let targetRetries = 0;
@@ -1123,74 +1276,43 @@ export class BrowserActions {
               report.result = { ...(await this.viewport()), targetRetries };
               break;
             }
-            const { cssVisualViewport: bounds } = await send(
-              "Page.getLayoutMetrics",
-            );
-            const x = step.x ?? bounds.clientWidth / 2,
-              y = step.y ?? bounds.clientHeight / 2;
-            const deltaX = step.deltaX ?? 0,
-              deltaY = step.deltaY ?? Math.round(bounds.clientHeight * 0.8);
-            if (
-              ![x, y, deltaX, deltaY].every(Number.isFinite) ||
-              x < 0 ||
-              y < 0 ||
-              x >= bounds.clientWidth ||
-              y >= bounds.clientHeight
-            )
-              throw Error("Invalid scroll point or distance");
-            await showBrowserPointer(this.page, x, y, "scroll");
-            await send("Input.dispatchMouseEvent", {
-              type: "mouseWheel",
-              x,
-              y,
-              deltaX,
-              deltaY,
-            });
-            await settleBrowserLayout(check);
-            report.result = await this.viewport();
+            report.result=await scrollBrowserPage(this.page,step,check,!this.wheelUnavailable,()=>{this.wheelUnavailable=true;});
             break;
           }
           case "drag": {
-            const start = await viewportPoint(step.x, step.y),
-              end = await viewportPoint(step.toX, step.toY);
-            const modifiers = modifierMask(step.modifiers);
-            await send("Input.dispatchMouseEvent", {
-              type: "mouseMoved",
-              ...start,
-              modifiers,
-            });
-            await this.waitForPointer(check);
-            await showBrowserPointer(this.page, start.x, start.y, "drag");
-            await send("Input.dispatchMouseEvent", {
-              type: "mousePressed",
-              ...start,
-              button: "left",
-              clickCount: 1,
-              modifiers,
-            });
+            const targetPoint=async(target:NonNullable<Step["target"]>)=>{
+              const normalized={action:"drag",target,ref:target.ref,selector:target.css,role:target.role,name:target.name} as Step;
+              const id=await nodeId(normalized);
+              await send("DOM.scrollIntoViewIfNeeded",{backendNodeId:id});
+              const {quads}=await send("DOM.getContentQuads",{backendNodeId:id});
+              if(!quads?.length)throw new BrowserToolError("target_not_found","Drag target has no visible box.",{target});
+              const q=quads[0];return {id,point:await viewportPoint((q[0]+q[2]+q[4]+q[6])/4,(q[1]+q[3]+q[5]+q[7])/4)};
+            };
+            const source=step.target ? await targetPoint(step.target) : undefined;
+            const destination=step.to ? await targetPoint(step.to) : undefined;
+            const start=source?.point ?? await viewportPoint(step.x,step.y),end=destination?.point ?? await viewportPoint(step.toX,step.toY);
+            const modifiers=modifierMask(step.modifiers);
+            let data:any;
+            const onDrag=(_event:unknown,method:string,params:any)=>{if(method === "Input.dragIntercepted")data=params.data;};
+            this.page.debugger.on("message",onDrag);
+            await send("Input.setInterceptDrags",{enabled:true});
             try {
-              for (let n = 1; n <= 8; n++) {
-                const x = start.x + ((end.x - start.x) * n) / 8,
-                  y = start.y + ((end.y - start.y) * n) / 8;
-                await showBrowserPointer(this.page, x, y, "drag");
-                await send("Input.dispatchMouseEvent", {
-                  type: "mouseMoved",
-                  x,
-                  y,
-                  button: "left",
-                  buttons: 1,
-                  modifiers,
-                });
+              await send("Input.dispatchMouseEvent",{type:"mouseMoved",...start,modifiers});
+              await this.waitForPointer(check);
+              await showBrowserPointer(this.page,start.x,start.y,"drag");
+              await send("Input.dispatchMouseEvent",{type:"mousePressed",...start,button:"left",clickCount:1,buttons:1,modifiers});
+              for(let n=1;n<=8;n++){
+                const x=start.x+(end.x-start.x)*n/8,y=start.y+(end.y-start.y)*n/8;
+                await send("Input.dispatchMouseEvent",{type:"mouseMoved",x,y,button:"left",buttons:1,modifiers});
+                await new Promise(resolve=>setTimeout(resolve,16));
               }
+              if(data)for(const type of ["dragEnter","dragOver","drop"])await send("Input.dispatchDragEvent",{type,...end,data,modifiers});
+              await showBrowserPointer(this.page,end.x,end.y,"drag");
+              report.result={from:start,to:end,html5:!!data,dispatched:true};
             } finally {
-              // Release the held button even when a handoff interrupts the gesture.
-              await cleanup("Input.dispatchMouseEvent", {
-                type: "mouseReleased",
-                ...end,
-                button: "left",
-                clickCount: 1,
-                modifiers,
-              }).catch(() => {});
+              await cleanup("Input.dispatchMouseEvent",{type:"mouseReleased",...end,button:"left",clickCount:1,modifiers}).catch(()=>{});
+              await cleanup("Input.setInterceptDrags",{enabled:false}).catch(()=>{});
+              this.page.debugger.removeListener("message",onDrag);
             }
             break;
           }
@@ -1291,6 +1413,7 @@ export class BrowserActions {
                 break;
               }
               await send("DOM.scrollIntoViewIfNeeded", { backendNodeId: id });
+              await settleBrowserLayout(check);
               if (step.action === "select" || step.action === "fill") {
                 const { result } = await send("Runtime.callFunctionOn", {
                   objectId,
@@ -1375,10 +1498,9 @@ export class BrowserActions {
                 const { result } = await send("Runtime.callFunctionOn", {
                   objectId,
                   returnByValue: true,
-                  functionDeclaration:
-                    "function(){if(this.disabled||this.getAttribute('aria-disabled')==='true')return null;const r=this.getBoundingClientRect();const x=(Math.max(0,r.left)+Math.min(innerWidth,r.right))/2,y=(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2;const hit=this.getRootNode().elementFromPoint(x,y);return hit&&(hit===this||this.contains(hit))?{x,y}:null}",
+                  functionDeclaration:inspectClickTarget.toString(),
                 });
-                if (!result.value)
+                if (!result.value?.actionable)
                   throw new BrowserToolError(
                     "target_obstructed",
                     "The target is covered, disabled, or outside the visible viewport.",
@@ -1390,10 +1512,16 @@ export class BrowserActions {
                         name: step.name,
                         text: step.text,
                       },
+                      hit:result.value?.hit,actionability:result.value,dispatched:false,inputDelivered:false,
                     },
                     "Inspect the visible page or close the overlay before retrying.",
                   );
-                report.result = await pointer(step, result.value, objectId);
+                const {quads}=await send("DOM.getContentQuads",{backendNodeId:id});
+                const {cssVisualViewport:bounds}=await send("Page.getLayoutMetrics");
+                const q=quads?.[0];
+                const point=q ? {x:(Math.max(0,Math.min(q[0],q[2],q[4],q[6]))+Math.min(bounds.clientWidth,Math.max(q[0],q[2],q[4],q[6])))/2,
+                  y:(Math.max(0,Math.min(q[1],q[3],q[5],q[7]))+Math.min(bounds.clientHeight,Math.max(q[1],q[3],q[5],q[7])))/2} : result.value.point;
+                report.result = await pointer(step, point, objectId);
               }
             } finally {
               await cleanup("Runtime.releaseObject", { objectId }).catch(
@@ -1409,6 +1537,7 @@ export class BrowserActions {
         report.status = "completed";
         report.urlAfter = this.page.getURL();
         report.documentChanged = this.epoch !== version;
+        } finally {releaseInput?.();}
       }
       check();
       if (input.snapshot !== false && !reads.length) {
@@ -1445,6 +1574,8 @@ export class BrowserActions {
         .map((report) => report.step);
       const active = reports.at(-1);
       const interrupted = [
+        "BROWSER_CLOSED",
+        "CONTROL_TAKEN",
         "control_taken",
         "tab_closed",
         "cancelled",
@@ -1457,7 +1588,7 @@ export class BrowserActions {
           : this.page.getURL();
       }
       let snapshot: string | undefined;
-      if (!this.page.isDestroyed() && failure.code !== "cancelled")
+      if (!this.page.isDestroyed() && !["cancelled","BROWSER_CLOSED"].includes(failure.code))
         snapshot = await browserCommand(
           this.page,
           "Accessibility.getFullAXTree",
