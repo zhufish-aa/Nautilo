@@ -1,0 +1,80 @@
+name: Publish existing packages
+
+on:
+  push:
+    tags: ["publish-v*"]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read existing package runs
+        id: source
+        shell: bash
+        run: |
+          node --input-type=module <<'JS' >> "$GITHUB_OUTPUT"
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          const ref=process.env.GITHUB_REF_NAME.match(/^publish-v([\d.]+)-(\d+)-(\d+)$/);
+          assert(ref, 'Use publish-vVERSION-MAC_RUN-WINDOWS_LINUX_RUN');
+          assert.equal(ref[1], JSON.parse(readFileSync('package.json','utf8')).version);
+          console.log(`tag=v${ref[1]}\nmac-run=${ref[2]}\nother-run=${ref[3]}`);
+          JS
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nautilo-darwin-*
+          run-id: ${{ steps.source.outputs.mac-run }}
+          github-token: ${{ github.token }}
+          path: release
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: nautilo-win32-x64
+          run-id: ${{ steps.source.outputs.other-run }}
+          github-token: ${{ github.token }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: nautilo-linux-x64
+          run-id: ${{ steps.source.outputs.other-run }}
+          github-token: ${{ github.token }}
+          path: release
+      - name: Stop superseded builds after preserving packages
+        uses: actions/github-script@v7
+        env:
+          SOURCE_RUN: ${{ steps.source.outputs.other-run }}
+        with:
+          script: |
+            const run_id=Number(process.env.SOURCE_RUN);
+            const input={...context.repo,run_id};
+            const {data}=await github.rest.actions.getWorkflowRun(input);
+            if (data.status !== 'completed') await github.rest.actions.cancelWorkflowRun(input);
+      - name: Assemble marketplace index and checksums
+        run: node scripts/assemble-release.mjs
+      - name: Publish ready packages
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Nautilo ${{ steps.source.outputs.tag }}
+          tag_name: ${{ steps.source.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/Nautilo-*.exe
+            release/Nautilo-*.zip
+            release/Nautilo-*.dmg
+            release/Nautilo-*.AppImage
+            release/Nautilo-*.deb
+            release/Nautilo-*.rpm
+            release/nautilo-plugin-*.tgz
+            release/plugins-registry.json
+            release/SHA256SUMS.txt
