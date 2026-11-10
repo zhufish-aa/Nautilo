@@ -63,7 +63,7 @@ jobs:
         run: Add-Content -LiteralPath $env:GITHUB_PATH -Value 'C:\msys64\mingw64\bin'
       - name: Set up Linux packaging
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y rpm fakeroot
+        run: sudo apt-get update && sudo apt-get install -y rpm fakeroot xvfb
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -79,6 +79,12 @@ jobs:
         run: node scripts/package-native-plugins.mjs
       - name: Build application packages
         run: pnpm exec electron-builder --${{ matrix.builder }} --${{ matrix.arch }} --publish never
+      - name: Check packaged application startup
+        if: runner.os != 'Linux'
+        run: node scripts/smoke-packaged-app.mjs
+      - name: Check packaged application startup (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum node scripts/smoke-packaged-app.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: nautilo-${{ matrix.platform }}

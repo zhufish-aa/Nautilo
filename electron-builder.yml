@@ -17,8 +17,9 @@ directories:
   buildResources: apps/desktop/resources
   output: release
 
-# The renderer bundles every npm dependency into out/ via electron-vite, and
-# main/preload only use electron + node builtins — node_modules stays out.
+# Runtime JavaScript dependencies (including main-process ws) are bundled into
+# out/. The Vite runtime guard and isolated packaged-startup check enforce this
+# layout, so node_modules stays out of the shipped app.
 files:
   - out/**
   - package.json
