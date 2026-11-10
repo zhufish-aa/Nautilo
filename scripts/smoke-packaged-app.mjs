@@ -68,6 +68,14 @@ try {
   } else {
     cpSync(join(release, "linux-unpacked"), appRoot, { recursive: true, dereference: false });
     executable = join(appRoot, "Nautilo");
+    // Ubuntu CI restricts unprivileged user namespaces. Restore the helper's
+    // installation permissions on this isolated copy instead of disabling
+    // Chromium's sandbox for the application or the startup probe.
+    if (process.env.CI) {
+      const helper = join(appRoot, "chrome-sandbox");
+      run("sudo", ["chown", "root:root", helper]);
+      run("sudo", ["chmod", "4755", helper]);
+    }
   }
   assert(existsSync(executable), `Packaged executable missing: ${executable}`);
   const server = createServer();
