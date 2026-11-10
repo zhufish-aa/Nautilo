@@ -11,21 +11,15 @@ export interface SessionTurnContext {
   recovered: boolean;
 }
 
-/**
- * Prepended when a "work" session (re)creates its provider thread: the CLI is
- * told its job is producing office artifacts in the workspace, not editing a
- * code repository. Injected only on thread (re)creation — afterwards the
- * provider thread itself carries the instruction.
- */
+/** Neutral guidance for both new and recovered workspace sessions. */
 export function workModeGuidance(workspaceRoot?: string): string {
   return [
-    "<agenthub_work_mode>",
-    "This is an Nautilo Work session. Your job is producing office deliverables, not modifying a code repository.",
-    workspaceRoot ? `Write every deliverable inside the workspace directory: ${workspaceRoot}` : "Write every deliverable inside the session workspace directory.",
-    "Prefer real office formats: .docx for documents, .xlsx for spreadsheets, .pptx for slides, .md for drafts/notes, .csv for raw data.",
-    "If your environment provides office skills (documents, spreadsheets, presentations, research), follow their workflow and verification rules.",
-    "Whenever you create or update a deliverable, end your reply with the exact file path(s) so the user can preview them.",
-    "</agenthub_work_mode>"
+    "<agenthub_workspace>",
+    "This Nautilo workspace supports both software development and document production. Follow the user's request and applicable permissions.",
+    workspaceRoot ? `Workspace directory: ${workspaceRoot}` : "Use the session workspace directory for deliverables.",
+    "For office deliverables, use suitable formats such as .docx, .xlsx, or .pptx and follow available relevant skills and verification workflows.",
+    "When you create or update a deliverable, provide its exact file path so the user can preview it.",
+    "</agenthub_workspace>"
   ].join("\n");
 }
 
@@ -35,23 +29,24 @@ export function buildSessionTurnContext(input: {
   artifacts: Artifact[];
   currentAttachments?: Artifact[];
   recoverProviderContext: boolean;
-  workMode?: boolean;
+  fullHistory?: boolean;
   workspaceRoot?: string;
 }): SessionTurnContext {
   const currentAttachments = input.currentAttachments ?? [];
   const images = input.artifacts.filter((artifact) => artifact.kind === "image" && artifact.path && existsSync(artifact.path));
-  const latestImage = IMAGE_REFERENCE.test(input.currentText) ? images.at(-1)?.path : undefined;
+  const latestImage = !input.fullHistory && IMAGE_REFERENCE.test(input.currentText) ? images.at(-1)?.path : undefined;
   const localImagePaths = [...new Set([
     ...currentAttachments.filter((artifact) => artifact.kind === "image" && artifact.path && existsSync(artifact.path)).map((artifact) => artifact.path!),
     ...(latestImage ? [latestImage] : [])
   ])];
   if (!input.recoverProviderContext) return { prompt: input.currentText, localImagePaths, recovered: false };
-  const guidance = input.workMode ? workModeGuidance(input.workspaceRoot) : "";
+  const guidance = workModeGuidance(input.workspaceRoot);
   if (input.messages.length === 0 && input.artifacts.length === 0) {
     return { prompt: [guidance, input.currentText].filter(Boolean).join("\n\n"), localImagePaths, recovered: true };
   }
 
-  const transcript = selectHistory(input.messages)
+  if (input.fullHistory && Buffer.byteLength(input.messages.map((message) => message.text).join("\n"), "utf8") > 1024 * 1024) throw new Error("History exceeds the safe 1 MiB context rebuild limit; create a new conversation with an explicit summary");
+  const transcript = (input.fullHistory ? input.messages : selectHistory(input.messages))
     .map((message) => `${message.sender === "user" ? "User" : message.sender === "agent" ? "Assistant" : "System"}: ${message.text}`)
     .join("\n\n");
   const artifactInventory = input.artifacts.slice(-8).map((artifact) =>

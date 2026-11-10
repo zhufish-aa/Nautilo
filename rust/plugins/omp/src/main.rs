@@ -12,6 +12,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod native_experience;
+mod history;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -53,7 +56,8 @@ fn descriptor() -> Value {
             "KIMI_API_KEY", "MOONSHOT_API_KEY", "OPENCODE_API_KEY",
             "ZAI_API_KEY", "ZAI_CODING_CN_API_KEY", "AWS_PROFILE",
             "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION",
-            "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"
+            "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN", "PI_CODING_AGENT_DIR",
+            "PI_CONFIG_DIR", "PI_CONFIG_FILES", "OMP_PROFILE", "PI_PROFILE"
         ],
         "permissionModes": [
             { "value": "standard", "name": { "zh-CN": "标准", "en-US": "Standard" },
@@ -81,7 +85,8 @@ fn descriptor() -> Value {
             "inputHint": "可选的压缩说明",
             "providerCommand": "compact"
         }],
-        "contextWindowDiscovery": true
+        "contextWindowDiscovery": true,
+        "nativeContextVersion": "persistent-session-v1"
     })
 }
 
@@ -140,14 +145,20 @@ async fn capture(command: &str, args: &[String]) -> (String, Option<i32>) {
 
 // ---------------------------------------------------------------- the plugin
 
+use agenthub_plugin_sdk::session_pool::{SessionPool, ResidentProcess, TurnBudget};
+
 struct OmpPlugin {
+    pool: SessionPool<OmpResident>,
     channel: Mutex<Option<Arc<dyn DaemonChannel>>>,
     runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
 }
+#[cfg(test)] #[path="../../../../tests/fixtures/native_session_checks.rs"] mod native_session_checks;
+#[cfg(test)] #[tokio::test] async fn native_resident_conformance(){native_session_checks::exercise(&OmpPlugin::new(),"omp").await;}
 
 impl OmpPlugin {
     fn new() -> Self {
         Self {
+            pool: Default::default(),
             channel: Mutex::new(None),
             runs: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -156,22 +167,32 @@ impl OmpPlugin {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for OmpPlugin {
+    async fn read_session_history(&self,request:&Value,session:&str)->anyhow::Result<Option<Value>>{history::read(request,session).await.map(Some)}
+    fn native_terminal_supported(&self)->bool {true}
+    async fn release_session(&self,request:&Value)->anyhow::Result<()> {if let Some(native)=self.pool.retire(request["localSessionId"].as_str().unwrap_or("")){native.close().await;}Ok(())}
+    async fn terminal_plan(&self,request:&Value,resume:Option<String>)->anyhow::Result<Value> {
+        let mut plan=prepare_omp(request,&resume,"terminal")?;
+        if let Some(index)=plan.args.windows(2).position(|args|args==["--mode","rpc"]){plan.args.drain(index..index+2);}
+        Ok(json!({"command":plan.command,"args":plan.args,"env":plan.env}))
+    }
     fn descriptor(&self) -> Value {
         descriptor()
     }
 
-    fn capabilities(&self) -> Value {
-        json!({
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({
+            "nativeHistory": true,
             "structuredOutput": false,
             "textOutput": true,
             "interactiveStdin": true,
-            "nativeResume": false,
+            "sessionBackgroundEvents": true,
+            "nativeResume": true,
             "pty": false
-        })
+        }),native_experience::declarations())
     }
 
-    fn set_interaction_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::InteractionChannel>) {
-        *self.channel.lock().unwrap() = Some(unsafe { std::mem::transmute(channel) });
+    fn set_daemon_channel(&self, channel: Arc<dyn DaemonChannel>) {
+        *self.channel.lock().unwrap() = Some(channel);
     }
 
     async fn detect(&self, instance: &Value) -> Value {
@@ -230,9 +251,10 @@ impl ProviderPlugin for OmpPlugin {
         let run_handle_slot = Arc::new(Mutex::new(None::<agenthub_plugin_sdk::process::ProcessHandle>));
         let slot = run_handle_slot.clone();
         let runs = self.runs.clone();
+        let pool = self.pool.clone();
         let run_id = run_id.to_string();
         tokio::spawn(async move {
-            let result = run_omp(&run_id, request, resume, sender.clone(), channel, slot, runs).await;
+            let result = run_omp(&run_id, request, resume, sender.clone(), channel, slot, runs, pool).await;
             if let Err(error) = result {
                 let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
@@ -242,7 +264,7 @@ impl ProviderPlugin for OmpPlugin {
         Ok(receiver)
     }
 
-    async fn dispose(&self) {}
+    async fn dispose(&self) { for native in self.pool.drain() { native.close().await; } }
 
     async fn cancel(&self, run_id: &str) {
         // Kill the child process tree: a stale omp keeps the session locked
@@ -352,6 +374,9 @@ fn parse_omp_models(output: &Value) -> Value {
 
 #[derive(Default)]
 struct OmpParseState {
+    children: HashMap<String, OmpChildState>,
+    pending_children: HashMap<String, Vec<Value>>,
+    usage: agenthub_plugin_sdk::usage::TurnUsage,
     message_sequence: u32,
     current_message_id: Option<String>,
     current_thinking_id: Option<String>,
@@ -360,6 +385,59 @@ struct OmpParseState {
     last_assistant_stop_reason: Option<String>,
     model_error: bool,
     tool_args: HashMap<String, (String, Value)>,
+}
+
+struct OmpChildState {
+    state: Box<OmpParseState>,
+    dispatch_id: String,
+    agent: String,
+    description: String,
+    status: String,
+}
+
+fn child_activity(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
+    let payload = &value["payload"];
+    let Some(id) = payload["id"].as_str() else { return vec![] };
+    if value["type"] == "subagent_event" {
+        let Some(child) = state.children.get_mut(id) else {
+            state.pending_children.entry(id.to_string()).or_default().push(value.clone());
+            return vec![];
+        };
+        return parse_omp_rpc_event(&payload["event"], &mut child.state).into_iter().filter_map(|mut event| {
+            if !["message", "thinking", "tool", "command"].contains(&event["kind"].as_str().unwrap_or("")) { return None; }
+            event["subagentDispatchId"] = json!(child.dispatch_id);
+            for key in ["messageId", "callId"] {
+                if let Some(value) = event[key].as_str() { event[key] = json!(format!("{id}:{value}")); }
+            }
+            Some(event)
+        }).collect();
+    }
+    let dispatch = payload["parentToolCallId"].as_str().map(str::to_string).unwrap_or_else(|| format!("omp-native:{id}"));
+    let child = state.children.entry(id.to_string()).or_insert_with(|| OmpChildState {
+        state:Box::default(), dispatch_id:dispatch.clone(), agent:String::new(), description:String::new(), status:String::new()
+    });
+    child.agent = payload["agent"].as_str().unwrap_or("Agent").to_string();
+    child.description = payload["description"].as_str().unwrap_or(&child.agent).to_string();
+    child.status = payload["status"].as_str().unwrap_or("started").to_string();
+    let mut input = state.tool_args.get(&dispatch).map(|(_, args)| args.clone())
+        .unwrap_or_else(|| json!({"agent":child.agent,"description":child.description}));
+    let ids: Vec<_> = state.children.iter().filter(|(_, child)| child.dispatch_id == dispatch).map(|(id,_)| id.clone()).collect();
+    let states: serde_json::Map<String, Value> = ids.iter().map(|id| {
+        let child = &state.children[id];
+        (id.clone(), json!({"status": if child.status == "aborted" {"failed"} else {child.status.as_str()}}))
+    }).collect();
+    input["receiverThreadIds"] = json!(ids);
+    input["agentsStates"] = Value::Object(states);
+    let stored = state.tool_args.get(&dispatch);
+    let name = stored.map(|(name,_)| name.as_str()).unwrap_or("subagent");
+    let synthetic = stored.is_none();
+    let completed = ids.iter().all(|id| state.children[id].status != "started");
+    let success = ids.iter().all(|id| state.children[id].status == "completed");
+    let mut events = vec![json!({"kind":"tool","callId":dispatch,"name":name,"input":input,
+        "phase":if synthetic && completed {"completed"} else if synthetic {"started"} else {"updated"},
+        "success":if completed {json!(success)} else {Value::Null},"raw":value})];
+    for pending in state.pending_children.remove(id).unwrap_or_default() { events.extend(child_activity(&pending, state)); }
+    events
 }
 
 fn omp_file_diff(name: &str, args: &Value) -> Option<Value> {
@@ -411,6 +489,7 @@ fn tool_result_text(value: &Value) -> String {
 fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
     let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
     match event_type {
+        "subagent_lifecycle" | "subagent_event" => child_activity(value, state),
         "message_start" => {
             let message = value.get("message").cloned().unwrap_or(Value::Null);
             if message.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -484,12 +563,12 @@ fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
                     }));
                 }
             }
-            if !state.streamed_thinking {
-                let thinking: String = content
+            let thinking: String = content
                     .iter()
                     .filter(|part| part.get("type").and_then(Value::as_str) == Some("thinking"))
                     .filter_map(|part| part.get("thinking").and_then(Value::as_str))
                     .collect();
+            if !state.streamed_thinking {
                 if !thinking.is_empty() {
                     events.push(json!({
                         "kind": "thinking",
@@ -503,7 +582,7 @@ fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
             if state.streamed_thinking || content.iter().any(|part| part.get("type").and_then(Value::as_str) == Some("thinking")) {
                 events.push(json!({
                     "kind": "thinking",
-                    "text": "",
+                    "text": thinking,
                     "phase": "completed",
                     "messageId": state.current_thinking_id.clone().map(Value::String).unwrap_or(Value::Null),
                     "raw": value
@@ -520,13 +599,20 @@ fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
             if usage.is_object() && !usage.as_object().is_none_or(|u| u.is_empty()) {
                 events.push(json!({
                     "kind": "usage",
+                    "usageScope": "context",
+                    "inputTokensIncludesCache": false,
                     "inputTokens": usage.get("input").cloned().unwrap_or(Value::Null),
                     "cachedInputTokens": usage.get("cacheRead").cloned().unwrap_or(Value::Null),
+                    "cacheCreationInputTokens": usage.get("cacheWrite").cloned().unwrap_or(Value::Null),
                     "outputTokens": usage.get("output").cloned().unwrap_or(Value::Null),
                     "reasoningOutputTokens": usage.get("reasoning").cloned().unwrap_or(Value::Null),
-                    "contextUsed": usage.get("totalTokens").cloned().unwrap_or(Value::Null),
+                    "contextUsed": (["input", "cacheRead", "cacheWrite"].iter()
+                        .filter_map(|key| usage.get(key).and_then(Value::as_u64)).reduce(|a, b| a + b)),
                     "raw": value
                 }));
+            }
+            if let Some(usage) = events.iter().find(|event| event["kind"] == "usage").cloned() {
+                events.push(state.usage.update(&state.message_sequence.to_string(), &usage));
             }
             if state.model_error {
                 events.push(json!({
@@ -560,6 +646,18 @@ fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
                 "fileDiff": omp_file_diff(&name, &args).unwrap_or(Value::Null),
                 "raw": value
             })]
+        }
+        "tool_execution_update" => {
+            let call_id = value["toolCallId"].as_str().unwrap_or("");
+            let stored = state.tool_args.get(call_id);
+            let name = value["toolName"].as_str().or_else(|| stored.map(|(name, _)| name.as_str())).unwrap_or("tool");
+            let args = value.get("args").or_else(|| stored.map(|(_, args)| args)).unwrap_or(&Value::Null);
+            let output = tool_result_text(&value["partialResult"]);
+            if name == "bash" {
+                vec![json!({"kind":"command","callId":call_id,"command":args["command"],"phase":"updated","output":output,"raw":value})]
+            } else {
+                vec![json!({"kind":"tool","callId":call_id,"name":name,"phase":"updated","input":args,"output":output,"raw":value})]
+            }
         }
         "tool_execution_end" => {
             let call_id = value.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_string();
@@ -611,19 +709,6 @@ fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
     }
 }
 
-fn mime_type_of(path: &str) -> &'static str {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if lower.ends_with(".gif") {
-        "image/gif"
-    } else if lower.ends_with(".webp") {
-        "image/webp"
-    } else {
-        "image/png"
-    }
-}
-
 // ---------------------------------------------------------------- protocol v2 chunk reassembly
 
 /// Protocol v2 splits oversized frames into `rpc_chunk` physical lines.
@@ -671,30 +756,37 @@ impl RpcChunkState {
 
 const OMP_MAX_RPC_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
-#[allow(clippy::too_many_arguments)]
-async fn run_omp(
-    run_id: &str,
-    request: Value,
-    _resume: Option<String>,
-    sender: mpsc::UnboundedSender<Value>,
-    channel: Option<Arc<dyn DaemonChannel>>,
-    handle_slot: Arc<Mutex<Option<agenthub_plugin_sdk::process::ProcessHandle>>>,
-    runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
-) -> anyhow::Result<()> {
+fn prepare_omp(request: &Value, resume: &Option<String>, run_id: &str) -> anyhow::Result<ProcessRequest> {
     let instance = request.get("instance").cloned().unwrap_or(Value::Null);
     let mut env = env_of(&request);
-    for (key, value) in std::env::vars() {
-        env.entry(key).or_insert(value);
+    if instance.pointer("/providerOptions/runtimeConnectionId").is_none() {
+        for (key, value) in std::env::vars() { env.entry(key).or_insert(value); }
     }
 
     let permission_mode = request.get("permissionMode").and_then(Value::as_str).unwrap_or("standard");
+    env = agenthub_plugin_sdk::connection::prepare_request(&request, env)?;
     let mut args = base_args(&instance);
     args.extend([
         "--mode".to_string(),
         "rpc".to_string(),
-        "--no-session".to_string(),
-        "--no-title".to_string(),
     ]);
+    if let Some(extension) = env.get("NAUTILO_OMP_PROVIDER_EXTENSION") {
+        args.extend(["--extension".into(), extension.clone()]);
+    }
+    if request["mcpServers"].as_array().is_some_and(|v|!v.is_empty()) || request["skills"].as_array().is_some_and(|v|!v.is_empty()) {
+        let resources = agenthub_plugin_sdk::native_config::runtime_package(&request, "omp")?;
+        args.extend(["--extension".into(), resources.to_string_lossy().into_owned()]);
+    }
+    // Every Nautilo conversation has its own native session directory. Never
+    // continue another conversation from the CLI's global most-recent session.
+    let local_id=request["localSessionId"].as_str().unwrap_or(run_id);
+    anyhow::ensure!(!local_id.is_empty() && local_id.chars().all(|c|c.is_ascii_alphanumeric() || c=='-' || c=='_'),"Invalid local session identity");
+    let session_root=env.get("NAUTILO_OMP_SESSION_ROOT").or_else(||env.get("PI_CODING_AGENT_DIR")).map(std::path::PathBuf::from)
+        .unwrap_or_else(||env.get("USERPROFILE").or_else(||env.get("HOME")).map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join(".omp/agent"));
+    let sessions=session_root.join("nautilo-sessions").join(local_id);
+    std::fs::create_dir_all(&sessions)?;
+    args.extend(["--session-dir".into(),sessions.to_string_lossy().into_owned()]);
+    if resume.is_some(){args.extend(["--resume".into(),resume.as_deref().unwrap().to_string()]);}
     match permission_mode {
         "read-only" => {
             args.push("--approval-mode".to_string());
@@ -724,63 +816,97 @@ async fn run_omp(
     }
     if let Some(model) = request.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()) {
         args.push("--model".to_string());
-        args.push(model.to_string());
+        args.push(if instance.pointer("/providerOptions/runtimeConnectionId").is_some() { format!("nautilo/{model}") } else { model.to_string() });
     }
     if let Some(effort) = request.get("reasoningEffort").and_then(Value::as_str).filter(|e| !e.is_empty()) {
         args.push("--thinking".to_string());
         args.push(effort.to_string());
     }
 
-    let started = process::start(&ProcessRequest {
+    Ok(ProcessRequest {
         command: executable_of(&instance),
         args,
         cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
         env: Some(env),
-        timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
-        idle_timeout_ms: request.get("idleTimeoutMs").and_then(Value::as_u64),
-        max_output_bytes: request.get("maxOutputBytes").and_then(Value::as_u64).map(|v| v as usize),
+        timeout_ms: None,
+        idle_timeout_ms: None,
+        max_output_bytes: None,
         ..Default::default()
-    })?;
+    })
+}
+struct OmpResident {
+    runtime: ResidentProcess,
+    state: Arc<Mutex<OmpParseState>>,
+    chunks: Arc<Mutex<RpcChunkState>>,
+}
+impl std::ops::Deref for OmpResident {type Target=ResidentProcess;fn deref(&self)->&Self::Target {&self.runtime}}
+impl std::ops::DerefMut for OmpResident {fn deref_mut(&mut self)->&mut Self::Target {&mut self.runtime}}
+impl OmpResident {async fn close(self){self.runtime.close().await;}}
+async fn open_omp(request:&Value,resume:&Option<String>,run_id:&str)->anyhow::Result<OmpResident>{Ok(OmpResident {
+    runtime:ResidentProcess::new(process::start(&prepare_omp(request,resume,run_id)?)?),state:Arc::new(Mutex::new(OmpParseState::default())),chunks:Arc::new(Mutex::new(RpcChunkState::new()))
+})}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_omp(
+    run_id: &str,
+    request: Value,
+    resume: Option<String>,
+    sender: mpsc::UnboundedSender<Value>,
+    channel: Option<Arc<dyn DaemonChannel>>,
+    handle_slot: Arc<Mutex<Option<agenthub_plugin_sdk::process::ProcessHandle>>>,
+    runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
+    pool: SessionPool<OmpResident>,
+) -> anyhow::Result<()> {
+    let local_images: Vec<Value> = agenthub_plugin_sdk::images::read_request_images(&request)?
+        .into_iter().map(|image| json!({"type":"image", "mimeType":image.mime_type,
+            "data":base64::engine::general_purpose::STANDARD.encode(image.bytes)})).collect();
+    let identity = agenthub_plugin_sdk::session_pool::identity(&request);
+    let key = request["localSessionId"].as_str().or(resume.as_deref()).unwrap_or(run_id).to_string();
+    let attached=std::time::Instant::now();
+    let cached = pool.take(&key);
+    let mut reused = false;
+    let mut native = if let Some((previous,cached)) = cached {
+        if resume.is_some() && cached.session_id==resume && previous == identity && cached.process.as_ref().is_some_and(|process|process.handle.is_alive()) {reused=true; cached}
+        else {cached.close().await; open_omp(&request,&resume,run_id).await?}
+    } else {open_omp(&request,&resume,run_id).await?};
+    let parse_state=native.state.clone();let chunks=native.chunks.clone();
+    let native_session_id=native.session_id.clone();
+    let started = native.process.as_mut().unwrap();
+    started.events.pause().await;
     let handle = started.handle.clone();
     *handle_slot.lock().unwrap() = Some(handle.clone());
     runs.lock().unwrap().insert(run_id.to_string(), handle.clone());
+    let _=sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"omp","transport":"rpc","reused":reused,"pid":handle.pid,"attachMs":attached.elapsed().as_millis()}}));
 
     let runtime_tools: Vec<Value> = request.get("runtimeTools").and_then(Value::as_array).cloned().unwrap_or_default();
     // Keep the channel for extension UI interactions (approval prompts); host
     // tool calls are gated on runtime_tools at the call site below.
 
-    let mut state = OmpParseState::default();
+    let mut native_session_id=native_session_id;
+    {let mut state=parse_state.lock().unwrap();state.model_error=false;state.last_assistant_stop_reason=None;}
     let mut settled = false;
     let mut terminal_status = false;
     let mut state_received = false;
-    let mut negotiated = false;
+    let mut negotiated = reused;
     let mut host_tools_sent = false;
-    let mut chunk_state = RpcChunkState::new();
     let prompt_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
     let provider_command = request.get("providerCommand").and_then(Value::as_str).map(str::to_string);
-    let local_images: Vec<String> = request
-        .get("localImagePaths")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect();
+    let prompt_id=format!("agenthub-prompt:{run_id}");
 
     let handle_for_prompt = handle.clone();
     let prompt_sent_flag = prompt_sent.clone();
     let prompt_text = prompt.clone();
     let provider_command_clone = provider_command.clone();
     let local_images_clone = local_images.clone();
+    let request_id=prompt_id.clone();
     let send_prompt = move || {
         if prompt_sent_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
         let mut frame = Map::new();
-        frame.insert("id".to_string(), json!("agenthub-prompt"));
+        frame.insert("id".to_string(), json!(request_id));
         if provider_command_clone.as_deref() == Some("compact") {
             frame.insert("type".to_string(), json!("compact"));
             let custom = regex::Regex::new(r"(?i)^\s*\/?compact\b")
@@ -793,18 +919,7 @@ async fn run_omp(
             frame.insert("type".to_string(), json!("prompt"));
             frame.insert("message".to_string(), json!(prompt_text));
             if !local_images_clone.is_empty() {
-                let images: Vec<Value> = local_images_clone
-                    .iter()
-                    .filter_map(|path| {
-                        let bytes = std::fs::read(path).ok()?;
-                        Some(json!({
-                            "type": "image",
-                            "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                            "mimeType": mime_type_of(path)
-                        }))
-                    })
-                    .collect();
-                frame.insert("images".to_string(), Value::Array(images));
+                frame.insert("images".to_string(), json!(local_images_clone));
             }
         }
         handle_for_prompt.write(&format!("{}\n", Value::Object(frame)));
@@ -813,19 +928,21 @@ async fn run_omp(
     let _ = sender.send(json!({ "kind": "commands", "commands": native_commands() }));
     let _ = sender.send(json!({ "kind": "status", "phase": "turn_started" }));
 
-    let mut events = started.events;
+    if reused {handle.write("{\"id\":\"agenthub-state\",\"type\":\"get_state\"}\n");}
+    let mut budget = TurnBudget::new(&request);
+    let events = &mut started.events;
     let mut buffer = String::new();
-    while let Some(event) = events.recv().await {
+    let result: anyhow::Result<()> = async {
+    'turn: while let Some(event) = budget.recv(events).await {
         match event {
             ProcessEvent::Stdout(text) => {
                 buffer.push_str(&text);
                 if buffer.len() > OMP_MAX_RPC_FRAME_BYTES {
                     anyhow::bail!("omp RPC frame exceeded {OMP_MAX_RPC_FRAME_BYTES} bytes");
                 }
-                let mut lines: Vec<String> = buffer.split('\n').map(str::to_string).collect();
-                buffer = lines.pop().unwrap_or_default();
-                for line in lines {
-                    let line = line.trim_end_matches('\r');
+                while let Some(end)=buffer.find('\n') {
+                    let line:String=buffer.drain(..=end).collect();
+                    let line = line.trim_end_matches(['\r','\n']);
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -841,7 +958,7 @@ async fn run_omp(
                     };
                     // Protocol v2 chunk reassembly: a completed group yields the
                     // logical frame, which we then feed through the same path.
-                    if let Some(reassembled) = chunk_state.push(&value) {
+                    if let Some(reassembled) = chunks.lock().unwrap().push(&value) {
                         let value: Value = match serde_json::from_str(&reassembled) {
                             Ok(value) => value,
                             Err(_) => {
@@ -849,9 +966,11 @@ async fn run_omp(
                                 continue;
                             }
                         };
+                        if value["id"]=="agenthub-state" {native_session_id=value["data"]["sessionId"].as_str().map(str::to_string);}
                         if !handle_rpc_value(
+                            run_id,
                             &value,
-                            &mut state,
+                            &mut parse_state.lock().unwrap(),
                             &mut settled,
                             &mut terminal_status,
                             &mut state_received,
@@ -863,14 +982,18 @@ async fn run_omp(
                             &runtime_tools,
                             &send_prompt,
                             &provider_command,
+                            &prompt_id,
                         )? {
-                            return Ok(());
+                            anyhow::bail!("omp event consumer closed");
                         }
+                        if settled {break 'turn;}
                         continue;
                     }
+                    if value["id"]=="agenthub-state" {native_session_id=value["data"]["sessionId"].as_str().map(str::to_string);}
                     if !handle_rpc_value(
+                        run_id,
                         &value,
-                        &mut state,
+                        &mut parse_state.lock().unwrap(),
                         &mut settled,
                         &mut terminal_status,
                         &mut state_received,
@@ -882,9 +1005,11 @@ async fn run_omp(
                         &runtime_tools,
                         &send_prompt,
                         &provider_command,
+                        &prompt_id,
                     )? {
-                        return Ok(());
+                        anyhow::bail!("omp event consumer closed");
                     }
+                    if settled {break 'turn;}
                 }
             }
             ProcessEvent::Stderr(text) => {
@@ -895,31 +1020,60 @@ async fn run_omp(
             }
             ProcessEvent::Timeout { reason } => {
                 let _ = sender.send(json!({ "kind": "timeout", "reason": reason }));
+                anyhow::bail!("omp turn exceeded {reason} limit");
             }
             ProcessEvent::Exit { exit_code, .. } => {
-                let model_failed = state.model_error
-                    || state.last_assistant_stop_reason.as_deref() == Some("error")
-                    || state.last_assistant_stop_reason.as_deref() == Some("aborted");
+                let model_failed = {let state=parse_state.lock().unwrap();state.model_error || matches!(state.last_assistant_stop_reason.as_deref(),Some("error"|"aborted"))};
                 if !terminal_status {
                     let phase = if settled && exit_code == Some(0) && !model_failed { "turn_completed" } else { "turn_failed" };
                     let _ = sender.send(json!({ "kind": "status", "phase": phase }));
                 }
                 let code = if model_failed && exit_code == Some(0) { Some(1) } else { exit_code };
-                let _ = sender.send(json!({ "kind": "exit", "exitCode": code }));
-                runs.lock().unwrap().remove(run_id);
-                return Ok(());
+                anyhow::ensure!(settled && code==Some(0),"omp exited before a successful native turn boundary");
+                break;
             }
         }
     }
-    if !state_received && !terminal_status {
-        let _ = sender.send(json!({ "kind": "status", "phase": "turn_failed" }));
-    }
+    anyhow::ensure!(settled,"omp event stream ended before the turn settled");
+    Ok(())
+    }.await;
+    native.session_id=native_session_id;
+    let failed={let state=parse_state.lock().unwrap();state.model_error || matches!(state.last_assistant_stop_reason.as_deref(),Some("error"|"aborted"))};
     runs.lock().unwrap().remove(run_id);
+    if result.is_ok() && !failed && handle.is_alive() && !sender.is_closed() {
+        if let (Some(host),Some(binding))=(&channel,request["sessionBindingId"].as_str()) {
+            let idle_channel=agenthub_plugin_sdk::session_channel(&channel,&request);
+            let sink=agenthub_plugin_sdk::session_sink(host.clone(),binding.into()).await;
+            let idle_handle=handle.clone();let idle_run=run_id.to_string();
+            native.process.as_ref().unwrap().events.observe_idle_with_pending(Arc::new(move |event| {
+                match event {
+                    ProcessEvent::Stdout(text)=>{
+                        let value=serde_json::from_str::<Value>(text.trim()).ok().and_then(|value| {
+                            if value["type"]=="rpc_chunk" {chunks.lock().unwrap().push(&value).and_then(|frame|serde_json::from_str(&frame).ok())} else {Some(value)}
+                        });
+                        if let Some(value)=value {
+                            let(mut settled,mut terminal,mut state_received,mut negotiated,mut tools_sent)=(false,false,true,true,true);
+                            let _=handle_rpc_value(&idle_run,&value,&mut parse_state.lock().unwrap(),&mut settled,&mut terminal,&mut state_received,&mut negotiated,&mut tools_sent,&idle_handle,&sink,&idle_channel,&runtime_tools,&||{},&None,"background");
+                        }
+                    },
+                    ProcessEvent::Stderr(text)=>{let _=sink.send(json!({"kind":"raw","stream":"stderr","text":text}));},
+                    ProcessEvent::Error(message)=>{let _=sink.send(json!({"kind":"error","message":message}));},
+                    ProcessEvent::Exit{exit_code,signal}=>{let _=sink.send(json!({"kind":"exit","exitCode":exit_code,"signal":signal}));},
+                    ProcessEvent::Timeout{reason}=>{let _=sink.send(json!({"kind":"timeout","reason":reason}));}
+                }
+            }),buffer);
+        }
+        pool.put(key,identity,native);
+    }
+    else {native.close().await;}
+    result?;
+    let _=sender.send(json!({"kind":"exit","exitCode":if failed {1}else{0}}));
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn handle_rpc_value(
+    run_id: &str,
     value: &Value,
     state: &mut OmpParseState,
     settled: &mut bool,
@@ -933,10 +1087,12 @@ fn handle_rpc_value(
     runtime_tools: &[Value],
     send_prompt: &impl Fn(),
     provider_command: &Option<String>,
+    prompt_id:&str,
 ) -> anyhow::Result<bool> {
     let value_type = value.get("type").and_then(Value::as_str).unwrap_or("");
     match value_type {
         "ready" => {
+            let _=sender.send(json!({"kind":"status","phase":"runtime_capabilities","raw":{"providerId":"omp","source":"native-handshake","transport":"rpc","protocolVersion":value["protocolVersion"],"reported":{"supportedProtocolVersions":value["supportedProtocolVersions"]}}}));
             if !*negotiated {
                 *negotiated = true;
                 handle.write(&format!("{}\n", json!({ "id": "agenthub-negotiate", "type": "negotiate_protocol", "protocolVersion": 2 })));
@@ -944,7 +1100,18 @@ fn handle_rpc_value(
             Ok(true)
         }
         "response" => {
-            let is_compact = value.get("id").and_then(Value::as_str) == Some("agenthub-prompt")
+            if value["id"] == "agenthub-subagents" && value["success"] == false {
+                let _ = sender.send(json!({"kind":"raw","stream":"stderr","text":"This omp version does not expose native subagent events.\n"}));
+                return Ok(true);
+            }
+            if value["id"]=="agenthub-commands" || value["id"]=="agenthub-subagents" {
+                if value["success"]==false {let _=sender.send(json!({"kind":"raw","stream":"stderr","text":format!("Optional native command unavailable: {}",value["command"])}));return Ok(true);}
+            }
+            if value["id"]=="agenthub-commands" {let _=sender.send(json!({"kind":"commands","commands":value["data"]["commands"],"raw":value}));return Ok(true);}
+            if value["id"]==prompt_id && value["success"]!=false && value["data"]["agentInvoked"]==false {
+                *settled=true;*terminal_status=true;let _=sender.send(json!({"kind":"message","phase":"completed","messageId":"omp-native-command","text":""}));let _=sender.send(json!({"kind":"status","phase":"turn_completed"}));return Ok(true);
+            }
+            let is_compact = value.get("id").and_then(Value::as_str) == Some(prompt_id)
                 && provider_command.as_deref() == Some("compact");
             if value.get("success").and_then(Value::as_bool) == Some(false) && !is_compact {
                 anyhow::bail!(value
@@ -973,18 +1140,18 @@ fn handle_rpc_value(
                     let _ = sender.send(json!({ "kind": "status", "phase": "turn_completed", "raw": value }));
                     *terminal_status = true;
                 }
-                handle.end_stdin();
-                let terminate = handle.clone();
-                tokio::spawn(async move { terminate.cancel().await; });
+
                 // Keep the event loop running: the process kill will surface as
                 // ProcessEvent::Exit, which emits the final `exit` event.
                 return Ok(true);
             }
             match value.get("id").and_then(Value::as_str) {
                 Some("agenthub-negotiate") => {
+                    handle.write(&format!("{}\n", json!({"id":"agenthub-subagents","type":"set_subagent_subscription","level":"events"})));
                     handle.write(&format!("{}\n", json!({ "id": "agenthub-state", "type": "get_state" })));
                 }
                 Some("agenthub-state") => {
+                    handle.write("{\"id\":\"agenthub-commands\",\"type\":\"get_available_commands\"}\n");
                     *state_received = true;
                     let session_id = value
                         .get("data")
@@ -1022,13 +1189,19 @@ fn handle_rpc_value(
             }
             Ok(true)
         }
+        "available_commands_update" => {let _=sender.send(json!({"kind":"commands","commands":value["commands"],"raw":value}));Ok(true)},
+        "command_output" => {let _=sender.send(json!({"kind":"message","messageId":"omp-native-command","phase":"delta","text":value["text"].as_str().unwrap_or(""),"raw":value}));Ok(true)},
+        "prompt_result" if value["id"]==prompt_id && value["agentInvoked"]==false => {
+            *settled=true;*terminal_status=true;let _=sender.send(json!({"kind":"message","phase":"completed","messageId":"omp-native-command","text":""}));let _=sender.send(json!({"kind":"status","phase":"turn_completed"}));Ok(true)
+        },
         "host_tool_call" => {
             let id = value.get("id").cloned().unwrap_or(Value::Null);
             let name = value.get("toolName").and_then(Value::as_str).unwrap_or("tool").to_string();
             let arguments = value.get("arguments").cloned().unwrap_or_else(|| json!({}));
             if let (Some(channel), Some(id_str)) = (channel.as_ref().filter(|_| !runtime_tools.is_empty()), id.as_str()) {
-                let run_id = String::new();
-                let result = tokio::runtime::Handle::current().block_on(channel.call_tool(&run_id, &name, arguments));
+                let channel=channel.clone(); let handle=handle.clone(); let run_id=run_id.to_string(); let id_str=id_str.to_string();
+                tokio::spawn(async move {
+                let result = channel.call_tool(&run_id, &name, arguments).await;
                 let success = result.get("success").and_then(Value::as_bool).unwrap_or(false);
                 let content = result.get("content").and_then(Value::as_str).unwrap_or("").to_string();
                 handle.write(&format!(
@@ -1040,6 +1213,7 @@ fn handle_rpc_value(
                         "isError": !success
                     })
                 ));
+                });
             } else {
                 // No runtime channel: fail the tool so the model adapts.
                 let id_str = id.as_str().unwrap_or("").to_string();
@@ -1058,67 +1232,7 @@ fn handle_rpc_value(
         "host_tool_cancel" => Ok(true),
         "host_tool_update" => Ok(true),
         "extension_ui_request" => {
-            let method = value.get("method").and_then(Value::as_str).unwrap_or("");
-            if method == "confirm" {
-                // omp approval gate (write/always-ask modes): surface the prompt
-                // in the desktop UI and reply with the user's decision. Without
-                // a channel, deny — fail closed, matching omp's no-UI behavior.
-                let id = value.get("id").cloned().unwrap_or(Value::Null);
-                match channel {
-                    Some(channel) => {
-                        let channel = channel.clone();
-                        let mut input = json!({
-                            "kind": "approval",
-                            "title": value.get("title").and_then(Value::as_str).unwrap_or("omp 请求确认"),
-                            "options": [
-                                { "id": "confirm", "label": "允许", "intent": "approve" },
-                                { "id": "cancel", "label": "拒绝", "intent": "reject" }
-                            ]
-                        });
-                        if let Some(detail) = value.get("message") {
-                            input["detail"] = detail.clone();
-                        }
-                        // Await the user's decision in a separate task: waiting
-                        // inline would stall the omp event loop, and omp emits
-                        // nothing while waiting for the response, so the idle
-                        // timeout would kill the child and the run would
-                        // "complete" mid-turn. The heartbeat (get_state is
-                        // answered by omp) refreshes the idle timer.
-                        let handle = handle.clone();
-                        tokio::spawn(async move {
-                            let response = loop {
-                                tokio::select! {
-                                    response = channel.ask("", input.clone()) => break response,
-                                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-                                        handle.write(&format!("{}\n", json!({ "id": "agenthub-heartbeat", "type": "get_state" })));
-                                    }
-                                }
-                            };
-                            let confirmed = response.get("outcome").and_then(Value::as_str) == Some("selected")
-                                && response.get("optionId").and_then(Value::as_str) == Some("confirm");
-                            handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": confirmed })));
-                        });
-                    }
-                    None => {
-                        handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": false })));
-                    }
-                }
-                return Ok(true);
-            }
-            if ["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"].contains(&method) {
-                let text = value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .or_else(|| value.get("statusText").and_then(Value::as_str))
-                    .or_else(|| value.get("title").and_then(Value::as_str));
-                if let Some(text) = text {
-                    let stream = if value.get("notifyType").and_then(Value::as_str) == Some("error") { "stderr" } else { "stdout" };
-                    let _ = sender.send(json!({ "kind": "raw", "stream": stream, "text": format!("{text}\n") }));
-                }
-                return Ok(true);
-            }
-            let id = value.get("id").cloned().unwrap_or(Value::Null);
-            handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "cancelled": true })));
+            agenthub_plugin_sdk::extension_ui::dispatch(value, handle, sender, channel, run_id);
             Ok(true)
         }
         "agent_end" => {
@@ -1136,9 +1250,7 @@ fn handle_rpc_value(
                 let _ = sender.send(json!({ "kind": "status", "phase": if failed { "turn_failed" } else { "turn_completed" }, "raw": value }));
                 *terminal_status = true;
             }
-            handle.end_stdin();
-            let terminate = handle.clone();
-            tokio::spawn(async move { terminate.cancel().await; });
+
             Ok(true)
         }
         _ => {
@@ -1155,4 +1267,45 @@ fn handle_rpc_value(
 #[tokio::main]
 async fn main() {
     agenthub_plugin_sdk::serve(OmpPlugin::new()).await;
+}
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn tool_progress_reuses_the_call_and_does_not_finish_it() {
+        let mut state = OmpParseState::default();
+        parse_omp_rpc_event(&json!({"type":"tool_execution_start","toolCallId":"read-1","toolName":"read","args":{"path":"file"}}),&mut state);
+        let progress=parse_omp_rpc_event(&json!({"type":"tool_execution_update","toolCallId":"read-1","partialResult":{"content":[{"type":"text","text":"working"}]}}),&mut state);
+        assert_eq!(progress[0]["callId"],"read-1");
+        assert_eq!(progress[0]["name"],"read");
+        assert_eq!(progress[0]["phase"],"updated");
+        assert_eq!(progress[0]["output"],"working");
+        assert!(progress[0].get("success").is_none());
+    }
+    #[test]
+    fn native_child_events_keep_parent_dispatch_and_separate_state() {
+        let mut state = OmpParseState::default();
+        parse_omp_rpc_event(&json!({"type":"tool_execution_start","toolCallId":"parent","toolName":"task","args":{"agent":"scout","task":"inspect"}}),&mut state);
+        let lifecycle = parse_omp_rpc_event(&json!({"type":"subagent_lifecycle","payload":{"id":"child","parentToolCallId":"parent","agent":"scout","status":"started"}}),&mut state);
+        assert_eq!(lifecycle[0]["callId"],"parent");
+        assert_eq!(lifecycle[0]["phase"],"updated");
+        parse_omp_rpc_event(&json!({"type":"subagent_event","payload":{"id":"child","event":{"type":"message_start","message":{"role":"assistant"}}}}),&mut state);
+        let delta=parse_omp_rpc_event(&json!({"type":"subagent_event","payload":{"id":"child","event":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"child thought"}}}}),&mut state);
+        assert_eq!(delta[0]["subagentDispatchId"],"parent");
+        assert!(delta[0]["messageId"].as_str().unwrap().starts_with("child:"));
+        assert_eq!(state.message_sequence,0);
+        let completed=parse_omp_rpc_event(&json!({"type":"subagent_lifecycle","payload":{"id":"child","parentToolCallId":"parent","agent":"scout","status":"completed"}}),&mut state);
+        assert_eq!(completed[0]["input"]["agentsStates"]["child"]["status"],"completed");
+    }
+    #[test]
+    fn request_usage_keeps_cache_creation_and_correct_context_size() {
+        let mut state = OmpParseState::default();
+        let events = parse_omp_rpc_event(&json!({"type":"message_end","message":{"role":"assistant","content":[],
+            "usage":{"input":10,"output":7,"cacheRead":20,"cacheWrite":5,"totalTokens":42}}}), &mut state);
+        let usage = events.iter().find(|e| e["kind"] == "usage").unwrap();
+        assert_eq!(usage["cacheCreationInputTokens"], 5);
+        assert_eq!(usage["contextUsed"], 35);
+        assert_eq!(usage["usageScope"], "context");
+        assert_eq!(usage["inputTokensIncludesCache"], false);
+    }
 }

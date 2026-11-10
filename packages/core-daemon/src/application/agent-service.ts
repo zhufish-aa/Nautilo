@@ -3,9 +3,33 @@ import type { AdapterDetectionResult, ProviderNativeCommand } from "../adapters/
 import { AdapterRegistry, discoverOpenAiCompatibleModels, mergeInstanceModelConfig } from "../adapters/index.js";
 import { Database } from "../database/index.js";
 import { CoreError } from "../errors.js";
-import { CredentialService, EnvironmentPolicyService, providerEnvironmentPassthrough } from "../runtime/security/index.js";
+import { CredentialService, EnvironmentPolicyService, providerEnvironmentPassthrough, isolateLoginProfile, loginProfileDirectory } from "../runtime/security/index.js";
+
+import type { AgentCliAdapter, HarnessPluginOperation } from "@agenthub/provider-sdk";
+import { applyConnection, readConnection } from "../runtime/runtime-connection.js";
 
 export class AgentService {
+  async harnessPlugins(agentInstanceId: string, operation: HarnessPluginOperation, managerFor: (id: string) => AgentCliAdapter | undefined, connectionId?: string) {
+    let instance = this.database.agents.get(agentInstanceId);
+    if (!instance) throw new CoreError("IPC_NOT_FOUND", { resource: "agent", id: agentInstanceId });
+    const adapter = this.adapters.find(instance.providerId);
+    const manager = managerFor(instance.providerId);
+    if (!adapter || !manager?.harnessPlugins) throw new Error("This harness has no plugin manager");
+    if (connectionId) {
+      const connection = readConnection(this.database, connectionId);
+      if (!connection.enabled || connection.kind !== "login" || connection.harness !== instance.providerId) throw new Error("Select an enabled login for this harness");
+      instance = applyConnection(connection, instance);
+    }
+    const env = isolateLoginProfile(instance, this.environment.build(undefined, providerEnvironmentPassthrough(instance, process.env, manager.descriptor)));
+    return manager.harnessPlugins(instance, { env }, operation);
+  }
+  async listModes(agentInstanceId: string) {
+    const instance = this.database.agents.get(agentInstanceId);
+    if (!instance) throw new CoreError("IPC_NOT_FOUND", { resource: "agent", id: agentInstanceId });
+    const adapter = this.adapters.find(instance.providerId);
+    if (!adapter?.descriptor.modeDiscovery || !adapter.listModes) return { modes: [] };
+    return adapter.listModes(instance, { env: this.environment.build(undefined, providerEnvironmentPassthrough(instance, process.env, adapter.descriptor)) });
+  }
   constructor(
     private readonly database: Database,
     private readonly adapters: AdapterRegistry,
@@ -28,6 +52,13 @@ export class AgentService {
   upsert(instance: AgentInstance): AgentInstance {
     if (!instance.executable.trim()) {
       throw new CoreError("IPC_INVALID_REQUEST", { field: "executable" });
+    }
+    const directory = loginProfileDirectory(instance);
+    const current = this.database.agents.get(instance.id);
+    if (current && (directory !== loginProfileDirectory(current) || instance.providerId !== current.providerId)
+      && (this.database.sessions.listAll().some((session) => session.agentInstanceId === instance.id)
+        || this.database.runs.list().some((run) => run.agentInstanceId === instance.id))) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "loginProfileDirectory", reason: "Create a new instance to switch accounts; existing sessions retain their account" });
     }
     this.database.agents.save(instance, instance.updatedAt);
     return instance;
@@ -105,7 +136,7 @@ export class AgentService {
       const credentialEnvironment = { ...(this.credentials?.environment(instance.id, instance.providerId) ?? {}) };
       if (apiKey) for (const key of descriptor?.credentialEnv ?? []) credentialEnvironment[key] = apiKey;
       const context = {
-        env: this.environment.build(undefined, { ...providerEnvironmentPassthrough(instance, process.env, descriptor), ...credentialEnvironment })
+        env: isolateLoginProfile(instance, this.environment.build(undefined, { ...providerEnvironmentPassthrough(instance, process.env, descriptor), ...credentialEnvironment }))
       };
       // Instance-editor quick fetch must honor the unsaved endpoint currently
       // visible in the form. Once the user supplies a base URL, never silently
@@ -126,7 +157,7 @@ export class AgentService {
           };
         }
       }
-      return await this.adapters.listModels(instance, context);
+      return await this.adapters.listModels(instance, context, true);
     } catch (error) {
       return {
         providerId,

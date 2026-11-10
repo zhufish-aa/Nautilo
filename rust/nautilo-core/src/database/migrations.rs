@@ -11,8 +11,12 @@ use crate::database::connection::db_fail;
 pub fn migrate(db: &Connection) -> CoreResult<()> {
     db.execute_batch(
         "
+        CREATE TABLE IF NOT EXISTS assistant_records (id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_assistant_records_kind ON assistant_records(kind);
         CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS runtime_connections (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS runtime_connection_versions (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS project_runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -43,6 +47,12 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
         CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, created_at TEXT NOT NULL, truncated INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id, created_at);
         CREATE TABLE IF NOT EXISTS run_touched_files (run_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(run_id, path));
+        CREATE TABLE IF NOT EXISTS native_handoffs (session_id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS native_history_bindings (session_id TEXT NOT NULL, provider_session_id TEXT NOT NULL, entry_kind TEXT NOT NULL, native_id TEXT NOT NULL, local_id TEXT, fingerprint TEXT NOT NULL, PRIMARY KEY(session_id, provider_session_id, entry_kind, native_id));
+        CREATE TRIGGER IF NOT EXISTS cleanup_native_history AFTER DELETE ON sessions BEGIN
+            DELETE FROM native_handoffs WHERE session_id=old.id;
+            DELETE FROM native_history_bindings WHERE session_id=old.id;
+        END;
         INSERT INTO schema_meta(key, value) VALUES('schema', '4') ON CONFLICT(key) DO NOTHING;
         ",
     )
@@ -50,6 +60,7 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
     ensure_column(db, "artifacts", "project_run_id", "TEXT")?;
     ensure_column(db, "artifacts", "task_id", "TEXT")?;
     ensure_column(db, "artifacts", "session_id", "TEXT")?;
+    db.execute_batch(include_str!("history_projection.sql")).map_err(db_fail)?;
     let version = current_schema_version(db)?;
     if version < 5 {
         migrate_execution_defaults_to_team_members(db)?;
@@ -65,6 +76,10 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
     if version < 7 {
         set_schema_version(db, 7)?;
     }
+    if version < 8 {
+        set_schema_version(db, 8)?;
+    }
+    if version < 9 { set_schema_version(db, 9)?; }
     Ok(())
 }
 

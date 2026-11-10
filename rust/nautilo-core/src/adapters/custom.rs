@@ -122,11 +122,32 @@ impl AgentCliAdapter for CustomCliAdapter {
         let options = request.instance.get("providerOptions").cloned().unwrap_or_else(|| json!({}));
         let stdin_mode = options.get("inputMode").and_then(Value::as_str) == Some("stdin");
         let structured = options.get("outputMode").and_then(Value::as_str) == Some("jsonl");
+        let context = serde_json::json!({"prompt":request.prompt,"cwd":request.cwd,"model":request.model,
+            "reasoningEffort":request.reasoning_effort,"permissionMode":request.permission_mode,
+            "serviceTier":request.service_tier,"contextWindow":request.context_window,
+            "outputSchemaPath":request.output_schema_path,"localImagePaths":request.local_image_paths});
+        let mut env = request.env.clone().unwrap_or_default();
+        env.insert("NAUTILO_INPUT_JSON".into(),context.to_string());
+        for (key,name) in [("model","NAUTILO_MODEL"),("reasoningEffort","NAUTILO_REASONING_EFFORT"),("permissionMode","NAUTILO_PERMISSION_MODE"),("serviceTier","NAUTILO_SERVICE_TIER")] {
+            if let Some(value) = context[key].as_str() { env.insert(name.into(),value.into()); }
+        }
+        let mut instance = request.instance.clone();
+        if let Some(args) = instance["baseArgs"].as_array_mut() {
+            for arg in args.iter_mut() { if let Some(text) = arg.as_str() {
+                let mut text = text.to_string();
+                for (key,value) in context.as_object().unwrap() {
+                    if key == "prompt" { continue; }
+                    let value = if value.is_null() {String::new()} else {value.as_str().map(str::to_string).unwrap_or_else(||value.to_string())};
+                    text = text.replace(&format!("{{{key}}}"), &value);
+                }
+                *arg = Value::String(text);
+            } }
+        }
         let started = ProcessRuntime::start(&ProcessRequest {
             command: request.instance.get("executable").and_then(Value::as_str).unwrap_or("").to_string(),
-            args: Self::command_args(&request.instance, &request.prompt),
+            args: Self::command_args(&instance, &request.prompt),
             cwd: Some(request.cwd.clone()),
-            env: request.env.clone(),
+            env: Some(env),
             timeout_ms: request.timeout_ms.or(number_option(options.get("timeoutMs"))),
             idle_timeout_ms: request.idle_timeout_ms.or(number_option(options.get("idleTimeoutMs"))),
             max_output_bytes: Some(

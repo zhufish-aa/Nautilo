@@ -20,8 +20,13 @@ impl ArtifactService {
 
     /// Stores an inline-content artifact (diffs, generated payloads).
     pub fn save(&self, input: &Value, content: &str) -> CoreResult<Value> {
+        self.save_with_id(input, content, &Uuid::new_v4().to_string())
+    }
+
+    /// Replaces one owned inline artifact without accumulating stale snapshots.
+    pub fn save_with_id(&self, input: &Value, content: &str, id: &str) -> CoreResult<Value> {
         let mut artifact = input.as_object().cloned().unwrap_or_default();
-        artifact.insert("id".to_string(), json!(Uuid::new_v4().to_string()));
+        artifact.insert("id".to_string(), json!(id));
         artifact.insert("contentHash".to_string(), json!(format!("{:x}", Sha256::digest(content.as_bytes()))));
         artifact.insert("content".to_string(), json!(content));
         let artifact = Value::Object(artifact);

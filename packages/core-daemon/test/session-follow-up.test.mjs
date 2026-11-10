@@ -171,3 +171,85 @@ test("queued follow-up can be listed and withdrawn before its turn starts", asyn
   assert.equal(prompts.length, 1);
   await daemon.stop();
 });
+
+for (const outcome of ['accepted', 'rejected', 'unsupported']) {
+  test(`queued guidance ${outcome} preserves message identity and delivery`, async () => {
+    const { daemon, session } = fixture();
+    const steers = [];
+    const releases = [];
+    let starts = 0;
+    let rejectSteer = outcome === 'rejected';
+    daemon.adapters.register({
+      providerId: 'follow-up-test', supportsStructuredOutput: true, supportsResume: false,
+      capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+      detect: async () => ({ installed: true, executable: 'follow-up-test' }),
+      start: () => {
+        starts++;
+        let release;
+        const done = new Promise(resolve => { release = resolve; });
+        releases.push(release);
+        async function* events() { yield { kind: 'session', providerSessionId: 'thread' }; await done; yield { kind: 'exit', exitCode: 0 }; }
+        return { process: {}, events: events(), cancel: async () => release(), write: () => {},
+          ...(outcome === 'unsupported' ? {} : { steer: async text => { if (rejectSteer) throw new Error('native rejection'); steers.push(text); } }) };
+      }
+    });
+    try {
+      await daemon.sessions.send({ sessionId: session.id, text: 'first' });
+      await daemon.sessions.followUp({ sessionId: session.id, messageId: 'queued-id', text: 'follow up', mode: 'queue' });
+      const input = { sessionId: session.id, messageId: 'queued-id' };
+      if (outcome === 'rejected') {
+        await assert.rejects(daemon.sessions.followUpSteer(input), /native rejection/);
+        assert.equal(daemon.sessions.followUpList({ sessionId: session.id }).items[0].messageId, 'queued-id');
+        rejectSteer = false;
+        await daemon.sessions.followUpSteer(input);
+      } else {
+        assert.equal((await daemon.sessions.followUpSteer(input)).mode, outcome === 'accepted' ? 'steer' : 'queue');
+      }
+      assert.equal(daemon.database.sessions.messages(session.id).filter(item => item.id === 'queued-id').length, 1);
+      assert.equal(daemon.sessions.followUpList({ sessionId: session.id }).items.length, outcome === 'unsupported' ? 1 : 0);
+      releases[0]();
+      if (outcome === 'unsupported') { await waitFor(() => starts === 2); releases[1](); }
+      await waitFor(() => daemon.database.runs.list().every(run => ['completed','failed','cancelled','crashed','timed_out'].includes(run.status)));
+      assert.equal(starts, outcome === 'unsupported' ? 2 : 1);
+      assert.deepEqual(steers, outcome === 'unsupported' ? [] : ['follow up']);
+    } finally { for (const release of releases) release(); await daemon.stop(); }
+  });
+}
+
+
+test("stopping preserves streamed text, resolves native dialogs first, and stays out of the failure path", async () => {
+  const { daemon, session } = fixture();
+  let release;
+  const done = new Promise(resolve => { release = resolve; });
+  let dialog;
+  daemon.adapters.register({
+    providerId: "follow-up-test", supportsStructuredOutput: true, supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    start: request => {
+      async function* events() {
+        yield { kind: "message", messageId: "partial", phase: "delta", text: "Already visible" };
+        dialog = request.requestInteraction({ kind: "question", nativeRequestId: "native-dialog", title: "Input", questions: [] });
+        await done;
+        yield { kind: "error", error: new Error("native interrupt") };
+        yield { kind: "exit", exitCode: 1 };
+      }
+      return { process: {}, events: events(), write() {}, cancel: async () => {
+        assert.deepEqual(await Promise.race([dialog, new Promise((_, reject) => setTimeout(() => reject(new Error("stop waited on the dialog")), 300))]), { outcome: "cancelled" });
+        release();
+      } };
+    }
+  });
+  try {
+    await daemon.sessions.send({ sessionId: session.id, text: "start" });
+    await waitFor(() => Boolean(dialog));
+    const run = daemon.database.runs.list().at(-1);
+    await daemon.runs.cancel(run.id);
+    await waitFor(() => daemon.database.events.replay({ sessionId: session.id }).some(event => event.type === "run.cancelled"));
+    const events = daemon.database.events.replay({ sessionId: session.id });
+    assert.equal(events.filter(event => event.type === "run.failed").length, 0);
+    assert.equal(events.filter(event => event.type === "run.cancelled").length, 1);
+    assert.equal(daemon.database.runs.get(run.id).status, "cancelled");
+    assert.ok(daemon.database.sessions.messages(session.id).some(message => message.text === "Already visible"));
+    assert.equal(daemon.interactions.list({ status: "pending" }).length, 0);
+  } finally { release?.(); await daemon.stop(); }
+});

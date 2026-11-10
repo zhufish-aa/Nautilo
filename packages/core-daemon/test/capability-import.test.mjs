@@ -25,6 +25,20 @@ function byName(servers, name) {
   return servers.find((server) => server.name === name);
 }
 
+test("mcp json diagnostics never echo secret values", () => {
+  const secret = "secret-value-123456";
+  const malformed = parseMcpConfigJson(`{"token":"${secret}", bad}`);
+  assert.ok(malformed.errors.length);
+  assert.ok(!malformed.errors.join(" ").includes(secret));
+  const parsed = parseMcpConfigJson(JSON.stringify({ mcpServers: {
+    local: { command: "npx", env: { TOKEN: `${secret}-\${input:bad}` } },
+    remote: { url: "https://example.com", headers: { Authorization: `${secret}-\${input:bad}` } }
+  } }));
+  const warnings = parsed.servers.flatMap((server) => server.warnings).join(" ");
+  assert.match(warnings, /无法解析的占位符/);
+  assert.ok(!warnings.includes(secret));
+});
+
 test("mcp json parser unwraps the common config shapes", () => {
   const wrappers = [
     '{"mcpServers":{"a":{"command":"npx"}}}',

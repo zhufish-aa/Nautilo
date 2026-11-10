@@ -74,7 +74,7 @@ export function PptxPreview({ bytes, zoom, onNav, onReady, onError }: OfficePrev
   }, [session, slide, slideCount, onNav]);
 
   return (
-    <div className="h-full overflow-auto bg-card/40 p-4">
+    <div className="h-full overflow-auto bg-canvas p-4">
       {/* Third-party DOM is confined to this root; scoped styles below keep
           its internals from inheriting app typography. */}
       <div ref={containerRef} className="pptx-preview-root mx-auto w-fit text-left text-ink" aria-label="PPTX" />

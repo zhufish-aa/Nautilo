@@ -184,15 +184,18 @@ impl KimiSubagentWireWatcher {
     }
 
     pub async fn initialize(&mut self) {
-        if self.initialized {
+        if self.initialized && self.session_dir.is_some() {
             return;
         }
+        let initial_snapshot = !self.initialized;
         self.session_dir = find_session_dir(&Path::new(&self.kimi_home).join("sessions"), &self.provider_session_id).await;
-        if let Some(dir) = &self.session_dir {
+        if let Some(dir) = self.session_dir.as_ref().filter(|_|initial_snapshot) {
             for child in list_child_wires(Path::new(dir)).await {
                 self.initial_sizes.insert(child.agent_id, child.size);
             }
         }
+        // A directory that appears after the initial handshake contains new
+        // work. Retry discovery without treating those new bytes as history.
         self.initialized = true;
     }
 
@@ -210,7 +213,7 @@ impl KimiSubagentWireWatcher {
     }
 
     pub fn has_active(&self) -> bool {
-        !self.dispatches.is_empty()
+        self.dispatches.values().any(|dispatch| dispatch.parser.as_ref().is_none_or(|parser|!parser.finished))
     }
 
     pub fn release(&mut self, call_id: &str) {

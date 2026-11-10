@@ -122,7 +122,7 @@ test("Codex commands match the official exec JSONL and resume surface", () => {
     "exec", "--json", "--model", "gpt-test", "--config", 'model_reasoning_effort="max"', "--config", 'service_tier="priority"', "--profile", "work", "--output-schema", "result.schema.json", "hello"
   ]);
   assert.deepEqual(buildCodexResumeArgs(configured, "thread-1", "continue", { ...request, prompt: "continue", providerSessionId: "thread-1" }), [
-    "exec", "resume", "--json", "--model", "gpt-test", "--config", 'model_reasoning_effort="max"', "--config", 'service_tier="priority"', "thread-1", "continue"
+    "exec", "resume", "--json", "--model", "gpt-test", "--config", 'model_reasoning_effort="max"', "--config", 'service_tier="priority"', "--output-schema", "result.schema.json", "thread-1", "continue"
   ]);
 });
 
@@ -138,7 +138,7 @@ test("Codex permission mode maps to approval policy and sandbox flags", () => {
     "exec", "--json", "--ask-for-approval", "never", "--sandbox", "danger-full-access"
   ]);
   const customBase = { ...withMode("ask"), baseArgs: ["exec", "--json"] };
-  assert.ok(!buildCodexStartArgs(customBase, "hello").includes("--ask-for-approval"));
+  assert.ok(buildCodexStartArgs(customBase, "hello").includes("--ask-for-approval"));
 });
 
 test("empty session permission mode falls back to the instance setting", () => {
@@ -205,6 +205,7 @@ test("Codex custom API base URL is applied as an invocation-scoped model provide
   assert.deepEqual(appServerArgs.slice(0, 2), ["app-server", "--stdio"]);
   assert.ok(appServerArgs.includes("--enable"));
   assert.ok(appServerArgs.includes("image_generation"));
+  assert.equal(appServerArgs.some((arg, index) => arg === "--disable" && appServerArgs[index + 1] === "apps"), false, "Codex's native Apps and connectors must remain enabled by its own configuration");
   assert.ok(appServerArgs.includes('web_search="live"'));
 
   const customCatalog = buildCodexCustomModelCatalog({
@@ -408,6 +409,19 @@ test("Codex app-server parser preserves deltas, call ids, input, and output", ()
   assert.ok(image.some((event) => event.kind === "artifact" && event.artifactType === "image"));
 });
 
+test("Codex tool receipts retain dynamic content and distinguish pending, success and failure", () => {
+  const item = { type: "dynamicToolCall", id: "delegate-1", tool: "agenthub_delegate", status: "completed",
+    result: null, contentItems: [{ type: "inputText", text: "child-session-1" }], success: false };
+  const event = parseCodexAppServerNotification("item/completed", { item })[0];
+  assert.match(event.output, /child-session-1/);
+  assert.equal(event.success, false);
+  assert.equal(parseCodexAppServerNotification("item/started", { item })[0].success, undefined);
+  const mcp = { type: "mcpToolCall", status: "completed", result: { content: [] }, error: null };
+  assert.equal(parseCodexAppServerNotification("item/completed", { item: mcp })[0].success, true);
+  mcp.result.isError = true;
+  assert.equal(parseCodexAppServerNotification("item/completed", { item: mcp })[0].success, false);
+});
+
 test("Codex app-server opts into native experimental provider capabilities", () => {
   assert.equal(CODEX_APP_SERVER_INITIALIZE_PARAMS.capabilities.experimentalApi, true);
 });
@@ -494,7 +508,7 @@ test("Codex Responses compatibility proxy translates input and streams Responses
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [{ type: "text", text: "hi" }],
@@ -543,7 +557,7 @@ test("Codex Responses compatibility proxy translates Chat tool calls", async (t)
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [{ type: "text", text: "hi" }],
@@ -585,7 +599,7 @@ test("Codex Responses compatibility proxy round-trips custom apply_patch calls",
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [{ type: "text", text: "create fixed.txt" }],
@@ -630,7 +644,7 @@ test("Codex Responses compatibility proxy sends custom tool results back through
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [
@@ -661,7 +675,7 @@ test("Codex Responses compatibility proxy does not mark an empty upstream respon
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({ model: "deepseek-v4-flash-free", input: "hi", stream: true })
   });
   const body = await response.text();
@@ -690,7 +704,7 @@ test("Codex Responses compatibility proxy preserves reasoning for tool results",
 
   const response = await fetch(`${proxy.baseUrl}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.token}` },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
       input: [
@@ -857,6 +871,9 @@ test("Kimi commands match prompt stream-json and session resume", () => {
 
 test("Kimi stream-json parser exposes messages, tools, and resume hints", () => {
   const tool = parseKimiJsonEvent({ role: "assistant", tool_calls: [{ id: "tool-1", type: "function", function: { name: "Bash", arguments: "{\"command\":\"pwd\"}" } }] })[0];
+  assert.equal(tool.callId, "tool-1");
+  const receipt = parseKimiJsonEvent({ role: "tool", tool_call_id: "tool-1", content: "workspace" })[0];
+  assert.equal(receipt.callId, tool.callId);
   assert.equal(tool?.kind, "tool");
   assert.deepEqual(tool?.input, { command: "pwd" });
   assert.equal(parseKimiJsonEvent({ role: "assistant", content: "done" })[0]?.kind, "message");
@@ -1161,7 +1178,7 @@ test("Codex model discovery prefers the instance-configured API endpoint", async
   assert.equal(requests[0].init.headers.authorization, "Bearer sk-test");
 });
 
-test("Codex model discovery falls back to the local CLI when the API fails", async (t) => {
+test("Codex default endpoint discovery can fall back to the local CLI when the API fails", async (t) => {
   const workspace = mkdtempSync(join(tmpdir(), "agenthub-codex-models-"));
   t.after(() => rmSync(workspace, { recursive: true, force: true }));
   t.mock.method(globalThis, "fetch", async () => {
@@ -1171,7 +1188,7 @@ test("Codex model discovery falls back to the local CLI when the API fails", asy
   const previousCwd = process.cwd();
   process.chdir(workspace);
   try {
-    const configured = { ...instance, baseArgs: [], providerOptions: { baseUrl: "https://api.deepseek.com/" } };
+    const configured = { ...instance, baseArgs: [], providerOptions: undefined };
     const catalog = await discoverCodexModels(configured, { env: { PATH: process.env.PATH, OPENAI_API_KEY: "sk-test" } });
     assert.equal(catalog.source, "provider_cli");
     assert.equal(catalog.defaultModel, "gpt-fake-codex");
@@ -1223,10 +1240,10 @@ test("Claude commands match headless stream-json, resume, and effort surface", (
   // A non-empty session value still overrides the instance setting.
   const overridden = buildClaudeStartArgs(configured, "hello", { ...request, permissionMode: "default" });
   assert.deepEqual(overridden.slice(-3), ["--permission-mode", "default", "hello"]);
-  // Custom baseArgs own the whole CLI surface.
+  // Custom prefixes retain selected native model, effort, permissions and streaming.
   const custom = { ...configured, baseArgs: ["-p", "--output-format", "stream-json"] };
-  assert.deepEqual(buildClaudeStartArgs(custom, "hello", request), ["-p", "--output-format", "stream-json", "hello"]);
-  assert.deepEqual(buildClaudeResumeArgs(custom, "session-1", "continue", request), ["-p", "--output-format", "stream-json", "--resume", "session-1", "continue"]);
+  assert.deepEqual(buildClaudeStartArgs(custom, "hello", request), buildClaudeStartArgs(configured, "hello", request));
+  assert.deepEqual(buildClaudeResumeArgs(custom, "session-1", "continue", request), buildClaudeResumeArgs(configured, "session-1", "continue", request));
   // Unknown permission modes are ignored rather than passed through.
   const weird = { ...instance, baseArgs: [], providerOptions: { permissionMode: "not-a-mode" } };
   assert.ok(!buildClaudeStartArgs(weird, "hello").includes("--permission-mode"));
@@ -1278,7 +1295,10 @@ test("Claude stream-json parser exposes session, commands, messages, tools, and 
   // Per-request usage reports the real context footprint of that single call.
   const requestUsage = assistant[3];
   assert.equal(requestUsage.inputTokens, 12);
-  assert.equal(requestUsage.cachedInputTokens, 9500);
+  assert.equal(requestUsage.cachedInputTokens, 9000);
+  assert.equal(requestUsage.cacheCreationInputTokens, 500);
+  assert.equal(requestUsage.usageScope, "context");
+  assert.equal(requestUsage.inputTokensIncludesCache, false);
   assert.equal(requestUsage.outputTokens, 7);
   assert.equal(requestUsage.contextUsed, 9512);
 
@@ -1304,7 +1324,9 @@ test("Claude stream-json parser exposes session, commands, messages, tools, and 
   // result.usage totals stay cumulative (throughput), but contextUsed keeps the
   // latest single-request footprint instead of the session-wide cache sum.
   assert.equal(usage.inputTokens, 5);
-  assert.equal(usage.cachedInputTokens, 1000);
+  assert.equal(usage.cachedInputTokens, 900);
+  assert.equal(usage.cacheCreationInputTokens, 100);
+  assert.equal(usage.usageScope, "turn");
   assert.equal(usage.outputTokens, 42);
   assert.equal(usage.contextUsed, 9512);
   assert.equal(usage.contextWindow, 200000);
@@ -1322,6 +1344,18 @@ test("Claude stream-json parser exposes session, commands, messages, tools, and 
   ] } }, state);
   assert.deepEqual(write[0].fileDiff, { operation: "write", path: "src/new.ts", before: "", after: "export {};\n" });
   assert.deepEqual(write[1].fileDiff, { operation: "edit", path: "src/a.ts", before: "a\nc", after: "b\nd" });
+});
+
+test("Codex summary and raw reasoning preserve whitespace and use independent stream identities", () => {
+  const params = { itemId: "thought", delta: " \n" };
+  const summary = parseCodexAppServerNotification("item/reasoning/summaryTextDelta", params)[0];
+  const content = parseCodexAppServerNotification("item/reasoning/textDelta", params)[0];
+  assert.equal(summary.text, " \n");
+  assert.equal(content.text, " \n");
+  assert.equal(summary.messageId, "thought");
+  assert.equal(content.messageId, "thought:content");
+  const completed = parseCodexAppServerNotification("item/completed", { item: { id: "thought", type: "reasoning", summary: ["Summary"], content: ["Raw content"] } });
+  assert.deepEqual(completed.map(event => [event.messageId, event.text, event.phase]), [["thought", "Summary", "completed"], ["thought:content", "Raw content", "completed"]]);
 });
 
 test("Claude stream_event partial messages emit text/thinking deltas", () => {
@@ -1383,7 +1417,8 @@ test("Claude model discovery explains why it fell back", async () => {
 
   const badBaseUrl = await discoverClaudeModels({ ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_BASE_URL: "not-a-url" });
   assert.match(badBaseUrl.warning ?? "", /ANTHROPIC_BASE_URL/);
-  assert.match(badBaseUrl.warning ?? "", /not-a-url/);
+  assert.match(badBaseUrl.warning ?? "", /HTTPS/);
+  assert.doesNotMatch(badBaseUrl.warning ?? "", /not-a-url/);
 });
 
 test("Claude model discovery reports HTTP failures and parses live model lists", async (t) => {
@@ -1592,4 +1627,29 @@ test("Codex app-server executes image_gen through the configured Images API", as
   assert.deepEqual(readFileSync(artifact.path), imageBytes);
   assert.match(artifact.path, /output[\\/]imagegen[\\/]e2e-blue-square\.png$/);
   assert.equal(events.find((event) => event.kind === "exit")?.exitCode, 0);
+});
+
+
+test("usage accounting distinguishes snapshots, cache categories, zero and unavailable costs", () => {
+  const claude = parseClaudeJsonEvent({ type: "result", total_cost_usd: 0,
+    usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 } }).find(e => e.kind === "usage");
+  assert.equal(claude.usageScope, "turn");
+  assert.equal(claude.cachedInputTokens, 0);
+  assert.equal(claude.cacheCreationInputTokens, 0);
+  assert.equal(claude.reportedCost, 0);
+  assert.equal(claude.currency, "USD");
+  assert.equal(claude.estimatedCost, undefined);
+  const exec = parseCodexJsonEvent({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0 } }).find(e => e.kind === "usage");
+  assert.equal(exec.usageScope, "turn");
+  assert.equal(exec.inputTokensIncludesCache, true);
+  assert.equal(exec.cachedInputTokens, 0);
+  assert.equal(exec.reportedCost, undefined);
+  const snapshot = { threadId: "thread-usage", tokenUsage: { total: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 2 }, last: { totalTokens: 7 } } };
+  const first = parseCodexAppServerNotification("thread/tokenUsage/updated", snapshot)[0];
+  const repeated = parseCodexAppServerNotification("thread/tokenUsage/updated", snapshot)[0];
+  assert.equal(first.usageScope, "session");
+  assert.equal(first.usageKey, "thread-usage");
+  assert.equal(first.inputTokensIncludesCache, true);
+  assert.deepEqual(first, repeated);
+  assert.equal(first.contextUsed, 7);
 });

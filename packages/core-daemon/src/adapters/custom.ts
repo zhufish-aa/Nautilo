@@ -18,11 +18,20 @@ export class CustomCliAdapter extends ProcessAdapter {
   }
   override start(request: AdapterStartRequest): AdapterRun {
     const options = request.instance.providerOptions ?? {};
+    const context = {prompt:request.prompt,cwd:request.cwd,model:request.model,reasoningEffort:request.reasoningEffort,
+      permissionMode:request.permissionMode,serviceTier:request.serviceTier,contextWindow:request.contextWindow,
+      outputSchemaPath:request.outputSchemaPath,localImagePaths:request.localImagePaths};
+    const env = {...request.env,NAUTILO_INPUT_JSON:JSON.stringify(context)} as Record<string,string|undefined>;
+    for (const [key,name] of [['model','NAUTILO_MODEL'],['reasoningEffort','NAUTILO_REASONING_EFFORT'],['permissionMode','NAUTILO_PERMISSION_MODE'],['serviceTier','NAUTILO_SERVICE_TIER']] as const) {
+      if (context[key]) env[name] = context[key];
+    }
+    const instance = {...request.instance,baseArgs:request.instance.baseArgs.map(arg => Object.entries(context)
+      .filter(([key]) => key !== 'prompt').reduce((text,[key,value]) => text.replaceAll(`{${key}}`,value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value)),arg))};
     const process = this.runtime.start({
       command: request.instance.executable,
-      args: this.commandArgs(request.instance, request.prompt),
+      args: this.commandArgs(instance, request.prompt),
       cwd: request.cwd,
-      env: request.env,
+      env,
       timeoutMs: request.timeoutMs ?? numberOption(options.timeoutMs),
       idleTimeoutMs: request.idleTimeoutMs ?? numberOption(options.idleTimeoutMs),
       maxOutputBytes: request.maxOutputBytes ?? numberOption(options.maxOutputBytes) ?? 20 * 1024 * 1024

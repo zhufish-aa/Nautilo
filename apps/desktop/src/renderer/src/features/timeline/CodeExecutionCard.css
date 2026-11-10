@@ -1,0 +1,21 @@
+.ptc-execution, .ptc-branch { min-width: 0; }
+.ptc-subcalls { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 2px 7px; padding-left: 14px; border-left: 1px solid var(--line); }
+.ptc-detail { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; color: var(--ink-2); background: var(--card); font: var(--app-font-weight) 13px/21px var(--app-font-sans); }
+.ptc-code-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 5px 12px; color: var(--ink-3); font: inherit; font-size: 12px; }
+.ptc-code-toolbar button { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px; border-radius: 4px; color: inherit; }
+.ptc-code-toolbar button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.ptc-code { background: color-mix(in srgb, var(--ink) 2%, var(--card)); }
+.ptc-code pre { min-width: 0; max-height: 240px; overflow: auto; padding: 6px 12px 12px; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; font: 400 13px/21px var(--font-mono); }
+.ptc-code code { font: inherit; }
+.ptc-output { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: start; gap: 12px; padding: 10px 12px; }
+.ptc-output:not(:first-child) { border-top: 1px solid var(--line); }
+.ptc-output-label, .ptc-fields dt { color: var(--ink-3); }
+.ptc-output-content { min-width: 0; max-height: 180px; overflow: auto; }
+.ptc-output-content pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.ptc-output[data-error] .ptc-output-content { color: var(--danger); }
+.ptc-fields { min-width: 0; }
+.ptc-fields > div { display: grid; grid-template-columns: minmax(55px, max-content) minmax(0, 1fr); gap: 12px; padding-block: 2px; }
+.ptc-fields dd { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ptc-input { padding: 9px 12px; max-height: 220px; overflow: auto; }
+.ptc-truncated { padding: 0 12px 8px; color: var(--ink-3); font-size: 12px; }
+@media (hover: hover) and (pointer: fine) { .ptc-code-toolbar button:hover { background: var(--card-hover); color: var(--ink); } }

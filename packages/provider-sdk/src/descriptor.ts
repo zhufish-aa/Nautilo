@@ -33,7 +33,9 @@ export interface ProviderNativeCommand {
   description: string;
   inputHint?: string;
   /** Dedicated provider transport used instead of sending command text as chat. */
-  providerCommand?: "compact";
+  providerCommand?: string;
+  /** Native transport advertised this command; terminal-only commands are not sent as model text. */
+  transport?: "prompt" | "rpc" | "terminal";
 }
 
 export interface ProviderDescriptor {
@@ -57,6 +59,14 @@ export interface ProviderDescriptor {
   permissionModes?: ProviderPermissionMode[];
   /** Provider-native upstream API protocols; omit when the provider has no choice. */
   apiTypes?: ProviderApiType[];
+  /** Optional native wire for host-managed protocol translation on API bindings. */
+  nativeApiProtocol?: "responses" | "anthropic";
+  /** Native plugins may negotiate the wire for the installed CLI version. */
+  connectionProtocolDiscovery?: boolean;
+  /** Version of the provider's durable context format; changes rebuild saved chat once. */
+  nativeContextVersion?: string;
+  /** The native headless CLI omits API deltas; observe its run-scoped wire. */
+  observeApiOutput?: boolean;
   /** Commands available immediately after the provider/plugin is loaded. */
   nativeCommands?: ProviderNativeCommand[];
   /**
@@ -64,6 +74,12 @@ export interface ProviderDescriptor {
    * (codex --profile). The instance editor hides the profile field otherwise.
    */
   configProfile?: boolean;
+  /** Native, extensible per-conversation modes, discovered from the runtime. */
+  modeDiscovery?: boolean;
+  /** The Nautilo plugin supplies native plugin inventory and item-specific operations. */
+  harnessPlugins?: boolean;
+  /** Companion package for a harness whose run adapter remains built in. */
+  pluginManagerFor?: string;
   /** Static model id suggestions shown before discovery runs. */
   modelSuggestions?: string[];
   /**
@@ -98,6 +114,8 @@ export interface ProviderRegistryEntry {
   tarball: string;
   /** Expected sha256 of the tarball (hex, lowercase); verified before install. */
   sha256?: string;
+  /** Native packages keyed by Node platform and architecture, e.g. darwin-arm64. */
+  platforms?: Record<string, { tarball: string; sha256: string }>;
   minAppVersion?: string;
 }
 

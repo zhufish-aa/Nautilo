@@ -1,3 +1,4 @@
+import { mergeCliArgs } from "../process-adapter.js";
 import type { AgentInstance } from "@agenthub/domain";
 import type { AdapterStartRequest } from "../types.js";
 import { resolvePermissionMode } from "../permission-mode.js";
@@ -9,7 +10,8 @@ import { buildCodexProviderConfigArgs } from "./provider-config.js";
  * over the instance setting; unset keeps Codex's own defaults (exec path)
  * or the app-server defaults below.
  */
-export function codexPermissionConfig(instance: AgentInstance, request?: AdapterStartRequest): { approvalPolicy: "on-request" | "on-failure" | "never"; sandbox: "workspace-write" | "danger-full-access" } | undefined {
+export function codexPermissionConfig(instance: AgentInstance, request?: AdapterStartRequest): { approvalPolicy: "on-request" | "on-failure" | "never" | "untrusted"; sandbox: "workspace-write" | "danger-full-access" | "read-only" } | undefined {
+  if (instance.providerOptions?.imageGenerationDelegate === true) return { approvalPolicy: "untrusted", sandbox: "read-only" };
   const mode = resolvePermissionMode(instance, request);
   switch (mode) {
     case "ask": return { approvalPolicy: "on-request", sandbox: "workspace-write" };
@@ -42,16 +44,16 @@ function defaultResumeArgs(instance: AgentInstance, request?: AdapterStartReques
 }
 
 export function buildCodexStartArgs(instance: AgentInstance, prompt: string, request?: AdapterStartRequest): string[] {
-  const args = instance.baseArgs.length ? [...instance.baseArgs] : defaultStartArgs(instance, request);
+  const args = instance.baseArgs.length ? mergeCliArgs(instance.baseArgs,defaultStartArgs(instance,request).slice(1)) : defaultStartArgs(instance, request);
   args.push(...buildCodexProviderConfigArgs(instance, request?.env));
   const schema = request?.outputSchemaPath
     ?? (typeof instance.providerOptions?.outputSchemaPath === "string" ? instance.providerOptions.outputSchemaPath : undefined);
   if (schema && !args.includes("--output-schema")) args.push("--output-schema", schema);
-  return [...args, prompt];
+  return [...args,...(request?.localImagePaths ?? []).flatMap(path=>["--image",path]), prompt];
 }
 
 export function buildCodexResumeArgs(instance: AgentInstance, sessionId: string, prompt: string, request?: AdapterStartRequest): string[] {
-  const args = instance.baseArgs.length ? [...instance.baseArgs, "resume"] : defaultResumeArgs(instance, request);
+  const args = instance.baseArgs.length ? mergeCliArgs([...instance.baseArgs,...(instance.baseArgs.includes("resume") ? [] : ["resume"])],defaultResumeArgs(instance,request).slice(2)) : defaultResumeArgs(instance, request);
   args.push(...buildCodexProviderConfigArgs(instance, request?.env));
-  return [...args, sessionId, prompt];
+  return [...args,...(request?.outputSchemaPath ? ["--output-schema",request.outputSchemaPath] : []),...(request?.localImagePaths ?? []).flatMap(path=>["--image",path]), sessionId, prompt];
 }

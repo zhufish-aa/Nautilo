@@ -1,5 +1,6 @@
+import { useSettingsStore } from "../../stores/settings";
 import { forwardRef, type ButtonHTMLAttributes } from "react";
-import { motion, type HTMLMotionProps } from "framer-motion";
+import { motion, useReducedMotion, type HTMLMotionProps } from "framer-motion";
 import { cn } from "../../lib/utils";
 
 export type ButtonVariant = "primary" | "outline" | "ghost" | "subtle" | "danger";
@@ -13,7 +14,7 @@ export interface ButtonProps extends Omit<HTMLMotionProps<"button">, "children">
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "bg-gradient-to-b from-accent to-accent-2 text-on-accent shadow-[0_1px_2px_rgba(0,0,0,0.25),inset_0_1px_0_rgba(255,255,255,0.18)] hover:shadow-glow hover:brightness-110 border border-accent-2/60",
+    "bg-accent text-on-accent shadow-sm hover:opacity-85 border border-transparent",
   outline:
     "border border-line-strong bg-card text-ink hover:bg-card-hover hover:border-accent/50",
   ghost: "text-ink-2 hover:text-ink hover:bg-accent-soft",
@@ -32,10 +33,13 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   { variant = "outline", size = "md", className, disabled, children, ...rest },
   ref
 ) {
+  const systemReducedMotion = useReducedMotion();
+  const appReducedMotion = useSettingsStore((state) => state.reduceMotion);
+  const reduceMotion = systemReducedMotion || appReducedMotion;
   return (
     <motion.button
       ref={ref}
-      whileTap={disabled ? undefined : { scale: 0.97 }}
+      whileTap={disabled || reduceMotion ? undefined : { scale: 0.97 }}
       transition={{ type: "spring", stiffness: 500, damping: 45 }}
       className={cn(
         "ui-button",

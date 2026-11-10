@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>nautilo capability probe</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; padding: 20px; }
+  .box { border: 1px solid #ccc; padding: 10px; margin: 10px 0; }
+  #dst { min-height: 40px; background: #f6f6f6; }
+  #ed { border: 1px dashed #999; padding: 6px; min-height: 24px; }
+</style>
+</head>
+<body>
+<h1>nautilo capability probe</h1>
+
+<div class="box">
+  <label>select</label>
+  <select id="sel">
+    <option value="a">选项 A</option>
+    <option value="b">选项 B</option>
+    <option value="c">选项 C</option>
+  </select>
+  <button id="selBtn" onclick="document.getElementById('selOut').textContent = document.getElementById('sel').value">读取</button>
+  <span id="selOut">-</span>
+</div>
+
+<div class="box">
+  <label>file input</label>
+  <input type="file" id="fileIn">
+</div>
+
+<div class="box">
+  <label>download</label>
+  <!-- Inline handlers resolve document.URL before window.URL. Use the constructor explicitly. -->
+  <button id="dl" onclick="const b=new Blob(['hello probe'],{type:'text/plain'});const a=document.createElement('a');a.href=window.URL.createObjectURL(b);a.download='probe.txt';document.body.appendChild(a);a.click();">下载文件</button>
+</div>
+
+<div class="box">
+  <label>dialog</label>
+  <button id="confirmBtn" onclick="window.__answer = confirm('确认吗？') ? 'yes' : 'no';">弹出 confirm</button>
+  <span id="dlgOut">-</span>
+</div>
+
+<div class="box">
+  <label>contenteditable</label>
+  <div id="ed" contenteditable="true"></div>
+</div>
+
+<div class="box">
+  <label>drag &amp; drop</label>
+  <div id="src" draggable="true" style="display:inline-block;padding:6px 12px;background:#eef;border:1px solid #99c">拖我</div>
+  <div id="dst">放到这里</div>
+</div>
+
+<div class="box">
+  <label>shadow DOM</label>
+  <div id="host"></div>
+</div>
+
+<div class="box">
+  <label>iframe</label>
+  <iframe id="fr" srcdoc="<button id='inFrame' onclick='document.body.dataset.hit=\'1\';this.textContent=\'点了\' '>框内按钮</button>" style="width:240px;height:60px"></iframe>
+</div>
+
+<div class="box">
+  <label>hover target</label>
+  <button id="hoverBtn" onmouseenter="this.textContent='hovered'">hover</button>
+</div>
+
+<script>
+  const host = document.getElementById('host');
+  const sr = host.attachShadow({ mode: 'open' });
+  sr.innerHTML = '<button id="shadowBtn" style="padding:6px 10px">影子按钮</button><span id="shadowOut">-</span>';
+  sr.getElementById('shadowBtn').addEventListener('click', () => {
+    sr.getElementById('shadowOut').textContent = 'shadow-clicked';
+  });
+  document.getElementById('confirmBtn').addEventListener('click', () => {
+    setTimeout(() => { document.getElementById('dlgOut').textContent = String(window.__answer); }, 50);
+  });
+  const dst = document.getElementById('dst');
+  dst.addEventListener('dragover', (e) => e.preventDefault());
+  dst.addEventListener('drop', (e) => { e.preventDefault(); dst.textContent = 'dropped'; });
+  window.__ready = true;
+</script>
+</body>
+</html>

@@ -2,6 +2,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account_login;
+mod account_profiles;
 mod artifact_protocol;
 mod attachment_files;
 mod core_daemon;
@@ -54,6 +56,7 @@ fn main() {
         .manage(CoreDaemonClient::new())
         .manage(MenuRegistry::new())
         .manage(ProviderUpdateRegistry::new())
+        .manage(account_login::AccountLoginRegistry::new())
         .manage(WorkspaceRoots::new())
         .manage(ShellPaths {
             data_dir: data_dir.clone(),
@@ -70,6 +73,7 @@ fn main() {
             shell_commands::attachment_describe_paths,
             shell_commands::attachment_import_clipboard,
             interactions::shell_open_path,
+            interactions::shell_open_external,
             interactions::shell_show_item_in_folder,
             interactions::clipboard_write_image,
             interactions::image_save_as,
@@ -77,6 +81,12 @@ fn main() {
             interactions::file_read_text,
             interactions::file_write_text,
             interactions::file_delete,
+            account_profiles::account_login_prepare,
+            account_profiles::account_login_recoverable,
+            account_profiles::account_login_attached,
+            account_login::account_login_start,
+            account_login::account_login_status,
+            account_login::account_login_cancel,
             provider_updates::provider_update_start,
             provider_updates::provider_update_cancel,
         ])

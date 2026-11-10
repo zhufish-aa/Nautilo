@@ -113,6 +113,13 @@ pub fn parse_codex_json_event(value: &Value) -> Vec<AdapterEvent> {
             let mut events = vec![];
             if let Some(usage) = value.get("usage") {
                 events.push(AdapterEvent::Usage {
+                    usage_scope: Some("turn".to_string()),
+                    usage_key: None,
+                    input_tokens_includes_cache: Some(true),
+                    cache_creation_input_tokens: None,
+                    reported_cost: None,
+                    estimated_cost: None,
+                    currency: None,
                     input_tokens: usage.get("input_tokens").and_then(number_of),
                     cached_input_tokens: usage.get("cached_input_tokens").and_then(number_of),
                     output_tokens: usage.get("output_tokens").and_then(number_of),
@@ -157,29 +164,64 @@ fn printable(value: &Value) -> Option<String> {
     }
 }
 
+pub fn is_current_codex_turn_diff(params: &Value, thread_id: &str, turn_id: Option<&str>) -> bool {
+    !thread_id.is_empty() && turn_id.is_some_and(|id| !id.is_empty())
+        && params.get("threadId").and_then(Value::as_str) == Some(thread_id)
+        && params.get("turnId").and_then(Value::as_str) == turn_id
+}
+
 pub fn parse_codex_app_server_notification(method: &str, params: &Value) -> Vec<AdapterEvent> {
     match method {
+        "turn/diff/updated" => match (
+            params.get("diff").and_then(Value::as_str),
+            params.get("threadId").and_then(Value::as_str),
+            params.get("turnId").and_then(Value::as_str),
+        ) {
+            (Some(diff), Some(thread_id), Some(turn_id)) => vec![AdapterEvent::TurnDiff {
+                diff: diff.to_string(), thread_id: thread_id.to_string(), turn_id: turn_id.to_string(), raw: Some(params.clone()),
+            }],
+            _ => vec![],
+        },
         "item/agentMessage/delta" => vec![AdapterEvent::Message {
-            text: params.get("delta").and_then(text_of).unwrap_or_default(),
+            text: params.get("delta").and_then(Value::as_str).unwrap_or_default().to_string(),
             phase: Some("delta".to_string()),
             message_id: params.get("itemId").and_then(text_of),
             subagent_dispatch_id: None,
             raw: Some(params.clone()),
         }],
-        "item/reasoning/summaryTextDelta" => vec![AdapterEvent::Thinking {
-            text: params.get("delta").and_then(text_of).unwrap_or_default(),
+        "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => vec![AdapterEvent::Thinking {
+            text: params.get("delta").and_then(Value::as_str).unwrap_or_default().to_string(),
             phase: Some("delta".to_string()),
-            message_id: params.get("itemId").and_then(text_of),
+            message_id: params.get("itemId").and_then(text_of).map(|id| {
+                if method == "item/reasoning/textDelta" { format!("{id}:content") } else { id }
+            }),
             subagent_dispatch_id: None,
             raw: Some(params.clone()),
         }],
         "turn/started" => vec![AdapterEvent::Status { phase: "turn_started".to_string(), raw: Some(params.clone()) }],
-        "turn/completed" => vec![AdapterEvent::Status { phase: "turn_completed".to_string(), raw: Some(params.clone()) }],
+        "turn/completed" => {
+            let failed = params.pointer("/turn/status").and_then(Value::as_str) == Some("failed")
+                || params.pointer("/turn/error").is_some_and(|e|!e.is_null());
+            let mut events = vec![AdapterEvent::Status { phase: if failed { "turn_failed" } else { "turn_completed" }.to_string(), raw: Some(params.clone()) }];
+            if failed {
+                events.push(AdapterEvent::Error { message: params.pointer("/turn/error/message").and_then(text_of).unwrap_or_else(||"Codex turn failed before producing a reply".into()) });
+            }
+            events
+        },
+        "error" if params["willRetry"] == true => vec![AdapterEvent::Status { phase: "turn_started".into(), raw: Some(params.clone()) }],
+        "error" => vec![AdapterEvent::Error { message: params.pointer("/error/message").and_then(text_of).or_else(||params.get("message").and_then(text_of)).unwrap_or_else(||"Codex reported an error".into()) }],
         "thread/tokenUsage/updated" => {
             let usage = params.get("tokenUsage").or_else(|| params.get("usage")).cloned().unwrap_or(Value::Null);
             let total = usage.get("total").unwrap_or(&usage);
             let last = usage.get("last").unwrap_or(&usage);
             vec![AdapterEvent::Usage {
+                usage_scope: Some("session".to_string()),
+                usage_key: params.get("threadId").and_then(text_of),
+                input_tokens_includes_cache: Some(true),
+                cache_creation_input_tokens: None,
+                reported_cost: None,
+                estimated_cost: None,
+                currency: None,
                 input_tokens: total.get("inputTokens").and_then(number_of),
                 cached_input_tokens: total.get("cachedInputTokens").and_then(number_of),
                 output_tokens: total.get("outputTokens").and_then(number_of),
@@ -201,9 +243,9 @@ fn parse_item(method: &str, params: &Value) -> Vec<AdapterEvent> {
     let phase = if method == "item/completed" { "completed" } else { "started" };
     let id = item.get("id").and_then(text_of);
     match item.get("type").and_then(Value::as_str).unwrap_or("") {
+        "userMessage" => params["threadId"].as_str().zip(id.as_deref()).map(|(thread,id)|vec![AdapterEvent::Session{provider_session_id:thread.into(),raw:Some(json!({"providerUserMessageId":id,"nativeTurnId":params["turnId"]}))}]).unwrap_or_default(),
         "collabAgentToolCall" => {
-            // Codex multi-agent collab call; spawnAgent is Nautilo's sub-agent
-            // dispatch, correlated back by the run loop.
+            // Provider-native dispatch, distinct from Nautilo team delegation.
             let state_summary = item
                 .get("agentsStates")
                 .and_then(Value::as_object)
@@ -227,8 +269,11 @@ fn parse_item(method: &str, params: &Value) -> Vec<AdapterEvent> {
                 name: item.get("tool").and_then(text_of).unwrap_or_else(|| "spawnAgent".to_string()),
                 phase: Some(phase.to_string()),
                 input: Some(json!({
+                    "agent_type": "Codex",
                     "prompt": item.get("prompt").and_then(text_of),
-                    "model": item.get("model").and_then(text_of)
+                    "model": item.get("model").and_then(text_of),
+                    "receiverThreadIds": item.get("receiverThreadIds"),
+                    "agentsStates": item.get("agentsStates")
                 })),
                 output: if phase == "completed" && !state_summary.is_empty() { Some(Value::String(state_summary)) } else { None },
                 success: Some(item.get("status").and_then(text_of).as_deref() != Some("failed")),
@@ -258,16 +303,18 @@ fn parse_item(method: &str, params: &Value) -> Vec<AdapterEvent> {
                 .and_then(Value::as_array)
                 .map(|parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"))
                 .unwrap_or_default();
-            if summary.is_empty() {
-                return vec![];
-            }
-            vec![AdapterEvent::Thinking {
-                text: summary,
-                phase: Some("completed".to_string()),
-                message_id: id,
-                subagent_dispatch_id: None,
-                raw: Some(params.clone()),
-            }]
+            let content = item.get("content").and_then(Value::as_array)
+                .map(|parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"))
+                .unwrap_or_default();
+            [(summary, id.clone()), (content, id.map(|id| format!("{id}:content")))].into_iter()
+                .filter(|(text, _)| !text.is_empty())
+                .map(|(text, message_id)| AdapterEvent::Thinking {
+                    text,
+                    phase: Some("completed".to_string()),
+                    message_id,
+                    subagent_dispatch_id: None,
+                    raw: Some(params.clone()),
+                }).collect()
         }
         "commandExecution" => vec![AdapterEvent::Command {
             call_id: id,
@@ -293,13 +340,17 @@ fn parse_item(method: &str, params: &Value) -> Vec<AdapterEvent> {
                 name: if name.is_empty() { "tool".to_string() } else { name },
                 phase: Some(phase.to_string()),
                 input: item.get("arguments").cloned().or_else(|| item.get("input").cloned()),
-                output: item
-                    .get("result")
-                    .or_else(|| item.get("output"))
-                    .or_else(|| item.get("error"))
+                output: ["result", "output", "contentItems", "error"].into_iter()
+                    .filter_map(|key| item.get(key))
+                    .find(|value| !value.is_null())
                     .and_then(printable)
                     .map(Value::String),
-                success: Some(item.get("status").and_then(text_of).as_deref() != Some("failed") && item.get("error").is_none()),
+                success: (phase == "completed").then(|| {
+                    item.get("success").and_then(Value::as_bool) != Some(false)
+                        && item.get("status").and_then(Value::as_str) != Some("failed")
+                        && !item.get("error").is_some_and(|error| !error.is_null())
+                        && item.pointer("/result/isError").and_then(Value::as_bool) != Some(true)
+                }),
                 file_diff: None,
                 subagent_dispatch_id: None,
                 raw: Some(params.clone()),
@@ -393,7 +444,7 @@ fn parse_item(method: &str, params: &Value) -> Vec<AdapterEvent> {
 pub fn with_subagent_dispatch(events: Vec<AdapterEvent>, dispatch_id: &str) -> Vec<AdapterEvent> {
     events
         .into_iter()
-        .map(|event| match event {
+        .filter_map(|event| Some(match event {
             AdapterEvent::Message { text, phase, message_id, raw, .. } => AdapterEvent::Message {
                 text,
                 phase,
@@ -428,7 +479,106 @@ pub fn with_subagent_dispatch(events: Vec<AdapterEvent>, dispatch_id: &str) -> V
                 subagent_dispatch_id: Some(dispatch_id.to_string()),
                 raw,
             },
-            other => other,
-        })
+            // Native child lifecycle/usage/errors must not finish the parent
+            // run, replace its provider thread, or overwrite its context ring.
+            AdapterEvent::File { .. } => event,
+            _ => return None,
+        }))
         .collect()
+}
+
+pub fn update_native_child(dispatch: &mut Value, child_id: &str, status: &str, message: Option<&str>) -> Vec<AdapterEvent> {
+    if !dispatch["agentsStates"].is_object() { dispatch["agentsStates"] = json!({}); }
+    dispatch["agentsStates"][child_id] = json!({ "status": status, "message": message });
+    parse_item("item/completed", &json!({ "item": dispatch }))
+}
+
+/// A child can finish before the join response. Replay its real item snapshot
+/// so short-lived native children still have inspectable activity and results.
+pub fn native_child_history(thread: &Value, dispatch_id: &str) -> Vec<AdapterEvent> {
+    let mut events = vec![];
+    if let Some(turns) = thread["turns"].as_array() {
+        for turn in turns {
+            if let Some(items) = turn["items"].as_array() {
+                for item in items {
+                    let method = if item["status"] == "inProgress" { "item/started" } else { "item/completed" };
+                    events.extend(with_subagent_dispatch(parse_item(method, &json!({ "item": item })), dispatch_id));
+                }
+            }
+        }
+    }
+    events
+}
+
+#[cfg(test)]
+mod native_diff_tests {
+    use super::*;
+
+    #[test]
+    fn native_diff_empty_is_a_valid_replacement() {
+        let events = parse_codex_app_server_notification("turn/diff/updated", &json!({ "threadId": "t", "turnId": "u", "diff": "" }));
+        assert!(matches!(events.as_slice(), [AdapterEvent::TurnDiff { diff, .. }] if diff.is_empty()));
+        assert!(parse_codex_app_server_notification("turn/diff/updated", &json!({ "threadId": "t", "turnId": "u", "diff": null })).is_empty());
+    }
+
+    #[test]
+    fn native_diff_requires_exact_main_thread_and_current_turn() {
+        assert!(is_current_codex_turn_diff(&json!({ "threadId": "t", "turnId": "u" }), "t", Some("u")));
+        assert!(!is_current_codex_turn_diff(&json!({ "threadId": "child", "turnId": "u" }), "t", Some("u")));
+        assert!(!is_current_codex_turn_diff(&json!({ "threadId": "t", "turnId": "old" }), "t", Some("u")));
+        assert!(!is_current_codex_turn_diff(&json!({ "threadId": "t", "turnId": "u" }), "t", None));
+    }
+}
+
+#[cfg(test)]
+mod usage_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn tool_receipts_preserve_dynamic_content_and_explicit_failures() {
+        let params = json!({"item": {"id":"delegate-1", "type":"dynamicToolCall", "tool":"agenthub_delegate",
+            "status":"completed", "result":null, "contentItems":[{"type":"inputText","text":"child-session-1"}], "success":false}});
+        let events = parse_codex_app_server_notification("item/completed", &params);
+        assert!(matches!(events.as_slice(), [AdapterEvent::Tool {output:Some(Value::String(output)), success:Some(false), ..}]
+            if output.contains("child-session-1")));
+        let started = parse_codex_app_server_notification("item/started", &params);
+        assert!(matches!(started.as_slice(), [AdapterEvent::Tool {success:None, ..}]));
+        let mut params = json!({"item":{"type":"mcpToolCall", "status":"completed", "error":null, "result":{"content":[]}}});
+        assert!(matches!(parse_codex_app_server_notification("item/completed", &params).as_slice(), [AdapterEvent::Tool {success:Some(true), ..}]));
+        params["item"]["result"]["isError"] = json!(true);
+        assert!(matches!(parse_codex_app_server_notification("item/completed", &params).as_slice(), [AdapterEvent::Tool {success:Some(false), ..}]));
+    }
+
+    #[test]
+    fn summary_and_raw_reasoning_keep_whitespace_and_independent_streams() {
+        for (method, id) in [("item/reasoning/summaryTextDelta", "thought"), ("item/reasoning/textDelta", "thought:content")] {
+            let events = parse_codex_app_server_notification(method, &json!({"itemId":"thought","delta":" \n"}));
+            assert!(matches!(events.as_slice(), [AdapterEvent::Thinking {text, phase:Some(phase), message_id:Some(message_id), ..}]
+                if text == " \n" && phase == "delta" && message_id == id));
+        }
+        let events = parse_codex_app_server_notification("item/completed", &json!({"item":{"id":"thought","type":"reasoning","summary":["Summary"],"content":["Raw content"]}}));
+        assert!(matches!(events.as_slice(), [
+            AdapterEvent::Thinking {text:summary, message_id:Some(summary_id), ..},
+            AdapterEvent::Thinking {text:content, message_id:Some(content_id), ..}
+        ] if summary == "Summary" && summary_id == "thought" && content == "Raw content" && content_id == "thought:content"));
+    }
+
+    #[test]
+    fn app_server_snapshot_is_session_scoped_and_exec_is_turn_scoped() {
+        let events = parse_codex_app_server_notification("thread/tokenUsage/updated", &json!({
+            "threadId": "thread-1", "tokenUsage": {
+                "total": { "inputTokens": 20, "cachedInputTokens": 0, "outputTokens": 4 },
+                "last": { "totalTokens": 10 }
+            }
+        }));
+        assert!(matches!(events.as_slice(), [AdapterEvent::Usage {
+            usage_scope: Some(scope), usage_key: Some(key), input_tokens: Some(20),
+            cached_input_tokens: Some(0), input_tokens_includes_cache: Some(true),
+            context_used: Some(10), reported_cost: None, ..
+        }] if scope == "session" && key == "thread-1"));
+        let events = parse_codex_json_event(&json!({"type": "turn.completed", "usage": {"input_tokens": 0}}));
+        assert!(matches!(&events[0], AdapterEvent::Usage {
+            usage_scope: Some(scope), input_tokens: Some(0), cached_input_tokens: None, ..
+        } if scope == "turn"));
+    }
 }

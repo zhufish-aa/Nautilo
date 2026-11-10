@@ -1,0 +1,43 @@
+{
+  "id": "commandcode",
+  "apiVersion": 1,
+  "main": "agenthub-plugin-commandcode",
+  "version": "0.2.15",
+  "descriptor": {
+    "providerId": "commandcode",
+    "name": "Command Code",
+    "vendor": "Command Code",
+    "capabilities": ["headless_structured", "tool_streaming"],
+    "defaultExecutable": "command-code",
+    "credentialEnv": [],
+    "envPassthrough": [],
+    "permissionModes": [
+      {
+        "value": "standard",
+        "name": { "zh-CN": "标准", "en-US": "Standard" },
+        "description": { "zh-CN": "Command Code 无头默认权限：允许读取和搜索，写入与命令会被拒绝", "en-US": "Command Code headless default: reads and searches allowed, edits and shell commands are blocked" }
+      },
+      {
+        "value": "auto-accept",
+        "name": { "zh-CN": "自动接受", "en-US": "Auto-accept" },
+        "description": { "zh-CN": "自动接受文件编辑（--auto-accept）", "en-US": "Auto-accept file edits (--auto-accept)" }
+      },
+      {
+        "value": "dont-ask",
+        "name": { "zh-CN": "不询问", "en-US": "Don't ask" },
+        "description": { "zh-CN": "fail-closed 白名单模式，适合 CI 场景（--permission-mode dont-ask）", "en-US": "Fail-closed allowlist mode for CI (--permission-mode dont-ask)" }
+      },
+      {
+        "value": "plan",
+        "name": { "zh-CN": "计划模式", "en-US": "Plan mode" },
+        "description": { "zh-CN": "只读分析，不执行修改（--plan）", "en-US": "Read-only analysis, no modifications (--plan)" }
+      },
+      {
+        "value": "yolo",
+        "name": { "zh-CN": "完全放行", "en-US": "Full autonomy" },
+        "description": { "zh-CN": "所有工具调用自动放行，不再请求确认（--yolo）", "en-US": "Every tool call runs without prompting (--yolo)" }
+      }
+    ],
+    "contextWindowDiscovery": false
+  }
+}

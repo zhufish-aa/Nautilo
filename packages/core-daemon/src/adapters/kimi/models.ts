@@ -12,6 +12,10 @@ export async function discoverKimiModels(owner: KimiModelDiscoveryRuntime, insta
   const jsonResult = await owner.capture(jsonInvocation.command, jsonInvocation.args, env);
   if (jsonResult.exitCode !== 0) throw new Error(jsonResult.text.trim() || `kimi provider list --json exited with ${jsonResult.exitCode ?? "unknown"}`);
 
+  // Modern CLI JSON already supplies the selected alias; do not spawn a
+  // second CLI just to rediscover the same value from human-readable output.
+  const configured = parseKimiModelList(jsonResult.text);
+  if (configured.defaultModel) return configured;
   let defaultModel: string | undefined;
   try {
     const textInvocation = owner.invocation(instance, ["provider", "list"]);

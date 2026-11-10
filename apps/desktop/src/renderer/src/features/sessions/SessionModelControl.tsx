@@ -1,550 +1,195 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Zap } from "lucide-react";
-import type { ProviderModel } from "@agenthub/domain";
-import { useI18n, type MessageKey } from "../../lib/i18n";
-import { configureWorkbenchSession, switchWorkbenchSessionInstance } from "../../lib/orchestration-runtime";
-import { permissionModesFor } from "../../lib/provider-catalog";
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import type { RuntimeConnection } from "@agenthub/domain";
+import { Dialog } from "../../components/ui/Dialog";
+import { SelectField } from "../../components/ui/Select";
+import { Button } from "../../components/ui/Button";
+import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
+import { useTeamsStore } from "../../stores/teams";
+import { connectionModelKey, useConnectionsStore } from "../../stores/connections";
+import { connectionSupportsAgent } from "../../lib/session-connections";
+import { connectionModelCatalog, type ConnectionModelSelection } from "../../lib/connection-models";
+import { ArrowUpRight, Box, Check, ChevronDown, Search, Server, SlidersHorizontal } from "lucide-react";
+import { useI18n } from "../../lib/i18n";
+import { configureWorkbenchSession } from "../../lib/orchestration-runtime";
 import { useAgentsStore } from "../../stores/agents";
 import { useSessionsStore } from "../../stores/sessions";
-import { Input } from "../../components/ui/Input";
+import { toast } from "../../stores/toast";
+import "./model-picker.css";
 
-type MenuView = "summary" | "models" | "efforts" | "speeds" | "modes" | "sources";
-
-function effortLabel(value: string): string {
-  const labels: Record<string, string> = {
-    low: "Low",
-    medium: "Medium",
-    high: "High",
-    xhigh: "Extra High",
-    max: "Max",
-    ultra: "Ultra"
-  };
-  return labels[value.toLowerCase()] ?? `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+export type ComposerConfiguration = ConnectionModelSelection;
+type Draft = { instanceId: string; configuration: ComposerConfiguration; onChange: (patch: ComposerConfiguration) => void; onInstanceChange?: (id: string) => void };
+const effortLabel = (value: string) => ({ low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max", ultra: "Ultra" }[value] ?? value);
+function ModelMark({ name }: { name: string }): JSX.Element {
+  const provider = /deepseek/i.test(name) ? "deepseek" : /claude/i.test(name) ? "claude-code" : /(?:^|[/\s-])(?:gpt|o[134])(?:[/\s.-]|$)/i.test(name) ? "codex" : /kimi|moonshot/i.test(name) ? "kimi-code" : undefined;
+  return provider ? <ProviderAvatar providerId={provider} size="sm"/> : <Box size={17} aria-hidden/>;
 }
 
-/** Groups catalog models by the source prefix of `source/model` ids (opencode-style); flat ids land in one unnamed group. */
-function groupModelsBySource(catalogModels: ProviderModel[]): { source: string; models: ProviderModel[] }[] {
-  const groups = new Map<string, ProviderModel[]>();
-  for (const item of catalogModels) {
-    const slash = item.id.indexOf("/");
-    const source = slash > 0 ? item.id.slice(0, slash) : "";
-    const list = groups.get(source) ?? [];
-    list.push(item);
-    groups.set(source, list);
-  }
-  return [...groups.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([source, groupModels]) => ({ source, models: groupModels }));
-}
-
-/** A Codex-style, per-session model and reasoning control. */
-export function SessionModelControl({ sessionId, disabled }: { sessionId?: string; disabled?: boolean }): JSX.Element | null {
-  const { t, locale } = useI18n();
-  const [open, setOpen] = useState(false);
-  const [view, setView] = useState<MenuView>("summary");
-  const [advancedDetails, setAdvancedDetails] = useState(false);
-  const [previousStandardModelId, setPreviousStandardModelId] = useState<string>();
-  const [customModelId, setCustomModelId] = useState("");
-  const [customEffort, setCustomEffort] = useState("");
-  const rootRef = useRef<HTMLDivElement>(null);
-  const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
-  const instances = useAgentsStore((state) => state.instances);
-  const catalogs = useAgentsStore((state) => state.modelCatalogs);
-  const loadModels = useAgentsStore((state) => state.loadModels);
-  const instanceId = session?.target.type === "agent" ? session.target.instanceId : undefined;
-  const instance = instances.find((item) => item.id === instanceId);
+/** Conversation identity is fixed. Only supported model/effort choices belong here. */
+export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?: string; disabled?: boolean; draft?: Draft }): JSX.Element | null {
+  const { locale } = useI18n();
+  const zh = locale === "zh-CN";
+  const [menu, setMenu] = useState(false);
+  const [query, setQuery] = useState("");
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [boundConnection, setBoundConnection] = useState<RuntimeConnection>();
+  const [connectionError, setConnectionError] = useState(false);
+  const [pendingConnection, setPendingConnection] = useState<{ id?: string; revision?: number; name: string; destination?: string; sourceSessionId: string; sourceConnectionId?: string; sourceRevision?: number }>();
+  const connectionCatalogs = useConnectionsStore((state) => state.modelCatalogs);
+  const connectionModelsLoading = useConnectionsStore((state) => state.loadingModels);
+  const loadConnectionModels = useConnectionsStore((state) => state.loadModels);
+  const connections = useConnectionsStore(state => state.connections);
+  const hydrateConnections = useConnectionsStore(state => state.hydrate);
+  const getConnection = useConnectionsStore(state => state.get);
+  const teams = useTeamsStore(state => state.teams);
+  const root = useRef<HTMLDivElement>(null);
+  const session = useSessionsStore(state => state.sessions.find(item => item.id === sessionId));
+  const instances = useAgentsStore(state => state.instances);
+  const catalogs = useAgentsStore(state => state.modelCatalogs);
+  const loading = useAgentsStore(state => state.loadingModels);
+  const loadModels = useAgentsStore(state => state.loadModels);
+  const target = session?.target;
+  const member = target?.type === "member" ? teams.find(team => team.id === target.teamId)?.members.find(member => member.id === target.memberId) : undefined;
+  const instanceId = target?.type === "agent" ? target.instanceId : member?.agentInstanceId ?? draft?.instanceId;
+  const instance = instances.find(item => item.id === instanceId);
   const catalog = instance ? catalogs[instance.id] : undefined;
-  const models = useMemo(() => catalog?.models ?? [], [catalog]);
-  const modelId = session?.model || catalog?.defaultModel || "";
-  const model = catalog?.models.find((item) => item.id === modelId);
-  const effort = session?.reasoningEffort
-    || model?.defaultReasoningEffort
-    || model?.reasoningEfforts[0]
-    || "";
-  const effortIndex = Math.max(0, model?.reasoningEfforts.indexOf(effort) ?? 0);
-  const progress = model && model.reasoningEfforts.length > 1
-    ? (effortIndex / (model.reasoningEfforts.length - 1)) * 100
-    : 0;
-  const highspeedModel = models.find((item) => /high[-_ ]?speed/i.test(`${item.id} ${item.displayName}`));
-  const serviceTiers = model?.serviceTiers ?? [];
-  const speedTiers = useMemo(() => [
-    { id: "standard", name: t("sessions.composer.standard"), description: undefined as string | undefined },
-    ...(serviceTiers.length > 0
-      ? serviceTiers
-      : highspeedModel
-        ? [{ id: `model:${highspeedModel.id}`, name: t("sessions.composer.fast"), description: highspeedModel.description }]
-        : [])
-  ], [highspeedModel, serviceTiers, t]);
-  const speedTierId = serviceTiers.length > 0
-    ? session?.serviceTier || model?.defaultServiceTier || "standard"
-    : highspeedModel?.id === modelId ? `model:${highspeedModel.id}` : "standard";
-  const speedTier = speedTiers.find((item) => item.id === speedTierId) ?? speedTiers[0]!;
-  const fastTier = speedTiers.find((item) => item.id !== "standard");
-  const fastActive = !!fastTier && speedTier.id === fastTier.id;
-
-  const permissionModes = useMemo(() => (instance ? permissionModesFor(instance.providerId) : []), [instance]);
-  // Same-provider enabled instances are the switchable API sources for this session.
-  const sourceInstances = useMemo(
-    () => (instance ? instances.filter((item) => item.providerId === instance.providerId && item.enabled) : []),
-    [instance, instances]
-  );
-  const modelGroups = useMemo(() => groupModelsBySource(models), [models]);
-  const sessionPermissionMode = session?.permissionMode?.trim();
-  const instancePermissionMode = instance?.permissionMode?.trim();
-  const effectivePermissionMode = sessionPermissionMode || instancePermissionMode || "";
-  const permissionModeOption = permissionModes.find((mode) => mode.value === effectivePermissionMode);
-  const displayPermissionMode = permissionModeOption
-    ? permissionModeOption.name[locale]
-    : t("sessions.composer.permissionModeDefault");
-
+  const configuration = session ?? draft?.configuration;
+  const connectionId = configuration?.connectionId;
+  const currentHead = connections.find(item => item.id === connectionId);
+  const connectionRevision = sessionId ? configuration?.connectionRevision : currentHead?.revision ?? configuration?.connectionRevision;
+  const activeApprovalContext = useRef({ sessionId, instanceId, connectionId, connectionRevision });
+  activeApprovalContext.current = { sessionId, instanceId, connectionId, connectionRevision };
+  const selectedConnection = sessionId ? (boundConnection && boundConnection.id === connectionId && (connectionRevision === undefined || boundConnection.revision === connectionRevision) ? boundConnection : undefined) : connections.find(item => item.id === connectionId);
+  const connectionKey = connectionId && (connectionRevision ?? selectedConnection?.revision) ? connectionModelKey(connectionId, (connectionRevision ?? selectedConnection?.revision)!) : undefined;
+  const connectionCatalog = selectedConnection ? connectionModelCatalog(selectedConnection, connectionKey ? connectionCatalogs[connectionKey] : undefined) : undefined;
+  const compatible = !!selectedConnection && !!instance && connectionSupportsAgent(selectedConnection, instance);
+  const models = connectionId ? compatible ? connectionCatalog?.models ?? [] : [] : instance?.configurationKind === "harness" ? [] : catalog?.models ?? [];
+  const modelId = configuration?.model || (!connectionId ? member?.model : undefined) || (connectionId ? connectionCatalog?.defaultModel ?? models[0]?.id : catalog?.defaultModel);
+  const model = models.find(item => item.id === modelId);
+  const effort = configuration?.reasoningEffort || (!connectionId ? member?.reasoningEffort : undefined) || model?.defaultReasoningEffort || model?.reasoningEfforts[0];
+  const locked = disabled || saving;
+  useEffect(() => { void hydrateConnections(); }, [hydrateConnections]);
   useEffect(() => {
-    if (!instance?.id) return;
-    void loadModels(instance.id);
-  }, [instance?.id, loadModels]);
-
+    let current = true;
+    setBoundConnection(undefined); setConnectionError(false);
+    if (sessionId && connectionId) void getConnection(connectionId, connectionRevision).then(value => { if (current) setBoundConnection(value); }).catch(() => { if (current) setConnectionError(true); });
+    return () => { current = false; };
+  }, [sessionId, connectionId, connectionRevision, getConnection]);
   useEffect(() => {
-    if (!open) return;
-    const closeOnOutsideClick = (event: MouseEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutsideClick);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [open]);
-
-  if (!sessionId || !instance) return null;
-
-  const selectModel = (nextModelId: string): void => {
-    const next = models.find((item) => item.id === nextModelId);
-    if (next && !/high[-_ ]?speed/i.test(`${next.id} ${next.displayName}`)) setPreviousStandardModelId(next.id);
-    void configureWorkbenchSession(sessionId, {
-      model: nextModelId,
-      reasoningEffort: next?.defaultReasoningEffort ?? next?.reasoningEfforts[0] ?? "",
-      serviceTier: next?.defaultServiceTier ?? ""
-    });
-    setView("summary");
-  };
-  const selectCustomModel = (): void => {
-    const nextModelId = customModelId.trim();
-    if (!nextModelId) return;
-    selectModel(nextModelId);
-  };
-  const selectEffort = (nextEffort: string): void => {
-    void configureWorkbenchSession(sessionId, { reasoningEffort: nextEffort });
-    setView("summary");
-  };
-  const selectCustomEffort = (): void => {
-    const nextEffort = customEffort.trim();
-    if (!nextEffort) return;
-    selectEffort(nextEffort);
-  };
-  const selectPermission = (nextMode: string): void => {
-    // Empty selection clears the session override so the instance setting applies.
-    void configureWorkbenchSession(sessionId, { permissionMode: nextMode.trim() || undefined });
-    setView("summary");
-  };
-  const selectSpeed = (nextTierId: string): void => {
-    if (nextTierId.startsWith("model:")) {
-      const nextModelId = nextTierId.slice("model:".length);
-      const nextModel = models.find((item) => item.id === nextModelId);
-      if (!nextModel) return;
-      if (modelId !== nextModelId) setPreviousStandardModelId(modelId);
-      void configureWorkbenchSession(sessionId, {
-        model: nextModel.id,
-        reasoningEffort: nextModel.defaultReasoningEffort ?? nextModel.reasoningEfforts[0] ?? "",
-        serviceTier: ""
-      });
-      setView("summary");
-      return;
-    }
-    if (nextTierId === "standard" && highspeedModel?.id === modelId) {
-      const fallback = models.find((item) => item.id === previousStandardModelId)
-        ?? models.find((item) => item.isDefault && item.id !== highspeedModel.id)
-        ?? models.find((item) => item.id !== highspeedModel.id);
-      if (fallback) {
-        void configureWorkbenchSession(sessionId, {
-          model: fallback.id,
-          reasoningEffort: fallback.defaultReasoningEffort ?? fallback.reasoningEfforts[0] ?? "",
-          serviceTier: ""
+    let current = true;
+    setLoadError(false);
+    if (instanceId && !connectionId && instance?.configurationKind !== "harness") void loadModels(instanceId).catch(() => { if (current) setLoadError(true); });
+    return () => { current = false; };
+  }, [instanceId, connectionId, instance?.configurationKind, loadModels]);
+  useEffect(() => {
+    let current = true;
+    if (connectionId && compatible && selectedConnection) void loadConnectionModels(connectionId, connectionRevision ?? selectedConnection.revision)
+      .catch(() => { if (current) setLoadError(true); });
+    return () => { current = false; };
+  }, [connectionId, connectionRevision, selectedConnection?.revision, compatible, loadConnectionModels]);
+  useEffect(() => { setMenu(false); }, [sessionId, instanceId, disabled]);
+  useEffect(() => { setPendingConnection(undefined); }, [sessionId, instanceId, connectionId, connectionRevision]);
+  useEffect(() => {
+    if (!menu) return;
+    const frame = requestAnimationFrame(() => searchRef.current?.focus());
+    const outside = (event: MouseEvent) => { if (!root.current?.contains(event.target as Node) && !(event.target as Element).closest?.("[data-radix-popper-content-wrapper]")) setMenu(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && !event.defaultPrevented) { setMenu(false); triggerRef.current?.focus(); } };
+    document.addEventListener("mousedown", outside); document.addEventListener("keydown", escape);
+    return () => { cancelAnimationFrame(frame); document.removeEventListener("mousedown", outside); document.removeEventListener("keydown", escape); };
+  }, [menu]);
+  if (!configuration || !instance) return null;
+  const configure = async (patch: Omit<ComposerConfiguration, "connectionId"> & { connectionId?: string | null; confirmConnectionChange?: boolean }) => {
+    if (locked) return false;
+    setSaving(true);
+    try {
+      if (sessionId) await configureWorkbenchSession(sessionId, patch);
+      else {
+        const { confirmConnectionChange: _confirmed, connectionId: nextConnectionId, ...next } = patch;
+        // Model/effort edits are partial updates. An omitted connection ID
+        // preserves the binding; only an explicit null clears it.
+        draft?.onChange({
+          ...next,
+          ...("connectionId" in patch ? { connectionId: nextConnectionId ?? undefined } : {}),
         });
       }
-      setView("summary");
+      setMenu(false);
+      return true;
+    }
+    catch (error) { toast.error(error instanceof Error ? error.message : String(error)); return false; }
+    finally { setSaving(false); }
+  };
+  const unavailable = !connectionId && instance.configurationKind === "harness"
+    ? (zh ? "请先选择供应商或账号" : "Choose a provider or account first")
+    : selectedConnection && !compatible
+      ? (zh ? "当前连接与 Harness 不兼容" : "This connection is incompatible with the harness")
+      : (zh ? "请在供应商设置中启用模型" : "Enable a model in provider settings");
+  const efforts = model?.reasoningEfforts ?? [];
+  const label = model?.displayName || modelId || (loading[instance.id] ? (zh ? "读取模型…" : "Loading models…") : unavailable);
+  const modelDescription = effort ? label + " · " + effortLabel(effort) : label;
+  const hint = disabled ? (zh ? "运行中不可更改" : "Cannot change during a run") : (zh ? "下一次发送时生效" : "Applies to the next message");
+  const changeConnection = (candidate: { id?: string; revision?: number; name: string; destination?: string }) => {
+    if (locked || (candidate.id === connectionId && candidate.revision === connectionRevision)) return;
+    if (sessionId) { setMenu(false); setPendingConnection({ ...candidate, sourceSessionId: sessionId, sourceConnectionId: connectionId, sourceRevision: connectionRevision }); }
+    else void configure({ connectionId: candidate.id ?? null, connectionRevision: candidate.revision, model: "", reasoningEffort: "", serviceTier: "" });
+  };
+  const confirmConnection = () => {
+    const approved = pendingConnection;
+    const current = useSessionsStore.getState().sessions.find(item => item.id === approved?.sourceSessionId);
+    if (!approved || approved.sourceSessionId !== activeApprovalContext.current.sessionId || instanceId !== activeApprovalContext.current.instanceId || !current || current.connectionId !== approved.sourceConnectionId || current.connectionRevision !== approved.sourceRevision) {
+      setPendingConnection(undefined);
       return;
     }
-    void configureWorkbenchSession(sessionId, { serviceTier: nextTierId === "standard" ? "" : nextTierId });
-    setView("summary");
+    void configure({ connectionId: approved.id ?? null, connectionRevision: approved.revision, confirmConnectionChange: true, model: "", reasoningEffort: "", serviceTier: "" }).then(success => { if (success) setPendingConnection(undefined); });
   };
-  const toggleFast = (): void => {
-    if (!fastTier) return;
-    selectSpeed(fastActive ? "standard" : fastTier.id);
-  };
-  const toggle = (): void => {
-    setOpen((current) => {
-      if (!current) setAdvancedDetails(false);
-      return !current;
+  const visibleModels = models.filter((item) => `${item.displayName} ${item.id}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const connectionOptions = [
+    ...(instance.configurationKind === "harness" ? [] : [{ value: "__instance", label: zh ? "旧会话原有连接" : "Legacy connection" }]),
+    ...connections.filter((item) => connectionSupportsAgent(item, instance)).map((item) => ({ value: item.id, label: item.name }))
+  ];
+  if (connectionId && !connectionOptions.some((item) => item.value === connectionId)) {
+    connectionOptions.push({ value: connectionId, label: selectedConnection?.name ?? connectionId });
+  }
+  const chooseConnection = (id: string): void => {
+    const item = connections.find((connection) => connection.id === id);
+    changeConnection(item ? {
+      id: item.id, revision: item.revision, name: item.name,
+      destination: item.kind === "api" ? item.baseUrl : `${item.harness} · ${zh ? "所选登录账号" : "Selected login account"}`
+    } : {
+      name: zh ? "Agent 原有配置" : "Existing agent configuration",
+      destination: instance.baseUrl || `${instance.providerId} · ${zh ? "接收地址由本机 CLI 配置决定，Nautilo 未验证" : "Destination comes from local CLI configuration and is not verified by Nautilo"}`
     });
-    setView("summary");
   };
-
-  const displayModel = model?.displayName ?? (modelId || t("agents.editor.basic.model"));
-  const displayEffort = effort ? effortLabel(effort) : t("agents.editor.basic.reasoningDefault");
-  const panelKey = view === "summary" ? (advancedDetails ? "advanced" : "quick") : view;
-  const panelWidth = view === "models" ? 320 : view !== "summary" ? 288 : advancedDetails ? 264 : 224;
-
-  return (
-    <div ref={rootRef} className="relative ml-auto shrink-0">
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            initial={{ opacity: 0, y: 8, scale: 0.97, width: panelWidth }}
-            animate={{ opacity: 1, y: 0, scale: 1, width: panelWidth }}
-            exit={{ opacity: 0, y: 6, scale: 0.98 }}
-            transition={{ type: "spring", stiffness: 430, damping: 41, mass: 0.7 }}
-            className="absolute right-0 bottom-full z-40 mb-2 overflow-hidden rounded-2xl border border-line/80 bg-card p-1.5 shadow-pop"
-          >
-            {/* Keep initial (no initial={false}): the inner view switch
-                (summary ⇄ models ⇄ details) must mount at opacity 0 and then
-                animate in, not flash the new view fully visible first. */}
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={panelKey}
-                layout="size"
-                initial={{ opacity: 0, x: view === "summary" ? 0 : 18 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: view === "summary" ? 0 : -14 }}
-                transition={{ opacity: { duration: 0.15 }, x: { type: "spring", stiffness: 460, damping: 43 }, layout: { type: "spring", stiffness: 360, damping: 38 } }}
-              >
-                {view === "summary" && !advancedDetails && (
-                <>
-                  <div className="flex h-10 w-full items-center rounded-xl px-1.5 text-ink-3 transition-colors hover:bg-card-hover hover:text-ink">
-                    <button
-                      type="button"
-                      onClick={() => setAdvancedDetails(true)}
-                      className="flex h-9 flex-1 items-center rounded-lg px-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-                      aria-expanded={false}
-                    >
-                      <span>{t("sessions.composer.advanced")}</span>
-                      <ChevronRight className="ml-1 h-4 w-4" aria-hidden />
-                    </button>
-                    <motion.button
-                      type="button"
-                      whileTap={fastTier ? { scale: 0.82 } : undefined}
-                      onClick={toggleFast}
-                      disabled={!fastTier}
-                      aria-label={t("sessions.composer.fast")}
-                      aria-pressed={fastActive}
-                      title={fastTier?.description ?? t("sessions.composer.fastUnavailable")}
-                      className={`grid h-7 w-7 place-items-center rounded-lg outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/60 ${fastActive ? "bg-info/10 text-info" : fastTier ? "text-ink-3 hover:bg-card hover:text-ink" : "cursor-not-allowed text-ink-3/35"}`}
-                    >
-                      <Zap className="h-4 w-4" aria-hidden />
-                    </motion.button>
-                  </div>
-                  {model && model.reasoningEfforts.length > 0 && (
-                    <div className="px-2.5 pt-0.5 pb-3">
-                      <div className="relative flex h-8 items-center">
-                        <div className="session-effort-track pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 overflow-hidden">
-                          <motion.div
-                            className={`session-effort-fill ${fastActive ? "is-fast" : ""}`}
-                            animate={{ width: `${progress}%` }}
-                            transition={{ type: "spring", stiffness: 420, damping: 41 }}
-                          >
-                            <span className="session-speed-particles" aria-hidden />
-                          </motion.div>
-                        </div>
-                        <input
-                          className="session-effort-range relative z-30 w-full"
-                          type="range"
-                          min={0}
-                          max={Math.max(0, model.reasoningEfforts.length - 1)}
-                          step={1}
-                          value={effortIndex}
-                          onChange={(event) => selectEffort(model.reasoningEfforts[Number(event.target.value)] ?? effort)}
-                          aria-label={t("agents.editor.basic.reasoning")}
-                          style={{ "--effort-progress": `${progress}%` } as CSSProperties}
-                        />
-                        <div className="pointer-events-none absolute inset-x-3 z-20 flex items-center justify-between">
-                          {model.reasoningEfforts.map((item, index) => (
-                            <span
-                              key={item}
-                              className={`h-1 w-1 rounded-full ${index <= effortIndex ? "bg-white/60" : "bg-ink-3/35"}`}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </>
-                )}
-
-                {view === "summary" && advancedDetails && (
-                <>
-                  <SettingRow
-                    label={t("sessions.composer.apiSource")}
-                    value={instance.displayName}
-                    disabled={sourceInstances.length <= 1}
-                    onClick={() => setView("sources")}
-                  />
-                  <SettingRow
-                    label={t("agents.editor.basic.model")}
-                    value={displayModel}
-                    onClick={() => {
-                      setCustomModelId(modelId === "default" ? "" : modelId);
-                      setView("models");
-                    }}
-                  />
-                  <SettingRow
-                    label={t("agents.editor.basic.reasoning")}
-                    value={displayEffort}
-                    disabled={!model?.reasoningEfforts.length}
-                    onClick={() => setView("efforts")}
-                  />
-                  <SettingRow
-                    label={t("sessions.composer.speed")}
-                    value={speedTier.name}
-                    disabled={speedTiers.length <= 1}
-                    onClick={() => setView("speeds")}
-                  />
-                  {permissionModes.length > 0 && (
-                    <SettingRow
-                      label={t("agents.editor.basic.permissionMode")}
-                      value={displayPermissionMode}
-                      onClick={() => setView("modes")}
-                    />
-                  )}
-                  <div className="mt-1 border-t border-line pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setAdvancedDetails(false)}
-                      className="flex h-9 w-full items-center gap-1 rounded-xl px-3 text-sm text-ink-3 outline-none transition-colors hover:bg-card-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/60"
-                      aria-expanded
-                    >
-                      <span>{t("sessions.composer.advanced")}</span>
-                      <ChevronDown className="h-4 w-4 rotate-180" aria-hidden />
-                    </button>
-                  </div>
-                </>
-                )}
-
-                {view === "models" && (
-                  <SelectionList title={t("agents.editor.basic.model")} onBack={() => setView("summary")}>
-                    <form
-                      className="border-b border-line px-2 py-2"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        selectCustomModel();
-                      }}
-                    >
-                      <div className="flex gap-2">
-                        <Input
-                          value={customModelId}
-                          onChange={(event) => setCustomModelId(event.target.value)}
-                          placeholder={t("agents.editor.basic.modelCustomPlaceholder")}
-                          aria-label={t("agents.editor.basic.modelCustomPlaceholder")}
-                          autoComplete="off"
-                          spellCheck={false}
-                          className="h-9 min-w-0 flex-1 font-mono text-xs"
-                        />
-                        <button
-                          type="submit"
-                          disabled={!customModelId.trim()}
-                          className="shrink-0 rounded-lg bg-accent px-3 text-xs font-medium text-white outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          {t("common.confirm")}
-                        </button>
-                      </div>
-                      <p className="mt-1.5 px-0.5 text-[11px] leading-4 text-ink-3">
-                        {t("agents.editor.basic.modelCustom")}
-                      </p>
-                    </form>
-                    {modelGroups.map((group) => (
-                      <div key={group.source || "default"}>
-                        {modelGroups.length > 1 && (
-                          <p className="px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-ink-3/70">{group.source}</p>
-                        )}
-                        {group.models.map((item) => (
-                          <SelectionItem
-                            key={item.id}
-                            label={item.displayName}
-                            description={item.description}
-                            selected={item.id === modelId}
-                            onClick={() => selectModel(item.id)}
-                          />
-                        ))}
-                      </div>
-                    ))}
-                  </SelectionList>
-                )}
-
-                {view === "efforts" && (
-                  <SelectionList title={t("agents.editor.basic.reasoning")} onBack={() => setView("summary")}>
-                    <form
-                      className="border-b border-line px-2 py-2"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        selectCustomEffort();
-                      }}
-                    >
-                      <div className="flex gap-2">
-                        <Input
-                          value={customEffort}
-                          onChange={(event) => setCustomEffort(event.target.value)}
-                          placeholder={t("agents.editor.basic.reasoningCustomPlaceholder")}
-                          aria-label={t("agents.editor.basic.reasoningCustomPlaceholder")}
-                          autoComplete="off"
-                          spellCheck={false}
-                          className="h-9 min-w-0 flex-1 font-mono text-xs"
-                        />
-                        <button
-                          type="submit"
-                          disabled={!customEffort.trim()}
-                          className="shrink-0 rounded-lg bg-accent px-3 text-xs font-medium text-white outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          {t("common.confirm")}
-                        </button>
-                      </div>
-                      <p className="mt-1.5 px-0.5 text-[11px] leading-4 text-ink-3">
-                        {t("agents.editor.basic.reasoningCustom")}
-                      </p>
-                    </form>
-                    {effort && !model?.reasoningEfforts.includes(effort) && (
-                      <SelectionItem
-                        label={effortLabel(effort)}
-                        description={t("agents.editor.basic.reasoningCustomCurrent")}
-                        selected
-                        onClick={() => selectEffort(effort)}
-                      />
-                    )}
-                    {(model?.reasoningEfforts ?? []).map((item) => (
-                      <SelectionItem
-                        key={item}
-                        label={effortLabel(item)}
-                        selected={item === effort}
-                        onClick={() => selectEffort(item)}
-                      />
-                    ))}
-                  </SelectionList>
-                )}
-
-                {view === "speeds" && (
-                  <SelectionList title={t("sessions.composer.speed")} onBack={() => setView("summary")}>
-                    {speedTiers.map((item) => (
-                      <SelectionItem
-                        key={item.id}
-                        label={item.name}
-                        description={item.description}
-                        selected={item.id === speedTier.id}
-                        onClick={() => selectSpeed(item.id)}
-                      />
-                    ))}
-                  </SelectionList>
-                )}
-
-                {view === "modes" && (
-                  <SelectionList title={t("agents.editor.basic.permissionMode")} onBack={() => setView("summary")}>
-                    <SelectionItem
-                      label={t("sessions.composer.permissionModeDefault")}
-                      selected={!sessionPermissionMode}
-                      onClick={() => selectPermission("")}
-                    />
-                    {permissionModes.map((mode) => (
-                      <SelectionItem
-                        key={mode.value}
-                        label={mode.name[locale]}
-                        description={mode.description[locale]}
-                        selected={sessionPermissionMode === mode.value}
-                        onClick={() => selectPermission(mode.value)}
-                      />
-                    ))}
-                  </SelectionList>
-                )}
-
-                {view === "sources" && (
-                  <SelectionList title={t("sessions.composer.apiSource")} onBack={() => setView("summary")}>
-                    {sourceInstances.map((item) => (
-                      <SelectionItem
-                        key={item.id}
-                        label={item.displayName}
-                        description={item.baseUrl ?? item.executable}
-                        selected={item.id === instanceId}
-                        onClick={() => {
-                          if (sessionId && item.id !== instanceId) void switchWorkbenchSessionInstance(sessionId, item.id);
-                          setView("summary");
-                        }}
-                      />
-                    ))}
-                  </SelectionList>
-                )}
-              </motion.div>
-            </AnimatePresence>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <motion.button
-        animate={{ width: open ? panelWidth : 224 }}
-        transition={{ type: "spring", stiffness: 420, damping: 41, mass: 0.65 }}
-        type="button"
-        onClick={toggle}
-        disabled={disabled}
-        aria-label={`${t("agents.editor.basic.model")}: ${displayModel}; ${t("agents.editor.basic.reasoning")}: ${displayEffort}`}
-        aria-expanded={open}
-        className={`grid h-8 grid-cols-[1fr_auto_1fr] items-center rounded-full border-0 px-3 text-xs text-ink-2 outline-none transition-colors hover:bg-card-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-45 ${open ? "bg-card-hover" : "bg-transparent"}`}
-      >
-        <span aria-hidden />
-        <span className="flex min-w-0 items-center justify-center gap-1.5">
-          <span className="truncate font-medium text-ink">{displayModel}</span>
-          <span className="truncate text-ink-3">{displayEffort}</span>
-        </span>
-        <ChevronDown className={`h-3.5 w-3.5 shrink-0 justify-self-end transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
-      </motion.button>
-    </div>
-  );
-}
-
-function SettingRow({ label, value, disabled, onClick }: { label: string; value: string; disabled?: boolean; onClick: () => void }): JSX.Element {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className="grid h-10 w-full grid-cols-[1fr_auto_16px] items-center gap-2 rounded-xl px-3 text-sm outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-45"
-    >
-      <span className="text-left text-ink">{label}</span>
-      <span className="max-w-32 truncate text-right text-ink-3">{value}</span>
-      <ChevronRight className="h-4 w-4 text-ink-3" aria-hidden />
-    </button>
-  );
-}
-
-function SelectionList({ title, onBack, children }: { title: string; onBack: () => void; children: React.ReactNode }): JSX.Element {
-  return (
-    <div>
-      <div className="flex h-10 items-center gap-2 border-b border-line px-1.5 pb-1">
-        <button type="button" onClick={onBack} className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 outline-none hover:bg-card-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/60">
-          <ChevronLeft className="h-4 w-4" aria-hidden />
-        </button>
-        <span className="text-sm font-medium text-ink">{title}</span>
+  return <div ref={root} className="composer-model-control">
+    <Dialog open={!!pendingConnection && pendingConnection.sourceSessionId === sessionId} onOpenChange={open => { if (!open && !saving) setPendingConnection(undefined); }} title={zh ? "切换下一轮的账号 / 供应商？" : "Switch account / provider for the next message?"} description={zh ? "下一条消息会向下方账号/端点发送本会话已保存的聊天文本和最近 8 个产物的名称/路径，其中可能包含此前发给其他供应商的信息。原生推理、缓存、工具事件与旧图片不迁移，图片请重新附加。聊天记录保留，但不是无损上下文迁移；文本超限时会拒绝发送，不会静默截断。" : "The next message will share saved conversation text and names/paths of the latest 8 artifacts with the account/endpoint below. This may include information previously sent to other providers. Native reasoning, cache, tool events and previous images do not transfer; reattach images. History is retained, but this is not lossless context transfer. Oversized text is rejected rather than silently truncated."} footer={<><Button variant="ghost" disabled={saving} onClick={() => setPendingConnection(undefined)}>{zh ? "取消" : "Cancel"}</Button><Button disabled={locked} onClick={confirmConnection}>{zh ? "切换下一轮" : "Switch next message"}</Button></>}><p className="text-sm font-medium text-ink">{pendingConnection?.name}</p><p className="mt-1 break-all text-xs text-muted">{pendingConnection?.destination}</p></Dialog>
+    {menu && <div role="dialog" aria-label={zh ? "模型设置" : "Model settings"} className="composer-model-menu model-picker-surface" data-design-frame="o7KjQn-82u">
+      <div className="model-menu-heading" title={hint}><span>{zh ? "选择模型" : "Choose model"}</span><Link to="/settings?section=accounts" aria-label={zh ? "管理模型" : "Manage models"} onClick={() => setMenu(false)}><SlidersHorizontal size={16}/></Link></div>
+      {draft?.onInstanceChange && <div className="model-menu-agent">
+        <span>Agent</span>
+        <SelectField value={instance.id} disabled={locked} onValueChange={(id) => { setQuery(""); draft.onInstanceChange?.(id); }} options={instances.filter((item) => item.enabled && item.configurationKind === "harness").map((item) => ({ value: item.id, label: item.displayName }))} aria-label={zh ? "选择 Agent" : "Choose an agent"} />
+      </div>}
+      <div className="model-menu-search"><Search size={15} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={zh ? "搜索模型" : "Search models"} aria-label={zh ? "搜索模型" : "Search models"} /></div>
+      <section className="model-picker-connection" aria-label={zh ? "账号与供应商" : "Account & provider"}>
+        <Server size={16} aria-hidden/>
+        <SelectField value={connectionId ?? (instance.configurationKind === "harness" ? undefined : "__instance")} placeholder={zh ? "选择供应商或账号" : "Choose a provider or account"} disabled={locked} onValueChange={chooseConnection} options={connectionOptions} aria-label={zh ? "选择账号或供应商" : "Choose account or provider"}/>
+        {selectedConnection && <span className="model-picker-protocol">{selectedConnection.kind === "login" ? (zh ? "账号" : "Account") : selectedConnection.protocol === "responses" ? "Responses" : selectedConnection.protocol === "chat" ? "Chat" : "Anthropic"}</span>}
+      </section>
+      <div className="model-menu-list">
+        {visibleModels.map((item) => <button type="button" key={item.id} title={item.id} disabled={locked} className="model-menu-option" aria-pressed={item.id === modelId} onClick={() => void configure({ model: item.id, reasoningEffort: item.defaultReasoningEffort ?? item.reasoningEfforts[0] ?? "", serviceTier: item.defaultServiceTier ?? "" }).then((saved) => { if (saved) triggerRef.current?.focus(); })}>
+          <ModelMark name={`${item.id} ${item.displayName}`}/><span><strong>{item.displayName}</strong></span>{item.id === modelId && <Check size={15} />}
+        </button>)}
+        {!visibleModels.length && <p className="model-menu-empty">{connectionKey && connectionModelsLoading[connectionKey] ? (zh ? "正在获取账号模型…" : "Discovering models…") : loadError ? (zh ? "模型读取失败，请在供应商设置中刷新。" : "Models could not be loaded. Refresh in provider settings.") : query ? (zh ? "没有匹配的模型" : "No matching models") : unavailable}</p>}
       </div>
-      <div className="max-h-72 overflow-y-auto pt-1">{children}</div>
-    </div>
-  );
-}
-
-function SelectionItem({ label, description, selected, onClick }: { label: string; description?: string; selected: boolean; onClick: () => void }): JSX.Element {
-  return (
-    <button type="button" onClick={onClick} className="grid min-h-10 w-full grid-cols-[1fr_18px] items-center gap-2 rounded-xl px-3 py-2 text-left outline-none hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-accent/60">
-      <span className="min-w-0">
-        <span className="block truncate text-sm font-medium text-ink">{label}</span>
-        {description && <span className="mt-0.5 block line-clamp-2 text-xs leading-4 text-ink-3">{description}</span>}
-      </span>
-      {selected && <Check className="h-4 w-4 text-accent" aria-hidden />}
+      {efforts.length > 0 && <div className="model-menu-efforts"><span>{zh ? "推理强度" : "Reasoning effort"}</span><div>{efforts.map((item) => <button type="button" key={item} disabled={locked} aria-pressed={item === effort} onClick={() => void configure({ reasoningEffort: item })}>{effortLabel(item)}</button>)}</div></div>}
+      {sessionId && currentHead && currentHead.revision !== connectionRevision && connectionSupportsAgent(currentHead, instance) && <button type="button" className="model-picker-revision" disabled={locked} onClick={() => chooseConnection(currentHead.id)}>{zh ? `更新到 v${currentHead.revision}` : `Update to v${currentHead.revision}`}</button>}
+      {connectionCatalog?.warning && <p className="model-menu-empty">{connectionCatalog.warning}</p>}
+      {connectionError && <p role="alert" className="model-menu-empty text-danger">{zh ? "绑定连接读取失败，请重试。" : "Unable to load the bound connection. Please retry."}</p>}
+      <footer className="model-picker-footer"><span>{models.length} {zh ? "个可用模型" : "available models"}</span><Link to="/settings?section=accounts" onClick={() => setMenu(false)}><SlidersHorizontal size={13}/>{zh ? "管理模型" : "Manage models"}<ArrowUpRight size={12}/></Link></footer>
+    </div>}
+    <button ref={triggerRef} type="button" disabled={locked} className="composer-model-trigger" aria-label={zh ? "选择模型" : "Choose model"} aria-expanded={menu} aria-description={modelDescription} title={modelDescription} onClick={() => { setMenu(!menu); setQuery(""); }}>
+      <Box size={16} aria-hidden /><span>{modelId === "default" ? `${instance.displayName} / ${zh ? "默认" : "Default"}` : label}</span>{effort && <span className="composer-effort-label" aria-label={`${zh ? "推理强度" : "Reasoning effort"} ${effortLabel(effort)}`}>· {effortLabel(effort)}</span>}<ChevronDown size={12} aria-hidden />
     </button>
-  );
+  </div>;
 }

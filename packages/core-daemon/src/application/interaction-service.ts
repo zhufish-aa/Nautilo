@@ -22,6 +22,8 @@ export class InteractionService {
   /** Sessions whose journal was already scanned for orphaned requests in this
    * process — the scan is idempotent, so run it once per session. */
   private readonly healedSessions = new Set<string>();
+  private readonly closedRuns = new Set<string>();
+  private readonly cancelledNative = new Map<string, Set<string>>();
 
   constructor(private readonly database: Database, private readonly events: EventService) {}
 
@@ -83,8 +85,9 @@ export class InteractionService {
     session: Session,
     runId: string | undefined,
     providerId: string,
-    input: Pick<InteractionRequest, "kind" | "title" | "detail" | "questions" | "options" | "plan">
+    input: Pick<InteractionRequest, "kind" | "title" | "detail" | "links" | "presentation" | "questions" | "options" | "plan" | "nativeRequestId" | "timeoutMs">
   ): Promise<InteractionResponse> {
+    if (runId && (this.closedRuns.has(runId) || this.cancelledNative.get(runId)?.has(input.nativeRequestId ?? ""))) return Promise.resolve({ outcome: "cancelled" });
     const record: InteractionRequest = {
       ...input,
       id: randomUUID(),
@@ -97,7 +100,14 @@ export class InteractionService {
     const resolution = new Promise<InteractionResponse>((resolve) => {
       this.pending.set(record.id, { record, resolve });
     });
-    this.events.appendForSession(session, { runId }, "interaction.requested", { interaction: record });
+    try { this.events.appendForSession(session, { runId }, "interaction.requested", { interaction: record }); }
+    catch { this.pending.delete(record.id); return Promise.resolve({ outcome: "cancelled" }); }
+    if (input.timeoutMs !== undefined) {
+      const timer = setTimeout(() => {
+        if (this.pending.has(record.id)) this.respond(record.id, { outcome: "cancelled" });
+      }, Math.max(0, input.timeoutMs));
+      void resolution.finally(() => clearTimeout(timer));
+    }
     return resolution;
   }
 
@@ -111,8 +121,10 @@ export class InteractionService {
       response,
       resolvedAt: new Date().toISOString()
     };
-    const session = this.eventsSession(record.sessionId);
-    this.events.appendForSession(session, { runId: record.runId }, "interaction.resolved", { interaction: record });
+    try {
+      const session = this.eventsSession(record.sessionId);
+      this.events.appendForSession(session, { runId: record.runId }, "interaction.resolved", { interaction: record });
+    } catch (error) { pending.resolve({ outcome: "cancelled" }); throw error; }
     this.remember(record);
     pending.resolve(response);
     return record;
@@ -130,6 +142,9 @@ export class InteractionService {
 
   /** Auto-cancels everything a finished/cancelled run was still waiting on. */
   cancelForRun(runId: string): void {
+    this.closedRuns.add(runId);
+    if (this.closedRuns.size > 4096) this.closedRuns.delete(this.closedRuns.values().next().value!);
+    this.cancelledNative.delete(runId);
     for (const [id, pending] of this.pending) {
       if (pending.record.runId !== runId) continue;
       this.pending.delete(id);
@@ -149,6 +164,11 @@ export class InteractionService {
       this.remember(record);
       pending.resolve({ outcome: "cancelled" });
     }
+  }
+
+  cancelNative(runId: string, nativeId: string): void {
+    const cancelled = this.cancelledNative.get(runId) ?? new Set<string>(); cancelled.add(nativeId); this.cancelledNative.set(runId, cancelled);
+    for (const [id, pending] of this.pending) if (pending.record.runId === runId && pending.record.nativeRequestId === nativeId) this.respond(id, { outcome: "cancelled" });
   }
 
   private remember(record: InteractionRequest): void {

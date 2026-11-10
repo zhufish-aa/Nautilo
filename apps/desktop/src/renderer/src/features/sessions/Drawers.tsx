@@ -1,18 +1,19 @@
-import { useEffect, useMemo, useRef, useState, Fragment, lazy, Suspense } from "react";
-import { Bot, Loader2, Pencil, RotateCcw, TerminalSquare } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
+import { Bot, FileText, Loader2, SquareTerminal, TerminalSquare } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { collectChangedFiles, type ChangedFileEntry } from "../../lib/changed-files";
 import { patchFileImages, reverseApplyUnifiedPatch, revertFileDiffs, sameContent } from "../../lib/revert-change";
 import { formatDurationMs, parseSubagentInput, parseSubagentResult, type SubagentUsage } from "../../lib/subagent-result";
 import { highlightDiffLine } from "../../lib/highlight";
+import { terminalWindowStart } from "../../lib/terminal-window";
 import { useProgressiveRows } from "../../lib/use-progressive-rows";
 import { cn } from "../../lib/utils";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
-import { Drawer } from "../../components/ui/Drawer";
-import { TabBar } from "../../components/ui/Tabs";
+import { WorkspaceDrawer as Drawer } from "./WorkspaceDrawer";
+import { ChangeReview, type ReviewEditorState } from "./ChangeReview";
+import { buildReviewFiles, reviewBefore, type ReviewChangeGroup } from "../../lib/change-review";
 import { Button } from "../../components/ui/Button";
 import { StatusChip, Tag } from "../../components/ui/Badge";
-import { ToolFileDiffView } from "../timeline/ToolFileDiffView";
 import { MarkdownContent } from "../timeline/MarkdownContent";
 import { TimelineEventView } from "../timeline/Timeline";
 import { sessionTargetName } from "./SessionListPanel";
@@ -20,13 +21,16 @@ import { useAgentsStore } from "../../stores/agents";
 import { useProjectsStore } from "../../stores/projects";
 import { useSessionsStore, SESSION_EMPTY } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
+import { NativeTerminal } from "./NativeTerminal";
+import { requestCore } from "../../lib/bridge";
+import type { NativeRuntimeCapabilities } from "@agenthub/provider-sdk";
+import { useNativeTerminalStatus } from "../../lib/use-native-terminal";
 import { toast } from "../../stores/toast";
 
-// Monaco is heavy; it only loads when the user actually opens the file editor.
-const DiffCodeEditor = lazy(() => import("../../components/ui/DiffCodeEditor"));
+const MultiTerminalDrawer = lazy(() => import("./TerminalWorkspace").then(module => ({ default: module.TerminalDrawer })));
 
 /* ---------------------------------------------------------------------------
- * F-033: raw terminal drawer — debug fallback only, never replaces chat.
+ * Terminal workspace: native CLI, shell and runtime logs share one toolbar.
  * ------------------------------------------------------------------------ */
 export function TerminalDrawer({
   open,
@@ -37,33 +41,72 @@ export function TerminalDrawer({
   onClose: () => void;
   sessionId?: string;
 }): JSX.Element {
-  const { t } = useI18n();
+  const [multiTabs, setMultiTabs] = useState<boolean>();
+  const { locale } = useI18n();
+  useEffect(() => {
+    if (!open || !sessionId || multiTabs !== undefined) return;
+    let disposed = false;
+    // A live older daemon may still own the user's terminal. Upgrade the
+    // workspace after the next daemon start without interrupting that PTY.
+    void requestCore("terminal.list", { sessionId }).then(() => { if (!disposed) setMultiTabs(true); }).catch(() => { if (!disposed) setMultiTabs(false); });
+    return () => { disposed = true; };
+  }, [open, sessionId, multiTabs]);
+  if (multiTabs) return <Suspense fallback={null}><MultiTerminalDrawer open={open} onClose={onClose} sessionId={sessionId} /></Suspense>;
+  if (multiTabs === false || !sessionId) return <LegacyTerminalDrawer open={open} onClose={onClose} sessionId={sessionId} />;
+  return open ? <Drawer placement="bottom" open onClose={onClose} title={locale === "zh-CN" ? "终端" : "Terminal"} resizable><div className="terminal-workspace-loading" role="status"><Loader2 size={16} className="animate-spin" />{locale === "zh-CN" ? "正在恢复终端" : "Restoring terminals"}</div></Drawer> : <></>;
+}
+
+function LegacyTerminalDrawer({ open, onClose, sessionId }: { open: boolean; onClose: () => void; sessionId?: string }): JSX.Element {
+  const { t, locale } = useI18n();
   const lines = useSessionsStore((state) => (sessionId ? (state.rawLog[sessionId] ?? SESSION_EMPTY.lines) : SESSION_EMPTY.lines));
   const bottomRef = useRef<HTMLDivElement>(null);
+  const followOutput = useRef(true);
+  const [lineLimit, setLineLimit] = useState(500);
+  const [view, setView] = useState<"terminal" | "native" | "logs">("terminal");
+  const [nativeAvailable, setNativeAvailable] = useState(false);
+  const [toolbarTarget, setToolbarTarget] = useState<HTMLDivElement | null>(null);
+  const nativeActive = useNativeTerminalStatus(sessionId, open);
+  useEffect(() => { if (open && nativeActive) setView("native"); }, [open, sessionId, nativeActive]);
+  useEffect(() => {
+    if (!open || !sessionId) return;
+    let disposed = false;
+    void requestCore<NativeRuntimeCapabilities>("agent.runtimeCapabilities", { sessionId }).then((capabilities) => { if (!disposed) setNativeAvailable(capabilities.interactions.nativeTerminal); }).catch(() => { if (!disposed) setNativeAvailable(false); });
+    return () => { disposed = true; };
+  }, [open, sessionId]);
+  useEffect(() => { setLineLimit(500); followOutput.current = true; }, [sessionId]);
 
   useEffect(() => {
-    if (open) bottomRef.current?.scrollIntoView({ block: "end" });
+    if (open && followOutput.current) bottomRef.current?.scrollIntoView({ block: "end" });
   }, [lines.length, open]);
 
+  if (!open) return <></>;
+  const startLine = terminalWindowStart(lines.length, lineLimit);
   return (
-    <Drawer open={open} onClose={onClose} title={t("sessions.drawers.terminal")} subtitle={t("sessions.drawers.terminalNote")}>
-      <div className="h-full overflow-y-auto bg-[#0a0c12] px-4 py-3">
+    <Drawer placement="bottom" open={open} onClose={onClose} title={locale === "zh-CN" ? "终端" : "Terminal"} resizable defaultHeight={320} storageKey="nautilo.terminal.height"
+      headerContent={<div className="terminal-tabs" role="tablist" aria-label={locale === "zh-CN" ? "终端视图" : "Terminal views"}>
+        <button type="button" className="terminal-tab" role="tab" aria-selected={view === "terminal"} onClick={() => setView("terminal")}><SquareTerminal size={14} aria-hidden />{locale === "zh-CN" ? "终端" : "Terminal"}</button>
+        {nativeAvailable && <button type="button" className="terminal-tab" role="tab" aria-selected={view === "native"} onClick={() => setView("native")}><TerminalSquare size={14} aria-hidden />{locale === "zh-CN" ? "原生 CLI" : "Native CLI"}</button>}
+        <button type="button" className="terminal-tab" role="tab" aria-selected={view === "logs"} onClick={() => setView("logs")}><FileText size={14} aria-hidden />{locale === "zh-CN" ? "运行日志" : "Logs"}</button>
+      </div>}
+      headerActions={<div ref={setToolbarTarget} className="workspace-panel-actions" />}>
+      {view !== "logs" && sessionId ? <NativeTerminal key={`${sessionId}:${view}`} sessionId={sessionId} kind={view === "native" ? "harness" : "shell"} toolbarTarget={toolbarTarget} /> : <div className="h-full overflow-y-auto bg-canvas px-5 py-4" onScroll={(event) => { const node = event.currentTarget; followOutput.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }}>
+        {startLine > 0 && <button type="button" className="mb-3 rounded px-2 py-1 text-xs text-ink-3 hover:bg-card-hover" onClick={() => setLineLimit((limit) => limit + 500)}>{t("sessions.interactions.showMore")} ({startLine})</button>}
         {lines.length === 0 ? (
           <div className="flex h-40 flex-col items-center justify-center gap-2 text-ink-3">
             <TerminalSquare className="h-6 w-6" aria-hidden />
             <p className="text-xs">{t("sessions.drawers.terminalEmpty")}</p>
           </div>
         ) : (
-          <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap">
-            {lines.map((line, index) => (
-              <div key={index} className={line.startsWith("$ ") ? "mt-2 text-accent" : "text-[#a8e6a3]/90"}>
+          <pre className="font-mono text-[13px] leading-6 whitespace-pre-wrap">
+            {lines.slice(startLine).map((line, index) => (
+              <div key={startLine + index} className={line.startsWith("$ ") ? "mt-2 text-ink" : "text-ink-2"}>
                 {line}
               </div>
             ))}
             <div ref={bottomRef} />
           </pre>
         )}
-      </div>
+      </div>}
     </Drawer>
   );
 }
@@ -113,6 +156,10 @@ function DiffView({ content }: { content: string }): JSX.Element {
   );
 }
 
+const CLOSED_DRAWER_ITEMS: never[] = [];
+const EMPTY_EVENT_MAP: ReturnType<typeof useSessionsStore.getState>["events"] = {};
+const EMPTY_ARTIFACT_MAP: ReturnType<typeof useSessionsStore.getState>["artifacts"] = {};
+
 export function ArtifactsDrawer({
   open,
   onClose,
@@ -126,13 +173,14 @@ export function ArtifactsDrawer({
   focusPath?: string | null;
 }): JSX.Element {
   const { t, locale } = useI18n();
-  const artifacts = useSessionsStore((state) => (sessionId ? (state.artifacts[sessionId] ?? SESSION_EMPTY.artifacts) : SESSION_EMPTY.artifacts));
-  const events = useSessionsStore((state) => (sessionId ? (state.events[sessionId] ?? SESSION_EMPTY.events) : SESSION_EMPTY.events));
-  const sessions = useSessionsStore((state) => state.sessions);
-  const allEvents = useSessionsStore((state) => state.events);
-  const teams = useTeamsStore((state) => state.teams);
-  const instances = useAgentsStore((state) => state.instances);
-  const projects = useProjectsStore((state) => state.projects);
+  const artifacts = useSessionsStore((state) => (open && sessionId ? (state.artifacts[sessionId] ?? SESSION_EMPTY.artifacts) : SESSION_EMPTY.artifacts));
+  const events = useSessionsStore((state) => (open && sessionId ? (state.events[sessionId] ?? SESSION_EMPTY.events) : SESSION_EMPTY.events));
+  const sessions = useSessionsStore((state) => open ? state.sessions : CLOSED_DRAWER_ITEMS);
+  const allEvents = useSessionsStore((state) => open ? state.events : EMPTY_EVENT_MAP);
+  const allArtifacts = useSessionsStore((state) => open ? state.artifacts : EMPTY_ARTIFACT_MAP);
+  const teams = useTeamsStore((state) => open ? state.teams : CLOSED_DRAWER_ITEMS);
+  const instances = useAgentsStore((state) => open ? state.instances : CLOSED_DRAWER_ITEMS);
+  const projects = useProjectsStore((state) => open ? state.projects : CLOSED_DRAWER_ITEMS);
   const session = sessions.find((item) => item.id === sessionId);
   const projectRoot = projects.find((item) => item.id === session?.projectId)?.rootPath;
 
@@ -140,52 +188,42 @@ export function ArtifactsDrawer({
   // timeline. kimi sessions surface edits via tool fileDiff, codex via
   // file_change events — collectChangedFiles covers both.
   const changeGroups = useMemo(() => {
-    const groups: { label?: string; entries: ChangedFileEntry[] }[] = [
-      { entries: collectChangedFiles(events) }
+    if (!open) return [];
+    const groups: ReviewChangeGroup[] = [
+      { id: sessionId ?? "main", entries: collectChangedFiles(events) }
     ];
     for (const sub of sessions.filter((item) => item.parentSessionId === sessionId)) {
       const entries = collectChangedFiles(allEvents[sub.id] ?? []);
-      if (entries.length > 0) groups.push({ label: sessionTargetName(sub, teams, instances), entries });
+      if (entries.length > 0) groups.push({ id: sub.id, label: sessionTargetName(sub, teams, instances), entries });
     }
     return groups;
-  }, [events, sessions, sessionId, allEvents, teams, instances]);
+  }, [open, events, sessions, sessionId, allEvents, teams, instances]);
 
-  const changedFiles = useMemo(() => changeGroups.flatMap((group) => group.entries), [changeGroups]);
-
-  const tabs = [
-    { value: "diff", label: t("sessions.drawers.tabs.diff") },
-    { value: "api_contract", label: t("sessions.drawers.tabs.contract") },
-    { value: "test_report", label: t("sessions.drawers.tabs.test") },
-    { value: "commit", label: t("sessions.drawers.tabs.commit") }
-  ];
-  const [tab, setTab] = useState("diff");
-  const [selectedFile, setSelectedFile] = useState(0);
-
-  // In-diff file editor, VS Code-style (monaco diff editor): left shows the
-  // reconstructed pre-change file (read-only), right the live file (editable).
-  // `before` is undefined when the pre-change content can no longer be
-  // reconstructed exactly; a plain editor is shown in that case.
-  const [editor, setEditor] = useState<{
-    path: string;
-    resolvedPath: string;
-    original: string;
-    value: string;
-    saving: boolean;
-    before?: string;
-  } | null>(null);
+  const reviewFiles = useMemo(() => buildReviewFiles(changeGroups, projectRoot), [changeGroups, projectRoot]);
+  const [selectedId, setSelectedId] = useState<string>();
+  const selectedFile = Math.max(0, reviewFiles.findIndex(file => file.id === selectedId));
+  const [editor, setEditor] = useState<ReviewEditorState | null>(null);
+  const editRequest = useRef(0);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [editLoading, setEditLoading] = useState(false);
   // Per-change revert: two-click confirm (撤回 → 确认撤回), then the recorded
   // change is reverse-applied to the live file (exact match; fails safely).
   const [revertArmed, setRevertArmed] = useState(false);
   const [reverting, setReverting] = useState(false);
   useEffect(() => {
+    editRequest.current += 1;
     setEditor(null);
+    setEditLoading(false);
     setRevertArmed(false);
-  }, [selectedFile, open]);
+  }, [reviewFiles[selectedFile]?.id, open, sessionId]);
 
   const revertChange = async (entry: ChangedFileEntry): Promise<void> => {
     const bridge = window.agenthub;
     if (!bridge) return;
+    if (entry.kind === "patch" && entry.comparisonUnavailable) {
+      toast.error(t("sessions.drawers.noDiffDetail"));
+      return;
+    }
     const basePaths = projectRoot ? [projectRoot] : [];
     setReverting(true);
     try {
@@ -195,6 +233,10 @@ export function ArtifactsDrawer({
           return;
         }
         const read = await bridge.files.readText({ path: entry.path, basePaths });
+        if (read.ok && read.truncated) {
+          toast.error(t("sessions.drawers.revertTruncated"));
+          return;
+        }
         if (!read.ok) {
           toast.error(t("sessions.drawers.revertFailed"));
           return;
@@ -229,6 +271,10 @@ export function ArtifactsDrawer({
       if (!entry.diff) return;
       if (entry.changeType === "added") {
         const read = await bridge.files.readText({ path: entry.path, basePaths });
+        if (read.ok && read.truncated) {
+          toast.error(t("sessions.drawers.revertTruncated"));
+          return;
+        }
         if (!read.ok || !sameContent(read.content, patchFileImages(entry.diff).after)) {
           toast.error(t("sessions.drawers.revertFailed"));
           return;
@@ -242,25 +288,18 @@ export function ArtifactsDrawer({
         return;
       }
       if (entry.changeType === "deleted") {
-        // The file is gone, so resolve the path without readText and restore it.
-        const absolute = /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(entry.path)
-          ? entry.path
-          : projectRoot
-            ? `${projectRoot.replace(/[\\/]+$/, "")}/${entry.path}`
-            : "";
-        if (!absolute) {
-          toast.error(t("sessions.drawers.revertFailed"));
-          return;
-        }
-        const write = await bridge.files.writeText({ path: absolute, content: patchFileImages(entry.diff).before });
-        if (!write.ok) {
-          toast.error(write.message ?? t("sessions.drawers.revertFailed"));
-          return;
-        }
-        toast.success(t("sessions.drawers.revertDone"));
+        // The bridge has no atomic create-if-absent operation. A stale deletion
+        // patch must never overwrite a file recreated by the user or another run.
+        toast.error(locale === "zh-CN"
+          ? "请手动恢复已删除文件，避免覆盖后来创建的内容。"
+          : "Restore deleted files manually to avoid overwriting newer content.");
         return;
       }
       const read = await bridge.files.readText({ path: entry.path, basePaths });
+      if (read.ok && read.truncated) {
+        toast.error(t("sessions.drawers.revertTruncated"));
+        return;
+      }
       if (!read.ok) {
         toast.error(t("sessions.drawers.revertFailed"));
         return;
@@ -281,15 +320,18 @@ export function ArtifactsDrawer({
     } finally {
       setReverting(false);
       setRevertArmed(false);
+      setRefreshVersion(version => version + 1);
     }
   };
 
   const startEdit = async (entry: ChangedFileEntry): Promise<void> => {
     const bridge = window.agenthub;
     if (!bridge) return;
+    const request = ++editRequest.current;
     setEditLoading(true);
     try {
       const result = await bridge.files.readText({ path: entry.path, basePaths: projectRoot ? [projectRoot] : [] });
+      if (request !== editRequest.current) return;
       if (!result.ok) {
         toast.error(t("sessions.drawers.editReadFailed"));
         return;
@@ -298,23 +340,12 @@ export function ArtifactsDrawer({
         toast.error(t("sessions.drawers.editTooLarge"));
         return;
       }
-      // Reconstruct the pre-change content for the diff editor's left side.
-      const before = ((): string | undefined => {
-        if (entry.kind === "fileDiff") {
-          if (entry.diffs.some((diff) => diff.truncated)) return undefined;
-          const reverted = revertFileDiffs(result.content, entry.diffs);
-          return reverted.ok ? reverted.content : undefined;
-        }
-        if (!entry.diff) return undefined;
-        if (entry.changeType === "added") return "";
-        const reverted = reverseApplyUnifiedPatch(result.content, entry.diff);
-        return reverted.ok ? reverted.content : undefined;
-      })();
+      const before = reviewBefore(entry, result.content);
       setEditor({ path: entry.path, resolvedPath: result.resolvedPath, original: result.content, value: result.content, saving: false, before });
     } catch {
-      toast.error(t("sessions.drawers.editReadFailed"));
+      if (request === editRequest.current) toast.error(t("sessions.drawers.editReadFailed"));
     } finally {
-      setEditLoading(false);
+      if (request === editRequest.current) setEditLoading(false);
     }
   };
 
@@ -325,10 +356,17 @@ export function ArtifactsDrawer({
     const content = editor.original.includes("\r\n") ? editor.value.replace(/\r?\n/g, "\r\n") : editor.value;
     setEditor({ ...editor, saving: true });
     try {
+      const current = await bridge.files.readText({ path: editor.resolvedPath, basePaths: projectRoot ? [projectRoot] : [] });
+      if (!current.ok || current.truncated || !sameContent(current.content, editor.original)) {
+        toast.error(locale === "zh-CN" ? "文件已在外部更改，请重新打开后再编辑。" : "The file changed outside this editor. Reopen it before saving.");
+        setEditor(value => value ? { ...value, saving: false } : value);
+        return;
+      }
       const result = await bridge.files.writeText({ path: editor.resolvedPath, content });
       if (result.ok) {
         toast.success(t("sessions.drawers.editSaved"));
         setEditor(null);
+        setRefreshVersion(version => version + 1);
       } else {
         toast.error(result.message ?? t("sessions.drawers.editFailed"));
         setEditor({ ...editor, saving: false });
@@ -339,200 +377,52 @@ export function ArtifactsDrawer({
     }
   };
 
-  // Opening via a "view diff" entry jumps straight to the referenced file;
-  // timeline refreshes keep the user's selection whenever it is still valid.
+  // A focus request is consumed once. New stream events must not pull selection back.
+  const focusedRequest = useRef("");
+  useEffect(() => { setSelectedId(undefined); focusedRequest.current = ""; }, [sessionId]);
   useEffect(() => {
-    if (!open) return;
-    setTab("diff");
-    setSelectedFile((current) => {
-      const index = focusPath ? changedFiles.findIndex((file) => file.path === focusPath) : -1;
-      if (index >= 0) return index;
-      return current < changedFiles.length ? current : 0;
-    });
-  }, [open, focusPath, changedFiles]);
+    if (!open) { focusedRequest.current = ""; return; }
+    if (!focusPath) return;
+    const request = JSON.stringify([sessionId, focusPath]);
+    if (focusedRequest.current === request) return;
+    const file = reviewFiles.find(item => item.entry.path.replace(/\\/g, "/") === focusPath.replace(/\\/g, "/"));
+    if (file) { setSelectedId(file.id); focusedRequest.current = request; }
+  }, [open, focusPath, sessionId, reviewFiles]);
 
-  const filtered = artifacts.filter((artifact) => artifact.kind === tab);
+  if (!open) return <></>;
+
+  const comparisonArtifacts = [
+    ...artifacts,
+    ...sessions.filter((item) => item.parentSessionId === sessionId)
+      .flatMap((item) => allArtifacts[item.id] ?? [])
+  ].filter((artifact) => artifact.kind === "diff" && artifact.content);
+  const filesystemComparisons = comparisonArtifacts.filter((artifact) => artifact.diffSource === "filesystem");
+  const providerComparisons = comparisonArtifacts.filter((artifact) => artifact.diffSource === "provider");
+  const comparisonUnavailable = artifacts.some((artifact) => artifact.comparisonUnavailable)
+    || sessions.some((item) => item.parentSessionId === sessionId
+      && allArtifacts[item.id]?.some((artifact) => artifact.comparisonUnavailable));
+
+  const reviewArtifacts = [
+    ...artifacts,
+    ...sessions.filter(item => item.parentSessionId === sessionId).flatMap(item => allArtifacts[item.id] ?? [])
+  ];
 
   return (
-    <Drawer open={open} onClose={onClose} title={t("sessions.drawers.artifacts")} defaultWidth={1200}>
-      <div className="flex h-full flex-col">
-        <div className="border-b border-line px-5 py-3">
-          <TabBar aria-label={t("sessions.drawers.artifacts")} value={tab} onValueChange={setTab} items={tabs} />
-        </div>
+    <Drawer open={open} onClose={onClose} title={locale === "zh-CN" ? "文件更改" : "File changes"} defaultWidth={1200} defaultMaximized hideHeader className="change-review-drawer">
+      <ChangeReview key={sessionId ?? "current"} groups={changeGroups} projectRoot={projectRoot} sessionId={sessionId}
+        selectedIndex={selectedFile} onSelect={index => setSelectedId(reviewFiles[index]?.id)} onClose={onClose}
+        editor={editor} onEditorChange={value => setEditor(current => current ? { ...current, value } : current)}
+        onEdit={entry => void startEdit(entry)} onCancelEdit={() => setEditor(null)} onSaveEdit={() => void saveEdit()}
+        onRevert={entry => { if (!revertArmed) setRevertArmed(true); else void revertChange(entry); }}
+        editLoading={editLoading} revertArmed={revertArmed} reverting={reverting} refreshVersion={refreshVersion}
+        artifacts={reviewArtifacts} sourceCount={filesystemComparisons.length + providerComparisons.length}
+        comparisonUnavailable={comparisonUnavailable}
+        sourceContent={<>
+          {filesystemComparisons.length > 0 && <ComparisonSourcePanel artifacts={filesystemComparisons} locale={locale} />}
+          {providerComparisons.length > 0 && <ComparisonSourcePanel artifacts={providerComparisons} locale={locale} source="provider" />}
+        </>}
 
-        {tab === "diff" ? (
-          changedFiles.length === 0 ? (
-            <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{t("sessions.drawers.noChanges")}</p>
-          ) : (
-            <div className="flex min-h-0 flex-1">
-              <ul className="w-56 shrink-0 space-y-1 overflow-y-auto border-r border-line p-3">
-                {(() => {
-                  let flatIndex = -1;
-                  return changeGroups.map((group, groupIndex) => (
-                    <Fragment key={group.label ?? "main"}>
-                      {group.label && (
-                        <li className={cn("px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3", groupIndex > 0 && "pt-2")}>
-                          {group.label}
-                        </li>
-                      )}
-                      {group.entries.map((entry) => {
-                        flatIndex += 1;
-                        const index = flatIndex;
-                        const stats = entry.kind === "patch"
-                          ? { added: entry.additions, removed: entry.deletions }
-                          : {
-                              added: entry.diff.after ? entry.diff.after.split(/\r?\n/).length : 0,
-                              removed: entry.diff.before ? entry.diff.before.split(/\r?\n/).length : 0
-                            };
-                        return (
-                          <li key={`${entry.path}-${index}`}>
-                            <button
-                              onClick={() => setSelectedFile(index)}
-                              aria-current={selectedFile === index}
-                              className={cn(
-                                "w-full truncate rounded-lg px-2.5 py-2 text-left font-mono text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
-                                selectedFile === index ? "bg-accent-soft text-accent" : "text-ink-2 hover:bg-card-hover"
-                              )}
-                              title={entry.path}
-                            >
-                              {entry.path.split(/[\\/]/).pop()}
-                              {entry.edits > 1 && <span className="ml-1 text-[10px] text-ink-3">×{entry.edits}</span>}
-                              <span className="ml-1.5 font-mono text-[10px]">
-                                <span className="text-ok">+{stats.added}</span>{" "}
-                                <span className="text-danger">-{stats.removed}</span>
-                              </span>
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </Fragment>
-                  ));
-                })()}
-              </ul>
-              <div className="flex min-w-0 flex-1 flex-col">
-                {(() => {
-                  const selected = changedFiles[selectedFile];
-                  if (!selected) {
-                    return <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noChanges")}</p>;
-                  }
-                  const diffContent = selected.kind === "patch" ? (
-                    selected.diff ? (
-                      <DiffView content={selected.diff} />
-                    ) : (
-                      <p className="px-5 py-10 text-sm text-ink-3">{t("sessions.drawers.noDiffDetail")}</p>
-                    )
-                  ) : (
-                    <div className="h-full overflow-y-auto">
-                      <ToolFileDiffView diff={selected.diff} locale={locale} scrollClassName="max-h-none" />
-                    </div>
-                  );
-                  if (editor) {
-                    const dirty = editor.value !== editor.original.replace(/\r\n/g, "\n");
-                    return (
-                      <>
-                        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
-                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3" title={editor.resolvedPath}>
-                            {editor.resolvedPath}
-                          </span>
-                          <Button variant="ghost" size="sm" disabled={editor.saving} onClick={() => setEditor(null)}>
-                            {t("common.cancel")}
-                          </Button>
-                          <Button variant="primary" size="sm" disabled={editor.saving || !dirty} onClick={() => void saveEdit()}>
-                            {editor.saving && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
-                            {t("common.save")}
-                          </Button>
-                        </div>
-                        {/* VS Code-style monaco diff editor: reconstructed
-                            pre-change file (read-only) | live file (editable). */}
-                        <div className="flex min-h-0 flex-1 flex-col">
-                          {editor.before === undefined ? (
-                            <p className="shrink-0 border-b border-line px-3 py-1 text-[11px] text-warn">
-                              {t("sessions.drawers.beforeUnavailable")}
-                            </p>
-                          ) : (
-                            <div className="flex shrink-0 border-b border-line text-[10px] font-semibold uppercase tracking-wider text-ink-3">
-                              <span className="flex-1 border-r border-line px-3 py-1">{t("sessions.drawers.beforeLabel")}</span>
-                              <span className="flex-1 px-3 py-1">{t("sessions.drawers.afterLabel")}</span>
-                            </div>
-                          )}
-                          <Suspense
-                            fallback={
-                              <div className="flex flex-1 items-center justify-center gap-2 text-sm text-ink-3">
-                                <Loader2 className="h-4 w-4 animate-spin text-accent" aria-hidden />
-                                {t("sessions.filePreview.loading")}
-                              </div>
-                            }
-                          >
-                            <DiffCodeEditor
-                              key={`${editor.resolvedPath}|${editor.before === undefined ? "single" : "diff"}`}
-                              before={editor.before}
-                              value={editor.value}
-                              onChange={(next) => setEditor((current) => (current ? { ...current, value: next } : current))}
-                              filePath={editor.resolvedPath}
-                            />
-                          </Suspense>
-                        </div>
-                      </>
-                    );
-                  }
-                  return (
-                    <>
-                      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
-                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3" title={selected.path}>
-                          {selected.path}
-                        </span>
-                        <button
-                          type="button"
-                          disabled={reverting}
-                          onClick={() => {
-                            if (!revertArmed) {
-                              setRevertArmed(true);
-                              return;
-                            }
-                            void revertChange(selected);
-                          }}
-                          className={cn(
-                            "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] transition-colors disabled:opacity-50",
-                            revertArmed ? "bg-warn/10 text-warn" : "text-ink-3 hover:bg-card-hover hover:text-ink"
-                          )}
-                        >
-                          {reverting ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden />}
-                          {revertArmed ? t("sessions.drawers.revertConfirm") : t("sessions.drawers.revert")}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={editLoading}
-                          onClick={() => void startEdit(selected)}
-                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-50"
-                        >
-                          {editLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Pencil className="h-3.5 w-3.5" aria-hidden />}
-                          {t("sessions.drawers.edit")}
-                        </button>
-                      </div>
-                      <div className="min-h-0 flex-1">{diffContent}</div>
-                    </>
-                  );
-                })()}
-              </div>
-            </div>
-          )
-        ) : filtered.length === 0 ? (
-          <p className="flex-1 px-5 py-10 text-center text-sm text-ink-3">{t("sessions.drawers.noArtifacts")}</p>
-        ) : (
-          <div className="flex-1 space-y-3 overflow-y-auto p-5">
-            {filtered.map((artifact) => (
-              <section key={artifact.id} className="overflow-hidden rounded-xl border border-line">
-                <header className="border-b border-line bg-card-hover px-4 py-2.5 text-[13px] font-medium text-ink-2">
-                  {artifact.name}
-                </header>
-                <pre className="overflow-x-auto bg-card px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2">
-                  {artifact.content}
-                </pre>
-              </section>
-            ))}
-          </div>
-        )}
-      </div>
+      />
     </Drawer>
   );
 }
@@ -590,6 +480,7 @@ export function DagDrawer({
     blocked_dependency: "text-warn border-warn/50"
   };
 
+  if (!open) return <></>;
   return (
     <Drawer open={open} onClose={onClose} title={t("sessions.drawers.dag")} subtitle={t("sessions.drawers.dagNote")} defaultWidth={560}>
       <div className="h-full overflow-auto p-4">
@@ -623,13 +514,11 @@ export function DagDrawer({
           )}
           {tasks.map((task, index) => {
             const pos = positions[index];
-            const tone = statusTone[task.status] ?? statusTone.queued;
             const title = task.title.length > 12 ? `${task.title.slice(0, 12)}…` : task.title;
             const subtitle = `${task.memberName ?? "—"} · ${t(`sessions.taskStatus.${task.status}` as MessageKey)}`;
             return (
               <g key={task.id} transform={`translate(${pos.x}, ${pos.y})`}>
-                <rect width="180" height="60" rx="12" fill="var(--card)" stroke="var(--line-strong)" strokeWidth="1" />
-                <rect width="4" height="60" rx="2" fill="currentColor" className={tone.split(" ")[0]} />
+                <rect width="180" height="60" rx="7" fill="var(--card)" stroke="var(--line-strong)" strokeWidth="1" />
                 <text x="16" y="24" fill="var(--ink)" fontSize="12" fontWeight="600">
                   {title}
                 </text>
@@ -697,10 +586,11 @@ export function SubagentDrawer({
     (sessionId ? state.events[sessionId] ?? [] : []).find((item) => item.id === eventId));
   const data = event?.data.kind === "tool_activity" ? event.data : undefined;
   const subagent = data?.subagent;
-  const tone = data?.status === "running" ? "accent" : data?.status === "done" ? "ok" : "danger";
-  const statusLabel = data?.status === "running"
+  const status = data?.status === "failed" ? "failed" : subagent?.status ?? data?.status;
+  const tone = status === "running" ? "accent" : status === "done" ? "ok" : "danger";
+  const statusLabel = status === "running"
     ? subagent?.background ? t("sessions.cards.subagentBackgroundRunning") : t("sessions.cards.running")
-    : data?.status === "done"
+    : status === "done"
       ? t("sessions.status.completed")
       : t("sessions.cards.failed");
   const activities: TimelineEvent[] = (subagent?.activities ?? []).map((payload, index) => ({
@@ -713,25 +603,28 @@ export function SubagentDrawer({
   const inputView = useMemo(() => (data?.input ? parseSubagentInput(data.input) : undefined), [data?.input]);
   const resultView = useMemo(() => (data?.output ? parseSubagentResult(data.output) : undefined), [data?.output]);
 
+  if (!open) return <></>;
   return (
     <Drawer open={open} onClose={onClose} title={t("sessions.drawers.subagent")} subtitle={subagent?.task} defaultWidth={560}>
       <div className="h-full overflow-y-auto p-4">
         <div className="mb-3 flex items-center gap-2">
-          <span aria-hidden className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-info/20 bg-info/10 text-info">
+          <span aria-hidden className="flex h-6 w-6 shrink-0 items-center justify-center text-ink-3">
             <Bot className="h-4 w-4" />
           </span>
           {subagent?.agentType && <Tag label={subagent.agentType} />}
+          {subagent?.model && <Tag label={subagent.model} />}
+          {subagent?.nativeAgentIds?.map((id) => <span key={id} title={id} className="font-mono text-xs">{id.slice(0, 8)}</span>)}
           {subagent?.background && <Tag label={t("sessions.cards.subagentBackground")} />}
-          {data && <StatusChip tone={tone} label={statusLabel} pulse={data.status === "running"} className="h-5 px-1.5 text-[10px]" />}
+          {data && <StatusChip tone={tone} label={statusLabel} pulse={status === "running"} className="h-5 px-1.5 text-[10px]" />}
           <SubagentUsageChips usage={resultView?.usage} agentId={resultView?.agentId} />
         </div>
         {subagent?.task && (
-          <p className="mb-4 rounded-xl border border-line bg-card px-3.5 py-2.5 text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-2">
+          <p className="mb-4 px-1 py-2.5 text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-2">
             {subagent.task}
           </p>
         )}
         {activities.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-line-strong px-3 py-4 text-center">
+          <div className="rounded-xl border border-line px-3 py-4 text-center">
             <p className="text-xs text-ink-3">{t("sessions.drawers.subagentEmpty")}</p>
             {data?.status !== "running" && (
               <p className="mt-1 text-[11px] leading-relaxed text-ink-3/70">{t("sessions.drawers.subagentEmptyHint")}</p>
@@ -748,7 +641,7 @@ export function SubagentDrawer({
           <div className="mt-4 space-y-2 border-t border-line pt-3">
             {resultView && (
               <details className="overflow-hidden rounded-xl border border-line bg-card" open={activities.length === 0}>
-                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink-3">
                   {t("sessions.drawers.subagentResult")}
                 </summary>
                 <div className="max-h-96 overflow-auto border-t border-line px-3.5 py-2.5 text-[13px] text-ink-2">
@@ -758,7 +651,7 @@ export function SubagentDrawer({
             )}
             {inputView?.prompt && (
               <details className="overflow-hidden rounded-xl border border-line bg-card" open={activities.length === 0}>
-                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink-3">
                   {t("sessions.drawers.subagentPrompt")}
                 </summary>
                 <p className="max-h-56 overflow-auto border-t border-line px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap text-ink-2">
@@ -768,7 +661,7 @@ export function SubagentDrawer({
             )}
             {inputView && (inputView.raw !== undefined || inputView.fields.length > 0) && (
               <details className="overflow-hidden rounded-xl border border-line bg-card">
-                <summary className="cursor-pointer bg-card-hover px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink-3">
                   {t("sessions.drawers.subagentInputRaw")}
                 </summary>
                 {inputView.raw !== undefined ? (
@@ -789,5 +682,39 @@ export function SubagentDrawer({
         )}
       </div>
     </Drawer>
+  );
+}
+
+/** Mount potentially large comparison text only when explicitly opened. */
+function ComparisonSourcePanel({ artifacts, locale, source = "filesystem" }: {
+  artifacts: { id: string; name: string; content: string }[];
+  locale: string;
+  source?: "filesystem" | "provider";
+}): JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const [selectedId, setSelectedId] = useState<string>();
+  const selected = artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts.at(-1);
+  return (
+    <section className="shrink-0 border-b border-line">
+      <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}
+        className="flex w-full items-center justify-between px-5 py-3 text-left text-sm text-ink-2 hover:bg-card-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+        <span>{source === "provider"
+          ? (locale === "zh-CN" ? "Agent 差异原文" : "Agent diff source")
+          : (locale === "zh-CN" ? "文件系统对比（采集范围内）" : "Filesystem comparison (captured scope)")}</span>
+        <span aria-hidden="true">{expanded ? "−" : "+"}</span>
+      </button>
+      {expanded && selected && (
+        <div className="border-t border-line">
+          {artifacts.length > 1 && (
+            <select aria-label={locale === "zh-CN" ? "选择对比记录" : "Choose comparison record"}
+              value={selected.id} onChange={(event) => setSelectedId(event.target.value)}
+              className="m-3 max-w-[calc(100%-1.5rem)] rounded-md border border-line bg-card px-2 py-1 text-sm text-ink">
+              {artifacts.map((artifact) => <option key={artifact.id} value={artifact.id}>{artifact.name}</option>)}
+            </select>
+          )}
+          <div className="h-64 overflow-hidden"><DiffView content={selected.content} /></div>
+        </div>
+      )}
+    </section>
   );
 }

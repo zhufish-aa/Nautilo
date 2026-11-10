@@ -1,3 +1,4 @@
+import { imagePromptBlocks } from "../images.js";
 import type { ProcessEvent } from "../../process-runtime.js";
 import { ProcessRuntime } from "../../process-runtime.js";
 import { JsonRpcProcessClient, type JsonRpcProcessEvent } from "../json-rpc-process.js";
@@ -40,8 +41,8 @@ function transportEvent(event: ProcessEvent): AdapterEvent | undefined {
   return event;
 }
 
-async function applyConfig(rpc: JsonRpcProcessClient, sessionId: string, response: RecordValue, request: AdapterStartRequest): Promise<void> {
-  const options = Array.isArray(response.configOptions) ? response.configOptions.map(record) : [];
+export async function applyConfig(rpc: JsonRpcProcessClient, sessionId: string, response: RecordValue, request: AdapterStartRequest): Promise<void> {
+  let options = Array.isArray(response.configOptions) ? response.configOptions.map(record) : [];
   const selections: Array<[string | undefined, string[]]> = [
     [request.model, ["model"]],
     [request.reasoningEffort, ["thinking", "reasoning", "effort"]]
@@ -49,8 +50,18 @@ async function applyConfig(rpc: JsonRpcProcessClient, sessionId: string, respons
   for (const [value, hints] of selections) {
     if (!value) continue;
     const option = options.find((item) => hints.some((hint) => `${String(item.id ?? "")} ${String(item.name ?? "")} ${String(item.label ?? "")}`.toLowerCase().includes(hint)));
-    if (!option?.id) continue;
-    await rpc.request("session/set_config_option", { sessionId, configId: option.id, value }).catch(() => undefined);
+    if (option?.id) {
+      const result = record(await rpc.request("session/set_config_option", { sessionId, configId: option.id, value }));
+      if (Array.isArray(result.configOptions)) options = result.configOptions.map(record);
+      continue;
+    }
+    const isModel = hints[0] === "model";
+    if (request.env?.[isModel ? "NAUTILO_BRIDGE_MODEL" : "NAUTILO_BRIDGE_EFFORT"] === value) continue;
+    const models = record(response.models);
+    if (isModel && models.currentModelId === value) continue;
+    if (isModel && Array.isArray(models.availableModels) && models.availableModels.some(item => record(item).modelId === value)) {
+      await rpc.request("session/set_model", { sessionId, modelId:value });
+    } else throw new Error(`CLI did not advertise a way to apply ${isModel ? "model" : "reasoning effort"}=${value}`);
   }
   // Permission mode must match exactly — a fuzzy "mode" hint would also hit the model option.
   // Session-level override wins; otherwise fall back to the instance setting
@@ -64,7 +75,10 @@ async function applyConfig(rpc: JsonRpcProcessClient, sessionId: string, respons
     });
     // Older Nautilo builds saved "manual"; the CLI calls that mode "default".
     const value = mode === "manual" ? "default" : mode;
-    if (option?.id) await rpc.request("session/set_config_option", { sessionId, configId: option.id, value }).catch(() => undefined);
+    if (option?.id) await rpc.request("session/set_config_option", { sessionId, configId: option.id, value });
+    else if ((Array.isArray(record(response.modes).availableModes) ? record(response.modes).availableModes as unknown[] : []).some((mode) => record(mode).id === value)) {
+      await rpc.request("session/set_mode", { sessionId, modeId: value });
+    } else if (value !== "default") throw new Error(`Kimi CLI does not advertise the selected permission mode: ${value}`);
   }
 }
 
@@ -139,7 +153,7 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
       // (the resume response carries configOptions too), so re-apply every time.
       await applyConfig(rpc, sessionId, sessionResponse, request);
       yield { kind: "status", phase: "turn_started" };
-      const prompt = rpc.requestWithId("session/prompt", { sessionId, prompt: [{ type: "text", text: request.prompt }] });
+      const prompt = rpc.requestWithId("session/prompt", { sessionId, prompt: imagePromptBlocks(request) });
       void prompt.promise.catch(() => undefined);
 
       const rpcEvents = rpc[Symbol.asyncIterator]();

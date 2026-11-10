@@ -43,7 +43,10 @@ pub struct Daemon {
     pub sessions: SessionService,
     pub adapters: AdapterRegistry,
     pub runs: std::sync::Arc<RunService>,
+    pub terminals: Arc<crate::runtime::terminal_service::TerminalService>,
+    pub source_control: crate::runtime::source_control::SourceControl,
     pub agents: AgentService,
+    pub connections: crate::application::ConnectionService,
     pub interactions: std::sync::Arc<InteractionService>,
     pub slash_commands: SlashCommandService,
     pub capability_imports: CapabilityImportService,
@@ -77,6 +80,8 @@ impl Daemon {
         );
         let interactions = std::sync::Arc::new(InteractionService::new(db.clone(), events.clone()));
         runs.set_interaction_service(interactions.clone());
+        let terminals=Arc::new(crate::runtime::terminal_service::TerminalService::default());
+        runs.set_terminal_service(terminals.clone());
         let sessions = SessionService::new(db.clone());
         sessions.set_run_pipeline(runs.clone(), events.clone());
         let agents = AgentService::new(db.clone(), adapters.clone(), credentials.clone());
@@ -90,6 +95,8 @@ impl Daemon {
         let diagnostics = DiagnosticsService::new(db.clone(), audit.clone(), std::sync::Arc::new(MetricsService::new(db.clone())), redaction.clone(), &data_dir);
         let daemon = Arc::new(Self {
             data_dir: data_dir.clone(),
+            terminals,
+            source_control: crate::runtime::source_control::SourceControl::default(),
             projects: ProjectService::new(db.clone()),
             teams: TeamService::new(db.clone()),
             capabilities: CapabilityService::new(db.clone()),
@@ -115,6 +122,7 @@ impl Daemon {
                 orchestration
             },
             plugins: PluginService::new(&data_dir.clone(), adapters.clone()),
+            connections: crate::application::ConnectionService::new(db.clone(), credentials.clone(), adapters.clone()),
             agents,
             adapters,
             runs,
@@ -153,9 +161,12 @@ impl Daemon {
         // to record ~99.9% of all audit rows (600k+ event.wait rows alone) and
         // ballooned the database. Only failures and mutations keep a trail.
         const READ_ONLY_IPC: &[&str] = &[
+            "scm.status", "scm.diff",
             "health.get",
+            "terminal.read", "terminal.list", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities",
             "project.list",
             "agent.list",
+            "connection.list", "connection.get", "connection.models",
             "team.list",
             "team.get",
             "capability.list",
@@ -193,7 +204,8 @@ impl Daemon {
         ];
         let audit = self.audit.clone();
         router.set_observer(Arc::new(move |request, response| {
-            if response.ok && READ_ONLY_IPC.contains(&request.method.as_str()) {
+            let listing_plugins = request.method == "provider.harnessPlugins" && request.input.pointer("/operation/action").and_then(Value::as_str) == Some("list");
+            if response.ok && (READ_ONLY_IPC.contains(&request.method.as_str()) || listing_plugins) {
                 return;
             }
             let outcome = if response.ok {

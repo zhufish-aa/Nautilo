@@ -5,6 +5,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod native_experience;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -20,8 +22,12 @@ fn descriptor() -> Value {
         "providerId": "trae",
         "name": "Trae",
         "vendor": "ByteDance",
-        "capabilities": ["headless_text"],
-        "defaultExecutable": "traecli",
+        "capabilities": ["headless_structured", "tool_streaming"],
+        "defaultExecutable": "trae-cli",
+        "nativeApiProtocol": "responses",
+        "connectionProtocolDiscovery": true,
+        "observeApiOutput": true,
+        "envPassthrough": ["TRAE_CONFIG_FILE"],
         "credentialEnv": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "DOUBAO_API_KEY"]
     })
 }
@@ -94,11 +100,12 @@ async fn probe_trae_binary(executable: &str, base_args: &[String]) -> Option<Tra
 
 struct TraePlugin {
     interactions: std::sync::Mutex<Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>>,
+    runs: Arc<Mutex<HashMap<String, Option<ProcessHandle>>>>,
 }
 
 impl TraePlugin {
     fn new() -> Self {
-        Self { interactions: std::sync::Mutex::new(None) }
+        Self { interactions: std::sync::Mutex::new(None), runs:Arc::default() }
     }
 }
 
@@ -108,14 +115,14 @@ impl ProviderPlugin for TraePlugin {
         descriptor()
     }
 
-    fn capabilities(&self) -> Value {
-        json!({
-            "structuredOutput": false,
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({
+            "structuredOutput": true,
             "textOutput": true,
             "interactiveStdin": false,
             "nativeResume": true,
             "pty": false
-        })
+        }),native_experience::declarations())
     }
 
     fn set_interaction_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::InteractionChannel>) {
@@ -123,7 +130,7 @@ impl ProviderPlugin for TraePlugin {
     }
 
     async fn detect(&self, instance: &Value) -> Value {
-        let executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "traecli".to_string());
+        let executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "trae-cli".to_string());
         match probe_trae_binary(&executable, &base_args(instance)).await {
             Some(probed) => json!({
                 "installed": true,
@@ -132,7 +139,7 @@ impl ProviderPlugin for TraePlugin {
                 "version": probed.version,
                 "help": probed.help.chars().take(16_384).collect::<String>(),
                 "error": if probed.mode == "cli" {
-                    Value::String("trae-agent 为纯文本模式：不支持会话恢复与上下文用量".to_string())
+                    Value::Null
                 } else {
                     Value::Null
                 }
@@ -145,11 +152,23 @@ impl ProviderPlugin for TraePlugin {
         }
     }
 
-    async fn start(&self, _run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+    async fn connection_protocol(&self, request: &Value) -> anyhow::Result<Value> {
+        let instance = &request["instance"];
+        let executable = str_of(instance, "executable").filter(|e|!e.is_empty()).unwrap_or_else(||"trae-cli".into());
+        let binary = probe_trae_binary(&executable, &base_args(instance)).await.ok_or_else(||anyhow::anyhow!("未找到可用的 Trae CLI"))?;
+        Ok(json!(if modern_cli(&binary) { "responses" } else { "anthropic" }))
+    }
+
+    async fn start(&self, run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
         let interactions = self.interactions.lock().unwrap().clone();
+        let runs = self.runs.clone();
+        let run_id = run_id.to_string();
+        runs.lock().unwrap().insert(run_id.clone(), None);
         tokio::spawn(async move {
-            let result = run(request, resume, sender.clone(), interactions).await;
+            let result = run(request, resume, sender.clone(), interactions, &runs, &run_id).await;
+            let process = runs.lock().unwrap().remove(&run_id).flatten();
+            if let Some(process) = process { process.cancel().await; }
             if let Err(error) = result {
                 let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
@@ -157,25 +176,203 @@ impl ProviderPlugin for TraePlugin {
         });
         Ok(receiver)
     }
+
+    async fn cancel(&self, run_id: &str) {
+        let process = self.runs.lock().unwrap().remove(run_id).flatten();
+        if let Some(process) = process { process.cancel().await; }
+    }
+
+    async fn dispose(&self) {
+        let processes: Vec<_> = self.runs.lock().unwrap().drain().filter_map(|(_,process)|process).collect();
+        for process in processes { process.cancel().await; }
+    }
+}
+
+async fn register_process(runs: &Mutex<HashMap<String, Option<ProcessHandle>>>, run_id: &str, process: ProcessHandle) -> anyhow::Result<()> {
+    let registered = {
+        let mut runs = runs.lock().unwrap();
+        if let Some(slot) = runs.get_mut(run_id) { *slot = Some(process.clone()); true } else {false}
+    };
+    if !registered { process.cancel().await; anyhow::bail!("Trae run was cancelled before startup completed"); }
+    Ok(())
 }
 
 async fn run(
-    request: Value,
+    mut request: Value,
     resume: Option<String>,
     sender: mpsc::UnboundedSender<Value>,
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
+    runs: &Mutex<HashMap<String, Option<ProcessHandle>>>,
+    run_id: &str,
 ) -> anyhow::Result<()> {
     let instance = request.get("instance").cloned().unwrap_or(Value::Null);
-    let executable = str_of(&instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "traecli".to_string());
+    let executable = str_of(&instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "trae-cli".to_string());
     let binary = probe_trae_binary(&executable, &base_args(&instance)).await;
     let Some(binary) = binary else {
         anyhow::bail!("未找到可用的 Trae CLI（traecli 或 trae-cli）");
     };
+    if binary.mode == "cli" { prepare_open_source_connection(&mut request)?; }
+    else { prepare_connection(&mut request, modern_cli(&binary))?; }
+    let instance = request["instance"].clone();
     if binary.mode == "cli" {
+        prepare_open_source_runtime(&mut request, resume.as_deref())?;
+        let instance = request["instance"].clone();
         let _ = sender.send(json!({ "kind": "status", "phase": "turn_started" }));
-        return plain_run(&instance, &request, sender).await;
+        return plain_run(&instance, &request, sender, runs, run_id).await;
     }
-    acp_run(&instance, &request, resume, sender, interactions).await
+    acp_run(&instance, &request, resume, sender, interactions, runs, run_id).await
+}
+
+fn modern_cli(binary: &TraeBinary) -> bool {
+    regex::Regex::new(r"(?m)^\s*exec\s").unwrap().is_match(&binary.help)
+}
+
+fn prepare_open_source_runtime(request: &mut Value, resume: Option<&str>) -> anyhow::Result<()> {
+    use std::path::PathBuf;
+    let id = request["localSessionId"].as_str().ok_or_else(||anyhow::anyhow!("Trae session identity is missing"))?.to_string();
+    anyhow::ensure!(!id.is_empty() && id.chars().all(|c|c.is_ascii_alphanumeric() || c=='-' || c=='_'),"Invalid Trae session identity");
+    let session = format!("nautilo-trae:{id}");
+    if let Some(resume) = resume { anyhow::ensure!(resume == session, "Trae session belongs to a different execution mode"); }
+    let root = request.pointer("/env/NAUTILO_CONNECTION_DIRECTORY").and_then(Value::as_str).map(PathBuf::from)
+        .or_else(||std::env::var("AGENTHUB_DATA_DIR").ok().map(PathBuf::from))
+        .unwrap_or_else(||agenthub_plugin_sdk::native_config::home(&HashMap::new()).join(".nautilo"));
+    let directory = root.join("trae-agent").join(&id);
+    let bridge = directory.join("bridge");
+    std::fs::create_dir_all(&bridge)?;
+    let code = include_str!("../../../../packages/provider-plugin-trae/resources/sitecustomize.py");
+    let script = bridge.join("sitecustomize.py");
+    if std::fs::read_to_string(&script).ok().as_deref() != Some(code) { std::fs::write(script, code)?; }
+    let images: Vec<_> = agenthub_plugin_sdk::images::read_request_images(request)?.into_iter().map(|image|image.path.to_string_lossy().into_owned()).collect();
+    if !request["env"].is_object() { request["env"] = json!({}); }
+    let mut paths = vec![bridge];
+    if let Some(path) = request["env"]["PYTHONPATH"].as_str() { paths.extend(std::env::split_paths(path)); }
+    request["env"]["PYTHONPATH"] = json!(std::env::join_paths(paths)?.to_string_lossy());
+    request["env"]["NAUTILO_TRAE_BRIDGE"] = json!("1");
+    request["env"]["NAUTILO_TRAE_STATE"] = json!(directory.join("conversation.json").to_string_lossy());
+    request["env"]["NAUTILO_TRAE_SESSION_ID"] = json!(session);
+    request["env"]["NAUTILO_TRAE_RESUME"] = json!(if resume.is_some() {"1"} else {"0"});
+    request["env"]["NAUTILO_TRAE_IMAGES"] = json!(serde_json::to_string(&images)?);
+    request["env"]["NAUTILO_TRAE_TRAJECTORY"] = json!(directory.join("trajectory.json").to_string_lossy());
+    if let Some(effort) = request["reasoningEffort"].as_str().map(str::to_string) { request["env"]["NAUTILO_TRAE_EFFORT"] = json!(effort); }
+    Ok(())
+}
+
+fn prepare_open_source_connection(request: &mut Value) -> anyhow::Result<()> {
+    if request.pointer("/instance/providerOptions/runtimeConnectionId").is_none() { return Ok(()) }
+    let root = request.pointer("/env/NAUTILO_CONNECTION_DIRECTORY").and_then(Value::as_str).ok_or_else(||anyhow::anyhow!("API connection directory is missing"))?;
+    let session = request["localSessionId"].as_str().unwrap_or("default");
+    anyhow::ensure!(!session.is_empty() && session.chars().all(|c|c.is_ascii_alphanumeric() || c=='-' || c=='_'), "Invalid session identity");
+    let directory = std::path::PathBuf::from(root).join("trae-agent").join(session);
+    std::fs::create_dir_all(&directory)?;
+    let base = request.pointer("/instance/providerOptions/baseUrl").and_then(Value::as_str).unwrap_or("").trim_end_matches('/');
+    let base = json!(base.strip_suffix("/v1").unwrap_or(base));
+    // The plugin declares the native Anthropic wire; the host supplies a local
+    // bridge when the saved connection speaks Chat or Responses.
+    let config = open_source_configuration(request, base.clone())?;
+    let file = directory.join("trae_config.yaml");
+    std::fs::write(&file,serde_json::to_string_pretty(&config)?)?;
+    request["env"]["TRAE_CONFIG_FILE"] = json!(file.to_string_lossy());
+    request["env"]["NAUTILO_TRAE_MCP_COUNT"] = json!(config["mcp_servers"].as_object().map(|v|v.len()).unwrap_or(0).to_string());
+    request["env"]["NAUTILO_TRAE_TRAJECTORY"] = json!(directory.join("trajectory.json").to_string_lossy());
+    request["env"]["ANTHROPIC_BASE_URL"] = base;
+    request["env"]["ANTHROPIC_API_KEY"] = request["env"]["NAUTILO_CONNECTION_API_KEY"].clone();
+    Ok(())
+}
+
+fn open_source_configuration(request: &Value, base: Value) -> anyhow::Result<Value> {
+    use std::path::PathBuf;
+    let cwd = PathBuf::from(request["cwd"].as_str().unwrap_or("."));
+    let explicit = request.pointer("/env/TRAE_CONFIG_FILE").and_then(Value::as_str);
+    let source = explicit.map(|path| {let path=PathBuf::from(path);if path.is_absolute(){path}else{cwd.join(path)}})
+        .or_else(||["trae_config.yaml", "trae_config.yml", "trae_config.json"].iter().map(|name|cwd.join(name)).find(|path|path.exists()));
+    let mut config: Value = if let Some(path) = source {
+        let text = std::fs::read_to_string(path)?;
+        serde_yaml::from_str(&text).map_err(|_|anyhow::anyhow!("Unable to parse the native Trae configuration"))?
+    } else {json!({})};
+    anyhow::ensure!(config.is_object(), "Native Trae configuration must be an object");
+    let mut agent = json!({"enable_lakeview":true,"max_steps":200,
+        "tools":["bash","str_replace_based_edit_tool","sequentialthinking","task_done"]});
+    if let Some(native) = config.pointer("/agents/trae_agent") {agenthub_plugin_sdk::native_config::merge(&mut agent, native.clone());}
+    let native_model = agent["model"].as_str().and_then(|name|config["models"].get(name)).cloned().unwrap_or_else(||json!({}));
+    let mut model = json!({"max_tokens":16_384,"temperature":0.5,"top_p":1.0,"top_k":0,"parallel_tool_calls":true,"max_retries":1});
+    agenthub_plugin_sdk::native_config::merge(&mut model, native_model);
+    model["model_provider"] = json!("nautilo"); model["model"] = request["model"].clone();
+    agent["model"] = json!("selected");
+    for section in ["agents", "model_providers", "models"] {
+        if config.get(section).is_none() { config[section] = json!({}); }
+        anyhow::ensure!(config[section].is_object(), "Native Trae {section} must be an object");
+    }
+    config["agents"]["trae_agent"] = agent.clone();
+    config["model_providers"]["nautilo"] = json!({"provider":"anthropic","api_key":"","base_url":base});
+    config["models"]["selected"] = model;
+    if agent["enable_lakeview"] != false {
+        if config.get("lakeview").is_none() { config["lakeview"] = json!({}); }
+        anyhow::ensure!(config["lakeview"].is_object(), "Native Trae lakeview must be an object");
+        config["lakeview"]["model"] = json!("selected");
+    }
+    for server in request["mcpServers"].as_array().into_iter().flatten() {
+        let Some(name) = server["name"].as_str() else {continue};
+        if config.get("mcp_servers").is_none() {config["mcp_servers"]=json!({});}
+        anyhow::ensure!(config["mcp_servers"].is_object(), "Native Trae mcp_servers must be an object");
+        let mut entry = config["mcp_servers"].get(name).cloned().unwrap_or_else(||json!({}));
+        let object = entry.as_object_mut().ok_or_else(||anyhow::anyhow!("Native Trae MCP entry must be an object"))?;
+        for key in ["command","args","env","cwd","url","http_url","headers"] {object.remove(key);}
+        if server["transport"] == "http" {object.insert("http_url".into(),server["url"].clone());}
+        else {for key in ["command","args","env","cwd"] {if let Some(value)=server.get(key) {object.insert(key.into(),value.clone());}}}
+        if let Some(headers)=server.get("headers") {object.insert("headers".into(),headers.clone());}
+        config["mcp_servers"][name]=entry;
+        if config.get("allow_mcp_servers").is_none() {config["allow_mcp_servers"]=json!([]);}
+        let allowed=config["allow_mcp_servers"].as_array_mut().ok_or_else(||anyhow::anyhow!("Native Trae allow_mcp_servers must be an array"))?;
+        if !allowed.contains(&json!(name)) {allowed.push(json!(name));}
+    }
+    Ok(config)
+}
+
+/// Versioned native config belongs to this plugin. Never edit the user's
+/// Trae profile or place a provider secret in a file or command argument.
+fn prepare_connection(request: &mut Value, modern: bool) -> anyhow::Result<()> {
+    if request.pointer("/instance/providerOptions/runtimeConnectionId").is_none() { return Ok(()) }
+    let root = request.pointer("/env/NAUTILO_CONNECTION_DIRECTORY").and_then(Value::as_str).ok_or_else(||anyhow::anyhow!("API connection directory is missing"))?;
+    let session = request["localSessionId"].as_str().unwrap_or("default");
+    anyhow::ensure!(!session.is_empty() && session.chars().all(|c|c.is_ascii_alphanumeric() || c=='-' || c=='_'), "Invalid local session identity");
+    let home = std::path::PathBuf::from(root).join("trae").join(session);
+    let dir = home.join(".trae");
+    std::fs::create_dir_all(&dir)?;
+    let base = request.pointer("/instance/providerOptions/baseUrl").cloned().unwrap_or(Value::Null);
+    let model = request["model"].clone();
+    if modern {
+        let effort = request["reasoningEffort"].as_str().filter(|v|!v.is_empty()).map(|v|format!("model_reasoning_effort = {}\n",json!(v))).unwrap_or_default();
+        std::fs::write(dir.join("traecli.toml"), format!("model = {model}\n{effort}model_provider = \"nautilo\"\n\n[model_providers.nautilo]\nname = \"Nautilo\"\nbase_url = {base}\nenv_key = \"NAUTILO_CONNECTION_API_KEY\"\nwire_api = \"responses\"\n"))?;
+    } else {
+        let models = request.pointer("/instance/models").and_then(Value::as_array).cloned().unwrap_or_default().iter().filter(|m|m["enabled"]!=false).map(|m|json!({
+            "name":format!("nautilo/{}",m["id"].as_str().unwrap_or("")),"context_window":m["contextWindow"].as_u64().unwrap_or(128_000),
+            "claude":{"model":m["id"],"base_url":base,"api_key":"${NAUTILO_CONNECTION_API_KEY}","max_tokens":16_384}
+        })).collect::<Vec<_>>();
+        let alias = format!("nautilo/{}",model.as_str().unwrap_or(""));
+        let config = json!({"model":{"name":alias},"models":models,"disable_model_failover":true,"failover_models":[]});
+        // JSON is valid YAML and preserves arbitrary model IDs exactly.
+        let text = serde_json::to_string_pretty(&config)?;
+        std::fs::write(dir.join("traecli.yaml"), &text)?;
+        std::fs::write(dir.join("trae_cli.yaml"), &text)?;
+        // Early 1.x builds used the roaming config directory instead.
+        let roaming = home.join("AppData/Roaming/trae_cli");
+        std::fs::create_dir_all(&roaming)?;
+        std::fs::write(roaming.join("trae_cli.yaml"), &text)?;
+        // Invocation overrides take precedence over project model defaults.
+        let mut args = base_args(&request["instance"]);
+        args.extend(["-c".into(),format!("model.name={alias}"),"-c".into(),"disable_model_failover=true".into()]);
+        request["instance"]["baseArgs"] = json!(args);
+        // ACP model values are native aliases, while claude.model and the
+        // host's immutable session retain the exact upstream model ID.
+        request["model"] = json!(alias);
+    }
+    request["env"]["HOME"] = json!(home.to_string_lossy());
+    request["env"]["USERPROFILE"] = json!(home.to_string_lossy());
+    request["env"]["TRAE_HOME"] = json!(dir.to_string_lossy());
+    request["env"]["APPDATA"] = json!(home.join("AppData/Roaming").to_string_lossy());
+    request["env"]["LOCALAPPDATA"] = json!(home.join("AppData/Local").to_string_lossy());
+    request["env"]["XDG_CONFIG_HOME"] = json!(home.join(".config").to_string_lossy());
+    Ok(())
 }
 
 // ---------------------------------------------------------------- plain CLI
@@ -186,6 +383,14 @@ fn trae_cli_args(instance: &Value, request: &Value) -> Vec<String> {
     args.push(request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string());
     args.push("--working-dir".to_string());
     args.push(request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string());
+    if let Some(path) = request.pointer("/env/NAUTILO_TRAE_TRAJECTORY").and_then(Value::as_str) {
+        args.extend(["--trajectory-file".into(),path.into()]);
+    }
+    if instance.pointer("/providerOptions/runtimeConnectionId").is_some() {
+        args.extend(["--provider".into(),"nautilo".into(),"--model".into(),request["model"].as_str().unwrap_or("").into(),
+            "--config-file".into(),request["env"]["TRAE_CONFIG_FILE"].as_str().unwrap_or("").into()]);
+        return args;
+    }
     if let Some(model) = request.get("model").and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty()) {
         match model.find('/') {
             Some(slash) if slash > 0 => {
@@ -216,17 +421,20 @@ fn clean_trae_cli_text(value: &str) -> String {
         .to_string()
 }
 
-async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSender<Value>) -> anyhow::Result<()> {
+async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSender<Value>, runs: &Mutex<HashMap<String, Option<ProcessHandle>>>, run_id: &str) -> anyhow::Result<()> {
     let mut env: HashMap<String, String> = request
         .get("env")
         .and_then(Value::as_object)
         .map(|env| env.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
         .unwrap_or_default();
     env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
-    let executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "traecli".to_string());
+    env.insert("PYTHONUTF8".to_string(), "1".to_string());
+    env.insert("PYTHONIOENCODING".to_string(), "utf-8".to_string());
+    let mut executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "trae-cli".to_string());
+    let mut args = trae_cli_args(instance, request);
     let started = process::start(&ProcessRequest {
         command: executable,
-        args: trae_cli_args(instance, request),
+        args,
         cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
         env: Some(env),
         timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
@@ -234,15 +442,32 @@ async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSen
         max_output_bytes: Some(request.get("maxOutputBytes").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20 * 1024 * 1024)),
         ..Default::default()
     })?;
+    register_process(runs, run_id, started.handle.clone()).await?;
     started.handle.end_stdin();
     let mut stdout = String::new();
     let mut stderr = String::new();
+    let mut pending = String::new();
+    let mut bridge_ready = false;
+    let mut streamed_message = false;
+    let mut streamed_usage = false;
     let mut events = started.events;
     while let Some(event) = events.recv().await {
         match event {
             ProcessEvent::Stdout(text) => {
-                stdout.push_str(&text);
-                let _ = sender.send(json!({ "kind": "raw", "stream": "stdout", "text": text }));
+                pending.push_str(&text);
+                while let Some(end) = pending.find('\n') {
+                    let line: String = pending.drain(..=end).collect();
+                    if let Some(frame) = line.trim().strip_prefix("@nautilo-event:") {
+                        let event: Value = serde_json::from_str(frame)?;
+                        if event["kind"] == "nautilo_ready" { bridge_ready = true; continue; }
+                        streamed_message |= event["kind"] == "message";
+                        streamed_usage |= event["kind"] == "usage";
+                        let _ = sender.send(event);
+                    } else {
+                        stdout.push_str(&line);
+                        let _ = sender.send(json!({"kind":"raw","stream":"stdout","text":line}));
+                    }
+                }
             }
             ProcessEvent::Stderr(text) => {
                 stderr.push_str(&text);
@@ -251,7 +476,16 @@ async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSen
             ProcessEvent::Exit { exit_code, .. } => {
                 let text = clean_trae_cli_text(&stdout);
                 if exit_code == Some(0) {
-                    if !text.is_empty() {
+                    anyhow::ensure!(bridge_ready, "Trae did not load the conversation bridge; check that the configured executable uses the native Python environment");
+                    if let Some(path) = request.pointer("/env/NAUTILO_TRAE_TRAJECTORY").and_then(Value::as_str) {
+                        let trajectory: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+                        anyhow::ensure!(trajectory["success"]==true,"Trae Agent did not complete the task; check the configured model and execution result");
+                        let answer = trajectory["final_result"].as_str().or_else(||trajectory["llm_interactions"].as_array()?.iter().rev().find_map(|i|i["response"]["content"].as_str())).unwrap_or("");
+                        anyhow::ensure!(!answer.trim().is_empty(),"Trae Agent returned no assistant response");
+                        if !streamed_message { let _ = sender.send(json!({"kind":"message","phase":"completed","text":answer})); }
+                        let totals = trajectory["llm_interactions"].as_array().into_iter().flatten().fold((0_u64,0_u64),|sum,item|(sum.0+item["response"]["usage"]["input_tokens"].as_u64().unwrap_or(0),sum.1+item["response"]["usage"]["output_tokens"].as_u64().unwrap_or(0)));
+                        if !streamed_usage { let _ = sender.send(json!({"kind":"usage","usageScope":"turn","inputTokensIncludesCache":false,"inputTokens":totals.0,"outputTokens":totals.1})); }
+                    } else if !text.is_empty() {
                         let _ = sender.send(json!({ "kind": "message", "phase": "completed", "text": text }));
                     }
                     let _ = sender.send(json!({ "kind": "status", "phase": "turn_completed" }));
@@ -267,7 +501,10 @@ async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSen
                         }
                     };
                     let _ = sender.send(json!({ "kind": "status", "phase": "turn_failed" }));
-                    let _ = sender.send(json!({ "kind": "error", "message": detail.chars().take(2_000).collect::<String>() }));
+                    // Python prints the exception reason at the end of a
+                    // traceback. Preserve that reason rather than only paths.
+                    let detail = detail.chars().rev().take(2_000).collect::<String>().chars().rev().collect::<String>();
+                    let _ = sender.send(json!({ "kind": "error", "message": detail }));
                 }
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": exit_code }));
                 return Ok(());
@@ -299,6 +536,8 @@ async fn acp_run(
     resume: Option<String>,
     sender: mpsc::UnboundedSender<Value>,
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
+    runs: &Mutex<HashMap<String, Option<ProcessHandle>>>,
+    run_id: &str,
 ) -> anyhow::Result<()> {
     let mut env: HashMap<String, String> = request
         .get("env")
@@ -333,10 +572,12 @@ async fn acp_run(
         "clientInfo": { "name": "Nautilo", "version": "0.1.0" }
     });
     let mut started = spawn_acp(&["acp", "serve"])?;
+    register_process(runs, run_id, started.handle.clone()).await?;
     let mut rpc = JsonRpcClient::new(started.handle.clone(), started.events);
     if rpc.request("initialize", initialize.clone()).await.is_err() {
         started.handle.cancel().await;
         started = spawn_acp(&["acp"])?;
+        register_process(runs, run_id, started.handle.clone()).await?;
         rpc = JsonRpcClient::new(started.handle.clone(), started.events);
         rpc.request("initialize", initialize).await?;
     }
@@ -377,7 +618,7 @@ async fn acp_run(
                 }
                 Some(JsonRpcEvent::Request { id, method, params }) => {
                     if method == "session/request_permission" {
-                        answer_acp_permission(&rpc, &id, &params, &interactions, "").await;
+                        answer_acp_permission(&rpc, &id, &params, &interactions, run_id).await;
                     } else {
                         rpc.respond_error(&id, -32601, &format!("Nautilo does not support ACP request {method}"));
                     }
@@ -392,7 +633,11 @@ async fn acp_run(
             Err(_) => anyhow::bail!("session/load channel closed"),
         }
     } else {
-        rpc.request(session_method, session_params).await?
+        match session_result.await {
+            Ok(Ok(value)) => value,
+            Ok(Err(message)) => anyhow::bail!(message),
+            Err(_) => anyhow::bail!("session/new channel closed"),
+        }
     };
     let session_id = session_response
         .get("sessionId")
@@ -404,11 +649,11 @@ async fn acp_run(
         anyhow::bail!("TRAE CLI ACP did not return a session id");
     };
     let _ = sender.send(json!({ "kind": "session", "providerSessionId": session_id }));
-    apply_acp_config(&rpc, &session_id, &session_response, request).await;
+    apply_acp_config(&rpc, &session_id, &session_response, request).await?;
     let _ = sender.send(json!({ "kind": "status", "phase": "turn_started" }));
     let (prompt_id, prompt_result) = rpc.request_with_id(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": request.get("prompt").and_then(Value::as_str).unwrap_or("") }] }),
+        json!({ "sessionId": session_id, "prompt": agenthub_plugin_sdk::images::acp_prompt(request)? }),
     );
     tokio::spawn(async move {
         let _ = prompt_result.await;
@@ -450,11 +695,17 @@ async fn acp_run(
                     let _ = sender.send(json!({ "kind": "thinking", "phase": "completed", "messageId": state.thinking_id, "text": "" }));
                 }
                 let _ = sender.send(json!({ "kind": "status", "phase": if error.is_some() { "turn_failed" } else { "turn_completed" } }));
-                process.cancel().await;
-                let _ = sender.send(match error {
-                    Some(error) => json!({ "kind": "error", "message": error.to_string() }),
-                    None => json!({ "kind": "exit", "exitCode": 0 }),
-                });
+                let failed = error.is_some();
+                if let Some(error) = error {
+                    let message = if error.to_string().contains("keyring") && request.pointer("/instance/providerOptions/runtimeConnectionId").is_some() {
+                        "当前安装的 Trae CLI 在执行自定义 API 前仍要求原生登录，但没有找到其登录凭据。请完成此 CLI 的登录，或为 Trae 插件指定支持直接 API 的 trae-agent 可执行文件。".to_string()
+                    } else { error.to_string() };
+                    let _ = sender.send(json!({ "kind": "error", "message": message }));
+                }
+                let _ = sender.send(json!({ "kind": "exit", "exitCode": if failed { 1 } else { 0 } }));
+                // Report the completed turn independently of CLI shutdown;
+                // background providers must not hide an actionable failure.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), process.cancel()).await;
                 return Ok(());
             }
             JsonRpcEvent::Response { .. } => {}
@@ -520,8 +771,8 @@ fn acp_mcp_servers(request: &Value) -> Vec<Value> {
 }
 
 /// Applies session model / reasoning effort through ACP configOptions.
-async fn apply_acp_config(rpc: &JsonRpcClient, session_id: &str, response: &Value, request: &Value) {
-    let options = response.get("configOptions").and_then(Value::as_array).cloned().unwrap_or_default();
+async fn apply_acp_config(rpc: &JsonRpcClient, session_id: &str, response: &Value, request: &Value) -> anyhow::Result<()> {
+    let mut options = response.get("configOptions").and_then(Value::as_array).cloned().unwrap_or_default();
     let selections: [(Option<String>, [&str; 3]); 2] = [
         (request.get("model").and_then(Value::as_str).map(str::to_string), ["model", "", ""]),
         (request.get("reasoningEffort").and_then(Value::as_str).map(str::to_string), ["thinking", "reasoning", "effort"]),
@@ -539,11 +790,24 @@ async fn apply_acp_config(rpc: &JsonRpcClient, session_id: &str, response: &Valu
             hints.iter().any(|hint| !hint.is_empty() && haystack.contains(hint))
         });
         if let Some(id) = option.and_then(|o| o.get("id")).and_then(Value::as_str) {
-            let _ = rpc
+            let result = rpc
                 .request("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": value }))
-                .await;
+                .await.map_err(|error| anyhow::anyhow!("Trae rejected {id}={value}: {error}"))?;
+            if let Some(updated) = result["configOptions"].as_array() { options = updated.clone(); }
+        } else {
+            let is_model = hints[0] == "model";
+            let marker = if is_model {"NAUTILO_BRIDGE_MODEL"} else {"NAUTILO_BRIDGE_EFFORT"};
+            if request["env"][marker].as_str() == Some(value.as_str()) { continue; }
+            if is_model && response.pointer("/models/currentModelId").and_then(Value::as_str) == Some(value.as_str()) { continue; }
+            if is_model && response.pointer("/models/availableModels").and_then(Value::as_array)
+                .is_some_and(|models|models.iter().any(|model|model["modelId"] == value)) {
+                rpc.request("session/set_model",json!({"sessionId":session_id,"modelId":value})).await?;
+            } else {
+                anyhow::bail!("Trae did not advertise a way to apply {}={value}", if is_model {"model"} else {"reasoning effort"});
+            }
         }
     }
+    Ok(())
 }
 
 async fn answer_acp_permission(
@@ -877,4 +1141,32 @@ fn parse_tool_call(update: &Value, state: &mut TraeAcpParseState) -> Vec<Value> 
 #[tokio::main]
 async fn main() {
     agenthub_plugin_sdk::serve(TraePlugin::new()).await;
+}
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn connection_overlay_preserves_native_configuration() {
+        let path = std::env::temp_dir().join(format!("nautilo-trae-audit-{}.json", std::process::id()));
+        let native = json!({
+            "agents":{"trae_agent":{"model":"original","tools":["bash"]},"reviewer":{"model":"original"}},
+            "models":{"original":{"model":"original","max_tokens":4000}},
+            "model_providers":{"original":{"provider":"openai"}},
+            "lakeview":{"model":"original","custom":true},
+            "mcp_servers":{"existing":{"command":"fixture"}}
+        });
+        std::fs::write(&path, native.to_string()).unwrap();
+        let result = open_source_configuration(&json!({"cwd":std::env::temp_dir(),"model":"chosen",
+            "env":{"TRAE_CONFIG_FILE":path}}), json!("http://127.0.0.1:1234"));
+        std::fs::remove_file(path).unwrap();
+        let result = result.unwrap();
+        assert_eq!(result["agents"]["reviewer"], native["agents"]["reviewer"]);
+        assert_eq!(result["agents"]["trae_agent"]["tools"], json!(["bash"]));
+        assert_eq!(result["models"]["original"], native["models"]["original"]);
+        assert_eq!(result["models"]["selected"]["max_tokens"], 4000);
+        assert_eq!(result["models"]["selected"]["model"], "chosen");
+        assert_eq!(result["model_providers"]["original"], native["model_providers"]["original"]);
+        assert_eq!(result["lakeview"]["custom"], true);
+        assert_eq!(result["mcp_servers"], native["mcp_servers"]);
+    }
 }

@@ -3,10 +3,22 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CoreDaemon } from "../dist/index.js";
+import { CoreDaemon, buildSessionTurnContext } from "../dist/index.js";
 import { readWorkspaceArtifact } from "../dist/application/artifact-read.js";
 
 const now = new Date().toISOString();
+
+test("workspace guidance applies on new and recovered threads, not synced turns", () => {
+  const base = { currentText: "edit code and make a report", artifacts: [], workspaceRoot: "/workspace" };
+  for (const messages of [[], [{ id: "1", sender: "user", text: "previous" }]]) {
+    const result = buildSessionTurnContext({ ...base, messages, recoverProviderContext: true });
+    assert.match(result.prompt, /software development and document production/);
+    assert.doesNotMatch(result.prompt, /not modifying a code repository|pip install|python -m venv/);
+    assert.match(result.prompt, /edit code and make a report/);
+  }
+  const synced = buildSessionTurnContext({ ...base, messages: [], recoverProviderContext: false });
+  assert.equal(synced.prompt, base.currentText);
+});
 
 function waitFor(condition, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
@@ -45,7 +57,9 @@ test("work mode injects deliverable guidance on the first turn", async () => {
 
   await daemon.sessions.send({ sessionId: session.id, text: "make a quarterly report" });
   await waitFor(() => prompts.length === 1);
-  assert.match(prompts[0], /<agenthub_work_mode>/);
+  assert.match(prompts[0], /<agenthub_workspace>/);
+  assert.match(prompts[0], /software development and document production/);
+  assert.doesNotMatch(prompts[0], /not modifying a code repository/);
   assert.ok(prompts[0].includes(workspace));
   assert.match(prompts[0], /make a quarterly report/);
   await waitFor(() => daemon.database.runs.list().every((run) => ["completed", "failed", "timed_out", "crashed", "cancelled"].includes(run.status)));

@@ -1,6 +1,6 @@
 const SECRET_FIELD = /(?:api[_-]?key|token|secret|password|authorization|credential)/i;
 const SECRET_PATTERN = /\b(?:sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~-]{8,})\b/gi;
-const SAFE_TELEMETRY_FIELD = /^(?:input|output|cachedInput|reasoningOutput)Tokens$/;
+const SAFE_TELEMETRY_FIELD = /^(?:(?:input|output|cachedInput|cacheCreationInput|reasoningOutput)Tokens|inputTokensIncludesCache)$/;
 
 export class RedactionService {
   constructor(private readonly values: () => string[] = () => []) {}

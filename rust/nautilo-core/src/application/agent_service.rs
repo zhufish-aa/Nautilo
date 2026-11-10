@@ -8,7 +8,7 @@ use crate::adapters::model_config::{discover_openai_compatible_models, merge_ins
 use crate::adapters::registry::AdapterRegistry;
 use crate::database::{lock, Database, Repositories};
 use crate::errors::{invalid, now_iso, CoreResult};
-use crate::runtime::security::environment_policy::{build_environment, provider_environment_passthrough};
+use crate::runtime::security::environment_policy::{build_environment, provider_environment_passthrough, isolate_login_profile, login_profile_directory};
 use crate::runtime::security::CredentialService;
 
 #[derive(Clone)]
@@ -32,9 +32,31 @@ impl AgentService {
         Repositories::new(&lock(&self.db).raw).agents().list_default()
     }
 
+    pub async fn list_modes(&self, instance_id: &str, cwd: Option<&str>) -> CoreResult<Value> {
+        let instance=self.list()?.into_iter().find(|i|i["id"]==instance_id).ok_or_else(||invalid("agentInstanceId","Harness instance not found"))?;
+        let adapter=self.adapters.find(instance["providerId"].as_str().unwrap_or(""))
+            .ok_or_else(||invalid("providerId","Harness plugin is not loaded"))?;
+        if adapter.descriptor()["modeDiscovery"]!=true {return Ok(json!({"modes":[]}));}
+        let env=build_environment(None,provider_environment_passthrough(&instance,Some(&adapter.descriptor())));
+        adapter.list_modes(&instance,Some(&json!({"env":env,"cwd":cwd}))).await
+    }
+
     pub fn upsert(&self, instance: &Value) -> CoreResult<Value> {
         if instance.get("executable").and_then(Value::as_str).unwrap_or("").trim().is_empty() {
             return Err(invalid("executable", ""));
+        }
+        let directory = login_profile_directory(instance)?;
+        {
+            let db = lock(&self.db);
+            let repositories = Repositories::new(&db.raw);
+            let id = instance.get("id").and_then(Value::as_str).unwrap_or("");
+            if let Some(current) = repositories.agents().get(id)? {
+                if (directory != login_profile_directory(&current)? || instance.get("providerId") != current.get("providerId"))
+                    && (repositories.sessions().list_all()?.iter().any(|session| session.get("agentInstanceId").and_then(Value::as_str) == Some(id))
+                        || repositories.runs().list()?.iter().any(|run| run.get("agentInstanceId").and_then(Value::as_str) == Some(id))) {
+                    return Err(invalid("loginProfileDirectory", "Create a new instance to switch accounts; existing sessions retain their account"));
+                }
+            }
         }
         let updated_at = instance.get("updatedAt").and_then(Value::as_str).unwrap_or("").to_string();
         Repositories::new(&lock(&self.db).raw).agents().save(instance, &updated_at)?;
@@ -184,7 +206,7 @@ impl AgentService {
         }
         let mut additions = provider_environment_passthrough(&instance, descriptor.as_ref());
         additions.extend(credential_environment.clone());
-        let context = json!({ "env": build_environment(None, additions) });
+        let context = json!({ "env": isolate_login_profile(&instance, build_environment(None, additions))? });
 
         // Instance-editor quick fetch must honor the unsaved endpoint currently
         // visible in the form. Once the user supplies a base URL, never
@@ -210,7 +232,7 @@ impl AgentService {
                 Err(error) => Ok(unavailable(error.to_string())),
             };
         }
-        match self.adapters.list_models(&instance, Some(&context)).await {
+        match self.adapters.list_models_with_refresh(&instance, Some(&context), true).await {
             Ok(catalog) => Ok(catalog),
             // The TS registry merges the instance's manually configured models
             // into every catalog, including discovery failures — otherwise

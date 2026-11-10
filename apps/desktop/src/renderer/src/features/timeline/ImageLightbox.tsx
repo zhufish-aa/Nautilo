@@ -22,6 +22,8 @@ export function ImageLightbox(): JSX.Element {
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
 
@@ -33,11 +35,20 @@ export function ImageLightbox(): JSX.Element {
   useEffect(() => {
     if (!image) return;
     resetView();
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") close();
+      if (event.key === "Escape") { event.stopPropagation(); close(); }
+      if (event.key === "Tab") {
+        const buttons = dialogRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
+        if (!buttons?.length) return;
+        const first = buttons[0]; const last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => { window.removeEventListener("keydown", onKeyDown); if (previous?.isConnected) previous.focus(); };
   }, [image, close, resetView]);
 
   // React attaches wheel listeners as passive; a native listener lets us preventDefault.
@@ -56,7 +67,7 @@ export function ImageLightbox(): JSX.Element {
     return () => stage.removeEventListener("wheel", onWheel);
   }, [image]);
 
-  const toolbarButton = "flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/15 hover:text-white";
+  const toolbarButton = "flex h-8 w-8 items-center justify-center rounded-lg text-ink-2 outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors hover:bg-card-hover hover:text-ink";
 
   return createPortal(
     <AnimatePresence>
@@ -66,21 +77,24 @@ export function ImageLightbox(): JSX.Element {
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.15 }}
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/25"
           onClick={close}
+          ref={dialogRef}
           role="dialog"
           aria-modal="true"
           aria-label={image.name ?? t("sessions.media.enlargeHint")}
         >
+          <div className="relative flex h-[80vh] w-[88vw] max-w-6xl flex-col overflow-hidden rounded-2xl border border-line bg-panel shadow-pop" onClick={(event) => event.stopPropagation()}>
           <div
-            className="absolute right-4 top-4 z-10 flex items-center gap-1 rounded-xl border border-white/10 bg-black/50 p-1"
+            className="z-10 flex shrink-0 flex-wrap items-center gap-1 border-b border-line px-4 py-3"
             onClick={(event) => event.stopPropagation()}
           >
+            <span className="mr-auto min-w-0 max-w-[40%] truncate text-sm font-medium">{image.name}</span>
             <button type="button" className={toolbarButton} title={t("sessions.media.zoomOut")} aria-label={t("sessions.media.zoomOut")}
               onClick={() => setZoom((value) => clampZoom(value / 1.25))}>
               <ZoomOut className="h-4 w-4" aria-hidden />
             </button>
-            <span className="w-12 text-center font-mono text-[11px] text-white/70">{Math.round(zoom * 100)}%</span>
+            <span className="w-12 text-center font-mono text-xs text-ink-3">{Math.round(zoom * 100)}%</span>
             <button type="button" className={toolbarButton} title={t("sessions.media.zoomIn")} aria-label={t("sessions.media.zoomIn")}
               onClick={() => setZoom((value) => clampZoom(value * 1.25))}>
               <ZoomIn className="h-4 w-4" aria-hidden />
@@ -88,7 +102,7 @@ export function ImageLightbox(): JSX.Element {
             <button type="button" className={toolbarButton} title={t("sessions.media.zoomReset")} aria-label={t("sessions.media.zoomReset")} onClick={resetView}>
               <RotateCcw className="h-4 w-4" aria-hidden />
             </button>
-            <span className="mx-0.5 h-5 w-px bg-white/15" aria-hidden />
+            <span className="mx-0.5 h-5 w-px bg-line" aria-hidden />
             <button type="button" className={toolbarButton} title={t("sessions.media.copyImage")} aria-label={t("sessions.media.copyImage")}
               onClick={() => void copyImageToClipboard(image, t)}>
               <Copy className="h-4 w-4" aria-hidden />
@@ -103,15 +117,15 @@ export function ImageLightbox(): JSX.Element {
                 <FolderOpen className="h-4 w-4" aria-hidden />
               </button>
             )}
-            <span className="mx-0.5 h-5 w-px bg-white/15" aria-hidden />
-            <button type="button" className={toolbarButton} title={t("sessions.media.closePreview")} aria-label={t("sessions.media.closePreview")} onClick={close}>
+            <span className="mx-0.5 h-5 w-px bg-line" aria-hidden />
+            <button ref={closeRef} type="button" className={toolbarButton} title={t("sessions.media.closePreview")} aria-label={t("sessions.media.closePreview")} onClick={close}>
               <X className="h-4 w-4" aria-hidden />
             </button>
           </div>
 
           <div
             ref={stageRef}
-            className={cn("flex h-full w-full items-center justify-center overflow-hidden", zoom > 1 && (dragging ? "cursor-grabbing" : "cursor-grab"))}
+            className={cn("flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden p-6", zoom > 1 && (dragging ? "cursor-grabbing" : "cursor-grab"))}
             onClick={(event) => {
               event.stopPropagation();
               // Clicks on empty stage area close; clicks on the image itself don't.
@@ -139,10 +153,8 @@ export function ImageLightbox(): JSX.Element {
             }}
             onDoubleClick={() => (zoom === 1 ? setZoom(2.5) : resetView())}
           >
-            <motion.img
+            <img
               key={image.src}
-              initial={{ scale: 0.96, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
               src={image.src}
               alt={image.name ?? ""}
               draggable={false}
@@ -150,16 +162,12 @@ export function ImageLightbox(): JSX.Element {
                 event.preventDefault();
                 void popupImageMenu(image, t);
               }}
-              className="max-h-[88vh] max-w-[92vw] select-none object-contain shadow-2xl"
+              className="max-h-full max-w-full select-none object-contain"
               style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }}
             />
           </div>
 
-          {image.name && (
-            <div className="pointer-events-none absolute bottom-4 left-1/2 max-w-[80vw] -translate-x-1/2 truncate rounded-lg bg-black/50 px-3 py-1.5 text-xs text-white/80">
-              {image.name}
-            </div>
-          )}
+          </div>
         </motion.div>
       )}
     </AnimatePresence>,

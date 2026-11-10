@@ -2,6 +2,7 @@ export type AgentHubErrorCode =
   | "AGENT_NOT_FOUND"
   | "AGENT_NOT_AUTHENTICATED"
   | "PROVIDER_VERSION_UNSUPPORTED"
+  | "PROVIDER_COMMAND_FAILED"
   | "RUN_START_FAILED"
   | "RUN_TIMEOUT"
   | "RUN_IDLE_TIMEOUT"
@@ -47,6 +48,7 @@ export const errorCatalog: Record<AgentHubErrorCode, ErrorDescriptor> = {
   AGENT_NOT_FOUND: { message: "找不到指定 Agent。", retryable: false, retryStrategy: "user_action", userAction: "检查 Agent 和团队成员配置。" },
   AGENT_NOT_AUTHENTICATED: { message: "Agent 尚未完成登录。", retryable: false, retryStrategy: "user_action", userAction: "先在对应 CLI 中完成登录。" },
   PROVIDER_VERSION_UNSUPPORTED: { message: "当前 Provider 版本不受支持。", retryable: false, retryStrategy: "user_action", userAction: "升级 CLI 或调整兼容配置。" },
+  PROVIDER_COMMAND_FAILED: { message: "指令执行失败。", retryable: false, retryStrategy: "user_action", userAction: "查看 Harness 返回的错误详情。" },
   RUN_START_FAILED: { message: "Agent 进程启动失败。", retryable: true, retryStrategy: "backoff", userAction: "检查可执行路径、权限和 CLI 安装。" },
   RUN_TIMEOUT: { message: "Agent 运行超时。", retryable: true, retryStrategy: "backoff", userAction: "重试或增加任务超时时间。" },
   RUN_IDLE_TIMEOUT: { message: "Agent 长时间没有输出。", retryable: true, retryStrategy: "backoff", userAction: "检查是否等待输入，或重试运行。" },

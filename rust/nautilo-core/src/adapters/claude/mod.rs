@@ -2,6 +2,8 @@
 //! Spawns `claude -p --output-format stream-json --verbose` and parses the
 //! event stream, with the runtime MCP bridge for tools/permission prompts.
 
+mod native_experience;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -16,10 +18,15 @@ use crate::process_runtime::{ProcessRequest, ProcessRuntime};
 use crate::adapters::runtime_mcp_bridge::{start_runtime_mcp_bridge, PERMISSION_PROMPT_TOOL_NAME};
 
 pub mod models;
+mod private_config;
+pub(crate) mod api_proxy;
+mod api_stream;
+mod resident;
+#[cfg(test)] pub(super) use resident::{launch as resident_test_launch, release_session as resident_test_release};
 
 pub const CLAUDE_RUNTIME_MCP_SERVER: &str = "agenthub";
 const CLAUDE_PERMISSION_MODES: [&str; 6] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "dontAsk"];
-const CLAUDE_ENV_OVERRIDE_KEYS: [&str; 3] = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"];
+const CLAUDE_ENV_OVERRIDE_KEYS: [&str; 9] = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"];
 
 fn text_of(value: &Value) -> Option<String> {
     value.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
@@ -146,7 +153,10 @@ pub fn build_claude_start_args(instance: &Value, prompt: &str, request: Option<&
         .map(|args| args.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
     if !base_args.is_empty() {
-        return base_args.into_iter().chain(std::iter::once(prompt.to_string())).collect();
+        let mut native = instance.clone(); native["baseArgs"] = json!([]);
+        let mut managed = build_claude_start_args(&native, prompt, request); managed.pop();
+        let mut args = crate::adapters::process_adapter::merge_cli_args(base_args, managed);
+        args.push(prompt.to_string()); return args;
     }
     let mut args = vec![
         "-p".to_string(),
@@ -175,10 +185,10 @@ pub fn build_claude_resume_args(
         .map(|args| args.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
     if !base_args.is_empty() {
-        return base_args
-            .into_iter()
-            .chain(["--resume".to_string(), session_id.to_string(), prompt.to_string()])
-            .collect();
+        let mut native = instance.clone(); native["baseArgs"] = json!([]);
+        let mut managed = build_claude_resume_args(&native, session_id, prompt, request); managed.pop();
+        let mut args = crate::adapters::process_adapter::merge_cli_args(base_args, managed);
+        args.push(prompt.to_string()); return args;
     }
     let mut args = vec![
         "-p".to_string(),
@@ -201,6 +211,7 @@ pub fn build_claude_resume_args(
 
 #[derive(Default)]
 pub struct ClaudeParseState {
+    subagents: HashMap<String, Box<ClaudeParseState>>,
     /// tool_use_id → tool name, so tool_result completions keep their identity.
     tool_names: HashMap<String, String>,
     /// Current streaming message id (partial messages mode).
@@ -293,6 +304,7 @@ fn file_diff(tool_name: &str, input: &Value) -> Option<Value> {
 
 fn parse_init(event: &Value, raw: &Value) -> Vec<AdapterEvent> {
     let mut events = vec![];
+    events.push(AdapterEvent::Status{phase:"runtime_capabilities".into(),raw:Some(json!({"providerId":"claude-code","source":"native-handshake","transport":"stream-json","cliVersion":event["claude_code_version"],"nativeSessionId":event["session_id"],"commands":event["slash_commands"]}))});
     if let Some(session_id) = event.get("session_id").and_then(text_of) {
         events.push(AdapterEvent::Session { provider_session_id: session_id, raw: Some(raw.clone()) });
     }
@@ -367,19 +379,26 @@ fn parse_assistant(event: &Value, state: &mut ClaudeParseState, raw: &Value, sub
         }
     }
     // Per-request usage is the only truthful context-footprint source; the
-    // result event's usage is cumulative across the CLI session. Sub-agent
+    // result event's usage is cumulative across this CLI execution. Sub-agent
     // requests must not move the indicator.
     if subagent_dispatch_id.is_none() {
         let usage = message.get("usage").cloned().unwrap_or(Value::Null);
         let input_tokens = usage.get("input_tokens").and_then(number_of);
         let cached = usage.get("cache_read_input_tokens").and_then(number_of).unwrap_or(0)
             + usage.get("cache_creation_input_tokens").and_then(number_of).unwrap_or(0);
-        if input_tokens.is_some() || cached > 0 {
+        if input_tokens.is_some() || usage.get("cache_read_input_tokens").and_then(number_of).is_some() || usage.get("cache_creation_input_tokens").and_then(number_of).is_some() {
             let context_used = input_tokens.unwrap_or(0) + cached;
             state.last_context_used = Some(context_used);
             events.push(AdapterEvent::Usage {
+                usage_scope: Some("context".to_string()),
+                usage_key: message.get("id").and_then(text_of),
+                input_tokens_includes_cache: Some(false),
+                cache_creation_input_tokens: usage.get("cache_creation_input_tokens").and_then(number_of),
+                reported_cost: None,
+                estimated_cost: None,
+                currency: None,
                 input_tokens,
-                cached_input_tokens: if cached > 0 { Some(cached) } else { None },
+                cached_input_tokens: usage.get("cache_read_input_tokens").and_then(number_of),
                 output_tokens: usage.get("output_tokens").and_then(number_of),
                 reasoning_output_tokens: None,
                 context_used: Some(context_used),
@@ -435,13 +454,18 @@ fn parse_result(event: &Value, state: &mut ClaudeParseState, raw: &Value) -> Vec
     // result.usage totals are cumulative; contextUsed stays with the latest
     // single request tracked in parse_assistant.
     let input_tokens = usage.get("input_tokens").and_then(number_of);
-    let cached = usage.get("cache_read_input_tokens").and_then(number_of).unwrap_or(0)
-        + usage.get("cache_creation_input_tokens").and_then(number_of).unwrap_or(0);
     let output_tokens = usage.get("output_tokens").and_then(number_of);
-    if input_tokens.is_some() || cached > 0 || output_tokens.is_some() {
+    if input_tokens.is_some() || usage.get("cache_read_input_tokens").is_some() || usage.get("cache_creation_input_tokens").is_some() || output_tokens.is_some() || event.get("total_cost_usd").and_then(Value::as_f64).is_some() {
         events.push(AdapterEvent::Usage {
+            usage_scope: Some("turn".to_string()),
+            usage_key: None,
+            input_tokens_includes_cache: Some(false),
+            cache_creation_input_tokens: usage.get("cache_creation_input_tokens").and_then(number_of),
+            reported_cost: event.get("total_cost_usd").and_then(Value::as_f64),
+            estimated_cost: None,
+            currency: event.get("total_cost_usd").and_then(Value::as_f64).map(|_| "USD".to_string()),
             input_tokens,
-            cached_input_tokens: if cached > 0 { Some(cached) } else { None },
+            cached_input_tokens: usage.get("cache_read_input_tokens").and_then(number_of),
             output_tokens,
             reasoning_output_tokens: None,
             context_used: state.last_context_used,
@@ -545,15 +569,21 @@ pub fn parse_claude_json_event(value: &Value, state: &SharedClaudeParseState) ->
     // Sub-agent activity carries parent_tool_use_id pointing at the
     // dispatching Agent/Task tool call.
     let subagent_dispatch_id = value.get("parent_tool_use_id").and_then(text_of);
-    let mut state = state.lock().unwrap();
+    let mut root = state.lock().unwrap();
+    if event_type=="result" {
+        if let Some(parent)=subagent_dispatch_id.as_ref() {
+            root.subagents.remove(parent);
+            return vec![AdapterEvent::Tool {call_id:Some(parent.clone()),name:"Agent".into(),phase:Some("completed".into()),input:None,output:value.get("result").cloned(),success:Some(value["is_error"]!=true),file_diff:None,subagent_dispatch_id:None,raw:Some(value.clone())}];
+        }
+    }
+    let state=if let Some(parent)=subagent_dispatch_id.as_ref(){root.subagents.entry(parent.clone()).or_default().as_mut()}else{&mut *root};
     match event_type {
         "system" if value.get("subtype").and_then(Value::as_str) == Some("init") => parse_init(value, value),
-        "stream_event" => parse_stream_event(value, &mut state, value, subagent_dispatch_id),
-        "assistant" => parse_assistant(value, &mut state, value, subagent_dispatch_id),
-        "user" => parse_user(value, &mut state, value, subagent_dispatch_id),
+        "stream_event" => parse_stream_event(value, state, value, subagent_dispatch_id),
+        "assistant" => parse_assistant(value, state, value, subagent_dispatch_id),
+        "user" => parse_user(value, state, value, subagent_dispatch_id),
         "result" => {
-            let events = parse_result(value, &mut state, value);
-            state.tool_names.clear();
+            let events = parse_result(value, state, value);
             state.stream_message_id = None;
             state.stream_blocks.clear();
             events
@@ -679,10 +709,7 @@ pub fn build_claude_permission_prompt_handler(
 
 // ---------------------------------------------------------------- the adapter
 
-pub struct ClaudeCodeAdapter {
-    /// Fallback parse state for the custom baseArgs path.
-    fallback_state: SharedClaudeParseState,
-}
+pub struct ClaudeCodeAdapter;
 
 impl Default for ClaudeCodeAdapter {
     fn default() -> Self {
@@ -692,7 +719,7 @@ impl Default for ClaudeCodeAdapter {
 
 impl ClaudeCodeAdapter {
     pub fn new() -> Self {
-        Self { fallback_state: create_claude_parse_state() }
+        Self
     }
 
     fn capture(command: &str, args: &[String]) -> CoreResult<(String, Option<i32>)> {
@@ -731,6 +758,11 @@ impl ClaudeCodeAdapter {
 
 #[async_trait::async_trait]
 impl AgentCliAdapter for ClaudeCodeAdapter {
+    fn native_capabilities(&self,instance:&Value)->Value {
+        let caps=self.capabilities();
+        let legacy=json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty});
+        agenthub_plugin_sdk::capabilities::describe(self.provider_id(),instance,&agenthub_plugin_sdk::capabilities::with_profile(legacy,native_experience::declarations()))
+    }
     fn provider_id(&self) -> &str {
         "claude-code"
     }
@@ -823,84 +855,25 @@ impl AgentCliAdapter for ClaudeCodeAdapter {
     }
 
     fn start(&self, request: AdapterStartRequest) -> CoreResult<AdapterRun> {
-        let has_base_args = request
-            .instance
-            .get("baseArgs")
-            .and_then(Value::as_array)
-            .is_some_and(|args| !args.is_empty());
-        if has_base_args {
-            // Custom baseArgs take over the whole CLI surface; MCP config
-            // cannot be injected. Parse with the shared fallback state and
-            // fall back to the generic normalizer per line.
-            let state = self.fallback_state.clone();
-            return start_simple_process(request, move |value, _stream| {
-                let parsed = parse_claude_json_event(value, &state);
-                if parsed.is_empty() {
-                    normalize_json(value)
-                } else {
-                    parsed
-                }
-            });
-        }
-        self.launch(request, None)
+        resident::launch(request, None)
     }
-
     fn resume(&self, request: AdapterResumeRequest) -> CoreResult<AdapterRun> {
-        let has_base_args = request
-            .start
-            .instance
-            .get("baseArgs")
-            .and_then(Value::as_array)
-            .is_some_and(|args| !args.is_empty());
-        if has_base_args {
-            let state = self.fallback_state.clone();
-            let session_id = request.provider_session_id;
-            let start_request = request.start;
-            let args = build_claude_resume_args(&start_request.instance, &session_id, &start_request.prompt, None);
-            return start_simple_process_with_args(start_request, args, move |value, _stream| {
-                let parsed = parse_claude_json_event(value, &state);
-                if parsed.is_empty() {
-                    normalize_json(value)
-                } else {
-                    parsed
-                }
-            });
-        }
-        let session_id = request.provider_session_id;
-        self.launch(request.start, Some(session_id))
+        resident::launch(request.start, Some(request.provider_session_id))
     }
-}
 
-/// Simple process launch (no MCP bridge), used by the custom-baseArgs path.
-fn start_simple_process(
-    request: AdapterStartRequest,
-    parse: impl Fn(&Value, &str) -> Vec<AdapterEvent> + Send + Sync + 'static,
-) -> CoreResult<AdapterRun> {
-    let instance = request.instance.clone();
-    let args = build_claude_start_args(&instance, &request.prompt, Some(&request));
-    start_simple_process_with_args(request, args, parse)
-}
+    async fn dispose(&self) { resident::dispose().await; }
+    async fn release_session(&self, request:&AdapterStartRequest)->CoreResult<()> {resident::release_session(request.local_session_id.as_deref().unwrap_or("")).await;Ok(())}
+    async fn native_terminal(&self,mut request:AdapterStartRequest,resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
+        let proxy=api_proxy::ApiProxy::prepare(&mut request)?;
+        let mut args=request.instance["baseArgs"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+        args.extend(model_args(Some(&request)));args.extend(effort_args(Some(&request)));args.extend(claude_permission_args(&request.instance,Some(&request)));
+        args.extend(claude_settings_args(Some(&request)));args.extend(claude_runtime_mcp_args(None,request.mcp_servers.as_deref().unwrap_or(&[])));
+        if let Some(resume)=resume {args.extend(["--resume".into(),resume]);}
+        args.push(String::new());let mut config=private_config::materialize(args).map_err(|error|crate::errors::invalid("terminal",&error.to_string()))?;config.args.pop();
+        let mut env=request.env.unwrap_or_default();if request.reasoning_effort.is_some(){env.entry("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT".into()).or_insert_with(||"1".into());}
+        Ok(crate::runtime::terminal_service::TerminalPlan{command:request.instance["executable"].as_str().unwrap_or("claude").into(),args:config.args.clone(),env:Some(env),cwd:request.cwd,resources:vec![Box::new(config),Box::new(proxy)],provider_session_id:None})
+    }
 
-fn start_simple_process_with_args(
-    request: AdapterStartRequest,
-    args: Vec<String>,
-    parse: impl Fn(&Value, &str) -> Vec<AdapterEvent> + Send + Sync + 'static,
-) -> CoreResult<AdapterRun> {
-    let executable = request.instance.get("executable").and_then(Value::as_str).unwrap_or("claude").to_string();
-    let started = ProcessRuntime::start(&ProcessRequest {
-        command: executable,
-        args,
-        cwd: Some(request.cwd.clone()),
-        env: request.env.clone(),
-        timeout_ms: request.timeout_ms,
-        idle_timeout_ms: request.idle_timeout_ms,
-        max_output_bytes: Some(request.max_output_bytes.unwrap_or(20 * 1024 * 1024)),
-    })
-    .map_err(|error| crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed, error.to_string()))?;
-    let handle = started.handle.clone();
-    handle.end_stdin(None);
-    let events = stream_events(started.events, true, std::sync::Arc::new(parse));
-    Ok(AdapterRun::from_process(events, &handle))
 }
 
 impl ClaudeCodeAdapter {
@@ -919,22 +892,27 @@ impl ClaudeCodeAdapter {
                     pump.await;
                 }
                 Err(error) => {
+                    let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
                     let _ = ready_sender.send(Err(error));
                 }
             }
         });
         let handle_placeholder = shared_handle_slot();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ready_cancelled = cancelled.clone();
         let cancel_slot = handle_placeholder.clone();
         let write_slot = handle_placeholder.clone();
         tokio::spawn(async move {
             if let Ok(Ok(handle)) = ready_receiver.await {
-                *handle_placeholder.lock().unwrap() = Some(handle);
+                *handle_placeholder.lock().unwrap() = Some(handle.clone());
+                if ready_cancelled.load(std::sync::atomic::Ordering::SeqCst) { handle.cancel().await; }
             }
         });
         let run = AdapterRun::new(
             receiver,
             move || {
                 Box::pin(async move {
+                    cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                     let handle = cancel_slot.lock().unwrap().clone();
                     if let Some(handle) = handle {
                         handle.cancel().await;
@@ -956,11 +934,12 @@ fn shared_handle_slot() -> Arc<Mutex<Option<crate::process_runtime::ProcessHandl
 }
 
 async fn launch_inner(
-    request: AdapterStartRequest,
+    mut request: AdapterStartRequest,
     resume_session: Option<String>,
     parse_state: SharedClaudeParseState,
     sender: tokio::sync::mpsc::UnboundedSender<AdapterEvent>,
 ) -> CoreResult<(crate::process_runtime::ProcessHandle, impl std::future::Future<Output = ()>)> {
+    let api_proxy = api_proxy::ApiProxy::prepare(&mut request)?;
     let instance = request.instance.clone();
     let needs_bridge = request.runtime_tools.is_some() || request.request_interaction.is_some();
     let bridge = if needs_bridge {
@@ -985,6 +964,24 @@ async fn launch_inner(
         args.extend(injected);
         args.push(prompt);
     }
+    if let Some(path) = request.output_schema_path.as_deref().or_else(||instance.pointer("/providerOptions/outputSchemaPath").and_then(Value::as_str)) {
+        let path = std::path::Path::new(&request.cwd).join(path);
+        let schema: Value = std::fs::read(&path).map_err(|error|crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed,format!("Unable to read output schema {}: {error}",path.display())))
+            .and_then(|bytes|serde_json::from_slice(&bytes).map_err(|error|crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed,error.to_string())))?;
+        let prompt = args.pop().unwrap_or_default();
+        args.extend(["--json-schema".into(),schema.to_string(),prompt]);
+    }
+    let stdin = if request.local_image_paths.as_ref().is_some_and(|paths| !paths.is_empty()) {
+        let content = super::images::prompt_blocks(&request, true).map_err(|error| crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed, error.to_string()))?;
+        args.pop(); // The prompt is carried by the native user message on stdin.
+        args.extend(["--input-format".to_string(), "stream-json".to_string()]);
+        Some(format!("{}\n",json!({"type":"user","message":{"role":"user","content":content}})))
+    } else { None };
+    let private_config = private_config::materialize(args).map_err(|error| {
+        if let Some(bridge) = &bridge { bridge.close(); }
+        crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed, error.to_string())
+    })?;
+    let args = private_config.args.clone();
     let mut env = request.env.clone().unwrap_or_default();
     // The CLI gates output_config.effort behind a model-name allowlist, so an
     // explicit user effort is silently dropped for other models. Opt out via
@@ -1008,8 +1005,18 @@ async fn launch_inner(
         crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed, error.to_string())
     })?;
     let handle = started.handle.clone();
-    handle.end_stdin(None);
-    let events = stream_events(started.events, true, Arc::new(move |value, _stream| parse_claude_json_event(value, &parse_state)));
+    if let Err(error) = private_config.record_child(handle.pid) {
+        handle.cancel().await;
+        if let Some(bridge) = &bridge { bridge.close(); }
+        return Err(crate::errors::CoreError::reason(crate::errors::ErrorCode::RunStartFailed, error.to_string()));
+    }
+    handle.end_stdin(stdin);
+    let custom_wrapper = instance["baseArgs"].as_array().is_some_and(|args|!args.is_empty());
+    let events = stream_events(started.events, true, Arc::new(move |value, _stream| {
+        let parsed = parse_claude_json_event(value,&parse_state);
+        if parsed.is_empty() && custom_wrapper { normalize_json(value) } else {parsed}
+    }));
+    let cleanup_handle = handle.clone();
     let pump = async move {
         let mut events = events;
         while let Some(event) = events.recv().await {
@@ -1017,9 +1024,59 @@ async fn launch_inner(
                 break;
             }
         }
+        cleanup_handle.cancel().await;
         if let Some(bridge) = bridge {
             bridge.close();
         }
+        drop(private_config);
+        drop(api_proxy);
     };
     Ok((handle, pump))
+}
+
+#[cfg(test)]
+mod usage_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn interleaved_child_streams_keep_their_own_message_and_completion_identity() {
+        let state=create_claude_parse_state();
+        let stream=|parent:Option<&str>,event:Value|json!({"type":"stream_event","parent_tool_use_id":parent,"event":event});
+        parse_claude_json_event(&stream(None,json!({"type":"message_start","message":{"id":"main"}})),&state);
+        parse_claude_json_event(&stream(Some("child"),json!({"type":"message_start","message":{"id":"child-message"}})),&state);
+        let parent=parse_claude_json_event(&stream(None,json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"main text"}})),&state);
+        assert!(parent.iter().any(|event|matches!(event,AdapterEvent::Message{message_id,subagent_dispatch_id,..} if message_id.as_deref()==Some("main") && subagent_dispatch_id.is_none())));
+        let child=parse_claude_json_event(&json!({"type":"result","parent_tool_use_id":"child","session_id":"child-session","is_error":false,"result":"child result"}),&state);
+        assert!(child.iter().all(|event|!matches!(event,AdapterEvent::Session{..}|AdapterEvent::Usage{..}|AdapterEvent::Status{..})));
+        assert!(child.iter().any(|event|matches!(event,AdapterEvent::Tool{call_id,phase,..} if call_id.as_deref()==Some("child") && phase.as_deref()==Some("completed"))));
+    }
+
+    #[test]
+    fn result_preserves_zero_cost_and_separate_cache_categories() {
+        let state = create_claude_parse_state();
+        let events = parse_claude_json_event(&json!({
+            "type": "result", "total_cost_usd": 0,
+            "usage": { "input_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 10, "output_tokens": 0 }
+        }), &state);
+        let usage = events.iter().find(|e| matches!(e, AdapterEvent::Usage { .. })).unwrap();
+        assert!(matches!(usage, AdapterEvent::Usage {
+            usage_scope: Some(scope), input_tokens: Some(0), cached_input_tokens: Some(0),
+            cache_creation_input_tokens: Some(10), input_tokens_includes_cache: Some(false),
+            reported_cost: Some(cost), estimated_cost: None, currency: Some(currency), ..
+        } if scope == "turn" && *cost == 0.0 && currency == "USD"));
+    }
+
+    #[test]
+    fn request_context_is_not_a_turn_total() {
+        let state = create_claude_parse_state();
+        let events = parse_claude_json_event(&json!({ "type": "assistant", "message": {
+            "id": "m1", "content": [], "usage": { "input_tokens": 2,
+                "cache_read_input_tokens": 3, "cache_creation_input_tokens": 5 }
+        }}), &state);
+        assert!(matches!(events.as_slice(), [AdapterEvent::Usage {
+            usage_scope: Some(scope), usage_key: Some(key), context_used: Some(10),
+            cached_input_tokens: Some(3), cache_creation_input_tokens: Some(5), ..
+        }] if scope == "context" && key == "m1"));
+    }
 }

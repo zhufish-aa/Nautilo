@@ -20,16 +20,20 @@ export interface DelegatedDependencyOutcome {
 
 export class OrchestrationPromptBuilder {
   mainTurn(goal: string, team: TeamDefinition, childSessions: Session[] = [], continuity?: string): string {
+    const canDelegate = team.delegationPolicy !== "direct_only" && team.members.some((member) => member.enabled && member.id !== team.mainMemberId);
+    const delegation = canDelegate ? [
+      "Use agenthub_delegate or agenthub_plan with the exact configured member IDs below to dispatch Nautilo team tasks. Honor an explicit user request to use a configured member even for a small task.",
+      "Default to delegating substantial, well-scoped work matching a configured member's role or strengths. Respect role descriptions and limitations; do not take over work assigned to that role.",
+      "Order before parallel: research and exploration must finish before implementation that depends on it. Use dependsOn for dependent tasks and serialize overlapping files. Parallelize only independent work.",
+      "Give implementation members concrete files, decisions, and acceptance checks. Use an exploration member first when facts are missing.",
+      "Do trivial work and central coordination yourself unless the user or a member's configured role explicitly assigns it to a member.",
+      "If the Nautilo delegation tools are unavailable in this turn, report that the configured member was not dispatched. Never substitute a provider-native child and claim that it is the configured member."
+    ].join("\n\n") : "Configured-member delegation is disabled for this turn (direct_only policy or no enabled child members). The Nautilo delegate and plan tools are not available. Do not claim a configured member was dispatched; if the user asks for one, explain that the team policy or enabled members need to change.";
     return [
       "[AGENTHUB_MAIN_TURN]",
       "Work on the user's request normally. You are not required to classify it or emit routing JSON.",
-      "Delegation policy for this turn:",
-      "- Default to delegating any substantial, well-scoped task that matches a configured member's role or strengths. The team exists to be used; doing everything yourself when a member fits is a failure mode.",
-      "- Order before parallel: research and exploration must finish before you dispatch implementation that depends on it. Chain dependent tasks with dependsOn or dispatch them in separate turns after the prerequisite result arrives. Parallel dispatch is only for tasks with disjoint files and no data dependency — when in doubt, serialize.",
-      "- Write implementation tasks with your decisions baked in: concrete files, the chosen approach, and acceptance checks. Never hand an implementation member open-ended 'investigate and decide' work — deciding is your job; use an exploration member when facts are missing, then plan from its result.",
-      "- Do the work yourself only when it is trivial (a quick lookup or a small edit), when it is central coordination (merging or verifying child output), or when no enabled member fits.",
-      "- Respect each member's role description and limitations; when a role assigns a category of work to a member, do not take that work over.",
-      "You may call the Nautilo delegate or plan tool at any point in this turn.",
+      delegation,
+      "Provider-native subagents (spawn_agent, Task, and similar tools) belong to the current Harness. They are distinct from Nautilo's configured members, connections, and models. Do not describe one as the other. Only report a configured dispatch after a successful Nautilo tool receipt; use its actual taskId and sessionId when asked where it ran.",
       "Every delegated task must be self-contained. A child receives the task text and its own provider session; it cannot inspect the parent session, a sibling Agent session, or another Agent's pending result.",
       "Never ask one child Agent to obtain status, context, or output from another child Agent. Use plan dependencies when ordering matters; Nautilo supplies completed dependency outcomes to the dependent child.",
       "Delegation tools do not forward chat-only attachments or inline images. Do not tell a child to inspect 'the attached image' or other unseen conversation content. Handle the visual analysis yourself, or provide a verified child-readable workspace path plus all essential textual observations in the task.",

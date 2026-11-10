@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
-use crate::adapters::codex::events::{parse_codex_app_server_notification, with_subagent_dispatch};
+use crate::adapters::codex::events::{is_current_codex_turn_diff, native_child_history, parse_codex_app_server_notification, update_native_child, with_subagent_dispatch};
 use crate::adapters::codex::image_gen::{
     codex_image_generation_tool, execute_codex_image_generation, is_codex_image_generation_configured,
     CODEX_IMAGE_GENERATION_TOOL_NAME,
@@ -23,6 +23,11 @@ use crate::adapters::{AdapterEvent, AdapterRun, AdapterStartRequest, TimeoutKind
 use crate::errors::{CoreError, CoreResult, ErrorCode};
 use crate::process_runtime::{ProcessEvent, ProcessRequest, ProcessRuntime, TimeoutReason};
 
+#[path = "session_pool.rs"]
+mod session_pool;
+#[path = "session_events.rs"]
+mod session_events;
+
 const CODEX_WEB_SEARCH_MODE: &str = "live";
 const CODEX_MODEL_CATALOG_PREFIX: &str = "agenthub-codex-model-";
 const CODEX_MODEL_CATALOG_CONTEXT_WINDOW: i64 = 272_000;
@@ -32,7 +37,7 @@ const CODEX_APPROVAL_DECISIONS: [&str; 4] = ["accept", "acceptForSession", "decl
 pub fn codex_app_server_initialize_params() -> Value {
     json!({
         "clientInfo": { "name": "Nautilo", "version": "0.1.0" },
-        "capabilities": { "experimentalApi": true }
+        "capabilities": { "experimentalApi": true, "mcpServerOpenaiFormElicitation": true }
     })
 }
 
@@ -98,6 +103,53 @@ pub fn build_codex_turn_input(prompt: &str, local_image_paths: &[String]) -> Val
     Value::Array(input)
 }
 
+fn turn_start_params(request: &AdapterStartRequest, thread_id: &str) -> anyhow::Result<Value> {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": build_codex_turn_input(&request.prompt, request.local_image_paths.as_deref().unwrap_or(&[])),
+        "cwd": request.cwd,
+        "model": request.model.as_deref().filter(|m| !m.is_empty()),
+        "serviceTier": request.service_tier.as_deref().filter(|t| !t.is_empty()),
+        "effort": request.reasoning_effort.as_deref().filter(|e| !e.is_empty()),
+        "summary": "auto"
+    });
+    if let Some(browser) = codex_desktop_browser_context(request.mcp_servers.as_deref().unwrap_or(&[])) {
+        // Application context is supplied on warm turns too. Keep the native
+        // instructions and the user's message intact; this is environment
+        // metadata, not a replacement system prompt or a fabricated tool.
+        params["additionalContext"] = json!({ "nautilo.desktop_browser": { "kind": "application", "value": browser } });
+    }
+    // A resumed, already-loaded thread keeps its prior turn settings unless
+    // turn/start explicitly overrides them. Match the user's current selection.
+    let (approval, sandbox) = codex_permission_config(&request.instance, Some(request)).unwrap_or(("never", "workspace-write"));
+    params["approvalPolicy"] = json!(approval);
+    params["sandboxPolicy"] = if sandbox == "danger-full-access" {
+        json!({"type":"dangerFullAccess"})
+    } else if sandbox == "read-only" {
+        json!({"type":"readOnly"})
+    } else {
+        json!({"type":"workspaceWrite"})
+    };
+    if let Some(path) = request.output_schema_path.as_deref().or_else(||request.instance.pointer("/providerOptions/outputSchemaPath").and_then(Value::as_str)) {
+        let path = std::path::Path::new(&request.cwd).join(path);
+        params["outputSchema"] = serde_json::from_slice(&std::fs::read(&path)
+            .map_err(|error|anyhow::anyhow!("Unable to read output schema {}: {error}",path.display()))?)?;
+    }
+    Ok(params)
+}
+
+fn codex_desktop_browser_context(servers: &[Value]) -> Option<String> {
+    let browser = servers.iter().find(|server| server["desktopBrowser"] == true)?;
+    let name = browser["name"].as_str()?.trim();
+    if name.is_empty() { return None; }
+    Some(format!(
+        "This session runs in Nautilo. Nautilo's built-in desktop browser is configured through MCP server {name:?}, with browser_tabs, browser_run, browser_read, browser_session and the other browser_* tools. \
+         Use that MCP server for browser tasks in Nautilo unless the user explicitly requests another browser. If its tools are deferred, discover them in the current tool catalog by server name or browser_run before concluding they are unavailable. \
+         Codex CUA / ChatGPT in-app browser (iab) and ego-browser are separate browser runtimes; they do not control Nautilo's built-in browser. When the user asks for Nautilo's browser, use the configured MCP tools rather than substituting one of those runtimes. \
+         If the MCP connection cannot load its tools, report that connection failure accurately."
+    ))
+}
+
 /// Supplies a short-lived catalog for custom endpoints so the selected model
 /// is described as search-capable (see the TS docstring).
 pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Option<&str>) -> Option<Value> {
@@ -123,6 +175,7 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
     if configured.is_empty() {
         return None;
     }
+    let anthropic_compat = instance.pointer("/providerOptions/anthropicCompat").and_then(Value::as_bool) == Some(true);
     let models: Vec<Value> = configured
         .iter()
         .map(|(id, model)| {
@@ -155,7 +208,7 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
                 "default_verbosity": "low",
                 "apply_patch_tool_type": "freeform",
                 "web_search_tool_type": "text",
-                "input_modalities": ["text", "image"],
+                "input_modalities": if anthropic_compat { json!(["text"]) } else { json!(["text", "image"]) },
                 "supports_image_detail_original": false,
                 "truncation_policy": { "mode": "tokens", "limit": 10_000 },
                 "supports_parallel_tool_calls": true,
@@ -179,11 +232,11 @@ pub fn build_codex_custom_model_catalog(instance: &Value, requested_model: Optio
                 "base_instructions": "",
                 "model_messages": null,
                 "include_skills_usage_instructions": false,
-                "supports_reasoning_summary_parameter": true,
+                "supports_reasoning_summary_parameter": !anthropic_compat,
                 "supports_search_tool": codex_web_search_enabled(instance),
                 "service_tiers": [],
                 "additional_speed_tiers": [],
-                "supports_reasoning_summaries": true,
+                "supports_reasoning_summaries": !anthropic_compat,
                 "effective_context_window_percent": 95,
                 "experimental_supported_tools": [],
                 "use_responses_lite": false,
@@ -215,6 +268,12 @@ pub struct PathBufCleanup(std::path::PathBuf);
 
 impl PathBufCleanup {
     pub fn cleanup(self) {
+        // Consuming this guard invokes Drop, including on early-return paths.
+    }
+}
+
+impl Drop for PathBufCleanup {
+    fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -233,18 +292,14 @@ pub fn build_codex_app_server_args(
     args.extend([
         "app-server".to_string(),
         "--stdio".to_string(),
-        "--enable".to_string(),
+        if instance.pointer("/providerOptions/anthropicCompat").and_then(Value::as_bool) == Some(true) { "--disable" } else { "--enable" }.to_string(),
         "image_generation".to_string(),
-        // Headless runs never touch Codex desktop apps (the built-in
-        // `codex_apps` MCP); when it fails to start it blocks every turn until
-        // a ~30s timeout fires. Disable the feature outright.
-        "--disable".to_string(),
-        "apps".to_string(),
     ]);
-    if codex_web_search_enabled(instance) {
-        args.push("--config".to_string());
-        args.push(format!("web_search={}", json!(CODEX_WEB_SEARCH_MODE)));
+    if instance.pointer("/providerOptions/imageGenerationDelegate").and_then(Value::as_bool) == Some(true) {
+        args.extend(["--disable".into(), "shell_tool".into()]);
     }
+    args.push("--config".to_string());
+    args.push(format!("web_search={}", json!(if codex_web_search_enabled(instance) {CODEX_WEB_SEARCH_MODE} else {"disabled"})));
     if let Some(path) = model_catalog_path {
         args.push("--config".to_string());
         args.push(format!("model_catalog_json={}", json!(path)));
@@ -268,20 +323,38 @@ pub struct PooledCodexAppServer {
     /// collide on the same RPC stream.
     pub turn_lock: tokio::sync::Mutex<()>,
     initialized: AtomicBool,
+    /// Only valid for this exact process generation. A warm turn can use the
+    /// loaded thread directly instead of asking Codex to read/replay its history.
+    loaded_thread_id: Mutex<Option<String>>,
+    events: Arc<session_events::SessionEvents>,
     instance_key: String,
     /// Hash of the instance/credentials/executable the process was started
     /// with; a config edit evicts the stale connection so the next turn
     /// cold-starts a fresh one with the new settings.
     config_fingerprint: u64,
+    generation: u64,
+    /// Keeps the latest config tombstone alive while any old waiter can retry.
+    _pool_lifetime: Arc<()>,
     /// Temp model catalog created at cold start; removed with the process.
     catalog_cleanup: Mutex<Option<PathBufCleanup>>,
 }
 
-static CODEX_APP_SERVER_POOL: LazyLock<Mutex<HashMap<String, Arc<PooledCodexAppServer>>>> =
+// Retain only configuration identity after a process exits. A queued request
+// must not resurrect old credentials after a newer configuration was installed.
+struct CodexPoolEntry {
+    config_fingerprint: u64,
+    generation: u64,
+    lifetime: Arc<()>,
+    connection: Option<Arc<PooledCodexAppServer>>,
+}
+
+static CODEX_APP_SERVER_POOL: LazyLock<Mutex<HashMap<String, CodexPoolEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+const CODEX_QUEUED_RECONNECT_LIMIT: usize = 1;
+
 fn codex_instance_key(request: &AdapterStartRequest) -> String {
-    request
+    let instance = request
         .instance
         .get("id")
         .and_then(Value::as_str)
@@ -293,29 +366,68 @@ fn codex_instance_key(request: &AdapterStartRequest) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("codex")
                 .to_string()
-        })
+        });
+    match request.local_session_id.as_deref().filter(|value| !value.is_empty()) {
+        Some(session) => json!([instance, session]).to_string(),
+        None => instance,
+    }
 }
-
 /// Returns the resident app-server connection for this agent instance,
 /// starting one on first use. Dead connections are replaced transparently.
 /// Process spawn is synchronous and fast (the child streams in the background),
 /// so this stays a plain function callable from the sync adapter start path.
 pub fn acquire_codex_app_server(request: &AdapterStartRequest) -> CoreResult<Arc<PooledCodexAppServer>> {
+    acquire_codex_app_server_matching(request, None)
+}
+
+fn acquire_codex_app_server_matching(
+    request: &AdapterStartRequest,
+    queued_origin: Option<(u64, u64)>,
+) -> CoreResult<Arc<PooledCodexAppServer>> {
     let key = codex_instance_key(request);
     let fingerprint = codex_config_fingerprint(request);
     // Hold the pool lock across the cold start: two parallel runs of the same
     // instance would otherwise each spawn a process and orphan one of them.
     let mut pool = CODEX_APP_SERVER_POOL.lock().unwrap();
-    if let Some(existing) = pool.get(&key) {
-        if existing.config_fingerprint == fingerprint && existing.rpc.process_handle().is_alive() {
-            return Ok(existing.clone());
-        }
-        // Config changed or the process died: replace the stale entry.
-        if let Some(cleanup) = existing.catalog_cleanup.lock().unwrap().take() {
-            cleanup.cleanup();
-        }
-        pool.remove(&key);
+    // A metadata-only entry is needed only while a running/queued generation
+    // can still retry. Prune orphan tombstones on acquisition, without keeping
+    // dead process handles or an unbounded history of deleted instance ids.
+    pool.retain(|_, entry| entry.connection.is_some() || Arc::strong_count(&entry.lifetime) > 1);
+    let lifetime = pool.get(&key).map(|entry| entry.lifetime.clone()).unwrap_or_else(|| Arc::new(()));
+    if let Some(dead) = pool.get(&key).and_then(|entry| entry.connection.as_ref())
+        .filter(|connection| !connection.rpc.process_handle().is_alive()).cloned()
+    {
+        if let Some(cleanup) = dead.catalog_cleanup.lock().unwrap().take() { cleanup.cleanup(); }
+        if let Some(entry) = pool.get_mut(&key) { entry.connection = None; }
     }
+    if let Some(entry) = pool.get(&key) {
+        if queued_origin.is_some_and(|(expected, _)| entry.config_fingerprint != expected) {
+            return Err(CoreError::reason(ErrorCode::RunStartFailed,
+                "Codex configuration changed while this turn was queued; retry with the current configuration"));
+        }
+        if let Some(existing) = &entry.connection {
+            if existing.config_fingerprint == fingerprint && existing.rpc.process_handle().is_alive() {
+                return Ok(existing.clone());
+            }
+            if queued_origin.is_some_and(|(_, generation)| entry.generation > generation) {
+                return Err(CoreError::reason(ErrorCode::RunStartFailed, "Codex recovery connection also exited before this queued turn could start"));
+            }
+            let retired = existing.clone();
+            tokio::spawn(async move {
+                let _turn_guard = retired.turn_lock.lock().await;
+                retired.rpc.process_handle().cancel().await;
+                if let Some(cleanup) = retired.catalog_cleanup.lock().unwrap().take() {
+                    cleanup.cleanup();
+                }
+            });
+        } else if queued_origin.is_some_and(|(_, generation)| entry.generation > generation) {
+            return Err(CoreError::reason(ErrorCode::RunStartFailed, "Codex recovery connection already failed; retry the turn"));
+        }
+    }
+    let generation = pool.get(&key).map(|entry| entry.generation + 1).unwrap_or(1);
+    // Record the latest requested configuration even if its cold start fails.
+    // An old waiter may retry its transport, never roll back a config change.
+    pool.insert(key.clone(), CodexPoolEntry { config_fingerprint: fingerprint, generation, lifetime: lifetime.clone(), connection: None });
 
     // Cold start: build the same `codex app-server --stdio` command line the
     // per-run path used, but without turn-scoped timeouts -- a resident
@@ -348,7 +460,7 @@ pub fn acquire_codex_app_server(request: &AdapterStartRequest) -> CoreResult<Arc
         env: request.env.clone(),
         timeout_ms: None,
         idle_timeout_ms: None,
-        max_output_bytes: Some(request.max_output_bytes.unwrap_or(20 * 1024 * 1024)),
+        max_output_bytes: None,
     })
     .map_err(|e| CoreError::reason(ErrorCode::RunStartFailed, e.to_string()))?;
     let rpc = Arc::new(JsonRpcProcessClient::new(started.handle, started.events));
@@ -356,11 +468,15 @@ pub fn acquire_codex_app_server(request: &AdapterStartRequest) -> CoreResult<Arc
         rpc,
         turn_lock: tokio::sync::Mutex::new(()),
         initialized: AtomicBool::new(false),
+        loaded_thread_id: Mutex::new(None),
+        events: Arc::new(session_events::SessionEvents::default()),
         catalog_cleanup: Mutex::new(model_catalog.map(|(_, cleanup)| cleanup)),
         config_fingerprint: fingerprint,
+        generation,
+        _pool_lifetime: lifetime.clone(),
         instance_key: key.clone(),
     });
-    pool.insert(key, pooled.clone());
+    pool.insert(key, CodexPoolEntry { config_fingerprint: fingerprint, generation, lifetime, connection: Some(pooled.clone()) });
     Ok(pooled)
 }
 
@@ -368,9 +484,13 @@ fn codex_config_fingerprint(request: &AdapterStartRequest) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
+    request.cwd.hash(&mut hasher);
     let mut hash_str = |value: &str| value.hash(&mut hasher);
     hash_str(request.instance.get("executable").and_then(Value::as_str).unwrap_or(""));
     hash_str(request.instance.get("profile").and_then(Value::as_str).unwrap_or(""));
+    if let Some(models) = request.instance.get("models") {
+        models.to_string().hash(&mut hasher);
+    }
     if let Some(opts) = request.instance.get("providerOptions") {
         opts.to_string().hash(&mut hasher);
     }
@@ -389,14 +509,14 @@ fn codex_config_fingerprint(request: &AdapterStartRequest) -> u64 {
 }
 
 
-/// Drops the pool entry for a connection that can no longer be reused (a
-/// killed process), so the next turn cold-starts a fresh one.
+/// Releases a connection that can no longer be reused. Keep only the latest
+/// configuration identity while an older waiter can still attempt recovery.
 pub fn discard_codex_app_server(pooled: &Arc<PooledCodexAppServer>) {
     let key = &pooled.instance_key;
     let mut pool = CODEX_APP_SERVER_POOL.lock().unwrap();
-    if let Some(existing) = pool.get(key) {
-        if Arc::ptr_eq(existing, pooled) {
-            pool.remove(key);
+    if let Some(entry) = pool.get_mut(key) {
+        if entry.connection.as_ref().is_some_and(|existing| Arc::ptr_eq(existing, pooled)) {
+            entry.connection = None;
         }
     }
     // The temp model catalog dies with the process it was started for.
@@ -407,94 +527,212 @@ pub fn discard_codex_app_server(pooled: &Arc<PooledCodexAppServer>) {
 
 /// Starts (or reuses) `codex app-server --stdio` and drives one thread turn
 /// over JSON-RPC. On normal completion the resident process stays alive for
-/// the next turn; errors and per-turn timeouts kill it and evict the pool
-/// entry so the following run cold-starts a clean connection.
+/// the next turn. A timed-out turn first tries native interruption; a settled
+/// interrupt preserves the session and its background work. An unresponsive
+/// or failed transport can cold-start one safe replacement for queued work.
 pub fn start_codex_app_server(request: AdapterStartRequest, resume_session: Option<String>) -> CoreResult<AdapterRun> {
+    session_pool::start(request, resume_session, false)
+}
+
+pub fn start_codex_app_server_transient(request: AdapterStartRequest, resume_session: Option<String>) -> CoreResult<AdapterRun> {
+    session_pool::start(request, resume_session, true)
+}
+
+pub async fn shutdown_codex_app_server_pools() { session_pool::shutdown().await; }
+pub async fn release_session(request:&AdapterStartRequest)->CoreResult<()> {session_pool::release_session(request).await}
+
+fn start_single_connection(request: AdapterStartRequest, resume_session: Option<String>) -> CoreResult<AdapterRun> {
     let pooled = acquire_codex_app_server(&request)?;
-    let rpc = pooled.rpc.clone();
+    start_on_connection(request, resume_session, pooled, true)
+}
+
+fn start_on_connection(request: AdapterStartRequest, resume_session: Option<String>, pooled: Arc<PooledCodexAppServer>, allow_reconnect: bool) -> CoreResult<AdapterRun> {
     let (sender, receiver) = mpsc::unbounded_channel::<AdapterEvent>();
     let state = Arc::new(Mutex::new(AppServerState::default()));
 
+    let (cancel_sender, mut cancel_receiver) = watch::channel(false);
+    let (completed_sender, completed_receiver) = oneshot::channel();
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(request.timeout_ms.unwrap_or(30 * 60_000));
     let pump = {
-        let rpc = rpc.clone();
         let state = state.clone();
         let sender = sender.clone();
         let request = request.clone();
         let pooled = pooled.clone();
         async move {
-            let _turn_guard = pooled.turn_lock.lock().await;
-            let already_initialized = pooled.initialized.load(Ordering::SeqCst);
-            let turn_timeout = request.timeout_ms.unwrap_or(30 * 60_000);
-            let result = tokio::time::timeout(
-                std::time::Duration::from_millis(turn_timeout),
-                run_turn(rpc.clone(), &request, resume_session, state.clone(), sender.clone(), already_initialized),
-            )
-            .await;
-            match result {
-                Ok(Ok(())) => {
-                    // Normal completion keeps the resident process warm for the
-                    // next turn; mark the connection initialized so the next
-                    // turn skips the JSON-RPC handshake.
-                    pooled.initialized.store(true, Ordering::SeqCst);
-                }
-                Ok(Err(error)) => {
-                    let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
-                    if !state.lock().unwrap().finished {
-                        pooled.rpc.process_handle().cancel().await;
-                        discard_codex_app_server(&pooled);
+            // Cancellation and the deadline include time spent waiting for another
+            // session. A queued run never owns (and must never kill) its process.
+            let queued_origin = (pooled.config_fingerprint, pooled.generation);
+            let mut connection = pooled;
+            let mut reconnects = 0;
+            let queued_at = std::time::Instant::now();
+            loop {
+                let turn_guard = match wait_for_codex_turn(&connection.turn_lock, &mut cancel_receiver, deadline, &sender).await {
+                    Ok(guard) => guard,
+                    Err(_) => break,
+                };
+                if !connection.rpc.process_handle().is_alive() {
+                    discard_codex_app_server(&connection);
+                    drop(turn_guard);
+                    if !allow_reconnect || reconnects >= CODEX_QUEUED_RECONNECT_LIMIT {
+                        let _ = sender.send(AdapterEvent::Error {
+                            message: "Codex app-server exited again before this queued turn could start".to_string(),
+                        });
+                        break;
+                    }
+                    // No RPC for this run has been submitted. Recover its dead
+                    // transport once; never replay a started thread or turn.
+                    if *cancel_receiver.borrow() { break; }
+                    if tokio::time::Instant::now() >= deadline {
+                        let _ = sender.send(AdapterEvent::Timeout { reason: TimeoutKind::Timeout });
+                        break;
+                    }
+                    let replacement = acquire_codex_app_server_matching(&request, Some(queued_origin));
+                    if *cancel_receiver.borrow() { break; }
+                    if tokio::time::Instant::now() >= deadline {
+                        let _ = sender.send(AdapterEvent::Timeout { reason: TimeoutKind::Timeout });
+                        break;
+                    }
+                    match replacement {
+                        Ok(replacement) => {
+                            connection = replacement;
+                            reconnects += 1;
+                            continue;
+                        }
+                        Err(error) => {
+                            let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
+                            break;
+                        }
                     }
                 }
-                Err(_elapsed) => {
-                    let _ = sender.send(AdapterEvent::Timeout { reason: TimeoutKind::Timeout });
-                    pooled.rpc.process_handle().cancel().await;
-                    discard_codex_app_server(&pooled);
+                let rpc = connection.rpc.clone();
+                if let Err(error)=connection.events.listen(&rpc).await {
+                    let _=sender.send(AdapterEvent::Error{message:error.to_string()});
+                    rpc.process_handle().cancel().await;discard_codex_app_server(&connection);break;
                 }
+                let context=connection.events.begin(request.clone(),state.clone(),sender.clone());
+                let _ = sender.send(AdapterEvent::Status {
+                    phase: "provider_starting".to_string(),
+                    raw: Some(json!({ "queueWaitMs": queued_at.elapsed().as_millis() as u64, "connectionRestarts": reconnects })),
+                });
+                {
+                    let mut state = state.lock().unwrap();
+                    state.active = true;
+                    state.active_rpc = Some(rpc.clone());
+                }
+                let already_initialized = connection.initialized.load(Ordering::SeqCst);
+                let loaded_thread_id = connection.loaded_thread_id.lock().unwrap().clone();
+                let turn = run_turn(rpc.clone(), &request, resume_session.clone(), state.clone(), sender.clone(), already_initialized, loaded_thread_id,context.clone());
+                tokio::pin!(turn);
+                let mut timed_out = false;
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel_receiver.changed() => {
+                        state.lock().unwrap().cancelled = true;
+                        let (thread_id, turn_id) = {
+                            let state = state.lock().unwrap();
+                            (state.thread_id.clone(), state.turn_id.clone())
+                        };
+                        if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
+                            // turn/interrupt is a JSON-RPC request, not a
+                            // notification. Keep draining this turn during its
+                            // grace period, while still owning the turn lock.
+                            let (_, interrupted) = rpc.request_with_id("turn/interrupt", json!({ "threadId": thread_id, "turnId": turn_id }));
+                            // A completed turn without an interrupt response
+                            // leaves a pending RPC behind. Reuse only after
+                            // both settle; otherwise killing the process also
+                            // clears the transport's pending-request map.
+                            match tokio::time::timeout(std::time::Duration::from_millis(3_000), async {
+                                let (turn_result, interrupt_result) = tokio::join!(&mut turn, interrupted);
+                                turn_result?;
+                                match interrupt_result {
+                                    Ok(Ok(_)) => Ok(()),
+                                    Ok(Err(message)) => Err(anyhow::anyhow!(message)),
+                                    Err(_) => Err(anyhow::anyhow!("Codex interrupt response channel closed")),
+                                }
+                            }).await {
+                                Ok(result) => result,
+                                Err(_) => Err(anyhow::anyhow!("Codex cancellation did not settle within its grace period")),
+                            }
+                        } else {
+                            Err(anyhow::anyhow!("Codex turn cancelled before startup completed"))
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        timed_out = true;
+                        let _ = sender.send(AdapterEvent::Timeout { reason: TimeoutKind::Timeout });
+                        Err(anyhow::anyhow!("Codex turn timed out"))
+                    }
+                    result = &mut turn => result,
+                };
+                let mut limit_settled=false;
+                if timed_out || context.limited() {
+                    timed_out=true;
+                    let (thread,turn)={let mut state=state.lock().unwrap();state.cancelled=true;(state.thread_id.clone(),state.turn_id.clone())};
+                    if let (Some(thread),Some(turn))=(thread,turn) {
+                        let (_,response)=rpc.request_with_id("turn/interrupt",json!({"threadId":thread,"turnId":turn}));
+                        limit_settled=matches!(tokio::time::timeout(std::time::Duration::from_secs(3),async {
+                            let (terminal,response)=tokio::join!(context.terminal(),response);
+                            terminal?;response.map_err(|_|anyhow::anyhow!("Codex interrupt channel closed"))?.map_err(anyhow::Error::msg)?;Ok::<_,anyhow::Error>(())
+                        }).await,Ok(Ok(())));
+                    }
+                }
+                let reusable = (result.is_ok() || limit_settled) && state.lock().unwrap().finished && connection.rpc.process_handle().is_alive();
+                if let Err(error) = result {
+                    if !timed_out && !state.lock().unwrap().cancelled {
+                        let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
+                    }
+                }
+                if reusable {
+                    connection.initialized.store(true, Ordering::SeqCst);
+                    *connection.loaded_thread_id.lock().unwrap() = state.lock().unwrap().thread_id.clone();
+                } else {
+                    // Retain the turn guard throughout cleanup. In particular,
+                    // a delayed cancel must not kill the *next* session's turn.
+                    connection.rpc.process_handle().cancel().await;
+                    discard_codex_app_server(&connection);
+                }
+                {
+                    context.park();
+                    let mut state = state.lock().unwrap();
+                    state.active = false;
+                    state.active_rpc = None;
+                }
+                break;
             }
+            state.lock().unwrap().finished = true;
+            let _ = completed_sender.send(());
         }
     };
     tokio::spawn(pump);
 
-    // steer / cancel talk to the RPC client shared with the pump.
-    let steer_rpc = rpc.clone();
     let steer_state = state.clone();
+    let write_state = state.clone();
     let cancel_state = state.clone();
-    let cancel_pooled = pooled.clone();
     let mut run = AdapterRun::new(
         receiver,
         move || {
-            let pooled = cancel_pooled.clone();
-            let state = cancel_state.clone();
             Box::pin(async move {
-                let (thread_id, turn_id) = {
-                    let state = state.lock().unwrap();
-                    (state.thread_id.clone(), state.turn_id.clone())
-                };
-                if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
-                    pooled.rpc.notify("turn/interrupt", json!({ "threadId": thread_id, "turnId": turn_id }));
-                }
-                // Give the turn a moment to wind down; only kill (and evict
-                // the pooled connection) if it is genuinely stuck.
-                tokio::time::sleep(std::time::Duration::from_millis(3_000)).await;
-                let finished = state.lock().unwrap().finished;
-                if !finished && pooled.rpc.process_handle().is_alive() {
-                    pooled.rpc.process_handle().cancel().await;
-                    discard_codex_app_server(&pooled);
-                }
+                cancel_state.lock().unwrap().cancelled = true;
+                let _ = cancel_sender.send(true);
+                let _ = completed_receiver.await;
             }) as crate::adapters::BoxFuture<()>
         },
         move |input| {
-            rpc.process_write(&input);
+            let state = write_state.lock().unwrap();
+            if state.active && !state.finished && !state.cancelled {
+                if let Some(rpc) = &state.active_rpc { rpc.process_write(&input); }
+            }
         },
     );
     run = run.with_steer(Arc::new(move |input: String| {
-        let rpc = steer_rpc.clone();
         let state = steer_state.clone();
         Box::pin(async move {
-            let (thread_id, turn_id, finished) = {
+            let (thread_id, turn_id, finished, rpc) = {
                 let state = state.lock().unwrap();
-                (state.thread_id.clone(), state.turn_id.clone(), state.finished)
+                (state.thread_id.clone(), state.turn_id.clone(), state.finished || state.cancelled || !state.active, state.active_rpc.clone())
             };
-            let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
+            let (Some(thread_id), Some(turn_id), Some(rpc)) = (thread_id, turn_id, rpc) else {
                 return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "No active Codex turn is available to steer"));
             };
             if finished {
@@ -517,13 +755,62 @@ pub fn start_codex_app_server(request: AdapterStartRequest, resume_session: Opti
     Ok(run)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CodexQueueExit {
+    Cancelled,
+    Timeout,
+}
+
+async fn wait_for_codex_turn<'a>(
+    turn_lock: &'a tokio::sync::Mutex<()>,
+    cancel: &mut watch::Receiver<bool>,
+    deadline: tokio::time::Instant,
+    sender: &mpsc::UnboundedSender<AdapterEvent>,
+) -> Result<tokio::sync::MutexGuard<'a, ()>, CodexQueueExit> {
+    if *cancel.borrow() {
+        return Err(CodexQueueExit::Cancelled);
+    }
+    let guard = match turn_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            let _ = sender.send(AdapterEvent::Status {
+                phase: "provider_queued".to_string(),
+                raw: Some(json!({ "reason": "shared_codex_app_server" })),
+            });
+            tokio::select! {
+                biased;
+                _ = cancel.changed() => return Err(CodexQueueExit::Cancelled),
+                _ = tokio::time::sleep_until(deadline) => {
+                    let _ = sender.send(AdapterEvent::Timeout { reason: TimeoutKind::Timeout });
+                    return Err(CodexQueueExit::Timeout);
+                }
+                guard = turn_lock.lock() => guard,
+            }
+        }
+    };
+    // The lock and cancellation can become ready in the same scheduler tick.
+    if *cancel.borrow() {
+        return Err(CodexQueueExit::Cancelled);
+    }
+    if tokio::time::Instant::now() >= deadline {
+        let _ = sender.send(AdapterEvent::Timeout { reason: TimeoutKind::Timeout });
+        return Err(CodexQueueExit::Timeout);
+    }
+    Ok(guard)
+}
+
 #[derive(Default)]
 struct AppServerState {
+    active: bool,
+    active_rpc: Option<Arc<JsonRpcProcessClient>>,
+    cancelled: bool,
     thread_id: Option<String>,
     turn_id: Option<String>,
     finished: bool,
     /// Child agent thread id → the collab tool call item that spawned it.
     child_threads: HashMap<String, String>,
+    native_dispatches: HashMap<String, Value>,
+    active_items: std::collections::HashSet<String>,
 }
 
 async fn run_turn(
@@ -533,28 +820,48 @@ async fn run_turn(
     state: Arc<Mutex<AppServerState>>,
     sender: mpsc::UnboundedSender<AdapterEvent>,
     already_initialized: bool,
+    loaded_thread_id: Option<String>,
+    context: Arc<session_events::Context>,
 ) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let warm_thread = resume_session.is_some() && resume_session == loaded_thread_id;
+    let timing = |phase: &str| crate::runtime::run_log::log(json!({
+        "event": "codex_turn_timing", "sessionId": request.local_session_id,
+        "model": request.model, "effort": request.reasoning_effort,
+        "warmThread": warm_thread, "phase": phase, "elapsedMs": started.elapsed().as_millis() as u64
+    }));
     if !already_initialized {
-        rpc.request("initialize", codex_app_server_initialize_params()).await?;
+        let initialized = rpc.request("initialize", codex_app_server_initialize_params()).await?;
+        let _ = sender.send(AdapterEvent::Status { phase: "runtime_capabilities".into(), raw: Some(json!({
+            "providerId":"codex", "source":"native-handshake", "transport":"app-server", "reported":initialized
+        })) });
         rpc.notify("initialized", json!({}));
     }
-    let mut thread_params = thread_options(request, true)?;
-    let method = if resume_session.is_some() { "thread/resume" } else { "thread/start" };
-    if let Some(session) = &resume_session {
-        thread_params.insert("threadId".to_string(), json!(session));
-    }
-    let thread_response = rpc.request(method, Value::Object(thread_params)).await?;
-    let thread_id = thread_response
-        .get("thread")
-        .and_then(|t| t.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| resume_session.clone())
-        .filter(|id| !id.is_empty());
+    let _ = sender.send(AdapterEvent::Status { phase: "runtime_ready".into(), raw: Some(json!({
+        "providerId":"codex", "transport":"app-server", "reused":already_initialized, "pid":rpc.process_handle().pid,
+        "attachMs":started.elapsed().as_millis()
+    })) });
+    timing("initialized");
+    let thread_id = if warm_thread {
+        resume_session.clone()
+    } else {
+        let mut thread_params = thread_options(request, true)?;
+        let method = if resume_session.is_some() { "thread/resume" } else { "thread/start" };
+        if let Some(session) = &resume_session {
+            thread_params.insert("threadId".to_string(), json!(session));
+            // Nautilo already has the visible transcript. Codex still loads
+            // its native context; excludeTurns only omits the response payload.
+            thread_params.insert("excludeTurns".to_string(), json!(true));
+        }
+        let response = rpc.request(method, Value::Object(thread_params)).await?;
+        response.pointer("/thread/id").and_then(Value::as_str).map(str::to_string)
+            .or_else(|| resume_session.clone()).filter(|id| !id.is_empty())
+    };
     let Some(thread_id) = thread_id else {
         anyhow::bail!("Codex app-server did not return a thread id");
     };
     state.lock().unwrap().thread_id = Some(thread_id.clone());
+    timing("thread_ready");
     let _ = sender.send(AdapterEvent::Session { provider_session_id: thread_id.clone(), raw: None });
 
     let compact = request.provider_command.as_deref() == Some("compact");
@@ -566,129 +873,16 @@ async fn run_turn(
         rpc.request("thread/compact/start", json!({ "threadId": thread_id })).await?;
     } else {
         let turn_response = rpc
-            .request("turn/start", json!({
-                "threadId": thread_id,
-                "input": build_codex_turn_input(&request.prompt, request.local_image_paths.as_deref().unwrap_or(&[])),
-                "cwd": request.cwd,
-                "model": request.model.as_deref().filter(|m| !m.is_empty()),
-                "serviceTier": request.service_tier.as_deref().filter(|t| !t.is_empty()),
-                "effort": request.reasoning_effort.as_deref().filter(|e| !e.is_empty()),
-                "summary": "auto"
-            }))
+            .request("turn/start", turn_start_params(request, &thread_id)?)
             .await?;
         let turn_id = turn_response.get("turn").and_then(|t| t.get("id")).and_then(Value::as_str).map(str::to_string);
+        if let Some(user)=turn_response["turn"]["items"].as_array().into_iter().flatten().find(|item|item["type"]=="userMessage") {
+            let _=sender.send(AdapterEvent::Session{provider_session_id:thread_id.clone(),raw:Some(json!({"providerUserMessageId":user["id"],"nativeTurnId":turn_id}))});
+        }
         state.lock().unwrap().turn_id = turn_id;
     }
-
-    loop {
-        let Some(event) = rpc.next_event().await else {
-            break;
-        };
-        match event {
-            JsonRpcProcessEvent::Notification { method, params } => {
-                let item = params.get("item").cloned().unwrap_or(Value::Null);
-                if (method == "item/started" || method == "item/completed")
-                    && item.get("type").and_then(Value::as_str) == Some("collabAgentToolCall")
-                {
-                    // A collab spawn names its child threads; subscribe so
-                    // their items arrive, correlated to the dispatch item id.
-                    let dispatch_id = item.get("id").and_then(Value::as_str).map(str::to_string);
-                    let receivers = item.get("receiverThreadIds").and_then(Value::as_array).cloned().unwrap_or_default();
-                    for receiver in receivers {
-                        let Some(child_id) = receiver.as_str() else { continue };
-                        let Some(dispatch_id) = &dispatch_id else { continue };
-                        let mut state = state.lock().unwrap();
-                        if !state.child_threads.contains_key(child_id) {
-                            let rpc = rpc.clone();
-                            let child = child_id.to_string();
-                            tokio::spawn(async move {
-                                let _ = rpc.request("thread/subscribe", json!({ "threadId": child })).await;
-                            });
-                        }
-                        state.child_threads.insert(child_id.to_string(), dispatch_id.clone());
-                    }
-                }
-                let events = parse_codex_app_server_notification(&method, &params);
-                let event_thread_id = params.get("threadId").and_then(Value::as_str).map(str::to_string);
-                let dispatch = event_thread_id
-                    .filter(|id| *id != thread_id)
-                    .and_then(|id| state.lock().unwrap().child_threads.get(&id).cloned());
-                for event in match dispatch {
-                    Some(dispatch_id) => with_subagent_dispatch(events, &dispatch_id),
-                    None => events,
-                } {
-                    if sender.send(event).is_err() {
-                        return Ok(());
-                    }
-                }
-                if compact && method == "thread/compacted" {
-                    state.lock().unwrap().finished = true;
-                    let _ = sender.send(AdapterEvent::Message {
-                        text: "Codex 上下文已压缩".to_string(),
-                        phase: None,
-                        message_id: None,
-                        subagent_dispatch_id: None,
-                        raw: None,
-                    });
-                    // Do NOT kill the resident app-server: reuse it for the next turn (matches the official Codex desktop app).
-                    let _ = sender.send(AdapterEvent::Exit { exit_code: Some(0), signal: None });
-                    return Ok(());
-                }
-                if method == "turn/completed" {
-                    state.lock().unwrap().finished = true;
-                    // Do NOT kill the resident app-server: reuse it for the next turn (matches the official Codex desktop app).
-                    let _ = sender.send(AdapterEvent::Exit { exit_code: Some(0), signal: None });
-                    return Ok(());
-                }
-            }
-            JsonRpcProcessEvent::Request { id, method, params } => {
-                match method.as_str() {
-                    "item/tool/call" => {
-                        for emitted in handle_dynamic_tool_call(&rpc, request, &id, &params).await {
-                            if sender.send(emitted).is_err() {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    "item/tool/requestUserInput" => handle_request_user_input(&rpc, request, &id, &params).await,
-                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-                        handle_codex_approval(&rpc, request, &id, &params, &method).await
-                    }
-                    _ => rpc.respond_error(&id, -32601, &format!("Nautilo does not support app-server request {method}")),
-                }
-            }
-            JsonRpcProcessEvent::Transport(process_event) => {
-                let finished = state.lock().unwrap().finished;
-                match process_event {
-                    ProcessEvent::Stdout(text) => {
-                        let _ = sender.send(AdapterEvent::Raw { stream: "stdout".to_string(), text });
-                    }
-                    ProcessEvent::Stderr(text) => {
-                        let _ = sender.send(AdapterEvent::Raw { stream: "stderr".to_string(), text });
-                    }
-                    ProcessEvent::Exit { exit_code, signal } => {
-                        if !finished {
-                            let _ = sender.send(AdapterEvent::Exit { exit_code, signal });
-                        }
-                        return Ok(());
-                    }
-                    ProcessEvent::Error(message) => {
-                        let _ = sender.send(AdapterEvent::Error { message });
-                    }
-                    ProcessEvent::Timeout { reason } => {
-                        let kind = match reason {
-                            TimeoutReason::Timeout => TimeoutKind::Timeout,
-                            TimeoutReason::Idle => TimeoutKind::Idle,
-                            TimeoutReason::MaxOutput => TimeoutKind::MaxOutput,
-                        };
-                        let _ = sender.send(AdapterEvent::Timeout { reason: kind });
-                    }
-                }
-            }
-            JsonRpcProcessEvent::Response { .. } => {}
-        }
-    }
-    Ok(())
+    timing("turn_accepted");
+    context.wait().await
 }
 
 async fn handle_dynamic_tool_call(
@@ -1023,4 +1217,483 @@ async fn handle_codex_approval(
         }
         Err(error) => rpc.respond_error(id, -32000, &error.to_string()),
     }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use std::time::Duration;
+    include!("session_events_tests.rs");
+
+    #[test]
+    fn codex_desktop_browser_context_identifies_the_actual_server_without_replacing_native_instructions() {
+        let mut request = AdapterStartRequest {
+            prompt: "使用 Nautilo 浏览器打开网页".into(),
+            mcp_servers: Some(vec![json!({
+                "name": "nautilo_browser_", "transport": "http", "desktopBrowser": true,
+                "url": "http://127.0.0.1:12345/mcp/private-session", "headers": { "Authorization": "Bearer private-key" }
+            })]),
+            ..Default::default()
+        };
+        let params = turn_start_params(&request, "existing-thread").unwrap();
+        assert_eq!(params["threadId"], "existing-thread");
+        assert_eq!(params["input"][0]["text"], request.prompt);
+        assert!(params.get("baseInstructions").is_none());
+        assert!(params.get("developerInstructions").is_none());
+        assert_eq!(params["additionalContext"]["nautilo.desktop_browser"]["kind"], "application");
+        let context = params["additionalContext"]["nautilo.desktop_browser"]["value"].as_str().unwrap();
+        assert!(context.contains("nautilo_browser_"));
+        assert!(context.contains("browser_run"));
+        assert!(!context.contains("12345"));
+        assert!(!context.contains("private-session"));
+        assert!(!context.contains("private-key"));
+        request.mcp_servers = Some(vec![json!({ "name": "unrelated", "transport": "http" })]);
+        assert!(turn_start_params(&request, "existing-thread").unwrap().get("additionalContext").is_none());
+    }
+
+    #[test]
+    fn resumed_turn_overrides_approval_and_sandbox_for_each_selection() {
+        let mut request = AdapterStartRequest { instance: json!({"providerOptions":{"permissionMode":"ask"}}), cwd: "C:/project".into(), ..Default::default() };
+        for (mode, approval, sandbox) in [("ask", "on-request", "workspaceWrite"), ("full-access", "never", "dangerFullAccess"), ("auto", "on-failure", "workspaceWrite")] {
+            request.permission_mode = Some(mode.into());
+            let params = turn_start_params(&request, "same-thread").unwrap();
+            assert_eq!(params["threadId"], "same-thread");
+            assert_eq!(params["approvalPolicy"], approval);
+            assert_eq!(params["sandboxPolicy"]["type"], sandbox);
+        }
+        request.permission_mode = None;
+        assert_eq!(turn_start_params(&request, "same-thread").unwrap()["approvalPolicy"], "on-request");
+        request.instance = json!({});
+        assert_eq!(turn_start_params(&request, "same-thread").unwrap()["sandboxPolicy"]["type"], "workspaceWrite");
+    }
+
+    fn deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(5)
+    }
+
+    #[tokio::test]
+    async fn queued_cancel_does_not_acquire_or_release_another_turn() {
+        let lock = tokio::sync::Mutex::new(());
+        let active = lock.lock().await;
+        let (cancel, mut cancelled) = watch::channel(false);
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let waiting = wait_for_codex_turn(&lock, &mut cancelled, deadline(), &sender);
+        tokio::pin!(waiting);
+        tokio::select! {
+            result = &mut waiting => panic!("unexpected admission: {:?}", result),
+            _ = async { assert!(matches!(events.recv().await, Some(AdapterEvent::Status { phase, .. }) if phase == "provider_queued")); } => {}
+        }
+        cancel.send(true).unwrap();
+        assert!(matches!(waiting.await, Err(CodexQueueExit::Cancelled)));
+        assert!(lock.try_lock().is_err());
+        drop(active);
+        assert!(lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_when_lock_and_cancel_are_ready_together() {
+        let lock = tokio::sync::Mutex::new(());
+        let active = lock.lock().await;
+        let (cancel, mut cancelled) = watch::channel(false);
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let waiting = wait_for_codex_turn(&lock, &mut cancelled, deadline(), &sender);
+        tokio::pin!(waiting);
+        tokio::select! {
+            _ = &mut waiting => panic!("unexpected admission"),
+            _ = events.recv() => {}
+        }
+        drop(active);
+        cancel.send(true).unwrap();
+        assert!(matches!(waiting.await, Err(CodexQueueExit::Cancelled)));
+        assert!(lock.try_lock().is_ok());
+        assert!(events.try_recv().is_err()); // no provider_starting
+    }
+
+    #[tokio::test]
+    async fn queued_timeout_leaves_active_turn_untouched() {
+        let lock = tokio::sync::Mutex::new(());
+        let _active = lock.lock().await;
+        let (_cancel, mut cancelled) = watch::channel(false);
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let result = wait_for_codex_turn(&lock, &mut cancelled, tokio::time::Instant::now() + Duration::from_millis(10), &sender).await;
+        assert!(matches!(result, Err(CodexQueueExit::Timeout)));
+        assert!(lock.try_lock().is_err());
+        assert!(matches!(events.recv().await, Some(AdapterEvent::Status { phase, .. }) if phase == "provider_queued"));
+        assert!(matches!(events.recv().await, Some(AdapterEvent::Timeout { .. })));
+    }
+
+    #[tokio::test]
+    async fn cancelled_before_start_never_acquires_available_lock() {
+        let lock = tokio::sync::Mutex::new(());
+        let (_cancel, mut cancelled) = watch::channel(true);
+        let (sender, mut events) = mpsc::unbounded_channel();
+        assert!(matches!(wait_for_codex_turn(&lock, &mut cancelled, deadline(), &sender).await, Err(CodexQueueExit::Cancelled)));
+        assert!(lock.try_lock().is_ok());
+        assert!(events.try_recv().is_err());
+    }
+
+    fn fake_request(prompt: &str) -> (AdapterStartRequest, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("nautilo-codex-queue-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app-server"), include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/core-daemon/test/fixtures/fake-codex-queue.cjs"))).unwrap();
+        let mut env: HashMap<String, String> = std::env::vars().filter(|(key, _)| ["PATH", "SystemRoot", "PATHEXT"].contains(&key.as_str())).collect();
+        env.insert("CODEX_FAKE_LOG".to_string(), root.join("rpc.ndjson").to_string_lossy().into_owned());
+        (AdapterStartRequest {
+            instance: json!({ "id": Uuid::new_v4().to_string(), "executable": std::env::var("NAUTILO_TEST_NODE").unwrap_or_else(|_| "node".to_string()) }),
+            prompt: prompt.to_string(), cwd: root.to_string_lossy().into_owned(), env: Some(env), timeout_ms: Some(5_000),
+            ..Default::default()
+        }, root)
+    }
+
+    async fn until_phase(run: &mut AdapterRun, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = run.events.recv().await {
+                if matches!(event, AdapterEvent::Status { ref phase, .. } if phase == expected) { return; }
+            }
+            panic!("missing phase {expected}");
+        }).await.unwrap();
+    }
+
+    async fn collect(run: &mut AdapterRun) -> Vec<AdapterEvent> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut events = vec![];
+            while let Some(event) = run.events.recv().await { events.push(event); }
+            events
+        }).await.unwrap()
+    }
+
+    async fn cleanup(request: &AdapterStartRequest, root: std::path::PathBuf) {
+        let pooled = acquire_codex_app_server(request).unwrap();
+        pooled.rpc.process_handle().cancel().await;
+        discard_codex_app_server(&pooled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn native_plugin_elicitation_survives_the_real_rpc_dispatch_and_waits_for_auth() {
+        for (accept, missing_id) in [(true, false), (true, true), (false, false)] {
+            let (mut request, root) = fake_request("plugin approval");
+            if missing_id { request.env.as_mut().unwrap().insert("CODEX_FAKE_MISSING_PLUGIN_ID".into(), "1".into()); }
+            std::fs::write(root.join("app-server"), include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/core-daemon/test/fixtures/fake-codex-elicitation.cjs"))).unwrap();
+            let prompts = Arc::new(Mutex::new(Vec::new()));
+            let seen = prompts.clone();
+            request.request_interaction = Some(Arc::new(move |input| {
+                seen.lock().unwrap().push(input);
+                Box::pin(async move { Ok(if accept { json!({"outcome":"selected","optionId":"confirm"}) } else { json!({"outcome":"cancelled"}) }) })
+            }));
+            let mut run = start_codex_app_server(request.clone(), None).unwrap();
+            let events = collect(&mut run).await;
+            assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message{text,..} if text == if accept {"Connected"} else {"Cancelled"})));
+            let prompts = prompts.lock().unwrap();
+            assert_eq!(prompts.len(), if accept {2} else {1});
+            if accept {
+                assert_eq!(prompts[0]["presentation"]["type"], "plugin_install");
+                assert_eq!(prompts[1]["presentation"]["type"], "plugin_authorization");
+                assert_eq!(prompts[1]["links"][0]["url"], "https://chatgpt.com/apps/github");
+            }
+            let rpc_log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+            assert_eq!(rpc_log.contains("\"method\":\"plugin/install\""), accept);
+            if accept { assert!(rpc_log.contains("\"pluginName\":\"plugin_fixture_github\"")); }
+            assert!(rpc_log.contains("\"mcpServerOpenaiFormElicitation\":true"));
+            drop(prompts);
+            cleanup(&request, root).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn native_child_join_keeps_dispatch_identity_and_parent_lifecycle_isolated() {
+        let (request, root) = fake_request("native-child");
+        let mut run = start_single_connection(request.clone(), None).unwrap();
+        let events = collect(&mut run).await;
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message { text, subagent_dispatch_id: Some(id), .. } if id == "spawn-native" && text == "Child snapshot before join")));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message { text, subagent_dispatch_id: Some(id), .. } if id == "spawn-native" && text == "Real native child result")));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Tool { call_id: Some(id), input: Some(input), .. } if id == "spawn-native" && input["agentsStates"]["native-child-thread"]["status"] == "completed")));
+        assert!(!events.iter().any(|event| matches!(event, AdapterEvent::Usage { input_tokens: Some(999999), .. })));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message { text, subagent_dispatch_id: None, .. } if text == "done:native-child")));
+        assert!(matches!(events.last(), Some(AdapterEvent::Exit { exit_code: Some(0), .. })));
+        let calls = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        assert!(!calls.contains("thread/subscribe"));
+        assert!(calls.contains("native-child-thread"));
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn modern_compaction_item_completes_and_errors_terminate_without_an_old_notification() {
+        let (mut request, root)=fake_request("compact");request.provider_command=Some("compact".into());
+        let mut run=start_single_connection(request.clone(),Some("thread-for-compaction".into())).unwrap();
+        let events=collect(&mut run).await;
+        assert!(events.iter().any(|event|matches!(event,AdapterEvent::Message{text,..} if text.contains("已压缩"))));
+        assert!(matches!(events.last(),Some(AdapterEvent::Exit{exit_code:Some(0),..})));
+        request.env.as_mut().unwrap().insert("CODEX_FAKE_COMPACT_ERROR".into(),"1".into());
+        let mut failed=start_single_connection(request.clone(),Some("thread-for-compaction".into())).unwrap();
+        let events=collect(&mut failed).await;
+        assert!(events.iter().any(|event|matches!(event,AdapterEvent::Error{message} if message.contains("Compaction API rejected"))));
+        assert!(matches!(events.last(),Some(AdapterEvent::Exit{exit_code:Some(1),..})));
+        cleanup(&request,root).await;
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_turn_stays_failed_and_retry_notice_can_recover() {
+        let (request, root) = fake_request("failed-turn");
+        let mut failed = start_single_connection(request.clone(), None).unwrap();
+        let events = collect(&mut failed).await;
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Error { message } if message.contains("rejected the credential"))));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Status { phase, .. } if phase == "turn_failed")));
+        assert!(!events.iter().any(|event| matches!(event, AdapterEvent::Status { phase, .. } if phase == "turn_completed")));
+        assert!(matches!(events.last(), Some(AdapterEvent::Exit { exit_code: Some(1), .. })));
+        let mut retry_request = request.clone();
+        retry_request.prompt = "retry-turn".into();
+        let mut retry = start_single_connection(retry_request, None).unwrap();
+        let events = collect(&mut retry).await;
+        assert!(!events.iter().any(|event| matches!(event, AdapterEvent::Error { .. })));
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Message { text, .. } if text == "done:retry-turn")));
+        assert!(matches!(events.last(), Some(AdapterEvent::Exit { exit_code: Some(0), .. })));
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn fake_rpc_queued_cancel_preserves_active_session_and_fifo() {
+        let (request, root) = fake_request("slow");
+        let mut first = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut first, "turn_started").await;
+        let mut second = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut second, "provider_queued").await;
+        tokio::time::timeout(Duration::from_millis(100), second.cancel()).await.unwrap();
+        let mut third_request = request.clone(); third_request.prompt = "foreign".to_string();
+        let mut third = start_single_connection(third_request, None).unwrap();
+        let first_events = collect(&mut first).await;
+        let third_events = collect(&mut third).await;
+        assert!(first_events.iter().any(|e| matches!(e, AdapterEvent::Message { text, .. } if text == "done:slow")));
+        assert!(third_events.iter().any(|e| matches!(e, AdapterEvent::Message { text, .. } if text == "done:foreign")));
+        assert!(!third_events.iter().any(|e| matches!(e, AdapterEvent::Message { text, .. } if text.contains("MUST NOT LEAK"))));
+        let log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        let messages: Vec<Value> = log.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(messages.iter().filter(|v| v["method"] == "initialize").count(), 1);
+        assert_eq!(messages.iter().filter(|v| v["method"] == "turn/start").count(), 2);
+        assert!(messages.iter().any(|v| v["id"] == "foreign-tool" && v["error"]["code"] == -32600));
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn fake_rpc_active_cancel_keeps_process_for_next_session() {
+        let (mut request, root) = fake_request("tool-after-interrupt");
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = tool_calls.clone();
+        request.execute_runtime_tool = Some(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(json!({ "success": true, "content": "must not execute" })) })
+        }));
+        let mut first = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut first, "turn_started").await;
+        let mut next = request.clone(); next.prompt = "fast".to_string();
+        let mut second = start_single_connection(next, None).unwrap();
+        until_phase(&mut second, "provider_queued").await;
+        tokio::time::timeout(Duration::from_secs(1), first.cancel()).await.unwrap();
+        let events = collect(&mut second).await;
+        assert!(events.iter().any(|e| matches!(e, AdapterEvent::Message { text, .. } if text == "done:fast")));
+        let log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        let messages: Vec<Value> = log.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(messages.iter().filter(|v| v["method"] == "initialize").count(), 1);
+        assert!(messages.iter().any(|v| v["method"] == "turn/interrupt" && v.get("id").is_some()));
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+        assert!(messages.iter().any(|v| v["id"] == "after-cancel-tool" && v["error"]["code"] == -32600));
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn fake_rpc_queue_timeout_does_not_kill_active_process() {
+        let (request, root) = fake_request("slow");
+        let mut first = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut first, "turn_started").await;
+        let mut queued_request = request.clone(); queued_request.timeout_ms = Some(15);
+        let mut queued = start_single_connection(queued_request, None).unwrap();
+        let queued_events = collect(&mut queued).await;
+        assert!(queued_events.iter().any(|e| matches!(e, AdapterEvent::Timeout { .. })));
+        let first_events = collect(&mut first).await;
+        assert!(first_events.iter().any(|e| matches!(e, AdapterEvent::Message { text, .. } if text == "done:slow")));
+        let log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        assert_eq!(log.lines().filter(|line| serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start").count(), 1);
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn fake_rpc_config_retirement_waits_for_the_active_turn() {
+        let (request, root) = fake_request("slow");
+        let original = acquire_codex_app_server(&request).unwrap();
+        let mut first = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut first, "turn_started").await;
+        let mut next = request.clone();
+        next.prompt = "fast".to_string();
+        next.instance["models"] = json!([{ "id": "different-catalog" }]);
+        assert_ne!(codex_config_fingerprint(&request), codex_config_fingerprint(&next));
+        let mut second = start_single_connection(next.clone(), None).unwrap();
+        assert!(original.rpc.process_handle().is_alive());
+        let events = collect(&mut first).await;
+        assert!(events.iter().any(|e| matches!(e, AdapterEvent::Message { text, .. } if text == "done:slow")));
+        let second_events = collect(&mut second).await;
+        assert!(second_events.iter().any(|e| matches!(e, AdapterEvent::Message { text, .. } if text == "done:fast")));
+        tokio::time::timeout(Duration::from_secs(1), original.rpc.process_handle().wait()).await.unwrap();
+        cleanup(&next, root).await;
+    }
+
+
+    #[tokio::test]
+    async fn fake_rpc_missing_interrupt_response_retires_connection() {
+        let (request, root) = fake_request("no-interrupt-response");
+        let original = acquire_codex_app_server(&request).unwrap();
+        let mut run = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut run, "turn_started").await;
+        tokio::time::timeout(Duration::from_secs(5), run.cancel()).await.unwrap();
+        assert!(!original.rpc.process_handle().is_alive());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+
+    #[tokio::test]
+    async fn fake_rpc_active_timeout_does_not_overwrite_timeout_with_error() {
+        let (mut request, root) = fake_request("hang");
+        request.timeout_ms = Some(250);
+        let mut run = start_single_connection(request.clone(), None).unwrap();
+        let events = collect(&mut run).await;
+        assert!(events.iter().any(|e| matches!(e, AdapterEvent::Timeout { .. })));
+        assert!(!events.iter().any(|e| matches!(e, AdapterEvent::Error { .. })));
+        let resident = acquire_codex_app_server(&request).unwrap();
+        assert!(resident.rpc.process_handle().is_alive());
+        cleanup(&request, root).await;
+    }
+
+
+    #[tokio::test]
+    async fn queued_sessions_share_one_replacement_without_replaying_a_started_turn() {
+        let (request, root) = fake_request("crash-controlled");
+        let original = acquire_codex_app_server(&request).unwrap();
+        let mut first = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut first, "turn_started").await;
+        let mut waiting = vec![];
+        for _ in 0..3 {
+            let mut next = request.clone(); next.prompt = "fast".to_string();
+            let mut run = start_single_connection(next, None).unwrap();
+            until_phase(&mut run, "provider_queued").await;
+            waiting.push(run);
+        }
+        original.rpc.request("test/crash", json!({})).await.unwrap();
+        let first_events = collect(&mut first).await;
+        assert!(first_events.iter().any(|event| matches!(event, AdapterEvent::Exit { exit_code: Some(17), .. })));
+        for run in &mut waiting {
+            let events = collect(run).await;
+            assert_eq!(events.iter().filter(|event| matches!(event, AdapterEvent::Message { text, .. } if text == "done:fast")).count(), 1);
+            assert!(!events.iter().any(|event| matches!(event, AdapterEvent::Error { .. })));
+        }
+        let log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        let messages: Vec<Value> = log.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(messages.iter().filter(|value| value["event"] == "spawn").count(), 2);
+        assert_eq!(messages.iter().filter(|value| value["method"] == "initialize").count(), 2);
+        assert_eq!(messages.iter().filter(|value| value["method"] == "turn/start" && value["params"]["input"][0]["text"] == "crash-controlled").count(), 1);
+        assert_eq!(messages.iter().filter(|value| value["method"] == "turn/start" && value["params"]["input"][0]["text"] == "fast").count(), 3);
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn queued_recovery_preserves_resume_identity_and_permissions() {
+        let (request, root) = fake_request("crash-controlled");
+        let original = acquire_codex_app_server(&request).unwrap();
+        let mut first = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut first, "turn_started").await;
+        let mut next = request.clone(); next.prompt = "fast".to_string();
+        next.permission_mode = Some("ask".to_string());
+        let expected_options = thread_options(&next, true).unwrap();
+        let mut resumed = start_single_connection(next, Some("existing-provider-thread".to_string())).unwrap();
+        until_phase(&mut resumed, "provider_queued").await;
+        original.rpc.request("test/crash", json!({})).await.unwrap();
+        collect(&mut first).await;
+        let events = collect(&mut resumed).await;
+        assert_eq!(events.iter().filter(|event| matches!(event, AdapterEvent::Session { provider_session_id, .. } if provider_session_id == "existing-provider-thread")).count(), 1);
+        let log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        let messages: Vec<Value> = log.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let resumes: Vec<_> = messages.iter().filter(|value| value["method"] == "thread/resume").collect();
+        assert_eq!(resumes.len(), 1);
+        assert_eq!(resumes[0]["params"]["threadId"], "existing-provider-thread");
+        assert_eq!(resumes[0]["params"]["approvalPolicy"], expected_options["approvalPolicy"]);
+        assert_eq!(resumes[0]["params"]["sandbox"], expected_options["sandbox"]);
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn queued_recovery_never_rolls_back_changed_configuration() {
+        let (request, root) = fake_request("fast");
+        let old = acquire_codex_app_server(&request).unwrap();
+        old.rpc.process_handle().cancel().await;
+        discard_codex_app_server(&old);
+        let mut current = request.clone();
+        current.env.as_mut().unwrap().insert("CODEX_FAKE_ACCOUNT".to_string(), "new-config-marker".to_string());
+        let newer = acquire_codex_app_server(&current).unwrap();
+        newer.rpc.process_handle().cancel().await;
+        discard_codex_app_server(&newer);
+        let recovery = acquire_codex_app_server_matching(&request, Some((old.config_fingerprint, old.generation)));
+        assert!(recovery.is_err());
+        assert_eq!(CODEX_APP_SERVER_POOL.lock().unwrap().get(&codex_instance_key(&request)).unwrap().config_fingerprint, newer.config_fingerprint);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn failed_replacement_is_not_restarted_by_every_old_waiter() {
+        let (request, root) = fake_request("fast");
+        let old = acquire_codex_app_server(&request).unwrap();
+        old.rpc.process_handle().cancel().await;
+        discard_codex_app_server(&old);
+        let origin = Some((old.config_fingerprint, old.generation));
+        let replacement = acquire_codex_app_server_matching(&request, origin).unwrap();
+        let reused = acquire_codex_app_server_matching(&request, origin).unwrap();
+        assert!(Arc::ptr_eq(&replacement, &reused));
+        let catalog_directory = root.join("retired-catalog");
+        std::fs::create_dir_all(&catalog_directory).unwrap();
+        *replacement.catalog_cleanup.lock().unwrap() = Some(PathBufCleanup(catalog_directory.clone()));
+        replacement.rpc.process_handle().cancel().await;
+        for _ in 0..8 { assert!(acquire_codex_app_server_matching(&request, origin).is_err()); }
+        assert!(!catalog_directory.exists());
+        assert!(CODEX_APP_SERVER_POOL.lock().unwrap().get(&codex_instance_key(&request)).unwrap().connection.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_expired_waiter_does_not_recover_dead_connection() {
+        let (request, root) = fake_request("crash-controlled");
+        let original = acquire_codex_app_server(&request).unwrap();
+        let mut first = start_single_connection(request.clone(), None).unwrap();
+        until_phase(&mut first, "turn_started").await;
+        let mut next = request.clone(); next.prompt = "fast".to_string();
+        let mut cancelled = start_single_connection(next.clone(), None).unwrap();
+        until_phase(&mut cancelled, "provider_queued").await;
+        cancelled.cancel().await;
+        next.timeout_ms = Some(20);
+        let mut expired = start_single_connection(next, None).unwrap();
+        let events = collect(&mut expired).await;
+        assert!(events.iter().any(|event| matches!(event, AdapterEvent::Timeout { .. })));
+        original.rpc.request("test/crash", json!({})).await.unwrap();
+        collect(&mut first).await;
+        let log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        let messages: Vec<Value> = log.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(messages.iter().filter(|value| value["event"] == "spawn").count(), 1);
+        assert_eq!(messages.iter().filter(|value| value["method"] == "turn/start").count(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn config_tombstone_is_pruned_after_its_last_waiter_drops() {
+        let (request, root) = fake_request("fast");
+        let old = acquire_codex_app_server(&request).unwrap();
+        old.rpc.process_handle().cancel().await;
+        discard_codex_app_server(&old);
+        let key = codex_instance_key(&request);
+        assert!(CODEX_APP_SERVER_POOL.lock().unwrap().contains_key(&key));
+        drop(old);
+        let (other, other_root) = fake_request("fast");
+        let fresh = acquire_codex_app_server(&other).unwrap();
+        assert!(!CODEX_APP_SERVER_POOL.lock().unwrap().contains_key(&key));
+        fresh.rpc.process_handle().cancel().await;
+        discard_codex_app_server(&fresh);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(other_root);
+    }
+
 }

@@ -9,20 +9,21 @@
 允许你为它们配置可执行文件/参数/环境变量/模型、组建**团队**、派发**任务 DAG**，并在一个统一会话界面里调度它们协同干活。
 它**不训练模型、不替代任何 CLI**，是做在这些 CLI 之上的编排与管理层。
 
-## 2. 技术栈总览（当前主线：Tauri + Rust）
+## 2. 技术栈总览（当前主线：Electron + React 前端、Rust 后端）
 
-**这是 Tauri 项目**（Tauri v2，Rust 壳 + 系统 WebView 渲染，不打包 Chromium）。
+**用户已确认当前运行架构是 Electron 桌面壳与 React 前端，连接独立的 Rust 后端。不得自行切换到 Tauri。** 仓库保留 Tauri 入口，共享 renderer，但它不是当前任务的启动入口。
 
 | 层 | 技术 | 位置 |
 |---|---|---|
-| 桌面壳 | Tauri 2（Rust） | `apps/desktop/src-tauri/` |
+| 桌面壳 | Electron | `apps/desktop/src/main/`、`apps/desktop/src/preload/` |
 | 核心后台 daemon | Rust（`nautilo-core`，由 TS 版移植而来） | `rust/nautilo-core/` |
 | 前端 UI | React 18 + electron-vite/vite 构建（同一份 renderer 被 Electron 与 Tauri 共用） | `apps/desktop/src/renderer/` |
 | Provider 插件 | Rust 编译为独立 exe（老版有 TS pnpm 包形式） | `rust/plugins/*`、`packages/provider-plugin-*` |
 | 领域模型 / 协议 | TS package（domain、schemas、event-protocol、provider-sdk） | `packages/*` |
 
-### 历史遗留的 Electron/Node 线（迁移中，仍保留）
-- Electron 主进程/preload：`apps/desktop/src/main/`、`apps/desktop/src/preload/`
+### 其他保留的入口与实现
+- Electron 主进程/preload 是当前桌面入口：`apps/desktop/src/main/`、`apps/desktop/src/preload/`
+- Tauri 壳作为另一个保留入口：`apps/desktop/src-tauri/`；未经用户要求不要切换启动路线。
 - Node.js 版 core daemon：`packages/core-daemon/`（Rust 版的对照实现）
 - Electron 打包：根 `electron-builder.yml` + `scripts/electron-builder*`
 
@@ -35,7 +36,7 @@
 ```text
 .
 ├── apps/desktop/                 # 桌面端（主工作区）
-│   ├── src/main/                 # Electron 主进程（历史线）
+│   ├── src/main/                 # Electron 主进程（当前桌面入口）
 │   ├── src/preload/              # contextBridge 白名单 API
 │   ├── src/renderer/             # React UI（两条壳共用）
 │   │   └── src/
@@ -97,7 +98,7 @@
 | 命令 | 作用 |
 |---|---|
 | `pnpm install` | 安装全 workspace |
-| `pnpm dev:desktop` | 构建 Node daemon 并用 Electron 开发模式跑 |
+| `pnpm dev:desktop` | 构建 Rust 后端及插件，并用 Electron 开发模式跑 |
 | `pnpm dev:tauri` | 构建 Rust 插件 + renderer，Tauri 开发跑 |
 | `pnpm tauri:renderer` | 单独构建 Tauri 前端（到 src-tauri/dist） |
 | `pnpm tauri:build` | renderer + Rust 后端 Cargo release 构建 |
@@ -153,3 +154,12 @@ Renderer (React)  → 壳层（Tauri commands / Electron preload 白名单）
 | 加一个内建能力/skill | `packages/core-daemon/src/application/capability-service.ts` + `builtin-*.ts` |
 | 改 IPC 协议 | `packages/schemas/src/ipc.ts`（TS+Rust 双方都要同步） |
 | 改持久化结构 | `packages/core-daemon/src/database/<repo>.ts` + `migrations.ts`（Rust：`rust/nautilo-core/src/database/`） |
+
+## 8. Harness 原生体验要求
+
+- 原生能力不缩水是验收要求。不得为了接入方便默认关闭 Apps、插件、MCP、Skills、扩展或原生会话持久化；加载成功也不代表功能完整。
+- 保留当前选定账号、原生配置优先级和会话身份。Nautilo 管理的资源按归属合并，不能通过换账号、覆盖整份配置或把历史拼成一段提示词冒充原生恢复。
+- 区分会话生命周期和单轮生命周期。支持常驻协议的 Harness 应复用运行环境；一轮完成不等于原生进程退出，后台任务和子 Agent 仍需正确跟踪。
+- 原生交互必须形成请求、界面、用户回应、原生结果的闭环。不能把已知的选择、输入、编辑请求直接自动取消，也不能把原生日志查看器称为可交互终端。
+- 启动参数应能追溯到传输要求、用户显式配置或已核实的协议适配；不要新增无依据的功能覆盖。发现适配缺口要明确记录，不能把“能发消息”称为完整兼容。
+- 对标结果、当前缺口和逐 Harness 验收流程见 [T3 Code 原生体验对标](docs/t3code-native-experience-benchmark.md)。按具体改动验证完整流程，避免只检查单个函数、扩大已验证范围或重复全量检查。

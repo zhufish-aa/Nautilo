@@ -1,15 +1,16 @@
 import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
-import { Check, ChevronDown, ChevronUp, ClipboardCheck, HelpCircle, RotateCcw, Send, ShieldAlert, X, type LucideIcon } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, ClipboardCheck, ExternalLink, HelpCircle, RotateCcw, Send, ShieldAlert, X, type LucideIcon } from "lucide-react";
 import type { InteractionOption, InteractionQuestion, InteractionRequest, InteractionResponse } from "@agenthub/domain";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn, formatDateTime } from "../../lib/utils";
 import { useInteractionsStore } from "../../stores/interactions";
 import { toast } from "../../stores/toast";
+import { getBridge } from "../../lib/bridge";
 import { StatusChip, type ChipTone } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
 import { MarkdownContent } from "../timeline/MarkdownContent";
+import { PluginApprovalCard, pluginPresentation } from "./PluginApprovalCard";
 
 const EMPTY: InteractionRequest[] = [];
 
@@ -37,6 +38,7 @@ function isDangerOption(option: InteractionOption): boolean {
 export function InteractionCards({ sessionId }: { sessionId: string }): JSX.Element | null {
   const interactions = useInteractionsStore((state) => state.bySession[sessionId] ?? EMPTY);
   const loadPending = useInteractionsStore((state) => state.loadPending);
+  const respondInteraction = useInteractionRespond();
 
   useEffect(() => {
     void loadPending(sessionId);
@@ -46,13 +48,14 @@ export function InteractionCards({ sessionId }: { sessionId: string }): JSX.Elem
   if (visible.length === 0) return null;
   return (
     <>
-      {visible.map((interaction) =>
-        interaction.kind === "question"
+      {visible.map((interaction) => {
+        const presentation = pluginPresentation(interaction);
+        return presentation ? <PluginApprovalCard key={interaction.id} interaction={interaction} presentation={presentation} onRespond={respondInteraction} /> : interaction.kind === "question"
           ? <QuestionCard key={interaction.id} interaction={interaction} />
           : interaction.kind === "plan_approval"
             ? <PlanApprovalCard key={interaction.id} interaction={interaction} />
             : <ApprovalCard key={interaction.id} interaction={interaction} />
-      )}
+      })}
     </>
   );
 }
@@ -70,30 +73,13 @@ function CardShell({
   time?: string;
   children: React.ReactNode;
 }): JSX.Element {
-  const toneClasses = {
-    warn: "border-warn/20 bg-warn/10 text-warn",
-    ok: "border-ok/20 bg-ok/10 text-ok",
-    muted: "border-line bg-card-hover text-ink-3",
-    plan: "border-accent/30 bg-accent-soft text-accent"
-  } as const;
   return (
-    <motion.article
-      initial={{ opacity: 0, y: 14, scale: 0.985 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 320, damping: 36 }}
-      className="flex gap-3"
-    >
-      <span aria-hidden className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border", toneClasses[tone])}>
-        <Icon className="h-4 w-4" />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="mb-1.5 flex items-baseline justify-between gap-3">
-          <div className="min-w-0 text-[13px] font-medium text-ink-2">{title}</div>
-          {time && <time className="shrink-0 text-[11px] text-ink-3">{time}</time>}
-        </div>
-        {children}
+    <article className="min-w-0 py-2" data-tone={tone}>
+      <div className="mb-3 flex items-center gap-2 text-sm text-ink-2" title={time}>
+        <Icon className="h-4 w-4 text-ink-3" aria-hidden />{title}
       </div>
-    </motion.article>
+      {children}
+    </article>
   );
 }
 
@@ -148,7 +134,7 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
   const pending = interaction.status === "pending";
 
   const [selections, setSelections] = useState<Record<string, string[]>>({});
-  const [texts, setTexts] = useState<Record<string, string>>({});
+  const [texts, setTexts] = useState<Record<string, string>>(() => Object.fromEntries(questions.map(question => [question.id, question.initialValue ?? ""])));
   const [submitting, setSubmitting] = useState(false);
 
   const toggleOption = (question: InteractionQuestion, option: InteractionOption): void => {
@@ -174,7 +160,7 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
   };
 
   const answersComplete = questions.every((question) =>
-    (selections[question.id] ?? []).length > 0 || Boolean((texts[question.id] ?? "").trim())
+    question.allowEmpty || (selections[question.id] ?? []).length > 0 || Boolean((texts[question.id] ?? "").trim())
   );
 
   const submit = async (): Promise<void> => {
@@ -182,8 +168,9 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
     const answers: Record<string, string[]> = {};
     for (const question of questions) {
       const values = [...(selections[question.id] ?? [])];
-      const text = (texts[question.id] ?? "").trim();
-      if (text) values.push(text);
+      const original = texts[question.id] ?? "";
+      const text = question.preserveWhitespace ? original : original.trim();
+      if (text || question.allowEmpty && !(question.options?.length)) values.push(text);
       answers[question.id] = values;
     }
     setSubmitting(true);
@@ -210,7 +197,7 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
         </span>
       }
     >
-      <div className="space-y-4 rounded-xl border border-warn/25 bg-warn/5 px-4 py-3">
+      <div className="space-y-4 rounded-xl border border-line bg-panel px-5 py-4">
         {interaction.title && <p className="text-sm font-medium text-ink">{interaction.title}</p>}
         {questions.map((question) => (
           <QuestionField
@@ -310,19 +297,16 @@ function QuestionField({
           )}
         </div>
       )}
-      {showFreeText && (
-        <Input
-          className="mt-2"
-          type={question.isSecret ? "password" : "text"}
-          value={text}
-          placeholder={t(question.isSecret
-            ? "sessions.interactions.secretPlaceholder"
-            : options.length > 0
-              ? "sessions.interactions.otherPlaceholder"
-              : "sessions.interactions.freeTextPlaceholder")}
-          onChange={(event) => onText(event.currentTarget.value)}
-        />
-      )}
+      {showFreeText && (question.inputType === "multiline" ? (
+        <textarea className="mt-2 min-h-36 w-full resize-y rounded-lg border border-line bg-card px-3 py-2 text-sm leading-6 text-ink outline-none focus:border-accent"
+          aria-label={question.question} value={text} placeholder={question.placeholder}
+          onChange={event => onText(event.currentTarget.value)} />
+      ) : (
+        <Input className="mt-2" aria-label={question.question} type={question.isSecret ? "password" : "text"}
+          value={text} placeholder={question.placeholder ?? t(question.isSecret ? "sessions.interactions.secretPlaceholder"
+            : options.length > 0 ? "sessions.interactions.otherPlaceholder" : "sessions.interactions.freeTextPlaceholder")}
+          onChange={event => onText(event.currentTarget.value)} />
+      ))}
     </fieldset>
   );
 }
@@ -378,7 +362,7 @@ function ApprovalCard({ interaction }: { interaction: InteractionRequest }): JSX
         </span>
       }
     >
-      <div className="rounded-xl border border-warn/25 bg-warn/5 px-4 py-3">
+      <div className="rounded-xl border border-line bg-panel px-5 py-4">
         <p className="text-sm font-medium text-ink">{interaction.title}</p>
         {detail && (
           <div className="mt-2">
@@ -401,6 +385,10 @@ function ApprovalCard({ interaction }: { interaction: InteractionRequest }): JSX
             )}
           </div>
         )}
+        {interaction.links?.length ? <div className="mt-3 flex flex-wrap gap-2">{interaction.links.map((link) => <Button key={link.url} variant="outline" size="sm" onClick={() => {
+          const bridge = getBridge();
+          if (bridge) void bridge.shell.openExternal(link.url).catch((error) => toast.error(String(error)));
+        }}><ExternalLink className="h-3.5 w-3.5" aria-hidden />{link.label}</Button>)}</div> : null}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {options.map((option, index) => (
             <Button
@@ -475,13 +463,13 @@ function PlanApprovalCard({ interaction }: { interaction: InteractionRequest }):
         </span>
       }
     >
-      <div className="overflow-hidden rounded-2xl border border-accent/25 bg-card shadow-[0_10px_35px_rgba(0,0,0,0.12)]">
-        <div className="flex items-start justify-between gap-4 border-b border-line bg-gradient-to-r from-accent-soft to-transparent px-5 py-4">
+      <div className="overflow-hidden rounded-xl border border-line bg-panel">
+        <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
           <div>
             <p className="text-[15px] font-semibold text-ink">{t("sessions.interactions.planReady")}</p>
-            <p className="mt-1 text-xs leading-relaxed text-ink-3">{t("sessions.interactions.planReviewHint")}</p>
+
           </div>
-          <span className="shrink-0 rounded-full border border-accent/25 bg-card px-2.5 py-1 text-[11px] font-medium text-accent">
+          <span className="shrink-0 rounded-full border border-line bg-panel px-2.5 py-1 text-xs font-medium text-ink-2">
             {interaction.providerId}
           </span>
         </div>
@@ -498,7 +486,7 @@ function PlanApprovalCard({ interaction }: { interaction: InteractionRequest }):
               <div className={cn("relative", !expanded && "max-h-80 overflow-hidden")}>
                 <MarkdownContent source={plan} />
                 {!expanded && (
-                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-card to-transparent" />
+                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-line" />
                 )}
               </div>
             )
@@ -517,7 +505,7 @@ function PlanApprovalCard({ interaction }: { interaction: InteractionRequest }):
         </div>
 
         {pending && (
-          <div className="flex flex-wrap items-center gap-2 border-t border-line bg-card-hover/50 px-5 py-3.5">
+          <div className="flex flex-wrap items-center gap-2 border-t border-line bg-panel px-5 py-3.5">
             {approve && (
               <Button variant="primary" size="sm" disabled={submitting} title={approve.description} onClick={() => void answer(approve.id)}>
                 <Check className="h-3.5 w-3.5" aria-hidden />

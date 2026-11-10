@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
-import { BrainCircuit, Sparkles } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import type { RunLifecycle, TimelineEvent } from "../../lib/types";
 
@@ -16,9 +15,7 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const active = lifecycle?.status === "running" || lifecycle?.status === "waiting_approval";
   const latest = useMemo(
-    () => [...events].reverse().find((event) =>
-      isProgressEvent(event) && (!lifecycle?.startedAt || event.timestamp >= lifecycle.startedAt)
-    ),
+    () => latestProgressEvent(events, lifecycle?.startedAt),
     [events, lifecycle?.startedAt]
   );
 
@@ -34,82 +31,68 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
     return () => window.clearInterval(timer);
   }, [active, latest?.id, latest?.timestamp]);
 
-  // Reasoning, tool, command, verification, and approval events already have
-  // dedicated timeline rows. Rendering this generic indicator as well would
-  // show the same in-flight operation twice.
-  if (!active || (!waitingForDelegates && latest && latest.data.kind !== "activity")) return null;
-  // Nothing to show until the agent is actually thinking — no waiting line.
-  if (
-    !waitingForDelegates &&
-    (!latest || (latest.data.kind === "activity" && (latest.data.phase === "queued" || latest.data.phase === "starting")))
-  ) {
-    return null;
-  }
+  // A CLI need not expose reasoning text to show that its turn is in flight.
+  // Only suppress this line when a dedicated row is displaying live progress;
+  // a completed tool/reasoning row must not hide the next model wait.
+  if (!active || (!waitingForDelegates && lifecycle?.reason !== "cancelling" && latest && hasVisibleProgress(latest))) return null;
   const zh = locale === "zh-CN";
-  const label = waitingForDelegates
-    ? (zh ? "子 Agent 正在运行，完成后会通知主 Agent" : "Child agents are running; the main agent will be notified when they finish")
+  const label = lifecycle?.reason === "cancelling"
+    ? (zh ? "正在停止…" : "Stopping…")
+    : waitingForDelegates
+    ? (zh ? "等待协作任务" : "Waiting for collaborators")
     : lifecycle?.status === "waiting_approval"
     ? (zh ? "等待你的批准" : "Waiting for your approval")
     : progressLabel(latest, zh);
 
-  const thinking = latest?.data.kind === "reasoning" || (latest?.data.kind === "activity" && latest.data.phase === "thinking");
-
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 12, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 300, damping: 35 }}
-      className="run-indicator run-border relative mt-4 overflow-hidden rounded-2xl border border-accent/25 bg-card/80 shadow-[0_14px_44px_-16px_var(--accent)] backdrop-blur-md"
-      role="status"
-      aria-live="polite"
-    >
-      <div className="flex items-center gap-3.5 px-4 py-3">
-        <span className="relative flex h-10 w-10 shrink-0 items-center justify-center" aria-hidden>
-          <span className="run-orb-glow absolute inset-0 rounded-full bg-accent/30 blur-md" />
-          <span className="run-orb absolute inset-1 rounded-full opacity-90" />
-          <span className="run-indicator-icon relative flex h-[26px] w-[26px] items-center justify-center rounded-full bg-card text-accent shadow-inner">
-            {thinking ? <BrainCircuit className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
-          </span>
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="shimmer-text truncate text-[13px] font-medium">{label}</p>
-          <p className="run-sublabel mt-0.5 text-[10px] font-medium uppercase tracking-[0.22em] text-ink-3">
-            {zh ? "实时运行" : "Live run"}
-          </p>
-        </div>
-        <span className="run-elapsed flex shrink-0 items-center gap-1.5 rounded-full border border-accent/25 bg-accent-soft px-2.5 py-1 font-mono text-[11px] tabular-nums text-accent">
-          <span className="relative flex h-1.5 w-1.5">
-            <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" aria-hidden />
-            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" aria-hidden />
-          </span>
-          {formatElapsed(elapsedSeconds)}
-        </span>
-      </div>
-    </motion.div>
+    <div role="status" className="flex items-center gap-2 py-1 text-sm text-ink-3">
+      <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden />
+      <span className="min-w-0 truncate">{label}</span>
+      <span aria-hidden="true" className="ml-auto shrink-0 text-xs tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+    </div>
   );
 }
 
 function isProgressEvent(event: TimelineEvent): boolean {
   if (event.data.kind === "activity" && event.data.phase === "completed") return false;
+  if (event.data.kind === "message") return event.data.sender === "agent";
   return ["activity", "reasoning", "tool_activity", "command", "verification", "approval"].includes(event.data.kind);
 }
 
-function progressLabel(event: TimelineEvent | undefined, zh: boolean): string {
-  if (!event) return zh ? "等待 Agent 响应…" : "Waiting for agent…";
+function latestProgressEvent(events: TimelineEvent[], startedAt?: string): TimelineEvent | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.data.kind === "tool_group") {
+      const nested = latestProgressEvent(event.data.items, startedAt);
+      if (nested) return nested;
+    } else if (isProgressEvent(event) && (!startedAt || event.timestamp >= startedAt)) return event;
+  }
+  return undefined;
+}
+
+function hasVisibleProgress(event: TimelineEvent): boolean {
   const data = event.data;
-  if (data.kind === "reasoning") return zh ? "正在思考，已收到推理摘要" : "Thinking · reasoning summary received";
+  if (data.kind === "reasoning") return Boolean(data.streaming);
+  if (data.kind === "tool_activity" || data.kind === "command" || data.kind === "verification") return data.status === "running";
+  if (data.kind === "approval") return data.approval.status === "pending";
+  return data.kind === "message";
+}
+
+function progressLabel(event: TimelineEvent | undefined, zh: boolean): string {
+  if (!event) return zh ? "正在思考…" : "Thinking…";
+  const data = event.data;
+  if (data.kind === "reasoning") return zh ? "正在思考…" : "Thinking…";
   if (data.kind === "tool_activity") {
     return data.status === "running"
       ? (zh ? `正在使用 ${data.toolName}` : `Using ${data.toolName}`)
-      : (zh ? `${data.toolName} 已完成，继续处理中…` : `${data.toolName} finished · continuing…`);
+      : (zh ? "正在思考…" : "Thinking…");
   }
-  if (data.kind === "command") return zh ? "正在执行命令" : "Running command";
-  if (data.kind === "verification") return zh ? "正在执行验收" : "Running verification";
+  if (data.kind === "command" || data.kind === "verification") return zh ? "正在思考…" : "Thinking…";
   if (data.kind === "approval") return zh ? "等待你的批准" : "Waiting for your approval";
   if (data.kind === "activity") {
     const labels = zh
-      ? { queued: "请求已发送，等待 Agent…", starting: "等待 Agent 响应…", thinking: "正在思考…", responding: "正在回复…", completed: "已完成" }
-      : { queued: "Request sent · waiting for agent…", starting: "Waiting for agent…", thinking: "Thinking…", responding: "Responding…", completed: "Completed" };
+      ? { queued: "请求已发送，等待 Agent…", provider_queued: "Agent 正忙，排队中…", starting: "等待 Agent 响应…", thinking: "正在思考…", responding: "正在回复…", completed: "已完成", stopped: "已停止" }
+      : { queued: "Request sent · waiting for agent…", provider_queued: "Agent busy · queued…", starting: "Waiting for agent…", thinking: "Thinking…", responding: "Responding…", completed: "Completed", stopped: "Stopped" };
     return labels[data.phase];
   }
   return zh ? "Agent 正在处理…" : "Agent is working…";

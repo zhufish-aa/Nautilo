@@ -6,10 +6,10 @@ import { Database } from "../database/index.js";
 
 export class ArtifactService {
   constructor(private readonly database: Database) {}
-  save(input: Omit<Artifact, "id" | "contentHash"> & { content: string }): Artifact {
+  save(input: Omit<Artifact, "id" | "contentHash"> & { content: string }, id: string = randomUUID()): Artifact {
     const artifact: Artifact = {
       ...input,
-      id: randomUUID(),
+      id,
       contentHash: createHash("sha256").update(input.content).digest("hex")
     };
     this.database.artifacts.save(artifact, new Date().toISOString(), Buffer.byteLength(input.content));

@@ -1,59 +1,30 @@
-import { AnimatePresence, motion } from "framer-motion";
-import type { ReactNode } from "react";
+import { useState, type ReactNode, type CSSProperties } from "react";
+import {ResizeHandle,useRememberedWidth} from "../ui/ResizeHandle";
+import { PanelLeftOpen } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
-import { useSettingsStore } from "../../stores/settings";
 import { SessionsPage } from "../../features/sessions/SessionsPage";
-import { WorkPage } from "../../features/work/WorkPage";
 import { Sidebar } from "./Sidebar";
 import { TitleBar } from "./TitleBar";
-import { ModeSwitch } from "../../features/work/ModeSwitch";
-
-function AuroraBackground(): JSX.Element {
-  return (
-    <div aria-hidden className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
-      <div
-        className="absolute inset-0"
-        style={{
-          backgroundImage: `linear-gradient(var(--grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--grid-line) 1px, transparent 1px)`,
-          backgroundSize: "44px 44px",
-          maskImage: "radial-gradient(ellipse 90% 70% at 50% 0%, black 30%, transparent 75%)",
-          WebkitMaskImage: "radial-gradient(ellipse 90% 70% at 50% 0%, black 30%, transparent 75%)"
-        }}
-      />
-      <div
-        className="absolute -top-40 left-[8%] h-[420px] w-[560px] rounded-full blur-[110px] motion-safe:animate-drift-slow"
-        style={{ background: "var(--aurora-1)" }}
-      />
-      <div
-        className="absolute top-[30%] right-[-6%] h-[380px] w-[480px] rounded-full blur-[120px] motion-safe:animate-drift-slower"
-        style={{ background: "var(--aurora-2)" }}
-      />
-    </div>
-  );
-}
+import { useSurfaceEntrance } from "../../lib/ui-motion";
 
 export function PageTransition({
   children,
-  className
+  className,
+  transitionKey
 }: {
   children: ReactNode;
   className?: string;
+  transitionKey?: string;
 }): JSX.Element {
-  // Apple-style page transition: critically damped spring (damping ratio 1.0,
-  // no overshoot — bounce is reserved for momentum-driven gestures), a small
-  // restrained offset, and a symmetric enter/exit path (leave the way you came).
+  const ref = useSurfaceEntrance<HTMLDivElement>(transitionKey);
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
-      transition={{ type: "spring", stiffness: 500, damping: 45 }}
+    <div ref={ref}
       className={cn("min-h-full", className)}
     >
       {children}
-    </motion.div>
+    </div>
   );
 }
 
@@ -77,95 +48,53 @@ export function PageHeader({
   );
 }
 
-/**
- * Keep-alive container for the Code/Work workbenches: both stay mounted and
- * absolutely stacked; a mode switch only flips visibility (plus a cheap
- * opacity fade), so scroll position, timeline and composer drafts survive and
- * no full remount stalls the main thread. The hidden pane is taken out of
- * rendering entirely via content-visibility.
- */
-function FullBleedPane({
-  active,
-  reduceMotion,
-  children
-}: {
-  active: boolean;
-  reduceMotion: boolean;
-  children: ReactNode;
-}): JSX.Element {
-  return (
-    <div
-      aria-hidden={!active}
-      className="absolute inset-0"
-      style={{
-        opacity: active ? 1 : 0,
-        visibility: active ? "visible" : "hidden",
-        contentVisibility: active ? "visible" : "hidden",
-        pointerEvents: active ? "auto" : "none",
-        transition: reduceMotion ? "none" : "opacity 150ms ease-out"
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
 export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const { t } = useI18n();
   const location = useLocation();
-  const reduceMotion = useSettingsStore((state) => state.reduceMotion);
+  const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem("nautilo.sidebar.collapsed") === "true"; } catch { return false; } });
+  const sidebarWidth=useRememberedWidth("nautilo.sidebar.width",window.innerWidth<=780?180:window.innerWidth<=1100?240:280,180,480);
+  const toggleSidebar = (value: boolean): void => { setCollapsed(value); try { localStorage.setItem("nautilo.sidebar.collapsed", String(value)); } catch { /* Storage can be disabled. */ } };
   // The chat-first workbench uses the full width/height; other pages stay centered.
   const fullBleed = location.pathname.startsWith("/sessions") || location.pathname.startsWith("/work");
-  const isWork = location.pathname.startsWith("/work");
+  const isAssistant = location.pathname === "/assistant";
+  const isSettings = location.pathname.startsWith("/settings");
+  const isRuns = location.pathname === "/runs";
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden text-ink">
+    <div className="app-shell flex h-screen flex-col overflow-hidden bg-canvas text-ink">
       <a
         href="#main-content"
         className="sr-only z-50 rounded-lg bg-accent px-3 py-2 text-sm text-on-accent focus:not-sr-only focus:absolute focus:top-2 focus:left-2"
       >
         {t("app.skipToContent")}
       </a>
-      <AuroraBackground />
       <TitleBar />
       <div className="relative z-10 flex min-h-0 flex-1">
-        <Sidebar />
+        {!isSettings && (
+          <div className="sidebar-slot" data-collapsed={collapsed} style={{"--sidebar-width":`${sidebarWidth.width}px`,position:"relative",overflow:collapsed?"hidden":"visible",transition:"none"} as CSSProperties}>
+            <Sidebar collapsed={collapsed} onCollapse={() => {
+              toggleSidebar(true);
+              requestAnimationFrame(() => document.getElementById("sidebar-expand")?.focus());
+            }} />
+            {!collapsed&&<ResizeHandle label="调整侧栏宽度" value={sidebarWidth.width} min={180} max={480} onChange={sidebarWidth.resize} onCommit={sidebarWidth.save} reset={280}/>}
+          </div>
+        )}
         <main
           id="main-content"
+          data-sidebar-collapsed={collapsed && !isSettings ? "true" : undefined}
           tabIndex={-1}
-          className={cn("min-w-0 flex-1 outline-none", fullBleed ? "overflow-hidden" : "overflow-y-auto")}
+          className={cn("workspace-main relative min-w-0 flex-1 outline-none", fullBleed || isSettings || isAssistant ? "overflow-hidden" : "overflow-y-auto")}
         >
-          {fullBleed ? (
-            <div className="relative h-full overflow-hidden">
-              {/* Persistent Code/Work switch: lives above both routes so it
-                  never remounts on a mode switch — only its pill slides. */}
-              <div className="pointer-events-none absolute inset-x-0 top-3 z-30 flex justify-center">
-                <ModeSwitch mode={isWork ? "work" : "code"} />
-              </div>
-              {/* Keep-alive: both workbenches mount once and stay mounted;
-                  switching modes only flips pane visibility. The routes render
-                  nothing themselves (see App.tsx). */}
-              <FullBleedPane active={!isWork} reduceMotion={reduceMotion}>
-                <SessionsPage active={!isWork} />
-              </FullBleedPane>
-              <FullBleedPane active={isWork} reduceMotion={reduceMotion}>
-                <WorkPage active={isWork} />
-              </FullBleedPane>
+          {collapsed && !isSettings && <button id="sidebar-expand" type="button" onClick={() => { toggleSidebar(false); requestAnimationFrame(() => document.getElementById("sidebar-collapse")?.focus()); }} aria-label="展开侧栏" title="展开侧栏" className="absolute left-3 top-3 z-30 rounded-lg bg-canvas p-2 text-ink-2 hover:bg-panel focus-visible:ring-2 focus-visible:ring-accent"><PanelLeftOpen className="h-4 w-4" /></button>}
+          {/* One mounted workspace for /sessions and the legacy /work URL. */}
+          <div className={cn("relative h-full overflow-hidden", !fullBleed && "hidden")} aria-hidden={!fullBleed}>
+            <SessionsPage active={fullBleed} />
+          </div>
+          {isSettings || isAssistant ? children : !fullBleed ? (
+            <div className={cn(isRuns ? "runs-route-surface min-h-full w-full" : "mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
+              <PageTransition transitionKey={location.pathname}>{children}</PageTransition>
             </div>
-          ) : (
-            <div className="mx-auto max-w-6xl px-7 py-7">
-              {/* NOTE: do NOT pass initial={false} here. With it, framer-motion
-                  mounts the incoming page at its animate values (opacity 1)
-                  for the first frame and only then applies the initial state
-                  and plays the entrance — the page visibly flashes fully
-                  rendered before sliding/fading in. Default (initial=true)
-                  renders the first frame at opacity 0 so the switch is a pure
-                  entrance animation. */}
-              <AnimatePresence mode="wait">
-                <PageTransition key={location.pathname}>{children}</PageTransition>
-              </AnimatePresence>
-            </div>
-          )}
+          ) : null}
         </main>
       </div>
     </div>

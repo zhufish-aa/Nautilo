@@ -6,8 +6,8 @@
  * - Official TRAE CLI (`traecli`, enterprise edition): ACP-native, driven over
  *   ndjson JSON-RPC (`traecli acp serve`) with streaming updates, tool calls,
  *   usage reports, permission bridging and session/load resume.
- * - Open-source trae-agent (`trae-cli`): headless `trae-cli run` only — plain
- *   stdout text, no resume, no usage. Used as a degraded fallback.
+ * - Open-source trae-agent (`trae-cli`): headless execution, isolated API
+ *   configuration and structured replies/usage read from its trajectory.
  *
  * The binary is probed per run: `instance.baseArgs` always precede the
  * plugin's own arguments, so wrappers such as `uv run trae-cli` work and the
@@ -15,9 +15,11 @@
  * compiled plugin is fully self-contained.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { statSync } from "node:fs";
-import { platform } from "node:os";
-import { delimiter, join } from "node:path";
+import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { platform, homedir } from "node:os";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { parse as parseYaml } from "yaml";
+import conversationBridge from "../resources/sitecustomize.py";
 import type {
   AdapterDetectionResult,
   AdapterEvent,
@@ -38,8 +40,12 @@ const descriptor: ProviderDescriptor = {
   providerId: "trae",
   name: "Trae",
   vendor: "ByteDance",
-  capabilities: ["headless_text"],
-  defaultExecutable: "traecli",
+  capabilities: ["headless_structured", "tool_streaming"],
+  defaultExecutable: "trae-cli",
+  nativeApiProtocol: "responses",
+  connectionProtocolDiscovery: true,
+  observeApiOutput: true,
+  envPassthrough: ["TRAE_CONFIG_FILE"],
   credentialEnv: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "DOUBAO_API_KEY"]
 };
 
@@ -51,13 +57,99 @@ interface TraeBinary {
   help: string;
 }
 
+function modernCli(binary: TraeBinary): boolean { return /^\s*exec\s/m.test(binary.help); }
+
+function prepareOpenSourceConnection<T extends AdapterStartRequest>(request: T): T {
+  if (!request.instance.providerOptions?.runtimeConnectionId) return request;
+  const root = request.env?.NAUTILO_CONNECTION_DIRECTORY;
+  if (!root) throw new Error("API connection directory is missing");
+  const session = request.localSessionId ?? "default";
+  if (!/^[A-Za-z0-9_-]+$/.test(session)) throw new Error("Invalid local session identity");
+  const directory = join(root, "trae-agent", session);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const configFile = join(directory, "trae_config.yaml");
+  const baseUrl = String(request.instance.providerOptions.baseUrl).replace(/\/+$/, "").replace(/\/v1$/, "");
+  const config = buildOpenSourceConfiguration(request, baseUrl);
+  writeFileSync(configFile, JSON.stringify(config, null, 2), { mode: 0o600 });
+  return { ...request, env: { ...request.env, TRAE_CONFIG_FILE: configFile, NAUTILO_TRAE_MCP_COUNT: String(Object.keys(asRecord(config.mcp_servers)).length),
+    NAUTILO_TRAE_TRAJECTORY: join(directory, "trajectory.json"),
+    ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_API_KEY: request.env?.NAUTILO_CONNECTION_API_KEY } };
+}
+
+export function buildOpenSourceConfiguration(request: AdapterStartRequest, baseUrl: string): Record<string, unknown> {
+  const explicit = request.env?.TRAE_CONFIG_FILE;
+  const source = explicit ? (isAbsolute(explicit) ? explicit : join(request.cwd, explicit))
+    : ["trae_config.yaml", "trae_config.yml", "trae_config.json"].map(name => join(request.cwd, name)).find(existsSync);
+  const parsed: unknown = source ? parseYaml(readFileSync(source, "utf8")) : {};
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Native Trae configuration must be an object");
+  const config = parsed as Record<string, unknown>;
+  const agent = { enable_lakeview: true, max_steps: 200,
+    tools: ["bash", "str_replace_based_edit_tool", "sequentialthinking", "task_done"],
+    ...asRecord(asRecord(config.agents).trae_agent) };
+  const nativeModel = asRecord(asRecord(config.models)[String(asRecord(agent).model ?? "")]);
+  for (const section of ["agents", "model_providers", "models", ...(agent.enable_lakeview !== false ? ["lakeview"] : [])]) {
+    const value = config[section];
+    if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) {
+      throw new Error(`Native Trae ${section} must be an object`);
+    }
+  }
+  config.agents = { ...asRecord(config.agents), trae_agent: { ...agent, model: "selected" } };
+  config.model_providers = { ...asRecord(config.model_providers), nautilo: { provider: "anthropic", api_key: "", base_url: baseUrl } };
+  config.models = { ...asRecord(config.models), selected: { max_tokens: 16384, temperature: 0.5, top_p: 1, top_k: 0,
+    parallel_tool_calls: true, max_retries: 1, ...nativeModel, model_provider: "nautilo", model: request.model } };
+  if (agent.enable_lakeview !== false) config.lakeview = { ...asRecord(config.lakeview), model: "selected" };
+  for (const server of request.mcpServers ?? []) {
+    const servers = asRecord(config.mcp_servers);
+    const entry = { ...asRecord(servers[server.name]) };
+    for (const key of ["command", "args", "env", "cwd", "url", "http_url", "headers"]) delete entry[key];
+    servers[server.name] = { ...entry, ...(server.transport === "http"
+      ? { http_url: server.url, headers: server.headers }
+      : { command: server.command, args: server.args, env: server.env }) };
+    config.mcp_servers = servers;
+    const allowed = config.allow_mcp_servers === undefined ? [] : config.allow_mcp_servers;
+    if (!Array.isArray(allowed)) throw new Error("Native Trae allow_mcp_servers must be an array");
+    config.allow_mcp_servers = [...new Set([...allowed, server.name])];
+  }
+  return config;
+}
+
+function prepareConnection<T extends AdapterStartRequest>(request: T, modern: boolean): T {
+  const options = request.instance.providerOptions;
+  if (!options?.runtimeConnectionId) return request;
+  if (!request.env?.NAUTILO_CONNECTION_DIRECTORY) throw new Error("API connection directory is missing");
+  const session = request.localSessionId ?? "default";
+  if (!/^[A-Za-z0-9_-]+$/.test(session)) throw new Error("Invalid local session identity");
+  const home = join(request.env.NAUTILO_CONNECTION_DIRECTORY, "trae", session);
+  const directory = join(home, ".trae");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  let instance = request.instance;
+  if (modern) {
+    writeFileSync(join(directory, "traecli.toml"), `model = ${JSON.stringify(request.model ?? "")}\nmodel_provider = "nautilo"\n${request.reasoningEffort ? `model_reasoning_effort = ${JSON.stringify(request.reasoningEffort)}\n` : ""}\n[model_providers.nautilo]\nname = "Nautilo"\nbase_url = ${JSON.stringify(options.baseUrl)}\nenv_key = "NAUTILO_CONNECTION_API_KEY"\nwire_api = "responses"\n`);
+  } else {
+    const models = (instance.models ?? []).filter(model => model.enabled !== false).map(model => ({
+      name: `nautilo/${model.id}`, context_window: model.contextWindow ?? 128_000,
+      claude: { model: model.id, base_url: options.baseUrl, api_key: "${NAUTILO_CONNECTION_API_KEY}", max_tokens: 16_384 },
+    }));
+    const alias = `nautilo/${request.model}`;
+    const text = JSON.stringify({ model: { name: alias }, models, disable_model_failover: true, failover_models: [] });
+    writeFileSync(join(directory, "traecli.yaml"), text);
+    writeFileSync(join(directory, "trae_cli.yaml"), text);
+    const roaming = join(home, "AppData", "Roaming", "trae_cli");
+    mkdirSync(roaming, { recursive: true, mode: 0o700 });
+    writeFileSync(join(roaming, "trae_cli.yaml"), text);
+    instance = { ...instance, baseArgs: [...instance.baseArgs, "-c", `model.name=${alias}`, "-c", "disable_model_failover=true"] };
+    request = { ...request, model: alias };
+  }
+  return { ...request, instance, env: { ...request.env, HOME: home, USERPROFILE: home, TRAE_HOME: directory, APPDATA: join(home, "AppData", "Roaming"), LOCALAPPDATA: join(home, "AppData", "Local"), XDG_CONFIG_HOME: join(home, ".config") } };
+}
+
 class TraePluginAdapter implements AgentCliAdapter {
   readonly providerId = "trae";
   readonly descriptor = descriptor;
-  readonly supportsStructuredOutput = false;
+  readonly supportsStructuredOutput = true;
   readonly supportsResume = true;
   readonly capabilities = {
-    structuredOutput: false,
+    structuredOutput: true,
     textOutput: true,
     interactiveStdin: false,
     nativeResume: true,
@@ -81,7 +173,7 @@ class TraePluginAdapter implements AgentCliAdapter {
         executable,
         version: probed.version,
         help: probed.help.slice(0, 16_384),
-        error: probed.mode === "acp" ? undefined : "trae-agent 为纯文本模式：不支持会话恢复与上下文用量"
+        error: undefined
       };
     } catch (error) {
       return { installed: false, executable, error: error instanceof Error ? error.message : String(error) };
@@ -96,19 +188,30 @@ class TraePluginAdapter implements AgentCliAdapter {
     return this.run(request, true);
   }
 
+  async connectionProtocol(request: AdapterStartRequest): Promise<"responses" | "anthropic"> {
+    const binary = await probeTraeBinary(request.instance.executable || descriptor.defaultExecutable!, request.instance.baseArgs);
+    if (!binary) throw new Error("未找到可用的 Trae CLI");
+    return modernCli(binary) ? "responses" : "anthropic";
+  }
+
   private run(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
     let handle: PluginProcessHandle | undefined;
     let rpc: PluginJsonRpcClient | undefined;
     let sessionId = resume ? (request as AdapterResumeRequest).providerSessionId : undefined;
     let finished = false;
+    let cancelled = false;
 
     const events = async function* (): AsyncGenerator<AdapterEvent> {
       try {
         const binary = await probeTraeBinary(request.instance.executable || descriptor.defaultExecutable || "traecli", request.instance.baseArgs);
+        if (cancelled) return;
         if (!binary) throw new Error("未找到可用的 Trae CLI（traecli 或 trae-cli）");
+        request = binary.mode === "cli" ? prepareOpenSourceConnection(request) : prepareConnection(request, modernCli(binary));
         if (binary.mode === "cli") {
+          request = prepareOpenSourceRuntime(request, resume ? (request as AdapterResumeRequest).providerSessionId : undefined);
           yield { kind: "status", phase: "turn_started" };
-          yield* plainRun(request);
+          yield* plainRun(request, (value) => { handle = value; });
+          finished = true;
           return;
         }
         yield* acpRun(request, resume, {
@@ -119,7 +222,10 @@ class TraePluginAdapter implements AgentCliAdapter {
           setFinished: () => { finished = true; }
         });
       } catch (error) {
-        yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
+        const message = error instanceof Error ? error.message : String(error);
+        yield { kind: "error", error: new Error(request.instance.providerOptions?.runtimeConnectionId && /keyring/.test(message)
+          ? "当前安装的 Trae CLI 在执行自定义 API 前仍要求原生登录，但没有找到其登录凭据。请完成此 CLI 的登录，或为 Trae 插件指定支持直接 API 的 trae-agent 可执行文件。"
+          : message) };
         if (!finished) await handle?.cancel().catch(() => undefined);
       }
     };
@@ -129,6 +235,7 @@ class TraePluginAdapter implements AgentCliAdapter {
       process: deferred,
       events: { [Symbol.asyncIterator]: events },
       cancel: async () => {
+        cancelled = true;
         if (rpc && sessionId) rpc.notify("session/cancel", { sessionId });
         await handle?.cancel();
       },
@@ -140,6 +247,29 @@ class TraePluginAdapter implements AgentCliAdapter {
 type RecordValue = Record<string, unknown>;
 const asRecord = (value: unknown): RecordValue =>
   typeof value === "object" && value !== null ? value as RecordValue : {};
+
+export function prepareOpenSourceRuntime<T extends AdapterStartRequest>(request: T, resume?: string): T {
+  const id = request.localSessionId;
+  if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid Trae session identity");
+  const session = `nautilo-trae:${id}`;
+  if (resume && resume !== session) throw new Error("Trae session belongs to a different execution mode");
+  const root = request.env?.NAUTILO_CONNECTION_DIRECTORY ?? process.env.AGENTHUB_DATA_DIR ?? join(homedir(), ".nautilo");
+  const directory = join(root,"trae-agent",id);
+  const bridge = join(directory,"bridge");
+  mkdirSync(bridge,{recursive:true,mode:0o700});
+  const script = join(bridge,"sitecustomize.py");
+  if (!existsSync(script) || readFileSync(script,"utf8") !== conversationBridge) writeFileSync(script,conversationBridge,{mode:0o600});
+  const images = (request.localImagePaths ?? []).map(path => isAbsolute(path) ? path : join(request.cwd,path));
+  traeImagePrompt(request); // Validate attachments before starting the CLI.
+  return {...request,env:{...request.env,
+    PYTHONPATH:[bridge,request.env?.PYTHONPATH].filter(Boolean).join(delimiter),
+    PYTHONUTF8:"1",PYTHONIOENCODING:"utf-8",NAUTILO_TRAE_BRIDGE:"1",
+    NAUTILO_TRAE_STATE:join(directory,"conversation.json"),NAUTILO_TRAE_SESSION_ID:session,
+    NAUTILO_TRAE_RESUME:resume ? "1" : "0", NAUTILO_TRAE_IMAGES:JSON.stringify(images),
+    NAUTILO_TRAE_TRAJECTORY:join(directory,"trajectory.json"),
+    ...(request.reasoningEffort ? {NAUTILO_TRAE_EFFORT:request.reasoningEffort} : {})
+  }};
+}
 
 /**
  * Probes one Trae CLI binary: `--version` must succeed and `--help` decides
@@ -176,7 +306,7 @@ async function* acpRun(
   resume: boolean,
   hooks: AcpRunHooks
 ): AsyncGenerator<AdapterEvent> {
-  const env = { PYTHONUNBUFFERED: "1", ...(request.env ?? {}) } as Record<string, string>;
+  const env = { ...(request.env ?? {}), PYTHONUNBUFFERED: "1", PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" } as Record<string, string>;
   // The ACP subcommand shape is `traecli acp serve`; fall back to bare `acp`
   // when the binary exits before answering initialize.
   let handle = spawnAcp(request, env, ["acp", "serve"]);
@@ -227,7 +357,7 @@ async function* acpRun(
   // model / effort are re-applied from configOptions every time.
   await applyAcpConfig(rpc, sessionId, sessionResponse, request);
   yield { kind: "status", phase: "turn_started" };
-  const prompt = rpc.requestWithId("session/prompt", { sessionId, prompt: [{ type: "text", text: request.prompt }] });
+  const prompt = rpc.requestWithId("session/prompt", { sessionId, prompt: traeImagePrompt(request) });
   void prompt.promise.catch(() => undefined);
 
   for await (const event of rpc) {
@@ -331,9 +461,19 @@ function acpMcpServers(request: AdapterStartRequest | AdapterResumeRequest): Arr
   return servers;
 }
 
+function traeImagePrompt(request: AdapterStartRequest): RecordValue[] {
+  return [{ type:"text", text:request.prompt }, ...(request.localImagePaths ?? []).map(path => {
+    const mimeType = ({png:"image/png",jpg:"image/jpeg",jpeg:"image/jpeg",gif:"image/gif",webp:"image/webp"} as Record<string,string>)[path.split(".").at(-1)?.toLowerCase() ?? ""];
+    if (!mimeType) throw new Error(`Unsupported image attachment: ${path}`);
+    const data = readFileSync(isAbsolute(path) ? path : join(request.cwd,path));
+    if (!data.length) throw new Error(`Image attachment is empty: ${path}`);
+    return {type:"image",mimeType,data:data.toString("base64")};
+  })];
+}
+
 /** Applies session model / reasoning effort through ACP configOptions. */
 async function applyAcpConfig(rpc: PluginJsonRpcClient, sessionId: string, response: RecordValue, request: AdapterStartRequest | AdapterResumeRequest): Promise<void> {
-  const options = Array.isArray(response.configOptions) ? response.configOptions.map(asRecord) : [];
+  let options = Array.isArray(response.configOptions) ? response.configOptions.map(asRecord) : [];
   const selections: Array<[string | undefined, string[]]> = [
     [request.model, ["model"]],
     [request.reasoningEffort, ["thinking", "reasoning", "effort"]]
@@ -341,8 +481,18 @@ async function applyAcpConfig(rpc: PluginJsonRpcClient, sessionId: string, respo
   for (const [value, hints] of selections) {
     if (!value) continue;
     const option = options.find((item) => hints.some((hint) => `${String(item.id ?? "")} ${String(item.name ?? "")} ${String(item.label ?? "")}`.toLowerCase().includes(hint)));
-    if (!option?.id) continue;
-    await rpc.request("session/set_config_option", { sessionId, configId: option.id, value }).catch(() => undefined);
+    if (option?.id) {
+      const result = asRecord(await rpc.request("session/set_config_option", { sessionId, configId: option.id, value }));
+      if (Array.isArray(result.configOptions)) options = result.configOptions.map(asRecord);
+      continue;
+    }
+    const isModel = hints[0] === "model";
+    if (request.env?.[isModel ? "NAUTILO_BRIDGE_MODEL" : "NAUTILO_BRIDGE_EFFORT"] === value) continue;
+    const models = asRecord(response.models);
+    if (isModel && models.currentModelId === value) continue;
+    if (isModel && Array.isArray(models.availableModels) && models.availableModels.some(item => asRecord(item).modelId === value)) {
+      await rpc.request("session/set_model", { sessionId, modelId:value });
+    } else throw new Error(`CLI did not advertise a way to apply ${isModel ? "model" : "reasoning effort"}=${value}`);
   }
 }
 
@@ -720,6 +870,11 @@ class AsyncQueue<T> implements AsyncIterable<T> {
  */
 export function traeCliArgs(instance: { executable: string; baseArgs: string[] }, request: AdapterStartRequest): string[] {
   const args = [...instance.baseArgs, "run", request.prompt, "--working-dir", request.cwd];
+  if (request.env?.NAUTILO_TRAE_TRAJECTORY) args.push("--trajectory-file",request.env.NAUTILO_TRAE_TRAJECTORY);
+  if (request.instance.providerOptions?.runtimeConnectionId) {
+    args.push("--provider", "nautilo", "--model", request.model ?? "", "--config-file", request.env?.TRAE_CONFIG_FILE ?? "");
+    return args;
+  }
   const model = request.model?.trim();
   if (model) {
     const slash = model.indexOf("/");
@@ -729,7 +884,7 @@ export function traeCliArgs(instance: { executable: string; baseArgs: string[] }
   return args;
 }
 
-async function* plainRun(request: AdapterStartRequest | AdapterResumeRequest): AsyncGenerator<AdapterEvent> {
+async function* plainRun(request: AdapterStartRequest | AdapterResumeRequest, setHandle: (handle: PluginProcessHandle) => void): AsyncGenerator<AdapterEvent> {
   const env = { PYTHONUNBUFFERED: "1", ...(request.env ?? {}) } as Record<string, string>;
   const executable = request.instance.executable || descriptor.defaultExecutable || "traecli";
   const args = traeCliArgs(request.instance, request);
@@ -745,27 +900,54 @@ async function* plainRun(request: AdapterStartRequest | AdapterResumeRequest): A
     idleTimeoutMs: request.idleTimeoutMs,
     maxOutputBytes: request.maxOutputBytes ?? 20 * 1024 * 1024
   });
+  setHandle(handle);
   // trae-agent runs non-interactively here; close stdin so it never waits.
   child.stdin.end();
 
   let stdout = "";
   let stderr = "";
+  let pending = "";
+  let bridgeReady = false;
+  let streamedMessage = false;
+  let streamedUsage = false;
   for await (const event of handle.events) {
     if (event.kind === "stdout") {
-      stdout += event.text;
-      yield { kind: "raw", stream: "stdout", text: event.text };
+      pending += event.text;
+      let index: number;
+      while ((index=pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0,index).trimEnd();
+        pending = pending.slice(index+1);
+        if (line.startsWith("@nautilo-event:")) {
+          const frame = JSON.parse(line.slice("@nautilo-event:".length));
+          if (frame.kind === "nautilo_ready") {bridgeReady=true;continue;}
+          streamedMessage ||= frame.kind === "message";
+          streamedUsage ||= frame.kind === "usage";
+          yield frame as AdapterEvent;
+        } else { stdout += line + "\n"; yield {kind:"raw",stream:"stdout",text:line+"\n"}; }
+      }
     } else if (event.kind === "stderr") {
       stderr += event.text;
       yield { kind: "raw", stream: "stderr", text: event.text };
     } else if (event.kind === "exit") {
       const text = cleanTraeCliText(stdout);
       if (event.exitCode === 0) {
-        if (text) yield { kind: "message", phase: "completed", text };
+        if (!bridgeReady) throw new Error("Trae did not load the conversation bridge; check the configured native Python environment");
+        if (request.env?.NAUTILO_TRAE_TRAJECTORY) {
+          const trajectory = JSON.parse(readFileSync(request.env.NAUTILO_TRAE_TRAJECTORY, "utf8"));
+          if (trajectory.success !== true) throw new Error("Trae Agent did not complete the task; check the configured model and execution result");
+          const interactions = (Array.isArray(trajectory.llm_interactions) ? trajectory.llm_interactions : []) as { response?: { content?: string; usage?: { input_tokens?: number; output_tokens?: number } } }[];
+          const answer = trajectory.final_result || [...interactions].reverse().find(item => item.response?.content)?.response?.content;
+          if (typeof answer !== "string" || !answer.trim()) throw new Error("Trae Agent returned no assistant response");
+          if (!streamedMessage) yield { kind: "message", phase: "completed", text: answer };
+          if (!streamedUsage) yield { kind: "usage", usageScope: "turn", inputTokensIncludesCache: false,
+            inputTokens: interactions.reduce((sum, item) => sum + (item.response?.usage?.input_tokens ?? 0), 0),
+            outputTokens: interactions.reduce((sum, item) => sum + (item.response?.usage?.output_tokens ?? 0), 0) };
+        } else if (text) yield { kind: "message", phase: "completed", text };
         yield { kind: "status", phase: "turn_completed" };
       } else {
         const detail = cleanTraeCliText(stderr) || text || `trae-cli exited with ${event.exitCode ?? "unknown"}`;
         yield { kind: "status", phase: "turn_failed" };
-        yield { kind: "error", error: new Error(detail.slice(0, 2_000)) };
+        yield { kind: "error", error: new Error(detail.slice(-2_000)) };
       }
       yield event;
     } else {

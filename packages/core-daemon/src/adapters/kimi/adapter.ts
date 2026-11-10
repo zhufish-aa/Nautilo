@@ -1,3 +1,4 @@
+import { promptWithImageFiles } from "../images.js";
 import type { AgentInstance } from "@agenthub/domain";
 import { ProcessAdapter } from "../process-adapter.js";
 import type { AdapterDiscoveryContext, AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest, ProviderDescriptor } from "../types.js";
@@ -5,6 +6,9 @@ import { buildKimiResumeArgs, buildKimiStartArgs } from "./commands.js";
 import { parseKimiJsonEvent } from "./events.js";
 import { discoverKimiModels } from "./models.js";
 import { startKimiAcp } from "./acp-run.js";
+import { prepareKimiConnection } from "./connection.js";
+import { startAnthropicCompatProxy } from "../codex/anthropic-compat-proxy.js";
+import { randomUUID } from "node:crypto";
 
 export class KimiCodeAdapter extends ProcessAdapter {
   readonly providerId = "kimi-code";
@@ -14,7 +18,9 @@ export class KimiCodeAdapter extends ProcessAdapter {
     vendor: "Moonshot AI",
     capabilities: ["headless_structured", "pty_interactive"],
     defaultExecutable: "kimi",
+    observeApiOutput: true,
     credentialEnv: ["KIMI_API_KEY"],
+    envPassthrough: ["KIMI_CODE_HOME"],
     contextWindowDiscovery: true,
     permissionModes: [
       {
@@ -63,10 +69,35 @@ export class KimiCodeAdapter extends ProcessAdapter {
     return parseKimiJsonEvent(value);
   }
   override start(request: AdapterStartRequest): AdapterRun {
-    return request.instance.baseArgs.length ? super.start(request) : startKimiAcp(request, false);
+    if (request.instance.providerOptions?.runtimeConnectionId && request.instance.providerOptions.apiType === "anthropic-messages") return this.anthropicRun(request, false);
+    request = { ...request, env: prepareKimiConnection(request) };
+    // Older ACP servers require OAuth before considering custom-model keys.
+    // Native prompt mode uses the selected API without borrowing that login.
+    return request.instance.providerOptions?.runtimeConnectionId || request.instance.baseArgs.length ? super.start({...request,prompt:promptWithImageFiles(request)}) : startKimiAcp(request, false);
   }
   override resume(request: AdapterResumeRequest): AdapterRun {
-    return request.instance.baseArgs.length ? super.resume(request) : startKimiAcp(request, true);
+    if (request.instance.providerOptions?.runtimeConnectionId && request.instance.providerOptions.apiType === "anthropic-messages") return this.anthropicRun(request, true);
+    request = { ...request, env: prepareKimiConnection(request) };
+    return request.instance.providerOptions?.runtimeConnectionId || request.instance.baseArgs.length ? super.resume({...request,prompt:promptWithImageFiles(request)}) : startKimiAcp(request, true);
+  }
+  private anthropicRun(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
+    let inner: AdapterRun | undefined, proxy: Awaited<ReturnType<typeof startAnthropicCompatProxy>> | undefined, cancelled=false;
+    const events=async function*(this: KimiCodeAdapter): AsyncGenerator<AdapterEvent> {
+      try {
+        proxy=await startAnthropicCompatProxy({remoteBaseUrl:String(request.instance.providerOptions?.baseUrl),environment:request.env});
+        if(cancelled)return;
+        const key=request.env?.NAUTILO_CONNECTION_API_KEY;const local=proxy.token??randomUUID();
+        const env=Object.fromEntries(Object.entries(request.env??{}).map(([name,value])=>[name,value===key?local:value]));
+        env.OPENAI_API_KEY=local;
+        env.OPENAI_BASE_URL=proxy.baseUrl;
+        const prepared={...request,env,instance:{...request.instance,providerOptions:{...request.instance.providerOptions,baseUrl:proxy.baseUrl,apiType:"openai-responses"}}};
+        inner=resume && "providerSessionId" in request ? this.resume({...prepared,providerSessionId:request.providerSessionId}) : this.start(prepared);
+        yield*inner.events;
+      } catch(error) {if(!cancelled)yield{kind:"error",error:error instanceof Error?error:new Error(String(error))};}
+      finally {await inner?.cancel().catch(()=>undefined);await proxy?.close();}
+    }.bind(this);
+    return {get process(){if(!inner)throw new Error("Kimi connection is starting");return inner.process;},events:{[Symbol.asyncIterator]:events},
+      cancel:async()=>{cancelled=true;await inner?.cancel();await proxy?.close();},write:input=>inner?.write(input)};
   }
   listModels(instance: AgentInstance, context?: AdapterDiscoveryContext) {
     return discoverKimiModels({

@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { lazy, Suspense, useEffect } from "react";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { MotionConfig } from "framer-motion";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AppShell } from "./components/layout/AppShell";
@@ -8,17 +8,22 @@ import { TooltipProvider } from "./components/ui/Tooltip";
 import { ImageLightbox } from "./features/timeline/ImageLightbox";
 import { FilePreviewDrawer } from "./features/timeline/FilePreviewDrawer";
 import { OnboardingTour } from "./features/onboarding/OnboardingTour";
-import { AgentsPage } from "./features/agents/AgentsPage";
-import { ProjectDetailPage } from "./features/projects/ProjectDetailPage";
-import { ProjectsPage } from "./features/projects/ProjectsPage";
-import { RunsPage } from "./features/runs/RunsPage";
-import { SettingsPage } from "./features/settings/SettingsPage";
-import { TasksPage } from "./features/tasks/TasksPage";
-import { TeamEditorPage } from "./features/teams/TeamEditorPage";
-import { TeamsPage } from "./features/teams/TeamsPage";
+
 import { useSettingsStore } from "./stores/settings";
 import { initializeCoreState } from "./lib/core-bootstrap";
 import { buildThemeCss, getTheme, SYSTEM_THEME_ID } from "./lib/themes";
+
+import { getBridge } from "./lib/bridge";
+const AssistantPage = lazy(() => import("./features/assistant/AssistantPage"));
+const DetachedPanel = lazy(() => import("./features/sessions/DetachedPanel"));
+const AgentsPage = lazy(() => import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage })));
+const ProjectDetailPage = lazy(() => import("./features/projects/ProjectDetailPage").then((module) => ({ default: module.ProjectDetailPage })));
+const ProjectsPage = lazy(() => import("./features/projects/ProjectsPage").then((module) => ({ default: module.ProjectsPage })));
+const RunsPage = lazy(() => import("./features/runs/RunsPage").then((module) => ({ default: module.RunsPage })));
+const SettingsPage = lazy(() => import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
+const TasksPage = lazy(() => import("./features/tasks/TasksPage").then((module) => ({ default: module.TasksPage })));
+const TeamEditorPage = lazy(() => import("./features/teams/TeamEditorPage").then((module) => ({ default: module.TeamEditorPage })));
+const TeamsPage = lazy(() => import("./features/teams/TeamsPage").then((module) => ({ default: module.TeamsPage })));
 
 /** Style element holding the active theme's generated CSS (registry-driven). */
 function ensureThemeStyleElement(): HTMLStyleElement {
@@ -68,36 +73,61 @@ function useDocumentPreferences(): void {
 
 export default function App(): JSX.Element {
   useDocumentPreferences();
-  const reduceMotion = useSettingsStore((state) => state.reduceMotion);
-  
+  const panels = getBridge()?.panels;
+  const target = panels?.context;
+  const navigate = useNavigate();
   useEffect(() => {
+    if (target) return;
+    return panels?.onDock(panel => {
+      const route = panel.sessionId ? "/sessions?session="+encodeURIComponent(panel.sessionId)+"&" : "/projects/"+encodeURIComponent(panel.projectId!)+"?";
+      navigate(route+"panel="+panel.kind, {replace:false});
+    });
+  },[panels,target,navigate]);
+  const reduceMotion = useSettingsStore((state) => state.reduceMotion);
+  const locale = useSettingsStore((state) => state.locale);
+
+  useEffect(() => {
+    document.documentElement.toggleAttribute("data-reduce-motion", reduceMotion);
+    return () => document.documentElement.removeAttribute("data-reduce-motion");
+  }, [reduceMotion]);
+
+  useEffect(() => {
+    if (target) return;
     void initializeCoreState().catch((error) => console.error("Failed to initialize Core Daemon state", error));
-  }, []);
+    return getBridge()?.assistant?.onChange(sessionId => {
+      if (sessionId) void import("./lib/orchestration-runtime").then(m => m.refreshAssistantTarget(sessionId)).catch(console.error);
+    });
+  }, [target]);
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? "always" : "user"}>
       <TooltipProvider>
-        <AppShell>
-          <Routes>
-            {/* F-023: chat-first — the workbench is the default entry */}
-            <Route path="/" element={<Navigate to="/sessions" replace />} />
-            {/* Code/Work workbenches are rendered keep-alive by AppShell so a
-                mode switch never remounts them; the routes only mark the URL. */}
-            <Route path="/sessions" element={null} />
-            <Route path="/work" element={null} />
-            <Route path="/projects" element={<ProjectsPage />} />
-            <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
-            <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/teams" element={<TeamsPage />} />
-            <Route path="/teams/:teamId" element={<TeamEditorPage />} />
-            <Route path="/tasks" element={<TasksPage />} />
-            <Route path="/runs" element={<RunsPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="*" element={<Navigate to="/sessions" replace />} />
-          </Routes>
-        </AppShell>
+        {target ? <Suspense fallback={null}><DetachedPanel target={target}/></Suspense> : <AppShell>
+          <Suspense fallback={<div role="status" aria-label={locale === "zh-CN" ? "正在加载" : "Loading"} className="p-6">
+            <div className="h-5 w-32 rounded bg-panel motion-safe:animate-pulse" />
+          </div>}>
+            <Routes>
+              {/* F-023: chat-first — the workbench is the default entry */}
+              <Route path="/" element={<Navigate to="/sessions" replace />} />
+              {/* One workspace is kept alive by AppShell. /work is a legacy alias;
+                  neither route creates a second instance or changes saved modes. */}
+              <Route path="/sessions" element={null} />
+              <Route path="/work" element={null} />
+              <Route path="/assistant" element={<AssistantPage />} />
+              <Route path="/projects" element={<ProjectsPage />} />
+              <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
+              <Route path="/agents" element={<Navigate to="/settings?section=agents" replace />} />
+              <Route path="/teams" element={<TeamsPage />} />
+              <Route path="/teams/:teamId" element={<TeamEditorPage />} />
+              <Route path="/tasks" element={<TasksPage />} />
+              <Route path="/runs" element={<RunsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="*" element={<Navigate to="/sessions" replace />} />
+            </Routes>
+          </Suspense>
+        </AppShell>}
         <Toaster />
-        <OnboardingTour />
+        {!target && <OnboardingTour />}
         <ImageLightbox />
         <FilePreviewDrawer />
       </TooltipProvider>

@@ -1,0 +1,14 @@
+{
+  "id": "codex-plugins",
+  "apiVersion": 1,
+  "main": "agenthub-plugin-codex-plugins",
+  "version": "0.2.15",
+  "descriptor": {
+    "providerId": "codex-plugins",
+    "name": "Codex Plugin Manager",
+    "vendor": "Nautilo",
+    "capabilities": [],
+    "envPassthrough": ["CODEX_HOME"],
+    "pluginManagerFor": "codex"
+  }
+}

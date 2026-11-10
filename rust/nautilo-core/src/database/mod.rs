@@ -11,3 +11,8 @@ pub use repositories::Repositories;
 pub fn lock(db: &std::sync::Arc<std::sync::Mutex<Database>>) -> std::sync::MutexGuard<'_, Database> {
     db.lock().unwrap()
 }
+
+pub mod assistant;
+pub mod history_projection;
+pub mod project_poll;
+pub mod native_history;

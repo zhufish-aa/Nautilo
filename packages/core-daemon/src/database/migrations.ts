@@ -1,9 +1,14 @@
+import { historyProjectionSchema } from "./history-projection-schema.js";
 import type { DatabaseSync } from "node:sqlite";
 
 export function migrateDatabase(db: DatabaseSync): void {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS assistant_records (id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_assistant_records_kind ON assistant_records(kind);
     CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS runtime_connections (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS runtime_connection_versions (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS project_runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -34,11 +39,19 @@ export function migrateDatabase(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, created_at TEXT NOT NULL, truncated INTEGER NOT NULL DEFAULT 0);
     CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id, created_at);
     CREATE TABLE IF NOT EXISTS run_touched_files (run_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(run_id, path));
+    CREATE TABLE IF NOT EXISTS native_handoffs (session_id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS native_history_bindings (session_id TEXT NOT NULL, provider_session_id TEXT NOT NULL, entry_kind TEXT NOT NULL, native_id TEXT NOT NULL, local_id TEXT, fingerprint TEXT NOT NULL, PRIMARY KEY(session_id, provider_session_id, entry_kind, native_id));
+    CREATE TRIGGER IF NOT EXISTS cleanup_native_history AFTER DELETE ON sessions BEGIN
+      DELETE FROM native_handoffs WHERE session_id=old.id;
+      DELETE FROM native_history_bindings WHERE session_id=old.id;
+    END;
     INSERT INTO schema_meta(key, value) VALUES('schema', '4') ON CONFLICT(key) DO NOTHING;
   `);
   ensureColumn(db, "artifacts", "project_run_id", "TEXT");
   ensureColumn(db, "artifacts", "task_id", "TEXT");
   ensureColumn(db, "artifacts", "session_id", "TEXT");
+  // Revisions are persisted in SQLite so mixed TS/Rust writers and raw deletes are observed.
+  db.exec(historyProjectionSchema);
   const version = currentSchemaVersion(db);
   if (version < 5) migrateExecutionDefaultsToTeamMembers(db);
   if (version < 5) setSchemaVersion(db, 5);
@@ -46,6 +59,8 @@ export function migrateDatabase(db: DatabaseSync): void {
   if (version < 6) setSchemaVersion(db, 6);
   // Schema 7 adds per-turn checkpoints (workspace snapshots) and run touched files.
   if (version < 7) setSchemaVersion(db, 7);
+  if (version < 8) setSchemaVersion(db, 8);
+  if (version < 9) setSchemaVersion(db, 9);
 }
 
 function ensureColumn(db: DatabaseSync, table: string, column: string, type: string): void {

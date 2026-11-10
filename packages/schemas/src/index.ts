@@ -6,6 +6,8 @@ import type {
   RecoveryDecision
 } from "@agenthub/domain";
 
+export type * from "./assistant.js";
+
 export const schemaVersion = 1 as const;
 
 function isAcceptanceCriterion(value: unknown): value is AcceptanceCriterion {

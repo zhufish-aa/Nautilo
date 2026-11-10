@@ -166,6 +166,25 @@ export interface DiagnosticExportResult {
   eventCount: number;
 }
 
+/** Reusable authentication/endpoint connection, independent of CLI instances. */
+export interface RuntimeConnection {
+  id: string;
+  name: string;
+  kind: "api" | "login";
+  revision: number;
+  enabled: boolean;
+  protocol?: "responses" | "chat" | "anthropic";
+  baseUrl?: string;
+  harness?: string;
+  loginProfileDirectory?: string;
+  models?: InstanceModelConfig[];
+  createdAt: string;
+  updatedAt: string;
+  /** Computed on reads; credentials never appear in connection JSON. */
+  hasCredential?: boolean;
+}
+export type RuntimeConnectionInput = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential">;
+
 export interface AgentInstance {
   id: AgentInstanceId;
   providerId: string;
@@ -188,18 +207,34 @@ export interface AgentInstance {
   updatedAt: string;
 }
 
+export interface ModelPricing {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
 export interface InstanceModelConfig {
+  /** Omit to inherit native capabilities; explicit text-only disables image input. */
+  inputModalities?: Array<"text" | "image">;
   /** Exact model id passed to the provider CLI's model option. */
   id: string;
   /** Optional display label override. */
   displayName?: string;
-  /** Ordered reasoning efforts for this model; the first entry is the default. */
+  /** Ordered provider-native reasoning values. */
   reasoningEfforts: string[];
+  /** Explicit default; the first effort remains the legacy fallback. */
+  defaultReasoningEffort?: string;
+  /** Disabled models remain configured but are hidden from model selection. */
+  enabled?: boolean;
+  /** Optional user-entered USD prices per one million tokens, not a provider quote. */
+  pricing?: ModelPricing;
   /** Optional context window override in tokens. */
   contextWindow?: number;
 }
 
 export interface ProviderModel {
+  inputModalities?: Array<"text" | "image">;
   /** Exact value passed to the provider CLI's model option. */
   id: string;
   displayName: string;
@@ -211,6 +246,8 @@ export interface ProviderModel {
   defaultReasoningEffort?: string;
   serviceTiers: ProviderServiceTier[];
   defaultServiceTier?: string;
+  /** User-configured USD prices per one million tokens. */
+  pricing?: ModelPricing;
 }
 
 export interface ProviderServiceTier {
@@ -240,6 +277,9 @@ export interface Role {
 }
 
 export interface TeamMember {
+  /** Independent provider/account, pinned when the member is saved. */
+  connectionId?: string;
+  connectionRevision?: number;
   id: string;
   displayName: string;
   agentInstanceId: AgentInstanceId;
@@ -252,7 +292,8 @@ export interface TeamMember {
   roleId: RoleId;
   strengths: Record<string, number>;
   allowedTaskTypes: string[];
-  maxConcurrentTasks: number;
+  /** Optional per-member task cap; absent means no configured limit. */
+  maxConcurrentTasks?: number;
   enabled: boolean;
 }
 
@@ -276,6 +317,8 @@ export interface Project {
   repositoryType: RepositoryType;
   /** How new Agent runs edit this project. Defaults to direct for legacy records. */
   workspaceMode?: WorkspaceMode;
+  /** Non-Git run baselines. Missing means full; off keeps only provider-supplied diffs. */
+  nonGitDiffMode?: "full" | "off";
   defaultBranch?: string;
   frontendPaths: string[];
   backendPaths: string[];
@@ -360,8 +403,15 @@ export interface Session {
   parentSessionId?: SessionId;
   taskId?: TaskId;
   agentInstanceId?: AgentInstanceId;
+  /** Immutable endpoint/account revision selected when this conversation is created. */
+  connectionId?: string;
+  connectionRevision?: number;
+  /** Next turn must rebuild full local text after changing authentication/endpoint. */
+  connectionContextRebuildRequired?: boolean;
   /** Session-level overrides captured when the user creates the conversation. */
   model?: string;
+  /** Native Harness preset identity, independent of model and permissions. */
+  agentMode?: string;
   reasoningEffort?: string;
   serviceTier?: string;
   /** CLI-native permission mode override; falls back to the agent instance setting. */
@@ -373,9 +423,14 @@ export interface Session {
   mode?: "code" | "work";
   title: string;
   status: SessionStatus;
+  /** Internal automatic-title checkpoint; a different visible title is a manual rename. */
+  autoTitle?: { title: string; messageId: string };
   providerSessionId?: string;
+  /** Working directory of the bound native session, including delegated worktrees. */
+  nativeWorkingDirectory?: string;
   /** Set after persisted Nautilo history is synchronized into the provider thread. */
   providerContextSyncedAt?: string;
+  providerContextVersion?: string;
   /** Nautilo runtime-tool contract installed into the native provider thread. */
   runtimeToolVersion?: number;
   /** Last context window reported by the provider itself; wins over stale model-catalog entries. */
@@ -448,6 +503,10 @@ export interface AgentRun {
   taskId?: TaskId;
   sessionId: SessionId;
   agentInstanceId: AgentInstanceId;
+  connectionId?: string;
+  connectionRevision?: number;
+  model?: string;
+  pricingSnapshot?: ModelPricing;
   memberId?: string;
   mode: RunMode;
   status: AgentRunStatus;
@@ -466,10 +525,13 @@ export interface Message {
   projectRunId?: ProjectRunId;
   taskId?: TaskId;
   runId?: AgentRunId;
+  background?: boolean;
   fromMemberId?: string;
   toMemberId?: string;
   correlationId?: string;
   attachmentIds?: ArtifactId[];
+  nativeIdentity?: { providerId?: string; providerSessionId: string; id: string; messageId?: string; source: "native-terminal" | "native-stream"; completed: boolean; turnStatus?: "running" | "completed" | "failed" | "cancelled" };
+  nativeFiles?: Array<{ id: string; name: string; url?: string; unavailable: true }>;
   editedAt?: string;
   text: string;
   createdAt: string;
@@ -489,6 +551,9 @@ export interface Artifact {
 }
 
 export interface GitChangedFile {
+  /** No fabricated patch/counts when either file version was not observable. */
+  comparisonUnavailable?: boolean;
+  reason?: string;
   path: string;
   changeType: "added" | "modified" | "deleted" | "renamed";
   additions: number;

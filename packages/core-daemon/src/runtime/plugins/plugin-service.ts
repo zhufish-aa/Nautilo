@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { PROVIDER_API_VERSION, type AgentCliAdapter, type ProviderPluginFactory, type ProviderPluginManifest, type ProviderRegistryEntry } from "@agenthub/provider-sdk";
@@ -29,6 +29,15 @@ export interface ProviderPluginRecord {
 const DISABLED_MARKER = ".disabled";
 const MANIFEST_FILE = "agenthub-plugin.json";
 
+export function selectRegistryPackage(entry: ProviderRegistryEntry, platform = process.platform, arch = process.arch): ProviderRegistryEntry | undefined {
+  if (!entry?.id) return undefined;
+  if (entry.platforms) {
+    const selected = entry.platforms[`${platform}-${arch}`];
+    return selected?.tarball && selected.sha256 ? { ...entry, ...selected } : undefined;
+  }
+  return entry.tarball ? entry : undefined;
+}
+
 /**
  * Loads provider plugins from `<dataDir>/plugins/<id>/` and registers their
  * adapters. One broken plugin never blocks the daemon — it is recorded with
@@ -42,6 +51,13 @@ export class PluginService {
   private readonly records = new Map<string, ProviderPluginRecord>();
   /** Ids currently registered by this service (plugins may be reloaded). */
   private readonly loadedIds = new Set<string>();
+  private readonly managers = new Map<string, AgentCliAdapter>();
+
+  managerFor(providerId: string): AgentCliAdapter | undefined {
+    const adapter = this.adapters.find(providerId);
+    if (adapter?.descriptor.harnessPlugins && adapter.harnessPlugins) return adapter;
+    return this.managers.get(providerId + "-plugins");
+  }
   /**
    * Adapters a loaded plugin replaced (typically built-ins), restored when
    * the plugin is disabled or uninstalled.
@@ -89,7 +105,10 @@ export class PluginService {
     const data = await response.json().catch((error) => {
       throw new CoreError("PLUGIN_REGISTRY_UNAVAILABLE", { url, reason: `registry JSON 解析失败：${errorMessage(error)}` });
     }) as { plugins?: ProviderRegistryEntry[] };
-    return (data.plugins ?? []).filter((entry) => entry?.id && entry.tarball);
+    return (data.plugins ?? []).flatMap((entry) => {
+      const selected = selectRegistryPackage(entry);
+      return selected ? [selected] : [];
+    });
   }
 
   /** Installs a plugin from the marketplace registry (download → sha256 → extract → load). */
@@ -144,21 +163,32 @@ export class PluginService {
   }
 
   async uninstall(pluginId: string): Promise<{ removed: true }> {
+    validatePluginId(pluginId);
+    const target = join(this.pluginsDir, pluginId);
+    await validatePluginTarget(this.pluginsDir, target);
     await this.unload(pluginId);
+    // Unload is asynchronous; revalidate before the destructive operation.
+    if (await validatePluginTarget(this.pluginsDir, target)) await rm(target, { recursive: true, force: true });
     this.records.delete(pluginId);
-    await rm(join(this.pluginsDir, pluginId), { recursive: true, force: true });
     return { removed: true };
   }
 
   async setEnabled(pluginId: string, enabled: boolean): Promise<ProviderPluginRecord> {
+    validatePluginId(pluginId);
     const dir = join(this.pluginsDir, pluginId);
+    await validatePluginTarget(this.pluginsDir, dir);
     const manifest = await this.readManifest(dir).catch(() => undefined);
     if (!manifest) throw new CoreError("IPC_NOT_FOUND", { resource: "plugin", id: pluginId });
+    this.validateManifest(manifest, dir);
+    if (manifest.id !== pluginId) throw new CoreError("PLUGIN_INVALID", { reason: "Plugin id does not match its directory" });
+    await validatePluginTarget(this.pluginsDir, dir);
     if (enabled) {
       await rm(join(dir, DISABLED_MARKER), { force: true });
       return this.loadOne(pluginId);
     }
-    await writeFile(join(dir, DISABLED_MARKER), new Date().toISOString(), "utf8");
+    // Marker existence is sufficient. Never truncate an existing file/link.
+    await writeFile(join(dir, DISABLED_MARKER), new Date().toISOString(), { encoding: "utf8", flag: "wx" })
+      .catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
     await this.unload(pluginId);
     const record: ProviderPluginRecord = { id: pluginId, enabled: false, status: "disabled", dir, manifest };
     this.records.set(pluginId, record);
@@ -171,6 +201,12 @@ export class PluginService {
 
   private async unload(pluginId: string): Promise<void> {
     if (!this.loadedIds.delete(pluginId)) return;
+    const manager = this.managers.get(pluginId);
+    if (manager) {
+      this.managers.delete(pluginId);
+      await manager.dispose?.();
+      return;
+    }
     const adapter = this.adapters.find(pluginId);
     await adapter?.dispose?.();
     const previous = this.overridden.get(pluginId);
@@ -202,9 +238,13 @@ export class PluginService {
   private async loadOne(pluginId: string): Promise<ProviderPluginRecord> {
     const dir = join(this.pluginsDir, pluginId);
     try {
+      validatePluginId(pluginId);
+      await validatePluginTarget(this.pluginsDir, dir);
       const manifest = await this.readManifest(dir);
       this.validateManifest(manifest, dir);
+      if (manifest.id !== pluginId) throw new CoreError("PLUGIN_INVALID", { reason: "Plugin id does not match its directory" });
       await this.unload(pluginId);
+      await validatePluginTarget(this.pluginsDir, dir);
       // Cache-buster so reinstalling the same plugin path picks up new code.
       const entryUrl = `${pathToFileURL(join(dir, manifest.main)).href}?v=${Date.now()}`;
       const module = await import(entryUrl) as { default?: ProviderPluginFactory };
@@ -215,9 +255,17 @@ export class PluginService {
       // adapter from outside this service) so unload() can restore it. On a
       // plugin reload, unload() already restored the previous adapter, which
       // is exactly what we snapshot here.
-      const existing = this.adapters.find(manifest.id);
-      if (existing) this.overridden.set(manifest.id, existing);
-      this.adapters.register(adapter);
+      if (adapter.descriptor.pluginManagerFor) {
+        if (manifest.id !== adapter.descriptor.pluginManagerFor + "-plugins" || !adapter.harnessPlugins) {
+          await adapter.dispose?.();
+          throw new Error("Invalid native plugin manager");
+        }
+        this.managers.set(pluginId, adapter);
+      } else {
+        const existing = this.adapters.find(manifest.id);
+        if (existing) this.overridden.set(manifest.id, existing);
+        this.adapters.register(adapter);
+      }
       this.loadedIds.add(pluginId);
       const record: ProviderPluginRecord = { id: pluginId, enabled: true, status: "loaded", dir, manifest };
       this.records.set(pluginId, record);
@@ -272,6 +320,24 @@ export class PluginService {
     // uninstalled (see unload()).
     void dir;
   }
+}
+
+function validatePluginId(pluginId: string): void {
+  if (typeof pluginId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(pluginId)) {
+    throw new CoreError("PLUGIN_INVALID", { reason: "Invalid plugin id" });
+  }
+}
+
+async function validatePluginTarget(rootDir: string, target: string): Promise<boolean> {
+  const info = await lstat(target).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!info) return false;
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new CoreError("PLUGIN_INVALID", { reason: "Plugin directory must not be a symlink" });
+  const [root, actual] = await Promise.all([realpath(rootDir), realpath(target)]);
+  if (dirname(actual) !== root) throw new CoreError("PLUGIN_INVALID", { reason: "Plugin directory escapes plugins root" });
+  return true;
 }
 
 async function exists(path: string): Promise<boolean> {

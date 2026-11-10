@@ -1,11 +1,12 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bot, Crown, Settings2 } from "lucide-react";
+import { Crown, Settings2 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { providerMeta } from "../../lib/provider-catalog";
 import type { UiSession, UiTeam, UiTeamMember } from "../../lib/types";
 import { StatusChip, Tag } from "../../components/ui/Badge";
+import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
@@ -22,6 +23,7 @@ interface SessionEntryInfo {
   session: UiSession;
   member?: UiTeamMember;
   providerName?: string;
+  providerId?: string;
   model?: string;
 }
 
@@ -41,6 +43,7 @@ function useEntryInfo(entry: UiSession, team?: UiTeam): SessionEntryInfo {
       session: entry,
       member,
       providerName: instance ? providerMeta(instance.providerId).name : undefined,
+      providerId: instance?.providerId,
       model: entry.model ?? member?.model
     };
   }, [entry, team, instances]);
@@ -78,26 +81,26 @@ function SessionEntryRow({
         onClick={() => onOpen(session.id)}
         aria-current={active ? "page" : undefined}
         className={cn(
-          "group flex w-full items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors duration-150 outline-none",
+          "group flex w-full items-center gap-2.5 rounded-lg border-0 px-3 py-3 text-left transition-colors duration-150 outline-none",
           "focus-visible:ring-2 focus-visible:ring-accent/70",
-          active ? "border-accent/40 bg-accent-soft/70" : "border-line bg-card hover:border-accent/30 hover:bg-card-hover"
+          active ? "bg-card-hover" : "bg-transparent hover:bg-card-hover"
         )}
       >
         <span
           aria-hidden
-          className="agent-avatar relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-gradient-to-br from-violet-500/25 to-fuchsia-500/15 text-violet-400"
+          className="agent-avatar relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-panel text-ink-2"
         >
-          <Bot className="h-4 w-4" />
+          <ProviderAvatar providerId={info.providerId ?? "custom"} size="sm" />
           <span
             className={cn(
               "absolute -right-0.5 -bottom-0.5 h-2 w-2 rounded-full border border-card",
-              status === "running" ? "bg-accent shadow-[0_0_12px_2px_var(--accent)] motion-safe:animate-pulse" : status === "completed" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-ink-3"
+              status === "running" ? "bg-accent motion-safe:animate-pulse" : status === "completed" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-ink-3"
             )}
           />
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
-            <span className={cn("truncate text-[13px] font-medium", active ? "text-accent" : "text-ink")}>
+            <span className={cn("truncate text-[13px] font-medium", active ? "text-ink" : "text-ink-2")}>
               {member?.displayName ?? session.title}
             </span>
             {isMain && <Crown className="h-3.5 w-3.5 shrink-0 text-warn" aria-label={t("sessions.panel.mainBadge")} />}
@@ -107,7 +110,7 @@ function SessionEntryRow({
               </span>
             )}
           </span>
-          <span className="mt-0.5 block truncate text-[11px] text-ink-3">
+          <span className="sr-only">
             {[member?.role.name, providerName, model].filter(Boolean).join(" · ")}
           </span>
           {!isMain && (
@@ -136,7 +139,7 @@ export function AgentPanel({
 }): JSX.Element {
   // Guard outside the hook-bearing body: hooks must not run without a session.
   if (!session) {
-    return <aside className="hidden w-64 shrink-0 border-l border-line bg-panel backdrop-blur-xl xl:block" />;
+    return <aside className="flex w-64 shrink-0 border-l border-line bg-panel  xl:block" />;
   }
   return <AgentPanelBody session={session} onOpenSession={onOpenSession} />;
 }
@@ -176,9 +179,9 @@ function AgentPanelBody({
   const rootInfo = useEntryInfo(root, team);
 
   return (
-    <aside aria-label={t("sessions.panel.title")} className="hidden w-64 shrink-0 flex-col border-l border-line bg-panel backdrop-blur-xl xl:flex">
-      <div className="flex items-center justify-between border-b border-line px-4 py-3">
-        <h2 className="text-xs font-semibold tracking-widest text-ink-3 uppercase">{t("sessions.panel.title")}</h2>
+    <aside aria-label={t("sessions.panel.title")} className="agent-assignment-panel flex min-h-0 w-64 flex-1 flex-col border-l border-line bg-panel">
+      <div className="agent-assignment-heading flex items-center justify-between border-b border-line px-4 py-3">
+        <h2 className="text-sm font-medium text-ink">{t("sessions.panel.title")}</h2>
         {team && (
           <button
             onClick={() => navigate(`/teams/${team.id}`)}
@@ -190,7 +193,7 @@ function AgentPanelBody({
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div className="agent-assignment-body min-h-0 flex-1 overflow-y-auto p-3">
         {team && root ? (
           <div className="space-y-4">
             <div className="flex items-center justify-between px-1">
@@ -199,7 +202,7 @@ function AgentPanelBody({
             </div>
 
             <section>
-              <h3 className="mb-1.5 px-1 text-[11px] font-semibold tracking-widest text-ink-3 uppercase">
+              <h3 className="mb-1.5 px-1 text-xs font-medium text-ink-3">
                 {t("sessions.panel.mainSession")}
               </h3>
               <ul className="space-y-2">
@@ -208,11 +211,11 @@ function AgentPanelBody({
             </section>
 
             <section>
-              <h3 className="mb-1.5 px-1 text-[11px] font-semibold tracking-widest text-ink-3 uppercase">
+              <h3 className="mb-1.5 px-1 text-xs font-medium text-ink-3">
                 {t("sessions.panel.subSessions")}
               </h3>
               {subs.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-line-strong px-3 py-3 text-center text-xs text-ink-3">
+                <p className="rounded-lg border border-line px-3 py-3 text-center text-xs text-ink-3">
                   {t("sessions.panel.noSub")}
                 </p>
               ) : (
@@ -250,35 +253,17 @@ function SubEntry({
 function SingleAgentInfo({ session }: { session: UiSession }): JSX.Element {
   const { t } = useI18n();
   const instances = useAgentsStore((state) => state.instances);
+  const lifecycle = useSessionsStore((state) => state.running[session.id]);
+  const status = visibleSessionStatus(session.status, lifecycle);
   const target = session.target;
   const instance =
     target.type === "agent" ? instances.find((item) => item.id === target.instanceId) : undefined;
   const meta = instance ? providerMeta(instance.providerId) : undefined;
 
   return (
-    <div className="space-y-3">
-      <p className="px-1 text-xs text-ink-3">{t("sessions.panel.single")}</p>
-      <div className="rounded-xl border border-line bg-card p-4">
-        <div className="flex items-center gap-2.5">
-          <span aria-hidden className="flex h-9 w-9 items-center justify-center rounded-lg border border-accent/20 bg-accent-soft text-accent">
-            <Bot className="h-4.5 w-4.5" />
-          </span>
-          <div className="min-w-0">
-            <p className="truncate text-[13px] font-medium text-ink">{instance?.displayName ?? "Agent"}</p>
-            <p className="truncate text-[11px] text-ink-3">{meta?.name}</p>
-          </div>
-        </div>
-        <dl className="mt-3 space-y-1.5 border-t border-line pt-3 text-xs">
-          <div className="flex justify-between gap-2">
-            <dt className="text-ink-3">{t("agents.instances.model")}</dt>
-            <dd className="font-mono text-ink-2">{session.model ?? t("agents.instances.defaultModel")}</dd>
-          </div>
-          <div className="flex justify-between gap-2">
-            <dt className="text-ink-3">{t("agents.editor.basic.reasoning")}</dt>
-            <dd className="font-mono text-ink-2">{session.reasoningEffort ?? t("agents.editor.basic.reasoningDefault")}</dd>
-          </div>
-        </dl>
-      </div>
-    </div>
+    <section className="agent-inspector">
+      <header><ProviderAvatar providerId={instance?.providerId ?? "custom"} /><div><h3>{instance?.displayName ?? "Agent"}</h3><p>{meta?.name === instance?.displayName ? meta?.vendor : meta?.name}</p></div><StatusChip tone={status === "running" ? "accent" : status === "failed" ? "danger" : status === "completed" ? "ok" : status === "waiting_approval" ? "warn" : "muted"} label={t(`sessions.status.${status}` as MessageKey)} /></header>
+      <dl><div><dt>{t("agents.instances.model")}</dt><dd title={session.model}>{session.model ?? t("agents.instances.defaultModel")}</dd></div><div><dt>{t("agents.editor.basic.reasoning")}</dt><dd><span className="agent-effort-value">{session.reasoningEffort ?? t("agents.editor.basic.reasoningDefault")}</span></dd></div></dl>
+    </section>
   );
 }

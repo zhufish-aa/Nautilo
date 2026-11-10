@@ -65,6 +65,7 @@ function installTauriBridge(): void {
         invoke("attachment_import_clipboard", { input: { name: input.name, mimeType: input.mimeType, dataBase64: toBase64(input.data) } })
     },
     shell: {
+      openExternal: (url) => invoke("shell_open_external", { url }),
       openPath: (path) => invoke("shell_open_path", { path }),
       showItemInFolder: async (path) => {
         await invoke("shell_show_item_in_folder", { path });
@@ -81,6 +82,14 @@ function installTauriBridge(): void {
       readText: (input) => invoke("file_read_text", { payload: input }),
       writeText: (input) => invoke("file_write_text", { payload: input }),
       delete: (input) => invoke("file_delete", { payload: input })
+    },
+    accounts: {
+      recoverableLogins: () => invoke("account_login_recoverable"),
+      acknowledgeLogin: (input) => invoke("account_login_attached", { providerId: input.providerId, profileId: input.profileId }),
+      prepareLogin: (providerId) => invoke("account_login_prepare", { providerId }),
+      startLogin: (input) => invoke("account_login_start", { input }),
+      loginStatus: (profileId) => invoke("account_login_status", { profileId }),
+      cancelLogin: (profileId) => invoke("account_login_cancel", { profileId })
     },
     providers: {
       startUpdate: (input) => invoke("provider_update_start", { payload: input }),

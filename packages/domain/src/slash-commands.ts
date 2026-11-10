@@ -16,7 +16,7 @@ export interface SlashCommandDefinition {
    * passes it to the adapter, which may use a dedicated transport (e.g.
    * OpenCode's summarize endpoint) instead of only sending the name as chat text.
    */
-  providerCommand?: "compact";
+  providerCommand?: string;
   argumentHint?: string;
   argumentRequired?: boolean;
 }

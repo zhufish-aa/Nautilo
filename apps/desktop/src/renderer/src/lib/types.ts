@@ -2,13 +2,14 @@ import type {
   AgentStatus,
   DelegationPolicy,
   InstanceModelConfig,
+  Project,
   RunMode,
   SessionStatus,
   TaskStatus,
   VerificationCommandTemplate,
   WorkspaceMode
 } from "@agenthub/domain";
-import type { ToolFileDiff } from "@agenthub/event-protocol";
+import type { CodeExecution, ToolFileDiff } from "@agenthub/event-protocol";
 import type { LocalizedText, ProviderPermissionMode } from "@agenthub/provider-sdk";
 
 export type { LocalizedText };
@@ -43,10 +44,11 @@ export interface EnvironmentPolicy {
 
 /** A CLI-native permission mode exposed for a provider (e.g. Codex approval modes). */
 export type PermissionModeOption = ProviderPermissionMode;
-export type CodexWireApi = "responses" | "chat";
+export type CodexWireApi = "responses" | "chat" | "anthropic";
 export type WebSearchMode = "native" | "official" | "off";
 
 export interface AgentInstanceConfig {
+  configurationKind?: "harness";
   id: string;
   providerId: string;
   displayName: string;
@@ -59,10 +61,17 @@ export interface AgentInstanceConfig {
   /** Write-only editor value; it is never hydrated from Core. */
   apiKey?: string;
   credentialStored?: boolean;
+  /** Official CLI account directory; no credential contents enter the renderer. */
+  loginProfileDirectory?: string;
+  loginProfileLabel?: string;
   baseUrl?: string;
   /** Provider-native upstream protocol (for example Pi's openai-completions). */
   apiType?: string;
   wireApi?: CodexWireApi;
+  /** Maximum simultaneous Codex app-server processes for this instance. */
+  appServerPoolSize?: number;
+  /** Login connection used only for official image generation. */
+  imageGenerationConnectionId?: string;
   webSearchMode?: WebSearchMode;
   webSearchInstanceId?: string;
   /** Model used when this instance delegates search to another instance. */
@@ -124,6 +133,13 @@ export interface UiProject {
   rootPath: string;
   repositoryType: "git" | "none";
   workspaceMode: WorkspaceMode;
+  nonGitDiffMode?: Project["nonGitDiffMode"];
+  /** Persisted settings must survive edits made without a fresh inspection. */
+  defaultBranch?: string;
+  frontendPaths?: string[];
+  backendPaths?: string[];
+  ignoredPaths?: string[];
+  policyId?: string;
   scan?: ProjectScanResult;
   scanning: boolean;
   activeRun?: ActiveRunSummary;
@@ -181,6 +197,8 @@ export interface TeamRole {
 }
 
 export interface UiTeamMember {
+  connectionId?: string;
+  connectionRevision?: number;
   id: string;
   displayName: string;
   agentInstanceId: string;
@@ -189,7 +207,8 @@ export interface UiTeamMember {
   serviceTier?: string;
   role: TeamRole;
   allowedTaskTypes: string[];
-  maxConcurrentTasks: number;
+  /** Optional per-member task cap; absent means no configured limit. */
+  maxConcurrentTasks?: number;
   enabled: boolean;
 }
 
@@ -222,12 +241,15 @@ export type SessionTarget =
   | { type: "agent"; instanceId: string; teamId?: string };
 
 export interface UiSession {
+  connectionId?: string;
+  connectionRevision?: number;
   id: string;
   projectId: string;
   target: SessionTarget;
   title: string;
   model?: string;
   reasoningEffort?: string;
+  agentMode?: string;
   serviceTier?: string;
   /** CLI-native permission mode override for this session; empty falls back to the instance setting. */
   permissionMode?: string;
@@ -249,6 +271,8 @@ export interface UiSession {
 }
 
 export type ChangedFile = {
+  comparisonUnavailable?: boolean;
+  reason?: string;
   path: string;
   changeType: "added" | "modified" | "deleted";
   additions: number;
@@ -265,6 +289,8 @@ export interface ApprovalRequest {
   kind: "command" | "merge" | "delegate";
   status: "pending" | "approved" | "rejected";
   decisionScope?: ApprovalScope;
+  availableScopes?: ApprovalScope[];
+  runScope?: "run" | "session";
   createdAt: string;
 }
 
@@ -305,19 +331,21 @@ export interface MessageAttachmentView {
   kind: "image" | "file";
   mimeType?: string;
   sizeBytes?: number;
+  unavailable?: boolean;
 }
 
 export type TimelinePayload =
     | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string; attachments?: MessageAttachmentView[]; editedAt?: string }
-  | { kind: "activity"; phase: "queued" | "starting" | "thinking" | "responding" | "completed"; detail?: string }
+  | { kind: "provider_ui"; method: string; key?: string; text: string; url?: string }
+  | { kind: "activity"; phase: "queued" | "provider_queued" | "starting" | "thinking" | "responding" | "completed" | "stopped"; detail?: string }
     | { kind: "reasoning"; text: string; streaming?: boolean; messageId?: string }
-  | { kind: "tool_activity"; toolName: string; status: "running" | "done" | "failed"; input?: string; output?: string; fileDiff?: ToolFileDiff; subagent?: { agentType?: string; task?: string; background?: boolean; activities?: TimelinePayload[] } }
+  | { kind: "tool_activity"; toolName: string; status: "running" | "done" | "failed"; input?: string; output?: string; codeExecution?: CodeExecution; fileDiff?: ToolFileDiff; subagent?: { agentType?: string; task?: string; background?: boolean; status?: "running" | "done" | "failed"; model?: string; nativeAgentIds?: string[]; activities?: TimelinePayload[] } }
   | { kind: "tool_group"; items: TimelineEvent[]; stepCount: number; callCount: number; running: boolean }
   | { kind: "usage"; inputTokens?: number; outputTokens?: number; contextUsed?: number; contextWindow?: number }
   | { kind: "artifact"; artifactType: "image" | "file"; name: string; mimeType?: string; content?: string; path?: string }
   | { kind: "planner_decision"; mode: "direct" | "delegate" | "plan"; rationale: string }
   | { kind: "recovery_decision"; action: "retry" | "take_over" | "continue"; taskId: string; rationale: string }
-  | { kind: "task_update"; taskId: string; title: string; memberName?: string; status: TaskStatus; sessionId?: string }
+  | { kind: "task_update"; taskId: string; title: string; objective?: string; memberId?: string; memberName?: string; status: TaskStatus; sessionId?: string; dispatchCall?: { toolName: string; input?: string; output?: string } }
   | { kind: "handoff"; taskId?: string; fromName: string; toName: string; summary: string; sessionId?: string }
   | {
       kind: "command";
@@ -328,7 +356,7 @@ export type TimelinePayload =
       attempts?: number;
       needsApproval?: boolean;
     }
-  | { kind: "file_change"; files: ChangedFile[] }
+  | { kind: "file_change"; files: ChangedFile[]; source?: "provider"; replace?: boolean }
   | {
       kind: "verification";
       command: string;
@@ -353,6 +381,9 @@ export type TimelinePayload =
   | { kind: "run_status"; run: RunLifecycle };
 
 export interface TimelineEvent {
+  background?: boolean;
+  /** Provider/run identity for authoritative cumulative diff replacement. */
+  runId?: string;
   id: string;
   sessionId: string;
   sequence: number;
@@ -361,6 +392,9 @@ export interface TimelineEvent {
 }
 
 export interface SessionArtifact {
+  diffSource?: "provider" | "filesystem";
+  /** A run had no non-Git baseline; absence of a patch is not absence of edits. */
+  comparisonUnavailable?: boolean;
   id: string;
   kind: "diff" | "api_contract" | "test_report" | "commit" | "image" | "file";
   name: string;

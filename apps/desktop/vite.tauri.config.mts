@@ -2,6 +2,8 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
+import { markdownEntitiesPlugin } from "./markdown-worker.vite";
+import { serialWorkerBuilds } from "./worker-build.vite";
 
 /**
  * Standalone renderer build for the Tauri shell. Mirrors the `renderer`
@@ -11,7 +13,8 @@ import { resolve } from "node:path";
 export default defineConfig({
   root: resolve(__dirname, "src/renderer"),
   base: "./",
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), markdownEntitiesPlugin()],
+  worker: { plugins: (chain:string[]=[]) => [markdownEntitiesPlugin(),serialWorkerBuilds(chain)] },
   resolve: {
     alias: {
       "@": resolve(__dirname, "src/renderer/src")

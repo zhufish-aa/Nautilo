@@ -1,3 +1,4 @@
+import { readModelResponseJson } from "./bounded-model-response.js";
 import type { InstanceModelConfig, ProviderModel, ProviderModelCatalog } from "@agenthub/domain";
 
 /**
@@ -24,32 +25,42 @@ export function mergeInstanceModelConfig(
   models?: InstanceModelConfig[]
 ): ProviderModelCatalog {
   if (!models?.length) return catalog;
-  const merged = [...catalog.models];
+  const disabled = new Set(models.filter((model) => model.enabled === false).map((model) => model.id.trim()));
+  const merged = catalog.models.filter((model) => !disabled.has(model.id));
   for (const config of models) {
     const id = config.id.trim();
-    if (!id) continue;
+    if (!id || disabled.has(id)) continue;
     const index = merged.findIndex((model) => model.id === id);
-    if (index >= 0) {
-      const existing = merged[index];
-      merged[index] = {
-        ...existing,
-        displayName: config.displayName?.trim() || existing.displayName,
-        reasoningEfforts: config.reasoningEfforts?.length ? [...config.reasoningEfforts] : existing.reasoningEfforts,
-        contextWindow: config.contextWindow ?? existing.contextWindow
-      };
-    } else {
-      merged.push({
-        id,
-        displayName: config.displayName?.trim() || id,
-        isDefault: false,
-        reasoningEfforts: [...(config.reasoningEfforts ?? [])],
-        contextWindow: config.contextWindow,
-        capabilities: [],
-        serviceTiers: []
-      });
-    }
+    const existing = index >= 0 ? merged[index] : undefined;
+    const reasoningEfforts = config.reasoningEfforts?.length ? [...config.reasoningEfforts] : [...(existing?.reasoningEfforts ?? [])];
+    const configuredDefault = configuredModelReasoningEffort(config);
+    const defaultReasoningEffort = configuredDefault
+      ?? (reasoningEfforts.includes(existing?.defaultReasoningEffort ?? "") ? existing?.defaultReasoningEffort : undefined);
+    const entry: ProviderModel = {
+      ...(existing ?? { id, isDefault: false, capabilities: [], serviceTiers: [] }),
+      displayName: config.displayName?.trim() || existing?.displayName || id,
+      reasoningEfforts,
+      defaultReasoningEffort,
+      contextWindow: config.contextWindow ?? existing?.contextWindow,
+      inputModalities: config.inputModalities ?? existing?.inputModalities,
+      pricing: config.pricing ? { ...config.pricing } : existing?.pricing
+    };
+    if (index >= 0) merged[index] = entry;
+    else merged.push(entry);
   }
-  return { ...catalog, models: merged };
+  const defaultModel = catalog.defaultModel && disabled.has(catalog.defaultModel)
+    ? merged.find((model) => model.isDefault)?.id ?? merged[0]?.id
+    : catalog.defaultModel;
+  return { ...catalog, models: merged, defaultModel };
+}
+
+/** Explicit per-model default wins; old ordered effort lists keep their default. */
+export function configuredModelReasoningEffort(config?: InstanceModelConfig): string | undefined {
+  if (!config || config.enabled === false) return undefined;
+  const efforts = config.reasoningEfforts ?? [];
+  const explicit = config.defaultReasoningEffort?.trim();
+  if (explicit && (!efforts.length || efforts.includes(explicit))) return explicit;
+  return efforts[0];
 }
 
 /**
@@ -62,13 +73,23 @@ export function mergeInstanceModelConfig(
  * base URL and its conventional versioned models route are tried; Anthropic
  * shims ending in `/anthropic` also retry against the parent endpoint.
  */
+export function validateModelEndpoint(baseUrl: string): string {
+  let url: URL;
+  try { url = new URL(baseUrl); }
+  catch { throw new Error("Model endpoint must be a valid absolute HTTP(S) URL"); }
+  const loopback = ["127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.username || url.password || url.href.includes("?") || url.href.includes("#")) throw new Error("Model endpoint cannot contain credentials, query parameters or fragments");
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error("Model endpoint requires HTTPS; HTTP is allowed only for 127.0.0.1 or [::1]");
+  return url.toString().replace(/\/+$/, "");
+}
+
 export async function discoverOpenAiCompatibleModels(
   baseUrl: string,
   apiKey?: string,
   timeoutMs = 10_000,
   apiType?: string
 ): Promise<ProviderModelCatalog> {
-  const normalized = baseUrl.replace(/\/+$/, "");
+  const normalized = validateModelEndpoint(baseUrl);
   const endpoints = modelListEndpoints(normalized, apiType);
   let lastError: unknown;
   for (const endpoint of endpoints) {
@@ -109,10 +130,16 @@ function modelListHeaders(apiKey: string | undefined, apiType?: string): Record<
 async function fetchModels(endpoint: string, apiKey: string | undefined, timeoutMs: number, apiType?: string): Promise<ProviderModelCatalog> {
   const response = await fetch(endpoint, {
     headers: modelListHeaders(apiKey, apiType),
+    // API-key headers are not stripped by fetch on cross-origin redirects.
+    // Require the user to configure the final endpoint instead of forwarding credentials.
+    redirect: "error",
     signal: AbortSignal.timeout(timeoutMs)
   });
-  if (!response.ok) throw new Error(`GET ${endpoint} failed (${response.status})`);
-  const parsed = parseOpenAiCompatibleModelList(await response.json());
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`GET ${endpoint} failed (${response.status})`);
+  }
+  const parsed = parseOpenAiCompatibleModelList(await readModelResponseJson(response));
   if (!parsed.models.length) throw new Error(`GET ${endpoint} returned no models`);
   return parsed;
 }

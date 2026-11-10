@@ -13,16 +13,20 @@ use crate::errors::{CoreResult, CoreError, ErrorCode};
 use crate::process_runtime::ProcessHandle;
 
 pub mod claude;
+pub mod images;
 pub mod custom;
 pub mod registry;
 pub mod codex;
 pub mod json_rpc_process;
 pub mod kimi;
 pub mod model_config;
+mod model_catalog_cache;
 pub mod normalize;
 pub mod plan_interaction;
 pub mod process_adapter;
 pub mod runtime_mcp_bridge;
+pub mod api_stream_observer;
+#[cfg(test)] mod resident_tests;
 
 pub use normalize::normalize_json;
 pub use process_adapter::stream_events;
@@ -32,7 +36,8 @@ pub use process_adapter::stream_events;
 pub type BoxFuture<T> = Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 
 /// AdapterEvent in the TS SDK. `raw` payloads stay as JSON values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag="kind", rename_all="snake_case", rename_all_fields="camelCase")]
 pub enum AdapterEvent {
     Message { text: String, phase: Option<String>, message_id: Option<String>, subagent_dispatch_id: Option<String>, raw: Option<Value> },
     Thinking { text: String, phase: Option<String>, message_id: Option<String>, subagent_dispatch_id: Option<String>, raw: Option<Value> },
@@ -56,10 +61,20 @@ pub enum AdapterEvent {
         subagent_dispatch_id: Option<String>,
         raw: Option<Value>,
     },
+    TurnDiff { diff: String, thread_id: String, turn_id: String, raw: Option<Value> },
     File { path: String, change_type: Option<String>, additions: Option<i64>, deletions: Option<i64>, diff: Option<String>, raw: Option<Value> },
     Session { provider_session_id: String, raw: Option<Value> },
     Status { phase: String, raw: Option<Value> },
+    /// Replacement snapshot: context footprint, turn execution, or provider session total.
+    /// Reported cost is accounting metadata, never evidence of a billed payment.
     Usage {
+        usage_scope: Option<String>,
+        usage_key: Option<String>,
+        input_tokens_includes_cache: Option<bool>,
+        cache_creation_input_tokens: Option<i64>,
+        reported_cost: Option<f64>,
+        estimated_cost: Option<f64>,
+        currency: Option<String>,
         input_tokens: Option<i64>,
         cached_input_tokens: Option<i64>,
         output_tokens: Option<i64>,
@@ -76,7 +91,8 @@ pub enum AdapterEvent {
     Timeout { reason: TimeoutKind },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all="snake_case")]
 pub enum TimeoutKind {
     Timeout,
     Idle,
@@ -94,13 +110,24 @@ impl TimeoutKind {
 }
 
 /// Everything a run needs to launch a provider turn (AdapterStartRequest).
+#[derive(Clone)]
+pub struct ImageGenerationExecutor {
+    pub generate: Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>,
+    pub cancel: Arc<dyn Fn() + Send + Sync>,
+}
+
 #[derive(Clone, Default)]
 pub struct AdapterStartRequest {
     pub instance: Value,
+    /// Stable Nautilo identity for local transport isolation, not a provider thread ID.
+    pub local_session_id: Option<String>,
+    /// History-only evidence from the PTY owner; never a provider launch flag.
+    pub native_terminal_live: Option<bool>,
     pub prompt: String,
     pub cwd: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub agent_mode: Option<String>,
     pub service_tier: Option<String>,
     pub permission_mode: Option<String>,
     pub context_window: Option<i64>,
@@ -113,8 +140,12 @@ pub struct AdapterStartRequest {
     pub runtime_tools: Option<Value>,
     /// Tools supplied by Nautilo for this provider session (delegation etc.).
     pub execute_runtime_tool: Option<Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>>,
+    pub image_generation: Option<ImageGenerationExecutor>,
     /// Provider-initiated user interaction; blocks until the user responds.
     pub request_interaction: Option<Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>>,
+    pub session_events: Option<Arc<dyn Fn(AdapterEvent) + Send + Sync>>,
+    pub session_interaction: Option<Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>>,
+    pub session_tool: Option<Arc<dyn Fn(Value) -> BoxFuture<anyhow::Result<Value>> + Send + Sync>>,
     pub skills: Option<Vec<Value>>,
     pub mcp_servers: Option<Vec<Value>>,
     pub provider_command: Option<String>,
@@ -215,10 +246,17 @@ pub struct AdapterDetectionResult {
 
 #[async_trait::async_trait]
 pub trait AgentCliAdapter: Send + Sync {
+    async fn list_modes(&self, _instance: &Value, _context: Option<&Value>) -> CoreResult<Value> {
+        Ok(serde_json::json!({"modes":[]}))
+    }
     fn provider_id(&self) -> &str;
     /// The ProviderDescriptor JSON served to the renderer via provider.catalog.
     fn descriptor(&self) -> Value;
     fn capabilities(&self) -> AdapterCapabilities;
+    fn native_capabilities(&self,instance:&Value)->Value {
+        let caps=self.capabilities();
+        agenthub_plugin_sdk::capabilities::describe(self.provider_id(),instance,&serde_json::json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty}))
+    }
     fn supports_structured_output(&self) -> bool {
         self.capabilities().structured_output
     }
@@ -238,6 +276,19 @@ pub trait AgentCliAdapter: Send + Sync {
         ))
     }
     async fn dispose(&self) {}
+    async fn release_session(&self, _request:&AdapterStartRequest) -> CoreResult<()> {Ok(())}
+    async fn read_session_history(&self,_request:&AdapterStartRequest,_session:&str)->CoreResult<Option<Value>> {Ok(None)}
+    fn native_history_supported(&self,_instance:&Value)->bool {false}
+    /// History readback alone does not prove stream message/call IDs are native.
+    fn native_message_ids_supported(&self,_instance:&Value)->bool {false}
+    async fn resume_terminal_events(&self,_request:&AdapterStartRequest,_session:&str,_snapshot:&Value)->CoreResult<()> {Ok(())}
+    async fn prepare_native_terminal(&self,request:AdapterStartRequest,resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
+        self.release_session(&request).await?;
+        self.native_terminal(request,resume).await
+    }
+    async fn native_terminal(&self,_request:AdapterStartRequest,_resume:Option<String>)->CoreResult<crate::runtime::terminal_service::TerminalPlan> {
+        Err(crate::errors::invalid("providerId","This adapter has not declared a native terminal launch plan"))
+    }
 }
 
 
@@ -284,6 +335,11 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
             subagent_dispatch_id: opt_str("subagentDispatchId"),
             raw,
         },
+        "turn_diff" => AdapterEvent::TurnDiff {
+            diff: opt_str("diff").unwrap_or_default(),
+            thread_id: opt_str("threadId").unwrap_or_default(),
+            turn_id: opt_str("turnId").unwrap_or_default(), raw,
+        },
         "file" => AdapterEvent::File {
             path: opt_str("path").unwrap_or_default(),
             change_type: opt_str("changeType"),
@@ -293,8 +349,16 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
             raw,
         },
         "session" => AdapterEvent::Session { provider_session_id: opt_str("providerSessionId").unwrap_or_default(), raw },
+        "extension_ui" => AdapterEvent::Status { phase: "extension_ui".into(), raw: Some(value.clone()) },
         "status" => AdapterEvent::Status { phase: opt_str("phase").unwrap_or_default(), raw },
         "usage" => AdapterEvent::Usage {
+            usage_scope: opt_str("usageScope"),
+            usage_key: opt_str("usageKey"),
+            input_tokens_includes_cache: value.get("inputTokensIncludesCache").and_then(Value::as_bool),
+            cache_creation_input_tokens: opt_i64("cacheCreationInputTokens"),
+            reported_cost: value.get("reportedCost").and_then(Value::as_f64),
+            estimated_cost: value.get("estimatedCost").and_then(Value::as_f64),
+            currency: opt_str("currency"),
             input_tokens: opt_i64("inputTokens"),
             cached_input_tokens: opt_i64("cachedInputTokens"),
             output_tokens: opt_i64("outputTokens"),
@@ -333,6 +397,9 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
 /// not serializable; interactions/tools travel over reverse channels).
 pub fn start_request_to_json(request: &AdapterStartRequest) -> Value {
     let mut map = serde_json::Map::new();
+    if let Some(live)=request.native_terminal_live {map.insert("nativeTerminalLive".into(),Value::Bool(live));}
+    if let Some(mode)=&request.agent_mode { map.insert("agentMode".into(),Value::String(mode.clone())); }
+    if let Some(id)=&request.local_session_id {map.insert("localSessionId".into(),Value::String(id.clone()));}
     map.insert("instance".to_string(), request.instance.clone());
     map.insert("prompt".to_string(), Value::String(request.prompt.clone()));
     map.insert("cwd".to_string(), Value::String(request.cwd.clone()));

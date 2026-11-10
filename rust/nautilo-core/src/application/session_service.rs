@@ -17,8 +17,19 @@ use crate::runtime::event_service::EventService;
 use crate::runtime::message_attachment_service::{append_attachment_context, MessageAttachmentService};
 use crate::runtime::orchestration::member_router::MemberRouter;
 use crate::runtime::run_service::{RunContext, RunService};
-use crate::application::session_context::{build_session_turn_context, TurnContextInput};
+use crate::application::session_context::{build_bound_turn_context, TurnContextInput};
 use crate::runtime::RUNTIME_TOOL_SCHEMA_VERSION;
+
+pub(crate) fn effective_agent_id(db: &rusqlite::Connection, session: &Value) -> CoreResult<String> {
+    if let Some(id) = session["agentInstanceId"].as_str().filter(|s| !s.is_empty()) { return Ok(id.into()); }
+    let member_id = session["memberId"].as_str().unwrap_or("");
+    if let Some(team_id) = session["teamId"].as_str() {
+        if let Some(team) = Repositories::new(db).teams().get(team_id)? {
+            if let Some(id) = team["members"].as_array().and_then(|members| members.iter().find(|m| m["id"] == member_id)).and_then(|m| m["agentInstanceId"].as_str()) { return Ok(id.into()); }
+        }
+    }
+    Ok(member_id.into())
+}
 
 const TERMINAL_RUN_STATUSES: [&str; 5] = ["completed", "failed", "timed_out", "crashed", "cancelled"];
 const TERMINAL_PROJECT_RUN_STATUSES: [&str; 3] = ["completed", "failed", "cancelled"];
@@ -73,7 +84,7 @@ impl SessionService {
 
     pub fn create(&self, input: &Value) -> CoreResult<Value> {
         let now = now_iso();
-        let session = json!({
+        let mut session = json!({
             "id": Uuid::new_v4().to_string(),
             "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
             "memberId": input.get("memberId").cloned().unwrap_or(Value::Null),
@@ -83,7 +94,12 @@ impl SessionService {
             "createdAt": now,
             "updatedAt": now,
         });
-        Repositories::new(&self.db.lock().unwrap().raw).sessions().save(&session)?;
+        for field in ["agentInstanceId","connectionId","connectionRevision","model","agentMode","reasoningEffort","serviceTier","permissionMode","parentSessionId"] {
+            if let Some(value) = input.get(field) { session[field] = value.clone(); }
+        }
+        let db = self.db.lock().unwrap();
+        crate::application::connection_service::bind_session(&db.raw, &mut session, None)?;
+        Repositories::new(&db.raw).sessions().save(&session)?;
         Ok(session)
     }
 
@@ -125,11 +141,44 @@ impl SessionService {
         let repos = Repositories::new(&db.raw);
         let current = repos.sessions().get(id)?;
         let Some(current) = current else {
-            repos.sessions().save(input)?;
-            return Ok(input.clone());
+            let mut normalized = input.clone();
+            crate::application::connection_service::bind_session(&db.raw, &mut normalized, None)?;
+            normalized.as_object_mut().unwrap().remove("confirmConnectionChange");
+            normalize_session_permission(&mut normalized);
+            repos.sessions().save(&normalized)?;
+            return Ok(normalized);
         };
-        let same_provider_binding = current.get("projectId") == input.get("projectId")
-            && current.get("agentInstanceId") == input.get("agentInstanceId");
+        let mut binding_input = input.clone();
+        crate::application::connection_service::bind_session(&db.raw, &mut binding_input, Some(&current))?;
+        let mut candidate = current.clone();
+        if let Some(fields) = binding_input.as_object() { for (key,value) in fields { candidate[key] = value.clone(); } }
+        if input.get("connectionId") == Some(&Value::Null) {
+            candidate.as_object_mut().unwrap().remove("connectionId"); candidate.as_object_mut().unwrap().remove("connectionRevision");
+        }
+        candidate.as_object_mut().unwrap().remove("confirmConnectionChange");
+        let connection_changed = current.get("connectionId") != candidate.get("connectionId") || current.get("connectionRevision") != candidate.get("connectionRevision");
+        let runs = repos.runs().list()?;
+        let session_runs: Vec<&Value> = runs.iter().filter(|run| run["sessionId"] == id).collect();
+        let started = !repos.sessions().messages(id)?.is_empty() || current.get("providerSessionId").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) || !session_runs.is_empty();
+        if started && (current.get("projectId") != candidate.get("projectId") || effective_agent_id(&db.raw,&current)? != effective_agent_id(&db.raw,&candidate)?) {
+            return Err(invalid("agentInstanceId","A started session keeps its project and Agent; create another session to change them"));
+        }
+        let active = session_runs.iter().any(|run| !TERMINAL_RUN_STATUSES.contains(&run["status"].as_str().unwrap_or("")))
+            || self.runs.read().unwrap().as_ref().is_some_and(|runs| runs.session_busy(id))
+            || self.pending_follow_ups.lock().unwrap().get(id).is_some_and(|items| !items.is_empty());
+        let settings_changed = connection_changed || ["model","agentMode","reasoningEffort","serviceTier"].iter().any(|key| current.get(*key) != candidate.get(*key));
+        if active && settings_changed { return Err(invalid("sessionId","Wait for active and queued requests before changing provider, account or model settings")); }
+        if connection_changed && (started || current.get("connectionId").and_then(Value::as_str).is_some()) && input["confirmConnectionChange"] != true {
+            return Err(invalid("confirmConnectionChange","Confirm provider/account switch: text history is rebuilt; native reasoning, cache and old image context are not transferred"));
+        }
+        if !connection_changed && current.get("connectionId").is_some() {
+            for field in ["providerSessionId","providerContextSyncedAt","providerContextWindow","runtimeToolVersion"] {
+                if input.get(field).is_some() && input.get(field) != current.get(field) { return Err(invalid(field,"Provider context is runtime-owned")); }
+            }
+        }
+        let input = &candidate;
+        let same_provider_binding = !connection_changed && current.get("projectId") == input.get("projectId")
+            && effective_agent_id(&db.raw,&current)? == effective_agent_id(&db.raw,input)?;
         // { ...current, ...input }: input keys win, including explicit nulls.
         let mut merged = current.as_object().cloned().unwrap_or_default();
         if let Some(overlay) = input.as_object() {
@@ -187,7 +236,14 @@ impl SessionService {
                 merged.remove("runtimeToolVersion");
             }
         }
-        let updated = Value::Object(merged);
+        let mut updated = Value::Object(merged);
+        updated.as_object_mut().unwrap().remove("confirmConnectionChange");
+        if connection_changed {
+            if input.get("connectionId").is_none() { updated.as_object_mut().unwrap().remove("connectionId"); updated.as_object_mut().unwrap().remove("connectionRevision"); }
+            for field in ["providerSessionId","providerContextSyncedAt","providerContextWindow","runtimeToolVersion"] { updated.as_object_mut().unwrap().remove(field); }
+            updated["connectionContextRebuildRequired"] = json!(started);
+        } else if let Some(value) = current.get("connectionContextRebuildRequired") { updated["connectionContextRebuildRequired"] = value.clone(); }
+        normalize_session_permission(&mut updated);
         repos.sessions().save(&updated)?;
         Ok(updated)
     }
@@ -231,6 +287,7 @@ impl SessionService {
     /// session.send — validates, persists the user message, and launches a run.
     pub async fn send(&self, input: &Value) -> CoreResult<Value> {
         let session_id = input.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        self.runs()?.ensure_native_history(session_id).await?;
         let text = input.get("text").and_then(Value::as_str).unwrap_or("");
         // Heal replayed zombie queue entries before this run's events make the
         // renderer re-read the journal (see heal_follow_ups).
@@ -292,17 +349,17 @@ impl SessionService {
             },
             &attachments,
         );
-        let turn_context = build_session_turn_context(TurnContextInput {
+        let turn_context = build_bound_turn_context(&session, TurnContextInput {
             current_text: &current_text,
             messages: &existing_messages,
             artifacts: &artifacts,
             current_attachments: &attachments,
             recover_provider_context: session.get("providerSessionId").is_none()
                 || session.get("providerContextSyncedAt").is_none()
+                || self.runs()?.requires_provider_recovery(&session,&agent)
                 || needs_runtime_tool_migration,
-            work_mode: session.get("mode").and_then(Value::as_str) == Some("work"),
             workspace_root: project_root.as_deref(),
-        });
+        })?;
         let attachment_ids: Vec<Value> = attachments.iter().filter_map(|a| a.get("id").cloned()).collect();
         let message = match edited_message {
             Some(edited) => {
@@ -314,7 +371,7 @@ impl SessionService {
             }
             None => {
                 let mut message = serde_json::Map::new();
-                message.insert("id".to_string(), json!(uuid::Uuid::new_v4().to_string()));
+                message.insert("id".to_string(), input.get("messageId").filter(|id| id.as_str().is_some_and(|id| !id.is_empty())).cloned().unwrap_or_else(|| json!(uuid::Uuid::new_v4().to_string())));
                 message.insert("sessionId".to_string(), json!(session_id));
                 message.insert("sender".to_string(), json!("user"));
                 message.insert("kind".to_string(), json!("chat"));
@@ -353,6 +410,7 @@ impl SessionService {
                         Some(turn_context.local_image_paths)
                     },
                     synchronize_provider_context: turn_context.recovered,
+                    user_message_id: message["id"].as_str().map(str::to_string),
                     ..Default::default()
                 },
             )
@@ -364,6 +422,7 @@ impl SessionService {
     /// otherwise queue as the next turn.
     pub async fn follow_up(&self, input: &Value) -> CoreResult<Value> {
         let session_id = input.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        self.runs()?.ensure_native_history(session_id).await?;
         let text = input.get("text").and_then(Value::as_str).unwrap_or("").trim().to_string();
         if text.is_empty() {
             return Err(invalid("text", "Guidance cannot be empty."));
@@ -379,9 +438,18 @@ impl SessionService {
         // every other CLI takes the queue path.
         if mode == "steer" && runs.can_steer(session_id) {
             runs.steer_session(session_id, &text).await?;
-            let message = follow_up_message(&session, &text);
-            let db = self.db.lock().unwrap();
-            Repositories::new(&db.raw).sessions().save_message(&message)?;
+            let mut message = follow_up_message(&session, &text);
+            if let Some(id) = input.get("messageId").and_then(Value::as_str).filter(|id| !id.is_empty()) { message["id"] = json!(id); }
+            {
+                let db = self.db.lock().unwrap();
+                Repositories::new(&db.raw).sessions().save_message(&message)?;
+            }
+            if let Some(events) = self.events.read().unwrap().clone() {
+                let _ = events.append_for_session(&session, &json!({
+                    "projectRunId": session.get("projectRunId").cloned().unwrap_or(Value::Null),
+                    "taskId": session.get("taskId").cloned().unwrap_or(Value::Null)
+                }), "session.follow_up_steered", json!({ "messageId": message["id"] }));
+            }
             return Ok(json!({ "accepted": true, "mode": "steer" }));
         }
 
@@ -406,17 +474,18 @@ impl SessionService {
             )
         };
         let agent = MemberRouter::new(self.db.clone()).resolve_session(&session)?;
-        let turn_context = build_session_turn_context(TurnContextInput {
+        let turn_context = build_bound_turn_context(&session, TurnContextInput {
             current_text: &text,
             messages: &existing_messages,
             artifacts: &artifacts,
             current_attachments: &[],
             recover_provider_context: session.get("providerSessionId").is_none()
-                || session.get("providerContextSyncedAt").is_none(),
-            work_mode: session.get("mode").and_then(Value::as_str) == Some("work"),
+                || session.get("providerContextSyncedAt").is_none()
+                || self.runs()?.requires_provider_recovery(&session,&agent),
             workspace_root: project_root.as_deref(),
-        });
-        let message = follow_up_message(&session, &text);
+        })?;
+        let mut message = follow_up_message(&session, &text);
+        if let Some(id) = input.get("messageId").and_then(Value::as_str).filter(|id| !id.is_empty()) { message["id"] = json!(id); }
         {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().save_message(&message)?;
@@ -492,7 +561,7 @@ impl SessionService {
             let db = self.db.lock().unwrap();
             let mut statement = match db.raw.prepare(
                 "SELECT data FROM runtime_events WHERE session_id = ?1 \
-                 AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled') \
+                 AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled', 'session.follow_up_steered') \
                  ORDER BY sequence, rowid",
             ) {
                 Ok(statement) => statement,
@@ -591,7 +660,9 @@ impl SessionService {
             let _ = Repositories::new(&db.raw).sessions().delete_message(session_id, message_id);
             return Ok(json!({ "cancelled": true }));
         }
-        self.runs()?.cancel_queued(session_id, message_id);
+        if !self.runs()?.cancel_queued(session_id, message_id) {
+            return Err(invalid("messageId", "Follow-up is already being sent."));
+        }
         self.untrack_pending_follow_up(session_id, message_id);
         {
             let db = self.db.lock().unwrap();
@@ -609,6 +680,30 @@ impl SessionService {
             );
         }
         Ok(json!({ "cancelled": true }))
+    }
+
+    pub async fn follow_up_steer(&self, input: &Value) -> CoreResult<Value> {
+        let session_id = input.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        let message_id = input.get("messageId").and_then(Value::as_str).unwrap_or("");
+        let session = {
+            let db = self.db.lock().unwrap();
+            Repositories::new(&db.raw).sessions().get(session_id)?.ok_or_else(|| not_found("session", session_id))?
+        };
+        let entry = self.pending_follow_up(session_id, message_id)
+            .ok_or_else(|| invalid("messageId", "Follow-up is no longer queued."))?;
+        let runs = self.runs()?;
+        if !runs.can_steer(session_id) { return Ok(json!({ "accepted": true, "mode": "queue" })); }
+        if !runs.steer_queued(session_id, message_id, entry["text"].as_str().unwrap_or("")).await? {
+            return Err(invalid("messageId", "Follow-up is already being sent."));
+        }
+        self.untrack_pending_follow_up(session_id, message_id);
+        if let Some(events) = self.events.read().unwrap().clone() {
+            let _ = events.append_for_session(&session, &json!({
+                "projectRunId": session.get("projectRunId").cloned().unwrap_or(Value::Null),
+                "taskId": session.get("taskId").cloned().unwrap_or(Value::Null)
+            }), "session.follow_up_steered", json!({ "messageId": message_id }));
+        }
+        Ok(json!({ "accepted": true, "mode": "steer" }))
     }
 }
 
@@ -680,4 +775,40 @@ pub fn follow_up_message(session: &Value, text: &str) -> Value {
     message.insert("text".to_string(), json!(text));
     message.insert("createdAt".to_string(), json!(now_iso()));
     Value::Object(message)
+}
+
+/// null resets a session override; absent fields remain absent/preserve merged state.
+fn normalize_session_permission(session: &mut Value) {
+    let Some(object) = session.as_object_mut() else { return; };
+    let Some(value) = object.get("permissionMode") else { return; };
+    match value.as_str().map(str::trim).filter(|mode| !mode.is_empty()) {
+        Some(mode) => { let mode = mode.to_string(); object.insert("permissionMode".into(), Value::String(mode)); }
+        None => { object.remove("permissionMode"); }
+    }
+}
+
+#[cfg(test)]
+mod permission_reset_tests {
+    use super::*;
+    #[test]
+    fn null_reset_clears_old_override_after_json_merge() {
+        let mut stored = json!({ "permissionMode": "full-access", "providerSessionId": "thread" });
+        let request: Value = serde_json::from_str(r#"{"permissionMode":null}"#).unwrap();
+        stored.as_object_mut().unwrap().extend(request.as_object().unwrap().clone());
+        normalize_session_permission(&mut stored);
+        assert!(stored.get("permissionMode").is_none());
+        assert_eq!(stored["providerSessionId"], "thread");
+    }
+    #[test]
+    fn omitted_preserves_and_explicit_modes_are_normalized() {
+        let mut stored = json!({ "permissionMode": "full-access" });
+        normalize_session_permission(&mut stored);
+        assert_eq!(stored["permissionMode"], "full-access");
+        stored["permissionMode"] = json!(" plan ");
+        normalize_session_permission(&mut stored);
+        assert_eq!(stored["permissionMode"], "plan");
+        stored["permissionMode"] = Value::Null;
+        normalize_session_permission(&mut stored);
+        assert!(stored.get("permissionMode").is_none());
+    }
 }

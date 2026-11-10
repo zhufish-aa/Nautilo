@@ -3,6 +3,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod native_experience;
+mod history;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -169,6 +172,7 @@ fn configure_pi_provider_environment(instance: &Value, env: &mut HashMap<String,
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim_end_matches('/');
+    let base_url=if configured_api==Some("anthropic-messages") {base_url.strip_suffix("/v1").unwrap_or(base_url)} else {base_url};
     env.insert(
         "AGENTHUB_PI_PROVIDER_CONFIG".to_string(),
         json!({
@@ -384,6 +388,8 @@ fn handle_bridge_connection(
 
 #[derive(Default)]
 struct PiParseState {
+    child_snapshots: HashMap<String, Value>,
+    usage: agenthub_plugin_sdk::usage::TurnUsage,
     message_sequence: u32,
     current_message_id: Option<String>,
     current_thinking_id: Option<String>,
@@ -439,7 +445,18 @@ fn tool_result_text(value: &Value) -> String {
     }
 }
 
+mod subagents;
+
 fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
+    let mut events = parse_pi_rpc_event_inner(value,state);
+    if value["type"] == "tool_execution_update" || value["type"] == "tool_execution_end" {
+        let name = value["toolName"].as_str().or_else(||state.tool_args.get(value["toolCallId"].as_str().unwrap_or("")).map(|(name,_)|name.as_str())).unwrap_or("").to_string();
+        events.extend(subagents::child_events(value,&name,&mut state.child_snapshots));
+    }
+    events
+}
+
+fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Value> {
     let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
     match event_type {
         "message_start" => {
@@ -515,12 +532,12 @@ fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
                     }));
                 }
             }
-            if !state.streamed_thinking {
-                let thinking: String = content
+            let thinking: String = content
                     .iter()
                     .filter(|part| part.get("type").and_then(Value::as_str) == Some("thinking"))
                     .filter_map(|part| part.get("thinking").and_then(Value::as_str))
                     .collect();
+            if !state.streamed_thinking {
                 if !thinking.is_empty() {
                     events.push(json!({
                         "kind": "thinking",
@@ -534,7 +551,7 @@ fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
             if state.streamed_thinking || content.iter().any(|part| part.get("type").and_then(Value::as_str) == Some("thinking")) {
                 events.push(json!({
                     "kind": "thinking",
-                    "text": "",
+                    "text": thinking,
                     "phase": "completed",
                     "messageId": state.current_thinking_id.clone().map(Value::String).unwrap_or(Value::Null),
                     "raw": value
@@ -560,14 +577,20 @@ fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
                 if prompt_tokens > 0 || num("output").unwrap_or(0) > 0 {
                     events.push(json!({
                         "kind": "usage",
+                        "usageScope": "context",
+                        "inputTokensIncludesCache": false,
                         "inputTokens": usage.get("input").cloned().unwrap_or(Value::Null),
                         "cachedInputTokens": usage.get("cacheRead").cloned().unwrap_or(Value::Null),
+                        "cacheCreationInputTokens": usage.get("cacheWrite").cloned().unwrap_or(Value::Null),
                         "outputTokens": usage.get("output").cloned().unwrap_or(Value::Null),
                         "reasoningOutputTokens": usage.get("reasoning").cloned().unwrap_or(Value::Null),
                         "contextUsed": if prompt_tokens > 0 { json!(prompt_tokens) } else { usage.get("totalTokens").cloned().unwrap_or(Value::Null) },
                         "raw": value
                     }));
                 }
+            }
+            if let Some(usage) = events.iter().find(|event| event["kind"] == "usage").cloned() {
+                events.push(state.usage.update(&state.message_sequence.to_string(), &usage));
             }
             if state.model_error {
                 events.push(json!({
@@ -601,6 +624,18 @@ fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
                 "fileDiff": pi_file_diff(&name, &args).unwrap_or(Value::Null),
                 "raw": value
             })]
+        }
+        "tool_execution_update" => {
+            let call_id = value["toolCallId"].as_str().unwrap_or("");
+            let stored = state.tool_args.get(call_id);
+            let name = value["toolName"].as_str().or_else(|| stored.map(|(name, _)| name.as_str())).unwrap_or("tool");
+            let args = value.get("args").or_else(|| stored.map(|(_, args)| args)).unwrap_or(&Value::Null);
+            let output = tool_result_text(&value["partialResult"]);
+            if name == "bash" {
+                vec![json!({"kind":"command","callId":call_id,"command":args["command"],"phase":"updated","output":output,"raw":value})]
+            } else {
+                vec![json!({"kind":"tool","callId":call_id,"name":name,"phase":"updated","input":args,"output":output,"raw":value})]
+            }
         }
         "tool_execution_end" => {
             let call_id = value.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_string();
@@ -655,39 +690,55 @@ fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
 // ---------------------------------------------------------------- the plugin
 
 struct PiPlugin {
-    tool_server: PiRuntimeToolServer,
+    pool: agenthub_plugin_sdk::session_pool::SessionPool<PiResident>,
     channel: Mutex<Option<Arc<dyn DaemonChannel>>>,
     runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
+    terminal_resources:Mutex<HashMap<String,(PiSkills,PiRuntimeToolServer)>>,
 }
+#[cfg(test)] #[path="../../../../tests/fixtures/native_session_checks.rs"] mod native_session_checks;
+#[cfg(test)] #[tokio::test] async fn native_resident_conformance(){native_session_checks::exercise(&PiPlugin::new(),"pi").await;}
 
 impl PiPlugin {
     fn new() -> Self {
         Self {
-            tool_server: PiRuntimeToolServer::new(),
+            pool: Default::default(),
             channel: Mutex::new(None),
             runs: Arc::new(Mutex::new(HashMap::new())),
+            terminal_resources:Mutex::new(HashMap::new()),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl ProviderPlugin for PiPlugin {
+    async fn read_session_history(&self,request:&Value,session:&str)->anyhow::Result<Option<Value>>{history::read(request,session).await.map(Some)}
+    fn native_terminal_supported(&self)->bool {true}
+    async fn release_session(&self,request:&Value)->anyhow::Result<()> {if let Some(native)=self.pool.retire(request["localSessionId"].as_str().unwrap_or("")){native.close().await;}Ok(())}
+    async fn terminal_plan(&self,request:&Value,resume:Option<String>)->anyhow::Result<Value> {
+        let(mut plan,skills,tools)=prepare_pi(request,&resume,&None,"terminal")?;
+        if let Some(index)=plan.args.windows(2).position(|args|args==["--mode","rpc"]){plan.args.drain(index..index+2);}
+        let token=Uuid::new_v4().to_string();self.terminal_resources.lock().unwrap().insert(token.clone(),(skills,tools));
+        Ok(json!({"command":plan.command,"args":plan.args,"env":plan.env,"token":token}))
+    }
+    async fn close_terminal(&self,token:&str){if let Some((skills,tools))=self.terminal_resources.lock().unwrap().remove(token){tools.close();skills.cleanup();}}
     fn descriptor(&self) -> Value {
         descriptor()
     }
 
-    fn capabilities(&self) -> Value {
-        json!({
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({
+            "nativeHistory": true,
             "structuredOutput": false,
             "textOutput": true,
             "interactiveStdin": true,
+            "sessionBackgroundEvents": true,
             "nativeResume": true,
             "pty": false
-        })
+        }),native_experience::declarations())
     }
 
-    fn set_interaction_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::InteractionChannel>) {
-        *self.channel.lock().unwrap() = Some(unsafe { std::mem::transmute(channel) });
+    fn set_daemon_channel(&self, channel: Arc<dyn DaemonChannel>) {
+        *self.channel.lock().unwrap() = Some(channel);
     }
 
     async fn detect(&self, instance: &Value) -> Value {
@@ -766,9 +817,10 @@ impl ProviderPlugin for PiPlugin {
         let run_handle_slot = Arc::new(Mutex::new(None::<agenthub_plugin_sdk::process::ProcessHandle>));
         let slot = run_handle_slot.clone();
         let runs = self.runs.clone();
+        let pool = self.pool.clone();
         let run_id = run_id.to_string();
         tokio::spawn(async move {
-            let result = run_pi(&run_id, request, resume, sender.clone(), channel, slot, runs).await;
+            let result = run_pi(&run_id, request, resume, sender.clone(), channel, slot, runs, pool).await;
             if let Err(error) = result {
                 let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
                 let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
@@ -779,7 +831,8 @@ impl ProviderPlugin for PiPlugin {
     }
 
     async fn dispose(&self) {
-        self.tool_server.close();
+        for native in self.pool.drain() { native.close().await; }
+        for (_,(skills,tools)) in self.terminal_resources.lock().unwrap().drain(){tools.close();skills.cleanup();}
     }
 
     async fn cancel(&self, run_id: &str) {
@@ -1004,34 +1057,48 @@ fn assert_pi_selection(state_response: &Value, expected_model: Option<&str>, exp
 
 const PI_MAX_RPC_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
-async fn run_pi(
-    run_id: &str,
-    request: Value,
-    resume: Option<String>,
-    sender: mpsc::UnboundedSender<Value>,
-    channel: Option<Arc<dyn DaemonChannel>>,
-    handle_slot: Arc<Mutex<Option<agenthub_plugin_sdk::process::ProcessHandle>>>,
-    runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
-) -> anyhow::Result<()> {
+struct PiResident {
+    session_id:Option<String>,
+    process: Option<process::StartedProcess>,
+    skills: Option<PiSkills>,
+    tools: Option<PiRuntimeToolServer>,
+    parse_state: Arc<Mutex<PiParseState>>,
+}
+impl PiResident {
+    async fn close(mut self) {
+        if let Some(process) = self.process.take() { process.handle.cancel().await; }
+        if let Some(tools) = self.tools.take() { tools.close(); }
+        if let Some(skills) = self.skills.take() { skills.cleanup(); }
+    }
+}
+impl Drop for PiResident {
+    fn drop(&mut self) {
+        let process = self.process.take(); let tools = self.tools.take(); let skills = self.skills.take();
+        if let Some(process) = process {
+            tokio::spawn(async move { process.handle.cancel().await; if let Some(tools)=tools {tools.close();} if let Some(skills)=skills {skills.cleanup();} });
+        }
+    }
+}
+fn prepare_pi(request: &Value, resume: &Option<String>, channel: &Option<Arc<dyn DaemonChannel>>, run_id: &str) -> anyhow::Result<(ProcessRequest,PiSkills,PiRuntimeToolServer)> {
     let instance = request.get("instance").cloned().unwrap_or(Value::Null);
     let mut env = env_of(&request);
-    for (key, value) in std::env::vars() {
-        env.entry(key).or_insert(value);
+    if instance.pointer("/providerOptions/runtimeConnectionId").is_none() {
+        for (key, value) in std::env::vars() { env.entry(key).or_insert(value); }
     }
-    env.insert("PI_OFFLINE".to_string(), "1".to_string());
     configure_pi_provider_environment(&instance, &mut env);
 
     let runtime_tools = request.get("runtimeTools").and_then(Value::as_array).cloned().unwrap_or_default();
+    let tool_server = PiRuntimeToolServer::new();
     let tool_url = if !runtime_tools.is_empty() && channel.is_some() {
         // A dedicated server per plugin process; the channel is required.
         let channel = channel.clone().unwrap();
-        let server = PiRuntimeToolServer::new();
+        let server = &tool_server;
         // The plugin process owns one shared server; register per run.
         let url = {
             let port = server.ensure_started().ok();
             port.map(|port| {
                 let token = Uuid::new_v4().to_string().replace('-', "");
-                server.registrations.lock().unwrap().insert(token.clone(), (runtime_tools.clone(), channel, String::new()));
+                server.registrations.lock().unwrap().insert(token.clone(), (runtime_tools.clone(), channel, run_id.to_string()));
                 format!("http://127.0.0.1:{port}/mcp/{token}")
             })
         };
@@ -1039,13 +1106,7 @@ async fn run_pi(
     } else {
         None
     };
-    if !runtime_tools.is_empty() && tool_url.is_none() {
-        let _ = sender.send(json!({
-            "kind": "raw",
-            "stream": "stderr",
-            "text": "AgentHub runtime tools were supplied but the Pi runtime tool endpoint is not ready yet; provider-native Pi tools remain available.\n"
-        }));
-    }
+    anyhow::ensure!(runtime_tools.is_empty() || tool_url.is_some(), "Pi runtime tool bridge failed to start");
     let extra_servers: Vec<Value> = tool_url
         .as_ref()
         .map(|url| vec![json!({ "transport": "http", "name": "agenthub", "url": url })])
@@ -1058,7 +1119,7 @@ async fn run_pi(
 
     let skills = materialize_pi_skills(request.get("skills").and_then(Value::as_array).cloned().unwrap_or_default())?;
     let mut args = base_args(&instance);
-    args.extend(["--mode".to_string(), "rpc".to_string(), "--offline".to_string()]);
+    args.extend(["--mode".to_string(), "rpc".to_string()]);
     if permission_mode == "isolated" || permission_mode == "auto" {
         args.push("--no-approve".to_string());
     } else {
@@ -1090,23 +1151,60 @@ async fn run_pi(
         args.push(effort.to_string());
     }
 
-    let started = process::start(&ProcessRequest {
+    let plan = ProcessRequest {
         command: executable_of(&instance),
         args,
         cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
         env: Some(env),
-        timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
-        idle_timeout_ms: request.get("idleTimeoutMs").and_then(Value::as_u64),
+        timeout_ms: None,
+        idle_timeout_ms: None,
         // Pi's message_update frames carry the complete growing snapshot in
         // addition to the delta; only enforce a caller-supplied cap.
-        max_output_bytes: request.get("maxOutputBytes").and_then(Value::as_u64).map(|v| v as usize),
+        max_output_bytes: None,
         ..Default::default()
-    })?;
+    };
+    Ok((plan,skills,tool_server))
+}
+async fn open_pi(request:&Value,resume:&Option<String>,channel:&Option<Arc<dyn DaemonChannel>>,run_id:&str)->anyhow::Result<PiResident>{
+    let(plan,skills,tools)=prepare_pi(request,resume,channel,run_id)?;
+    match process::start(&plan) {Ok(started)=>Ok(PiResident{session_id:None,process:Some(started),skills:Some(skills),tools:Some(tools),parse_state:Arc::new(Mutex::new(PiParseState::default()))}),Err(error)=>{tools.close();skills.cleanup();Err(error.into())}}
+}
+
+async fn run_pi(
+    run_id: &str,
+    request: Value,
+    resume: Option<String>,
+    sender: mpsc::UnboundedSender<Value>,
+    channel: Option<Arc<dyn DaemonChannel>>,
+    handle_slot: Arc<Mutex<Option<agenthub_plugin_sdk::process::ProcessHandle>>>,
+    runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
+    pool: agenthub_plugin_sdk::session_pool::SessionPool<PiResident>,
+) -> anyhow::Result<()> {
+    let local_images: Vec<Value> = agenthub_plugin_sdk::images::read_request_images(&request)?
+        .into_iter().map(|image| json!({"type":"image", "mimeType":image.mime_type,
+            "data":base64::engine::general_purpose::STANDARD.encode(image.bytes)})).collect();
+    let identity = agenthub_plugin_sdk::session_pool::identity(&request);
+    let key = request["localSessionId"].as_str().or(resume.as_deref()).unwrap_or(run_id).to_string();
+    let attached=std::time::Instant::now();let mut reused=false;
+    let cached = pool.take(&key);
+    let mut native = if let Some((previous, cached)) = cached {
+        if resume.is_some() && cached.session_id==resume && previous == identity && cached.process.as_ref().is_some_and(|process|process.handle.is_alive()) { reused=true;cached }
+        else { cached.close().await; open_pi(&request,&resume,&channel,run_id).await? }
+    } else { open_pi(&request,&resume,&channel,run_id).await? };
+    if let (Some(tools),Some(channel)) = (&native.tools,&channel) {
+        for registration in tools.registrations.lock().unwrap().values_mut() { registration.1=channel.clone(); registration.2=run_id.to_string(); }
+    }
+    let selected_model = effective_pi_model(&request["instance"], request["model"].as_str());
+    let started = native.process.as_mut().unwrap();
+    started.events.pause().await;
     let handle = started.handle.clone();
     *handle_slot.lock().unwrap() = Some(handle.clone());
     runs.lock().unwrap().insert(run_id.to_string(), handle.clone());
+    let _=sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"pi","transport":"rpc","reused":reused,"pid":handle.pid,"attachMs":attached.elapsed().as_millis()}}));
 
-    let mut state = PiParseState::default();
+    let mut native_session_id=native.session_id.clone();
+    let parse_state = native.parse_state.clone();
+    { let mut state=parse_state.lock().unwrap();state.model_error=false;state.last_assistant_stop_reason=None; }
     let mut settled = false;
     let mut terminal_status = false;
     let mut state_received = false;
@@ -1115,15 +1213,7 @@ async fn run_pi(
     let send = |value: Value| handle.write(&format!("{value}\n"));
     let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
     let provider_command = request.get("providerCommand").and_then(Value::as_str).map(str::to_string);
-    let local_images: Vec<String> = request
-        .get("localImagePaths")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect();
+    let prompt_id=format!("agenthub-prompt:{run_id}");
     let reasoning_effort = request.get("reasoningEffort").and_then(Value::as_str).map(str::to_string);
 
     let send_prompt = {
@@ -1131,6 +1221,7 @@ async fn run_pi(
         let handle = handle.clone();
         let prompt = prompt.clone();
         let provider_command = provider_command.clone();
+        let prompt_id=prompt_id.clone();
         move || {
             if prompt_sent.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -1140,7 +1231,7 @@ async fn run_pi(
                     .map(|re| re.replace(&prompt, "").trim().to_string())
                     .unwrap_or_else(|_| prompt.clone());
                 let mut frame = Map::new();
-                frame.insert("id".to_string(), json!("agenthub-prompt"));
+                frame.insert("id".to_string(), json!(prompt_id));
                 frame.insert("type".to_string(), json!("compact"));
                 if !custom.is_empty() {
                     frame.insert("customInstructions".to_string(), json!(custom));
@@ -1148,22 +1239,11 @@ async fn run_pi(
                 handle.write(&format!("{}\n", Value::Object(frame)));
             } else {
                 let mut frame = Map::new();
-                frame.insert("id".to_string(), json!("agenthub-prompt"));
+                frame.insert("id".to_string(), json!(prompt_id));
                 frame.insert("type".to_string(), json!("prompt"));
                 frame.insert("message".to_string(), json!(prompt));
                 if !local_images.is_empty() {
-                    let images: Vec<Value> = local_images
-                        .iter()
-                        .filter_map(|path| {
-                            let bytes = std::fs::read(path).ok()?;
-                            Some(json!({
-                                "type": "image",
-                                "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                                "mimeType": mime_type_of(path)
-                            }))
-                        })
-                        .collect();
-                    frame.insert("images".to_string(), Value::Array(images));
+                    frame.insert("images".to_string(), json!(local_images));
                 }
                 handle.write(&format!("{}\n", Value::Object(frame)));
             }
@@ -1202,19 +1282,20 @@ async fn run_pi(
     let _ = sender.send(json!({ "kind": "commands", "commands": native_commands() }));
     let _ = sender.send(json!({ "kind": "status", "phase": "turn_started" }));
 
-    let mut events = started.events;
+    let mut budget = agenthub_plugin_sdk::session_pool::TurnBudget::new(&request);
+    let events = &mut started.events;
     let mut buffer = String::new();
-    while let Some(event) = events.recv().await {
+    let result: anyhow::Result<()> = async {
+    'turn: while let Some(event) = budget.recv(events).await {
         match event {
             ProcessEvent::Stdout(text) => {
                 buffer.push_str(&text);
                 if buffer.len() > PI_MAX_RPC_FRAME_BYTES {
                     anyhow::bail!("Pi RPC frame exceeded {PI_MAX_RPC_FRAME_BYTES} bytes");
                 }
-                let mut lines: Vec<String> = buffer.split('\n').map(str::to_string).collect();
-                buffer = lines.pop().unwrap_or_default();
-                for line in lines {
-                    let line = line.trim_end_matches('\r');
+                while let Some(end) = buffer.find('\n') {
+                    let line: String=buffer.drain(..=end).collect();
+                    let line = line.trim_end_matches(['\r','\n']);
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -1228,9 +1309,11 @@ async fn run_pi(
                             continue;
                         }
                     };
+                    if value["id"]=="agenthub-state" {native_session_id=value["data"]["sessionId"].as_str().map(str::to_string);}
                     if !handle_rpc_value(
+                        run_id,
                         &value,
-                        &mut state,
+                        &mut parse_state.lock().unwrap(),
                         &mut settled,
                         &mut terminal_status,
                         &mut state_received,
@@ -1243,9 +1326,12 @@ async fn run_pi(
                         &selected_model,
                         &reasoning_effort,
                         &provider_command,
+                        &prompt_id,
+                        prompt.trim_start().starts_with('/'),
                     )? {
-                        return Ok(());
+                        anyhow::bail!("Pi event consumer closed");
                     }
+                    if settled { break 'turn; }
                 }
             }
             ProcessEvent::Stderr(text) => {
@@ -1256,11 +1342,10 @@ async fn run_pi(
             }
             ProcessEvent::Timeout { reason } => {
                 let _ = sender.send(json!({ "kind": "timeout", "reason": reason }));
+                anyhow::bail!("Pi turn exceeded {reason} limit");
             }
             ProcessEvent::Exit { exit_code, .. } => {
-                let model_failed = state.model_error
-                    || state.last_assistant_stop_reason.as_deref() == Some("error")
-                    || state.last_assistant_stop_reason.as_deref() == Some("aborted");
+                let model_failed = {let state=parse_state.lock().unwrap();state.model_error || matches!(state.last_assistant_stop_reason.as_deref(),Some("error"|"aborted"))};
                 if !terminal_status {
                     let phase = if settled && exit_code == Some(0) && !model_failed { "turn_completed" } else { "turn_failed" };
                     let _ = sender.send(json!({ "kind": "status", "phase": phase }));
@@ -1268,23 +1353,52 @@ async fn run_pi(
                 // Pi RPC itself exits 0 after a failed model turn; normalize
                 // that so the failure is not overwritten as completed.
                 let code = if model_failed && exit_code == Some(0) { Some(1) } else { exit_code };
-                let _ = sender.send(json!({ "kind": "exit", "exitCode": code }));
-                runs.lock().unwrap().remove(run_id);
-                skills.cleanup();
-                return Ok(());
+                anyhow::ensure!(settled && code == Some(0), "Pi exited before a successful turn boundary");
+                break;
             }
         }
     }
-    if !state_received && !terminal_status {
-        let _ = sender.send(json!({ "kind": "status", "phase": "turn_failed" }));
-    }
+    anyhow::ensure!(settled, "Pi stream ended before its native turn settled");
+    Ok(())
+    }.await;
+    native.session_id=native_session_id;
+    let failed = {let state=parse_state.lock().unwrap();state.model_error || matches!(state.last_assistant_stop_reason.as_deref(),Some("error"|"aborted"))};
     runs.lock().unwrap().remove(run_id);
-    skills.cleanup();
+    if result.is_ok() && !failed && handle.is_alive() && !sender.is_closed() {
+        if let (Some(host),Some(binding))=(&channel,request["sessionBindingId"].as_str()) {
+            let idle_channel=agenthub_plugin_sdk::session_channel(&channel,&request);
+            if let (Some(tools),Some(channel))=(&native.tools,&idle_channel) {
+                for registration in tools.registrations.lock().unwrap().values_mut(){registration.1=channel.clone();}
+            }
+            let sink=agenthub_plugin_sdk::session_sink(host.clone(),binding.into()).await;
+            let idle_handle=handle.clone();let idle_run=run_id.to_string();
+            native.process.as_ref().unwrap().events.observe_idle_with_pending(Arc::new(move |event| {
+                match event {
+                    ProcessEvent::Stdout(text)=>match serde_json::from_str::<Value>(text.trim()) {
+                        Ok(value)=>{
+                            if value["type"]=="extension_ui_request" {agenthub_plugin_sdk::extension_ui::dispatch(&value,&idle_handle,&sink,&idle_channel,&idle_run);}
+                            else {for event in parse_pi_rpc_event(&value,&mut parse_state.lock().unwrap()){let _=sink.send(event);}}
+                        }
+                        Err(_)=>{let _=sink.send(json!({"kind":"raw","stream":"stderr","text":text}));}
+                    },
+                    ProcessEvent::Stderr(text)=>{let _=sink.send(json!({"kind":"raw","stream":"stderr","text":text}));},
+                    ProcessEvent::Error(message)=>{let _=sink.send(json!({"kind":"error","message":message}));},
+                    ProcessEvent::Exit{exit_code,signal}=>{let _=sink.send(json!({"kind":"exit","exitCode":exit_code,"signal":signal}));},
+                    ProcessEvent::Timeout{reason}=>{let _=sink.send(json!({"kind":"timeout","reason":reason}));}
+                }
+            }),buffer);
+        }
+        pool.put(key,identity,native);
+    }
+    else { native.close().await; }
+    result?;
+    let _ = sender.send(json!({"kind":"exit","exitCode":if failed {1}else{0}}));
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn handle_rpc_value(
+    run_id: &str,
     value: &Value,
     state: &mut PiParseState,
     settled: &mut bool,
@@ -1299,10 +1413,31 @@ fn handle_rpc_value(
     selected_model: &Option<String>,
     reasoning_effort: &Option<String>,
     provider_command: &Option<String>,
+    prompt_id:&str,
+    slash_command:bool,
 ) -> anyhow::Result<bool> {
     let value_type = value.get("type").and_then(Value::as_str).unwrap_or("");
     if value_type == "response" {
-        if provider_command.as_deref() == Some("compact") && value.get("id").and_then(Value::as_str) == Some("agenthub-prompt") {
+        if slash_command && value["id"]==prompt_id && provider_command.as_deref()!=Some("compact") && value["success"]==true {
+            handle.write(&format!("{}\n",json!({"type":"get_state","id":format!("command-state:{prompt_id}")})));
+        }
+        if value["id"]==format!("command-state:{prompt_id}") {
+            let data=&value["data"];
+            if value["success"]==true && data["isStreaming"]==false && data["isCompacting"]!=true
+                && data["queuedMessageCount"].as_u64().unwrap_or(0)==0 && data["pendingMessageCount"].as_u64().unwrap_or(0)==0 {
+                *settled=true;*terminal_status=true;let _=sender.send(json!({"kind":"status","phase":"turn_completed","raw":value}));
+            }
+            return Ok(true);
+        }
+        if value["id"]=="agenthub-commands" {
+            if value["success"]!=false {
+                let mut commands=value["data"]["commands"].as_array().cloned().unwrap_or_default();
+                if !commands.iter().any(|command|command["name"]=="compact"){commands.extend(native_commands().as_array().cloned().unwrap_or_default());}
+                let _=sender.send(json!({"kind":"commands","commands":commands,"raw":value}));
+            }
+            return Ok(true);
+        }
+        if provider_command.as_deref() == Some("compact") && value.get("id").and_then(Value::as_str) == Some(prompt_id) {
             let error = value.get("error").and_then(Value::as_str);
             let nothing = value.get("success").and_then(Value::as_bool) == Some(false)
                 && regex::Regex::new(r"(?i)^(?:Nothing to compact(?: \(session too small\))?|Already compacted)$")
@@ -1325,7 +1460,6 @@ fn handle_rpc_value(
             }
             // Compact is an RPC command, not an agent turn: close stdin after
             // the response or a successful compaction would wait forever.
-            handle.end_stdin();
             return Ok(true);
         }
         if value.get("success").and_then(Value::as_bool) == Some(false) {
@@ -1337,6 +1471,8 @@ fn handle_rpc_value(
         }
         match value.get("id").and_then(Value::as_str) {
             Some("agenthub-state") => {
+                let _=sender.send(json!({"kind":"status","phase":"runtime_capabilities","raw":{"providerId":"pi","source":"native-handshake","transport":"rpc","nativeSessionId":value["data"]["sessionId"],"reported":{"model":value["data"]["model"]["id"],"thinkingLevel":value["data"]["thinkingLevel"]}}}));
+                handle.write("{\"id\":\"agenthub-commands\",\"type\":\"get_commands\"}\n");
                 *state_received = true;
                 let session_id = value
                     .get("data")
@@ -1376,68 +1512,7 @@ fn handle_rpc_value(
         return Ok(true);
     }
     if value_type == "extension_ui_request" {
-        // Extension UI requests (notify/confirm/select/editor) — notify-type
-        // ones surface as raw output; interactive ones are cancelled when no
-        // interaction channel is available, matching the TS fallback.
-        let method = value.get("method").and_then(Value::as_str).unwrap_or("");
-        if method == "confirm" {
-            // Approval gate: surface the prompt in the desktop UI and reply
-            // with the user's decision. Runs in its own task — awaiting the
-            // answer inline would stall the pi event loop, and pi emits
-            // nothing while waiting for the response, so the idle timeout
-            // would kill the child and the run would "complete" mid-turn.
-            // The heartbeat (get_state is answered by pi) refreshes the idle
-            // timer so an unanswered approval no longer trips the killer.
-            let id = value.get("id").cloned().unwrap_or(Value::Null);
-            match channel {
-                Some(channel) => {
-                    let channel = channel.clone();
-                    let mut input = json!({
-                        "kind": "approval",
-                        "title": value.get("title").and_then(Value::as_str).unwrap_or("Pi 请求确认"),
-                        "options": [
-                            { "id": "confirm", "label": "允许", "intent": "approve" },
-                            { "id": "cancel", "label": "拒绝", "intent": "reject" }
-                        ]
-                    });
-                    if let Some(detail) = value.get("message") {
-                        input["detail"] = detail.clone();
-                    }
-                    let handle = handle.clone();
-                    tokio::spawn(async move {
-                        let response = loop {
-                            tokio::select! {
-                                response = channel.ask("", input.clone()) => break response,
-                                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-                                    handle.write(&format!("{}\n", json!({ "id": "agenthub-heartbeat", "type": "get_state" })));
-                                }
-                            }
-                        };
-                        let confirmed = response.get("outcome").and_then(Value::as_str) == Some("selected")
-                            && response.get("optionId").and_then(Value::as_str) == Some("confirm");
-                        handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": confirmed })));
-                    });
-                }
-                None => {
-                    handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "confirmed": false })));
-                }
-            }
-            return Ok(true);
-        }
-        if ["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"].contains(&method) {
-            let text = value
-                .get("message")
-                .and_then(Value::as_str)
-                .or_else(|| value.get("statusText").and_then(Value::as_str))
-                .or_else(|| value.get("title").and_then(Value::as_str));
-            if let Some(text) = text {
-                let stream = if value.get("notifyType").and_then(Value::as_str) == Some("error") { "stderr" } else { "stdout" };
-                let _ = sender.send(json!({ "kind": "raw", "stream": stream, "text": format!("{text}\n") }));
-            }
-            return Ok(true);
-        }
-        let id = value.get("id").cloned().unwrap_or(Value::Null);
-        handle.write(&format!("{}\n", json!({ "type": "extension_ui_response", "id": id, "cancelled": true })));
+        agenthub_plugin_sdk::extension_ui::dispatch(value, handle, sender, channel, run_id);
         return Ok(true);
     }
     if value_type == "agent_settled" {
@@ -1449,7 +1524,6 @@ fn handle_rpc_value(
             let _ = sender.send(json!({ "kind": "status", "phase": if failed { "turn_failed" } else { "turn_completed" }, "raw": value }));
             *terminal_status = true;
         }
-        handle.end_stdin();
         return Ok(true);
     }
     for event in parse_pi_rpc_event(value, state) {
@@ -1458,19 +1532,6 @@ fn handle_rpc_value(
         }
     }
     Ok(true)
-}
-
-fn mime_type_of(path: &str) -> &'static str {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if lower.ends_with(".gif") {
-        "image/gif"
-    } else if lower.ends_with(".webp") {
-        "image/webp"
-    } else {
-        "image/png"
-    }
 }
 
 // ---------------------------------------------------------------- skills
@@ -1591,4 +1652,30 @@ fn copy_recursive(source: &std::path::Path, target: &std::path::Path) -> std::io
 #[tokio::main]
 async fn main() {
     agenthub_plugin_sdk::serve(PiPlugin::new()).await;
+}
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn tool_progress_reuses_the_call_and_does_not_finish_it() {
+        let mut state = PiParseState::default();
+        parse_pi_rpc_event(&json!({"type":"tool_execution_start","toolCallId":"read-1","toolName":"read","args":{"path":"file"}}),&mut state);
+        let progress=parse_pi_rpc_event(&json!({"type":"tool_execution_update","toolCallId":"read-1","partialResult":{"content":[{"type":"text","text":"working"}]}}),&mut state);
+        assert_eq!(progress[0]["callId"],"read-1");
+        assert_eq!(progress[0]["name"],"read");
+        assert_eq!(progress[0]["phase"],"updated");
+        assert_eq!(progress[0]["output"],"working");
+        assert!(progress[0].get("success").is_none());
+    }
+    #[test]
+    fn request_usage_keeps_cache_creation_and_correct_context_size() {
+        let mut state = PiParseState::default();
+        let events = parse_pi_rpc_event(&json!({"type":"message_end","message":{"role":"assistant","content":[],
+            "usage":{"input":10,"output":7,"cacheRead":20,"cacheWrite":5,"totalTokens":42}}}), &mut state);
+        let usage = events.iter().find(|e| e["kind"] == "usage").unwrap();
+        assert_eq!(usage["cacheCreationInputTokens"], 5);
+        assert_eq!(usage["contextUsed"], 35);
+        assert_eq!(usage["usageScope"], "context");
+        assert_eq!(usage["inputTokensIncludesCache"], false);
+    }
 }

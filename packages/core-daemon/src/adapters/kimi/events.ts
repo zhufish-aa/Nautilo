@@ -24,13 +24,13 @@ export function parseKimiJsonEvent(value: unknown): AdapterEvent[] {
       for (const callValue of event.tool_calls) {
         const call = record(callValue);
         const fn = record(call?.function);
-        if (typeof fn?.name === "string") events.push({ kind: "tool", name: fn.name, phase: "started", input: parseArguments(fn.arguments), raw: value });
+        if (typeof fn?.name === "string") events.push({ kind: "tool", callId: typeof call?.id === "string" ? call.id : undefined, name: fn.name, phase: "started", input: parseArguments(fn.arguments), raw: value });
       }
     }
     return events;
   }
   if (event.role === "tool") {
-    return [{ kind: "tool", name: typeof event.tool_call_id === "string" ? event.tool_call_id : "tool", phase: "completed", output: event.content, raw: value }];
+    return [{ kind: "tool", callId: typeof event.tool_call_id === "string" ? event.tool_call_id : undefined, name: typeof event.tool_call_id === "string" ? event.tool_call_id : "tool", phase: "completed", output: event.content, raw: value }];
   }
   if (event.role === "meta" && event.type === "session.resume_hint" && typeof event.session_id === "string") {
     return [{ kind: "session", providerSessionId: event.session_id, raw: value }];

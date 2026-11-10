@@ -1,3 +1,10 @@
+import { assistantModelStep } from "./assistant-model.js";
+import { assistantRecords, saveAssistantRecord, assistantSessions, assistantExcerpts } from "../database/assistant-reads.js";
+import { TerminalService } from "../runtime/terminal-service.js";
+import { SourceControl } from "../runtime/source-control.js";
+import { sourceControlDirectory } from "./source-control.js";
+import { ConnectionService } from "./connection-service.js";
+import { projectPollHealIds, projectPollLastSequence, readProjectPoll } from "../database/project-poll.js";
 import { IpcGateway } from "../ipc-gateway.js";
 import { join } from "node:path";
 import { Database } from "../database/index.js";
@@ -27,8 +34,11 @@ export interface ApplicationServices {
   adapters: AdapterRegistry;
   events: EventService;
   runs: RunService;
+  terminals: TerminalService;
+  sourceControl: SourceControl;
   projects: ProjectService;
   agents: AgentService;
+  connections: ConnectionService;
   teams: TeamService;
   sessions: SessionService;
   orchestration: OrchestrationService;
@@ -48,7 +58,53 @@ export interface ApplicationServices {
   dataDir: string;
 }
 export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationServices): void {
-  gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0" }));
+  gateway.register("scm.status", async input => services.sourceControl.status(sourceControlDirectory(services.database,input)));
+  gateway.register("scm.diff", async input => services.sourceControl.diff(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.commit", async input => services.sourceControl.commitDetails(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.commitDiff", async input => services.sourceControl.commitDiff(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.history", async input => services.sourceControl.history(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.file", async input => services.sourceControl.file(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.save", async input => services.sourceControl.save(sourceControlDirectory(services.database,input),input));
+  gateway.register("scm.mutate", async input => services.sourceControl.mutate(sourceControlDirectory(services.database,input),input));
+  gateway.register("terminal.open", async ({sessionId, projectId, tabId = "default", restoreOnly, cols, rows}) => {
+    const session = sessionId ? services.sessions.get(sessionId).session : undefined;
+    const project = services.database.projects.get(projectId ?? session?.projectId ?? "");
+    if (!project) throw new Error("Project not found");
+    if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(tabId)) throw new Error("Invalid terminal tab identity");
+    const scope = TerminalService.scope(sessionId, project.id);
+    return services.terminals.open(JSON.stringify(["shell", scope, tabId]), session?.nativeWorkingDirectory ?? project.rootPath, cols, rows, {scope, tabId, restoreOnly});
+  });
+  gateway.register("terminal.list", async ({sessionId, projectId}) => services.terminals.list(TerminalService.scope(sessionId, projectId ?? "")));
+  gateway.register("terminal.stop", async ({terminalId}) => services.terminals.stop(terminalId));
+  gateway.register("terminal.read", async ({terminalId, cursor}) => services.terminals.read(terminalId, cursor));
+  gateway.register("terminal.write", async ({terminalId, data}) => services.terminals.write(terminalId, data));
+  gateway.register("terminal.resize", async ({terminalId, cols, rows}) => services.terminals.resize(terminalId, cols, rows));
+  gateway.register("terminal.close", async input => "terminalId" in input ? services.terminals.close(input.terminalId) : services.terminals.closeTab(TerminalService.scope(input.sessionId,input.projectId ?? ""),input.tabId));
+  gateway.register("terminal.status", async () => ({nativeActive:false}));
+  gateway.register("terminal.native", async () => { throw new Error("原生会话交接需要使用 Rust 核心运行项目。"); });
+  gateway.register("agent.runtimeCapabilities", async ({sessionId, agentInstanceId}) => {
+    const session = sessionId ? services.sessions.get(sessionId).session : undefined;
+    const agent = services.database.agents.get(agentInstanceId ?? session?.agentInstanceId ?? "");
+    if (!agent) throw new Error("Agent not found");
+    const adapter = services.adapters.find(agent.providerId);
+    const reusable = agent.providerId === "codex" && !agent.baseArgs.length || agent.providerId === "opencode" && !agent.baseArgs.length;
+    return {schemaVersion:1 as const,providerId:agent.providerId,evidence:{source:"adapter-contract" as const},
+      session:{transport:"legacy-host",processReuse:reusable,resume:adapter?.supportsResume ? "native" as const : "unknown" as const},
+      turn:{interrupt:"process" as const,steer:"queued" as const},interactions:{dialogs:[],nativeTerminal:false,unknownRequests:"visible-error" as const},
+      resources:{nativeConfig:"unknown" as const,managedMcp:"unknown" as const,managedSkills:"unknown" as const}};
+  });
+
+  gateway.register("assistant.records", async input => assistantRecords(services.database.connection.raw, input));
+  gateway.register("assistant.save", async input => saveAssistantRecord(services.database.connection.raw, input));
+  gateway.register("assistant.modelStep", input => assistantModelStep(services, input));
+  gateway.register("assistant.sessions", async input => assistantSessions(services.database.connection.raw, input));
+  gateway.register("assistant.excerpts", async input => assistantExcerpts(services.database.connection.raw, input));
+  gateway.register("connection.list", async () => services.connections.list());
+  gateway.register("connection.get", async ({ connectionId, revision }) => services.connections.get(connectionId, revision));
+  gateway.register("connection.upsert", async (input) => services.connections.upsert(input));
+  gateway.register("connection.remove", async ({ connectionId }) => services.connections.remove(connectionId));
+  gateway.register("connection.models", async (input) => services.connections.discover(input));
+  gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0", features: {sourceControl:1,sourceControlHistory:1,sourceControlHistoryPaging:1,sourceControlEditing:1,terminalTabs:1} }));
   gateway.register("project.list", async () => services.projects.list());
   gateway.register("project.add", async (input) => services.projects.add(input));
   gateway.register("project.upsert", async (input) => { services.database.projects.save(input, new Date().toISOString()); return input; });
@@ -60,7 +116,10 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   // The renderer builds its whole provider UI (detection page, instance
   // editor, permission mode picker) from these descriptors — built-ins and
   // loaded plugins alike.
-  gateway.register("provider.catalog", async () => services.adapters.list().map((adapter) => adapter.descriptor));
+  gateway.register("provider.catalog", async () => services.adapters.list().map(adapter => ({
+    ...adapter.descriptor,
+    harnessPlugins: services.plugins.managerFor(adapter.descriptor.providerId) ? true : undefined
+  })));
   gateway.register("plugin.list", async () => services.plugins.list());
   gateway.register("plugin.registry", async (input) => services.plugins.fetchRegistry(input.registryUrl));
   gateway.register("plugin.install", async (input) => {
@@ -94,6 +153,30 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("team.upsert", async (input) => services.teams.upsert(input));
   gateway.register("team.remove", async ({ teamId }) => services.teams.remove(teamId));
   gateway.register("projectRun.list", async ({ projectId }) => services.database.projectRuns.list(projectId));
+  gateway.register("projectRun.poll", async (input) => {
+    const collect = (sessionId: string) => {
+      services.interactions.healOrphaned(sessionId);
+      services.sessions.healFollowUps(sessionId);
+      const afterSequence = projectPollLastSequence(services.database, sessionId);
+      return { sessionId, afterSequence, items: services.sessions.followUpList({ sessionId }).items,
+        interactions: services.interactions.list({ sessionId, status: "pending" }) };
+    };
+    const followUps = projectPollHealIds(services.database, input).map(collect);
+    let snapshot = readProjectPoll(services.database, input, followUps);
+    // A second writer may truncate between preflight healing and the snapshot.
+    // Repair only newly-reset scopes, then take one new consistent snapshot.
+    if (!("fallback" in snapshot)) {
+      const missing = snapshot.feeds.filter((feed) => feed.reset && !followUps.some((entry) => entry.sessionId === feed.sessionId));
+      if (missing.length) {
+        followUps.push(...missing.map((feed) => collect(feed.sessionId)));
+        snapshot = readProjectPoll(services.database, input, followUps);
+        if (!("fallback" in snapshot) && snapshot.feeds.some((feed) => feed.reset && !followUps.some((entry) => entry.sessionId === feed.sessionId))) {
+          throw new CoreError("IPC_INTERNAL_ERROR", { reason: "Project changed during snapshot recovery; retry" });
+        }
+      }
+    }
+    return snapshot;
+  });
   gateway.register("projectRun.get", async ({ projectRunId }) => services.orchestration.get(projectRunId));
   gateway.register("orchestration.start", async (input) => services.orchestration.start(input));
   gateway.register("orchestration.resolveDelegation", async ({ projectRunId, approved, scope }) => services.orchestration.resolveDelegation(projectRunId, approved, scope));
@@ -101,13 +184,24 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("orchestration.recover", async ({ projectRunId, memberId, mode }) => services.orchestration.recover(projectRunId, memberId, mode));
   gateway.register("orchestration.cancel", async ({ projectRunId }) => services.orchestration.cancel(projectRunId));
   gateway.register("session.list", async (input) => services.sessions.list(input));
+  gateway.register("session.historyBatch", async ({ items }) => services.database.sessions.historyBatch(items));
+  gateway.register("session.history", async ({ sessionId, cursor }) => services.database.sessions.history(sessionId, cursor));
   gateway.register("session.get", async ({ sessionId }) => services.sessions.get(sessionId));
+  gateway.register("session.generateTitle", async ({ sessionId }) => services.runs.generateSessionTitle(sessionId));
   gateway.register("session.create", async (input) => services.sessions.create(input));
   gateway.register("session.upsert", async (input) => services.sessions.upsert(input));
-  gateway.register("session.delete", async (input) => services.sessions.delete(input));
+  gateway.register("session.delete", async (input) => {
+    const result = services.sessions.delete(input);
+    for (const id of result.sessionIds) services.terminals.closeScope(TerminalService.scope(id,""));
+    return result;
+  });
   gateway.register("session.followUp", async (input) => services.sessions.followUp(input));
   gateway.register("session.followUp.list", async (input) => services.sessions.followUpList(input));
   gateway.register("session.followUp.cancel", async (input) => services.sessions.followUpCancel(input));
+  gateway.register("session.followUp.steer", async (input) => services.sessions.followUpSteer(input));
+  gateway.register("provider.modes", async (input) => services.agents.listModes(input.agentInstanceId));
+  gateway.register("provider.harnessPlugins", async ({agentInstanceId, connectionId, operation}) =>
+    services.agents.harnessPlugins(agentInstanceId, operation, id => services.plugins.managerFor(id), connectionId));
   gateway.register("session.send", async (input) => services.sessions.send(input));
   gateway.register("slashCommand.list", async ({ sessionId }) => services.slashCommands.list(sessionId));
   gateway.register("slashCommand.execute", async (input) => services.slashCommands.execute(input.sessionId, input.commandId, input.argument));
@@ -117,6 +211,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
     (!sessionId || run.sessionId === sessionId) && (!projectRunId || run.projectRunId === projectRunId)
   ));
   gateway.register("task.list", async ({ projectRunId }) => services.database.tasks.list(projectRunId));
+  gateway.register("artifact.changes", async (input) => services.database.artifacts.changes(input));
   gateway.register("artifact.list", async (input) => services.database.artifacts.list(input));
   gateway.register("artifact.read", async (input) => readWorkspaceArtifact(services.database, input));
   gateway.register("verification.list", async ({ projectRunId, taskId }) => services.database.verifications.list(projectRunId, taskId));
@@ -125,16 +220,27 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("policy.upsert", async (policy) => services.commandPolicies.save(policy));
   gateway.register("policy.evaluate", async (input) => services.commandPolicies.evaluate(input));
   gateway.register("approval.list", async (input) => services.approvals.list(input));
-  gateway.register("approval.resolve", async ({ approvalId, decision, scope }) => services.approvals.resolve(approvalId, decision, scope));
+  gateway.register("approval.resolve", async ({ approvalId, decision, scope }) => {
+    const records = services.approvals.resolveMany(approvalId, decision, scope);
+    for (const record of records) {
+      const session = record.sessionId ? services.database.sessions.get(record.sessionId) : undefined;
+      if (session) services.events.appendForSession(session, { projectRunId: record.projectRunId, taskId: record.taskId }, "approval.resolved", { approvalId: record.id, decision, scope });
+    }
+    return records[0];
+  });
   gateway.register("interaction.list", async (input) => services.interactions.list(input));
   gateway.register("interaction.respond", async ({ interactionId, outcome, optionId, answers }) =>
     services.interactions.respond(interactionId, { outcome, optionId, answers }));
   gateway.register("credential.set", async ({ agentInstanceId, apiKey, envName }) => {
+    if (agentInstanceId.startsWith("connection:")) throw new CoreError("IPC_INVALID_REQUEST", { field: "agentInstanceId", reason: "Connection credentials are revisioned; use connection.upsert" });
     services.credentials.set(agentInstanceId, { apiKey, envName });
     return { stored: true } as const;
   });
   gateway.register("credential.status", async ({ agentInstanceId }) => ({ stored: services.credentials.has(agentInstanceId) }));
-  gateway.register("credential.delete", async ({ agentInstanceId }) => ({ removed: services.credentials.remove(agentInstanceId) }));
+  gateway.register("credential.delete", async ({ agentInstanceId }) => {
+    if (agentInstanceId.startsWith("connection:")) throw new CoreError("IPC_INVALID_REQUEST", { field: "agentInstanceId", reason: "Connection credentials are revisioned; use connection.upsert" });
+    return { removed: services.credentials.remove(agentInstanceId) };
+  });
   gateway.register("recovery.list", async () => services.recovery.list());
   gateway.register("audit.list", async (input) => services.audit.list(input));
   gateway.register("metrics.get", async ({ projectId }) => services.metrics.snapshot(projectId));

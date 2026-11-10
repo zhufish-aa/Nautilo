@@ -1,3 +1,6 @@
+import { assertSessionIdentityUpdate } from "../session-binding-guard.js";
+import { bindNewSession } from "../runtime-connection.js";
+import { MemberRouter } from "./member-router.js";
 import { randomUUID } from "node:crypto";
 import type { ProjectRun, Session, TeamDefinition, TeamMember } from "@agenthub/domain";
 import { Database } from "../../database/index.js";
@@ -11,14 +14,28 @@ export class SessionRouter {
       const existing = this.database.sessions.get(existingSessionId);
       if (existing && existing.projectId === projectRun.projectId) {
         const updated = { ...existing, teamId: team.id, projectRunId: projectRun.id, memberId: projectRun.mainMemberId, agentInstanceId: projectRun.mainAgentInstanceId, updatedAt: new Date().toISOString() };
+        assertSessionIdentityUpdate(existing, updated, this.database);
         this.database.sessions.save(updated);
         return updated;
       }
     }
-    return this.create(projectRun, projectRun.mainMemberId, `Run: ${projectRun.goal.slice(0, 80)}`, { teamId: team.id, agentInstanceId: projectRun.mainAgentInstanceId });
+    const member = team.members?.find((item) => item.id === projectRun.mainMemberId);
+    return this.create(projectRun, projectRun.mainMemberId, `Run: ${projectRun.goal.slice(0, 80)}`, {
+      teamId: team.id, agentInstanceId: projectRun.mainAgentInstanceId,
+      connectionId: member?.connectionId, connectionRevision: member?.connectionRevision,
+      model: member?.model, reasoningEffort: member?.reasoningEffort, serviceTier: member?.serviceTier
+    });
   }
 
   delegated(projectRun: ProjectRun, team: TeamDefinition, member: TeamMember, parent: Session, taskId: string, title: string, targetSessionId?: string): Session {
+    const connectionId = member.connectionId ?? parent.connectionId;
+    const connectionRevision = member.connectionId ? member.connectionRevision : parent.connectionRevision;
+    const assertBinding = (session: Session): void => {
+      if (session.connectionId !== connectionId || (connectionRevision !== undefined && session.connectionRevision !== connectionRevision)
+        || (session.agentInstanceId && session.agentInstanceId !== member.agentInstanceId)) {
+        throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "This delegated session uses a different harness or account; create a new delegated session" });
+      }
+    };
     if (targetSessionId) {
       const target = this.database.sessions.get(targetSessionId);
       if (
@@ -31,6 +48,7 @@ export class SessionRouter {
       ) {
         throw new CoreError("PLAN_SCHEMA_INVALID", { reason: "invalid_continue_session", targetSessionId, memberId: member.id });
       }
+      assertBinding(target);
       const continued: Session = {
         ...target,
         projectRunId: projectRun.id,
@@ -44,10 +62,13 @@ export class SessionRouter {
     }
     const existing = this.database.sessions.list(projectRun.projectId, member.id)
       .find((session) => session.projectRunId === projectRun.id && session.taskId === taskId);
-    if (existing) return existing;
+    if (existing) { assertBinding(existing); return existing; }
     return this.create(projectRun, member.id, title, {
       teamId: team.id,
       parentSessionId: parent.id,
+      connectionId,
+      connectionRevision,
+      agentInstanceId: member.agentInstanceId,
       taskId,
       model: member.model,
       reasoningEffort: member.reasoningEffort,
@@ -60,6 +81,8 @@ export class SessionRouter {
     return this.create(projectRun, memberId, `Recovery: ${projectRun.goal.slice(0, 80)}`, {
       teamId: team.id,
       parentSessionId: previous.id,
+      connectionId: member?.connectionId ?? previous.connectionId,
+      connectionRevision: member?.connectionId ? member.connectionRevision : previous.connectionRevision,
       agentInstanceId: member?.agentInstanceId,
       model: member?.model,
       reasoningEffort: member?.reasoningEffort,
@@ -71,10 +94,10 @@ export class SessionRouter {
     projectRun: ProjectRun,
     memberId: string,
     title: string,
-    context: Pick<Session, "teamId" | "parentSessionId" | "taskId" | "agentInstanceId" | "model" | "reasoningEffort" | "serviceTier"> = { teamId: projectRun.teamId }
+    context: Pick<Session, "teamId" | "parentSessionId" | "taskId" | "agentInstanceId" | "model" | "reasoningEffort" | "serviceTier" | "connectionId" | "connectionRevision"> = { teamId: projectRun.teamId }
   ): Session {
     const now = new Date().toISOString();
-    const session: Session = {
+    let session: Session = {
       id: randomUUID(),
       projectId: projectRun.projectId,
       projectRunId: projectRun.id,
@@ -82,6 +105,8 @@ export class SessionRouter {
       parentSessionId: context.parentSessionId,
       taskId: context.taskId,
       agentInstanceId: context.agentInstanceId,
+      connectionId: context.connectionId,
+      connectionRevision: context.connectionRevision,
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       serviceTier: context.serviceTier,
@@ -92,6 +117,7 @@ export class SessionRouter {
       createdAt: now,
       updatedAt: now
     };
+    if (session.connectionId) session = bindNewSession(this.database, session, new MemberRouter(this.database).resolveSession(session));
     this.database.sessions.save(session);
     return session;
   }

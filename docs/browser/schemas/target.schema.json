@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nautilo.dev/schemas/target.schema.json",
+  "title": "Nautilo Target",
+  "description": "统一目标寻址。解析顺序 ref > css > xpath > role+name > text > href > xy。",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^@?(?:[A-Za-z0-9_-]{6}\\.)?[0-9]+$",
+          "description": "复制快照返回的短 ref；视图前缀防止跨标签和跨进程误命中，@ 可省略。",
+          "examples": [
+            "@a1B2_c.15",
+            "a1B2_c.15"
+          ]
+        },
+        "nth": {
+          "type": "integer",
+          "description": "Zero-based matching index; negative indices count from the end."
+        },
+        "view_id": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string",
+          "description": "CSS root restriction; targets outside it are not eligible."
+        },
+        "frame": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "CSS selector of the iframe element."
+            },
+            {
+              "type": "integer",
+              "description": "Zero-based iframe index; negative counts from the end."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "css"
+      ],
+      "properties": {
+        "css": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nth": {
+          "type": "integer",
+          "description": "Zero-based matching index; negative indices count from the end."
+        },
+        "view_id": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string",
+          "description": "CSS root restriction; targets outside it are not eligible."
+        },
+        "frame": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "CSS selector of the iframe element."
+            },
+            {
+              "type": "integer",
+              "description": "Zero-based iframe index; negative counts from the end."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "xpath"
+      ],
+      "properties": {
+        "xpath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nth": {
+          "type": "integer",
+          "description": "Zero-based matching index; negative indices count from the end."
+        },
+        "view_id": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string",
+          "description": "CSS root restriction; targets outside it are not eligible."
+        },
+        "frame": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "CSS selector of the iframe element."
+            },
+            {
+              "type": "integer",
+              "description": "Zero-based iframe index; negative counts from the end."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "name_match": {
+          "enum": [
+            "exact",
+            "contains",
+            "regex"
+          ],
+          "default": "exact"
+        },
+        "nth": {
+          "type": "integer",
+          "description": "Zero-based matching index; negative indices count from the end."
+        },
+        "view_id": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string",
+          "description": "CSS root restriction; targets outside it are not eligible."
+        },
+        "frame": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "CSS selector of the iframe element."
+            },
+            {
+              "type": "integer",
+              "description": "Zero-based iframe index; negative counts from the end."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exact": {
+          "type": "boolean",
+          "default": false
+        },
+        "nth": {
+          "type": "integer",
+          "description": "Zero-based matching index; negative indices count from the end."
+        },
+        "view_id": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string",
+          "description": "CSS root restriction; targets outside it are not eligible."
+        },
+        "frame": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "CSS selector of the iframe element."
+            },
+            {
+              "type": "integer",
+              "description": "Zero-based iframe index; negative counts from the end."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "href"
+      ],
+      "properties": {
+        "href": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nth": {
+          "type": "integer",
+          "description": "Zero-based matching index; negative indices count from the end."
+        },
+        "view_id": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string",
+          "description": "CSS root restriction; targets outside it are not eligible."
+        },
+        "frame": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "CSS selector of the iframe element."
+            },
+            {
+              "type": "integer",
+              "description": "Zero-based iframe index; negative counts from the end."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": 0
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0
+        },
+        "nth": {
+          "type": "integer",
+          "description": "Zero-based matching index; negative indices count from the end."
+        },
+        "view_id": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string",
+          "description": "CSS root restriction; targets outside it are not eligible."
+        },
+        "frame": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "CSS selector of the iframe element."
+            },
+            {
+              "type": "integer",
+              "description": "Zero-based iframe index; negative counts from the end."
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "x-resolution-order": [
+    "ref",
+    "css",
+    "xpath",
+    "role+name",
+    "text",
+    "href",
+    "xy"
+  ],
+  "x-actionable-filter": {
+    "description": "动作类解析先过可见性/禁用/遮挡过滤，失败时滚动进视口后重判两轮。",
+    "retries": 2,
+    "onZeroWithHiddenMatches": "TARGET_HIDDEN",
+    "onMultiple": "TARGET_AMBIGUOUS"
+  }
+}

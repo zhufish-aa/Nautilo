@@ -1,17 +1,20 @@
 import { existsSync, readFileSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect, type Socket } from "node:net";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, delimiter } from "node:path";
+import type {BrowserRunUpdate} from "@agenthub/event-protocol";
 
 interface ReadyMessage { service: "core-daemon"; status: "ok"; socketPath: string; }
 
-/** Owns the external Node daemon lifecycle; the Electron shell never imports SQLite. */
+/** Owns the external Rust daemon lifecycle (with a legacy Node fallback). */
 export class CoreDaemonClient {
+  constructor(private readonly onAssistantText?:(stepId:string,text:string)=>void,
+    private readonly onBrowserRun?:(update?:BrowserRunUpdate)=>void) {}
   private process?: ChildProcess;
   private socketPath?: string;
   private tokenPath?: string;
 
-  async start(userDataPath: string): Promise<void> {
+  async start(userDataPath: string, browserPort?: number): Promise<void> {
     if (this.process) return;
     const { command, args } = this.resolveDaemonCommand();
     // A development shell and a portable build can run at the same time. Each
@@ -20,11 +23,19 @@ export class CoreDaemonClient {
       ? `\\\\.\\pipe\\agenthub-core-${process.pid}`
       : join(userDataPath, "core.sock");
     this.tokenPath = join(userDataPath, "core.token");
+    const nodeRuntime=this.resolveNodeCommand();
+    const runtimeEnvironment:NodeJS.ProcessEnv={ ...process.env, NAUTILO_ASSISTANT_STREAM:this.onAssistantText?'1':'0',NAUTILO_BROWSER_STREAM:this.onBrowserRun?'1':'0' };
+    if (isAbsolute(nodeRuntime) && existsSync(nodeRuntime)) {
+      // Use the explicitly selected/bundled runtime for npm-based agent CLIs
+      // as well as the legacy daemon, even when the daemon itself is Rust.
+      const pathKey=Object.keys(runtimeEnvironment).find(key=>key.toLowerCase()==="path") ?? "PATH";
+      runtimeEnvironment[pathKey]=`${dirname(nodeRuntime)}${delimiter}${runtimeEnvironment[pathKey] ?? ""}`;
+    }
     this.process = spawn(command, args, {
       cwd: userDataPath,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, AGENTHUB_DATA_DIR: userDataPath, AGENTHUB_SOCKET: socketPath, AGENTHUB_TOKEN_PATH: this.tokenPath }
+      env: { ...runtimeEnvironment, ...(browserPort ? { NAUTILO_BROWSER_PORT: String(browserPort) } : {}), AGENTHUB_DATA_DIR: userDataPath, AGENTHUB_SOCKET: socketPath, AGENTHUB_TOKEN_PATH: this.tokenPath }
     });
     const ready = await this.waitForReady(this.process);
     this.socketPath = ready.socketPath;
@@ -106,22 +117,25 @@ export class CoreDaemonClient {
     return new Promise((resolve, reject) => {
       let buffer = "";
       const timer = setTimeout(() => reject(new Error("Core Daemon did not become ready")), 15_000);
-      const onData = (chunk: Buffer): void => {
-        buffer += chunk.toString("utf8");
+      child.stdout?.setEncoding('utf8');
+      const onData = (chunk: string): void => {
+        buffer += chunk;
         const parts = buffer.split(/\r?\n/);
         buffer = parts.pop() ?? "";
         for (const line of parts) {
           if (!line.trim()) continue;
           try {
-            const message = JSON.parse(line) as ReadyMessage;
-            if (message.status === "ok") { clearTimeout(timer); resolve(message); return; }
+            const message = JSON.parse(line);
+            if(message.event==="assistant.text" && typeof message.stepId==="string" && typeof message.text==="string") this.onAssistantText?.(message.stepId,message.text);
+            else if(message.event === "browser.run" && typeof message.sessionId === "string" && typeof message.runId === "string" && Number.isInteger(message.sequence) && ["running","waiting","completed","failed","cancelled"].includes(message.state))this.onBrowserRun?.(message);
+            else if (message.status === "ok") { clearTimeout(timer); resolve(message as ReadyMessage); }
           } catch { /* wait for the next complete JSON line */ }
         }
       };
       child.stdout?.on("data", onData);
       child.stderr?.on("data", (chunk) => console.error(`[core-daemon] ${chunk.toString("utf8")}`));
       child.once("error", (error) => { clearTimeout(timer); reject(error); });
-      child.once("exit", (code) => { if (code !== 0) { clearTimeout(timer); reject(new Error(`Core Daemon exited with ${code}`)); } });
+      child.once("exit", (code) => { this.onBrowserRun?.(); if (code !== 0) { clearTimeout(timer); reject(new Error(`Core Daemon exited with ${code}`)); } });
     });
   }
 

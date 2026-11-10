@@ -61,11 +61,59 @@ export interface ProviderUpdateStartPayload {
 
 export type ProviderUpdateStartResult = { ok: true } | { ok: false; reason: string };
 
+export interface BrowserTab {
+  id: string;
+  title: string;
+  url: string;
+  manual: boolean;
+  busy: boolean;
+  queued?: number;
+  zoomFactor?: number;
+  ownership?: "agent" | "user" | "ready" | "stopped";
+  activity?: string;
+  label?: string;
+  favicon?: string;
+}
+
+export interface BrowserPanelState {
+  manual: boolean;
+  url: string;
+  title: string;
+  busy: boolean;
+  queued?: number;
+  zoomFactor?: number;
+  image?: string;
+  tabId?: string;
+  agentTabId?: string;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  tabs?: BrowserTab[];
+  ownership?: "agent" | "user" | "ready" | "stopped";
+  thumbnails?: Record<string, string>;
+  workspaceName?: string;
+  workspaceSource?: "session" | "window";
+}
+
 /** Mirrors the preload bridge. Kept in sync with src/preload/index.ts. */
 export interface AgentHubBridge {
   readonly isElectron: true;
   readonly platform: string;
   getAppInfo(): Promise<AppInfo>;
+  assistant?: import("../../../shared/workspace-assistant").AssistantBridge;
+  panels?: {
+    context?: import("../../../shared/panel-window").PanelTarget;
+    open(target:import("../../../shared/panel-window").PanelTarget, focusOnly?:boolean):Promise<boolean>;
+    dock():Promise<void>;
+    cycle():Promise<void>;
+    current():Promise<import("../../../shared/panel-window").PanelTarget|undefined>;
+    onBrowserTarget(callback:(target:import("../../../shared/panel-window").PanelTarget)=>void):()=>void;
+    onDock(callback:(target:import("../../../shared/panel-window").PanelTarget)=>void):()=>void;
+  };
+  browser?: {
+    spaces(command:"list"|"create"|"rename", input?:import("../../../shared/browser-spaces").BrowserSpacesInput):Promise<import("../../../shared/browser-spaces").BrowserSpacesState>;
+    profile(command:"inspect"|"import"|"login",input:import("../../../shared/browser-profile").BrowserProfileInput):Promise<import("../../../shared/browser-profile").BrowserProfileResult>;
+    panel(id:string,command:"state"|"control"|"open"|"home"|"layout"|"hide"|"release"|"new"|"select"|"close"|"back"|"forward"|"reload"|"zoom"|"overview"|"preview",value?:unknown): Promise<BrowserPanelState|undefined>;
+  };
   window: {
     minimize(): Promise<void>;
     toggleMaximize(): Promise<void>;
@@ -83,6 +131,7 @@ export interface AgentHubBridge {
     importClipboard(input: { name: string; mimeType?: string; data: Uint8Array }): Promise<DesktopAttachment>;
   };
   shell: {
+    openExternal(url: string): Promise<void>;
     /** Resolves to "" on success or an error message string. */
     openPath(path: string): Promise<string>;
     showItemInFolder(path: string): Promise<void>;
@@ -103,6 +152,14 @@ export interface AgentHubBridge {
     writeText(input: FileWriteTextPayload): Promise<FileWriteTextResult>;
     /** Moves a file to the OS trash (revert of an agent-created file). */
     delete(input: { path: string }): Promise<FileDeleteResult>;
+  };
+  accounts: {
+    recoverableLogins(): Promise<Array<{ profileId: string; providerId: string; directory: string; createdAt: number }>>;
+    acknowledgeLogin(input: { profileId: string; providerId: string }): Promise<void>;
+    prepareLogin(providerId: string): Promise<{ profileId: string; directory: string }>;
+    startLogin(input: { profileId: string; providerId: string; executable: string; directory: string }): Promise<{ ok: boolean; reason?: string }>;
+    loginStatus(profileId: string): Promise<{ state: "idle" | "running" | "succeeded" | "failed" | "cancelled"; reason?: string }>;
+    cancelLogin(profileId: string): Promise<void>;
   };
   providers: {
     /** Spawns the provider CLI's self-update command; output streams via onUpdateOutput. */

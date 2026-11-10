@@ -91,7 +91,7 @@ const dark: ThemeDefinition = {
   // palettes work before JS runs and for "system"; nothing to inject here.
   tokens: {},
   preview: {
-    bg: "#0d1017",
+    bg: "#17181b",
     line: "rgba(255, 255, 255, 0.25)",
     faint: "rgba(255, 255, 255, 0.1)"
   }

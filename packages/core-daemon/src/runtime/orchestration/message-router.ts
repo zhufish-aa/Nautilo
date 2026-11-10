@@ -5,8 +5,9 @@ import { Database } from "../../database/index.js";
 export class MessageRouter {
   constructor(private readonly database: Database) {}
 
-  userGoal(session: Session, projectRun: ProjectRun, attachmentIds: ArtifactId[] = []): Message {
+  userGoal(session: Session, projectRun: ProjectRun, attachmentIds: ArtifactId[] = [], messageId?: string): Message {
     return this.save(session, {
+      ...(messageId ? { id: messageId } : {}),
       sender: "user",
       kind: "chat",
       projectRunId: projectRun.id,
@@ -66,7 +67,7 @@ export class MessageRouter {
     });
   }
 
-  private save(session: Session, fields: Omit<Message, "id" | "sessionId" | "createdAt">): Message {
+  private save(session: Session, fields: Omit<Message, "id" | "sessionId" | "createdAt"> & { id?: string }): Message {
     const message: Message = { id: randomUUID(), sessionId: session.id, createdAt: new Date().toISOString(), ...fields };
     this.database.sessions.saveMessage(message);
     return message;

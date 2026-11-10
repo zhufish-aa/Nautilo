@@ -3,7 +3,7 @@
 //! Records are in-memory: a pending interaction cannot outlive its provider
 //! process, and a daemon restart kills the process anyway.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -20,6 +20,8 @@ struct PendingInteraction {
     record: Value,
     resolve: oneshot::Sender<Value>,
 }
+#[derive(Default)]
+struct Lifecycle {closed:HashSet<String>,order:VecDeque<String>,cancelled_native:HashSet<(String,String)>}
 
 pub struct InteractionService {
     db: Arc<Mutex<Database>>,
@@ -29,6 +31,7 @@ pub struct InteractionService {
     /// Sessions whose journal was already scanned for orphaned requests in
     /// this process — the scan is idempotent, so run it once per session.
     healed_sessions: Mutex<HashSet<String>>,
+    lifecycle:Mutex<Lifecycle>,
 }
 
 impl InteractionService {
@@ -39,12 +42,20 @@ impl InteractionService {
             pending: Mutex::new(HashMap::new()),
             resolved_history: Mutex::new(vec![]),
             healed_sessions: Mutex::new(HashSet::new()),
+            lifecycle:Mutex::new(Lifecycle::default()),
         }
     }
 
     /// Called by RunService when an adapter asks for user input; blocks until
     /// respond() resolves it.
     pub async fn request(&self, session: &Value, run_id: Option<&str>, provider_id: &str, input: Value) -> Value {
+        let (record,receiver)={
+        let native_key = (run_id.map(str::to_string).unwrap_or_else(||format!("session:{}",session["id"].as_str().unwrap_or(""))), input["nativeRequestId"].as_str().unwrap_or("").to_string());
+        let lifecycle=self.lifecycle.lock().unwrap();
+        if run_id.is_some_and(|id|lifecycle.closed.contains(id)) || lifecycle.cancelled_native.contains(&native_key) { return json!({"outcome":"cancelled"}); }
+        if let Some(run_id)=run_id {
+            if Repositories::new(&self.db.lock().unwrap().raw).runs().get(run_id).ok().flatten().is_some_and(|run|matches!(run["status"].as_str(),Some("completed"|"cancelled"|"failed"|"crashed"|"timed_out"))){return json!({"outcome":"cancelled"});}
+        }
         let mut record = input.as_object().cloned().unwrap_or_default();
         record.insert("id".to_string(), json!(Uuid::new_v4().to_string()));
         record.insert("sessionId".to_string(), session.get("id").cloned().unwrap_or(Value::Null));
@@ -57,13 +68,41 @@ impl InteractionService {
         let record = Value::Object(record);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().unwrap().insert(record.get("id").and_then(Value::as_str).unwrap_or("").to_string(), PendingInteraction { record: record.clone(), resolve: sender });
-        let _ = self.events.append_for_session(
+        let recorded = self.events.append_for_session(
             session,
             &json!({ "runId": run_id }),
             "interaction.requested",
             json!({ "interaction": record }),
         );
-        receiver.await.unwrap_or_else(|_| json!({ "outcome": "cancelled" }))
+        if recorded.is_err(){self.pending.lock().unwrap().remove(record["id"].as_str().unwrap_or(""));return json!({"outcome":"cancelled"});}
+        drop(lifecycle);
+        (record,receiver)
+        };
+        let _pending_guard=PendingRequestGuard{service:self,id:record["id"].as_str().unwrap_or("").to_string()};
+        if let Some(ms) = input["timeoutMs"].as_u64() {
+            match tokio::time::timeout(std::time::Duration::from_millis(ms), receiver).await {
+                Ok(response) => response.unwrap_or_else(|_|json!({"outcome":"cancelled"})),
+                Err(_) => { let _ = self.respond(record["id"].as_str().unwrap_or(""), &json!({"outcome":"cancelled"})); json!({"outcome":"cancelled"}) }
+            }
+        } else { receiver.await.unwrap_or_else(|_| json!({ "outcome": "cancelled" })) }
+    }
+
+    pub fn cancel_native(&self, run_id: &str, native_id: &str) {
+        let mut lifecycle=self.lifecycle.lock().unwrap();
+        lifecycle.cancelled_native.insert((run_id.to_string(), native_id.to_string()));
+        let ids: Vec<String> = self.pending.lock().unwrap().iter().filter(|(_, entry)|
+            entry.record["runId"] == run_id && entry.record["nativeRequestId"] == native_id).map(|(id, _)|id.clone()).collect();
+        for id in ids { let _ = self.respond(&id, &json!({"outcome":"cancelled"})); }
+    }
+    pub fn cancel_session_native(&self, session_id: &str, native_id: &str) {
+        let mut lifecycle=self.lifecycle.lock().unwrap();
+        lifecycle.cancelled_native.insert((format!("session:{session_id}"),native_id.to_string()));
+        let ids:Vec<String>=self.pending.lock().unwrap().iter().filter(|(_,entry)|entry.record["sessionId"]==session_id && entry.record["runId"].is_null() && entry.record["nativeRequestId"]==native_id).map(|(id,_)|id.clone()).collect();
+        for id in ids {let _=self.respond(&id,&json!({"outcome":"cancelled"}));}
+    }
+    pub fn cancel_for_session(&self, session_id:&str) {
+        let ids:Vec<String>=self.pending.lock().unwrap().iter().filter(|(_,entry)|entry.record["sessionId"]==session_id).map(|(id,_)|id.clone()).collect();
+        for id in ids {let _=self.respond(&id,&json!({"outcome":"cancelled"}));}
     }
 
     pub fn respond(&self, interaction_id: &str, response: &Value) -> CoreResult<Value> {
@@ -183,6 +222,10 @@ impl InteractionService {
 
     /// Auto-cancels everything a finished/cancelled run was still waiting on.
     pub fn cancel_for_run(&self, run_id: &str) {
+        let mut lifecycle=self.lifecycle.lock().unwrap();
+        lifecycle.cancelled_native.retain(|(run, _)|run != run_id);
+        if lifecycle.closed.insert(run_id.into()){lifecycle.order.push_back(run_id.into());}
+        while lifecycle.order.len()>4096{if let Some(old)=lifecycle.order.pop_front(){lifecycle.closed.remove(&old);}}
         let entries: Vec<(String, PendingInteraction)> = {
             let mut pending = self.pending.lock().unwrap();
             let ids: Vec<String> = pending
@@ -192,6 +235,7 @@ impl InteractionService {
                 .collect();
             ids.into_iter().filter_map(|id| pending.remove(&id).map(|entry| (id, entry))).collect()
         };
+        drop(lifecycle);
         for (_, entry) in entries {
             let mut record = entry.record.as_object().cloned().unwrap_or_default();
             record.insert("status".to_string(), json!("cancelled"));
@@ -221,5 +265,60 @@ impl InteractionService {
         if history.len() > RESOLVED_HISTORY_LIMIT {
             history.remove(0);
         }
+    }
+}
+
+/// Aborting a reverse call must also dismiss its pending desktop question.
+struct PendingRequestGuard<'a>{service:&'a InteractionService,id:String}
+impl Drop for PendingRequestGuard<'_> {
+    fn drop(&mut self){if self.service.pending.lock().unwrap().contains_key(&self.id){let _=self.service.respond(&self.id,&json!({"outcome":"cancelled"}));}}
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn native_interactions_timeout_and_ignore_late_requests() {
+        let path=std::env::temp_dir().join(format!("nautilo-ui-{}.sqlite",Uuid::new_v4()));
+        let db=Arc::new(Mutex::new(Database::open(&path).unwrap()));
+        let session=json!({"id":"s","projectId":"p","memberId":"a","updatedAt":now_iso()});
+        {
+            let db=db.lock().unwrap();let repos=Repositories::new(&db.raw);
+            repos.projects().save(&json!({"id":"p"}),&now_iso()).unwrap();
+            repos.sessions().save(&session).unwrap();
+        }
+        let events=Arc::new(EventService::new(db.clone(),Default::default()));
+        let ui=Arc::new(InteractionService::new(db.clone(),events));
+        let response=ui.request(&session,Some("r"),"pi",json!({"kind":"question","title":"Edit","nativeRequestId":"edit","timeoutMs":5})).await;
+        assert_eq!(response,json!({"outcome":"cancelled"}));
+        assert!(ui.list(None,Some("pending")).is_empty());
+        ui.cancel_native("next","select");
+        assert_eq!(ui.request(&session,Some("next"),"omp",json!({"nativeRequestId":"select"})).await,response);
+        ui.cancel_for_run("closed");
+        assert_eq!(ui.request(&session,Some("closed"),"pi",json!({"nativeRequestId":"late"})).await,response);
+        let journal=Repositories::new(&db.lock().unwrap().raw).events().replay(Some("s"),None,None,None).unwrap();
+        assert_eq!(journal.iter().filter(|event|event["type"]=="interaction.requested").count(),1);
+        assert_eq!(journal.iter().filter(|event|event["type"]=="interaction.resolved").count(),1);
+        drop(ui);drop(db);
+        let _=std::fs::remove_file(path);
+    }
+    #[tokio::test]
+    async fn aborted_background_question_is_dismissed_and_native_ids_are_session_scoped() {
+        let db=Arc::new(Mutex::new(Database::open(std::path::Path::new(":memory:")).unwrap()));
+        let events=Arc::new(EventService::new(db.clone(),Default::default()));
+        let ui=Arc::new(InteractionService::new(db.clone(),events));
+        let first=json!({"id":"s1","projectId":"p","updatedAt":now_iso()});let second=json!({"id":"s2","projectId":"p","updatedAt":now_iso()});
+        {let db=db.lock().unwrap();let repos=Repositories::new(&db.raw);repos.projects().save(&json!({"id":"p"}),&now_iso()).unwrap();repos.sessions().save(&first).unwrap();repos.sessions().save(&second).unwrap();}
+        ui.cancel_session_native("s1","question");
+        let pending=ui.clone();let session=second.clone();
+        let task=tokio::spawn(async move{pending.request(&session,None,"pi",json!({"kind":"question","nativeRequestId":"question"})).await});
+        tokio::task::yield_now().await;
+        assert_eq!(ui.pending.lock().unwrap().len(),1,"cancelling another session must not dismiss this question");
+        task.abort();let _=task.await;
+        assert!(ui.pending.lock().unwrap().is_empty());
+        let journal=Repositories::new(&db.lock().unwrap().raw).events().replay(Some("s2"),None,None,None).unwrap();
+        assert_eq!(journal.last().unwrap()["type"],"interaction.resolved");
+        assert_eq!(journal.last().unwrap()["payload"]["interaction"]["status"],"cancelled");
     }
 }

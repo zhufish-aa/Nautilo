@@ -9,7 +9,7 @@ export class ProjectService {
   list(): Project[] { return this.database.projects.list(); }
   add(input: { rootPath: string; name?: string }): Project {
     const now = new Date().toISOString();
-    const project = { id: randomUUID(), name: input.name ?? input.rootPath.split(/[\\/]/).filter(Boolean).pop() ?? "Project", rootPath: input.rootPath, repositoryType: "none" as const, workspaceMode: "direct" as const, frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default", createdAt: now, updatedAt: now } as Project;
+    const project = { id: randomUUID(), name: input.name ?? input.rootPath.split(/[\\/]/).filter(Boolean).pop() ?? "Project", rootPath: input.rootPath, repositoryType: "none" as const, workspaceMode: "direct" as const, nonGitDiffMode: "off" as const, frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default", createdAt: now, updatedAt: now } as Project;
     this.database.projects.save(project, now);
     return project;
   }
@@ -18,7 +18,10 @@ export class ProjectService {
     const project = this.database.projects.get(projectId);
     if (!project) throw new CoreError("IPC_NOT_FOUND", { resource: "project", id: projectId });
     const inspection = this.inspector.inspect(project);
-    const updated = { ...project, repositoryType: inspection.git.isRepo ? "git" as const : "none" as const, defaultBranch: inspection.git.defaultBranch, frontendPaths: inspection.frontendPaths, backendPaths: inspection.backendPaths };
+    const latest = this.database.projects.get(projectId);
+    if (!latest) throw new CoreError("IPC_NOT_FOUND", { resource: "project", id: projectId });
+    if (latest.rootPath !== project.rootPath) throw new CoreError("IPC_INVALID_REQUEST", { field: "rootPath", reason: "Project directory changed during inspection; scan again." });
+    const updated = { ...latest, repositoryType: inspection.git.isRepo ? "git" as const : "none" as const, defaultBranch: inspection.git.defaultBranch, frontendPaths: inspection.frontendPaths, backendPaths: inspection.backendPaths };
     this.database.projects.save(updated, inspection.scannedAt);
     return { project: updated, inspection };
   }

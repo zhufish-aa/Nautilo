@@ -53,7 +53,7 @@ export function useSlashCommands(sessionId?: string): {
       setResult({
         commandId: command.id,
         title: "指令执行失败",
-        sections: [{ kind: "text", text: message(cause) }],
+        sections: [],
         actions: [{ id: "close", label: "关闭", kind: "primary" }],
         completed: true
       });
@@ -99,5 +99,6 @@ export function useSlashCommands(sessionId?: string): {
 }
 
 function message(value: unknown): string {
-  return value instanceof Error ? value.message : String(value);
+  const text = value instanceof Error ? value.message : String(value);
+  return text.replace(/^Error invoking remote method 'core:request': (?:Error: )?/, "");
 }

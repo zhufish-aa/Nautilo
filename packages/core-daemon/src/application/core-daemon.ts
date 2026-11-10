@@ -1,3 +1,7 @@
+import { TerminalService } from "../runtime/terminal-service.js";
+import { SourceControl } from "../runtime/source-control.js";
+import { ConnectionService } from "./connection-service.js";
+import { CodexAdapter } from "../adapters/codex/adapter.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AdapterRegistry } from "../adapters/index.js";
@@ -35,14 +39,17 @@ export interface CoreDaemonOptions { dataDir?: string; databasePath?: string; wo
 
 /** Composition root only: construction and lifecycle, no business rules. */
 export class CoreDaemon {
-  private stopped = false;
+  private stopPromise?: Promise<void>;
   readonly database: Database;
   readonly adapters: AdapterRegistry;
   readonly gateway: IpcGateway;
   readonly events: EventService;
   readonly runs: RunService;
+  readonly terminals = new TerminalService();
+  readonly sourceControl = new SourceControl();
   readonly projects: ProjectService;
   readonly agents: AgentService;
+  readonly connections: ConnectionService;
   readonly teams: TeamService;
   readonly sessions: SessionService;
   readonly projections: ProjectionService;
@@ -92,6 +99,7 @@ export class CoreDaemon {
     );
     this.projects = new ProjectService(this.database);
     this.agents = new AgentService(this.database, this.adapters, this.credentials, this.environment);
+    this.connections = new ConnectionService(this.database, this.credentials, this.adapters, this.environment);
     this.teams = new TeamService(this.database);
     this.sessions = new SessionService(this.database, this.runs, this.events);
     this.projections = new ProjectionService(this.database);
@@ -113,6 +121,7 @@ export class CoreDaemon {
     this.plugins = new PluginService(dataDir, this.adapters);
     this.recovery.recoverInterrupted();
     this.gateway.setObserver((request, response) => {
+      if (["scm.status", "scm.diff", "terminal.list", "terminal.read", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities"].includes(request.method)) return;
       this.audit.ipc(
         request.method,
         request.input,
@@ -122,13 +131,19 @@ export class CoreDaemon {
     });
     registerIpcHandlers(this.gateway, this);
   }
-  health(): { service: "core-daemon"; status: "ok"; version: string } { return { service: "core-daemon", status: "ok", version: "0.1.0" }; }
-  async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
-    await this.gateway.stop();
-    await this.plugins.stop();
-    try { this.audit.flush(); } catch { /* database may already be unavailable */ }
-    this.database.close();
+  health() { return { service: "core-daemon" as const, status: "ok" as const, version: "0.1.0", features: {sourceControl:1 as const,terminalTabs:1 as const} }; }
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    const runsStopped = this.runs.stop();
+    const codex = this.adapters.find("codex");
+    const codexStopped = codex instanceof CodexAdapter ? codex.shutdown() : Promise.resolve();
+    this.stopPromise = (async () => {
+      await Promise.all([this.gateway.stop(), runsStopped, codexStopped]);
+      await this.plugins.stop();
+      try { this.audit.flush(); } catch { /* database may already be unavailable */ }
+      this.database.close();
+    })();
+    this.terminals.closeAll();
+    return this.stopPromise;
   }
 }

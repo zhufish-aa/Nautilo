@@ -1,0 +1,16 @@
+.process-disclosure { min-width: 0; color: var(--ink-3); font: var(--app-font-weight) 13px/22px var(--app-font-sans); }
+.process-disclosure-row { display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0; min-height: 26px; padding: 2px 0; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.process-disclosure-leading { display: grid; place-items: center; flex: 0 0 14px; width: 14px; height: 16px; }
+.process-disclosure-label, .process-disclosure-dot { flex-shrink: 0; }
+.process-disclosure-preview { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.process-disclosure-chevron { flex-shrink: 0; opacity: 0; }
+.process-disclosure[data-open] .process-disclosure-chevron { visibility: hidden; }
+.process-disclosure-row:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+.process-disclosure-row:focus-visible .process-disclosure-chevron { opacity: 1; }
+.process-disclosure[data-running] > .process-disclosure-row { color: var(--ink-2); }
+.process-disclosure[data-failed] > .process-disclosure-row { color: var(--danger); }
+.process-disclosure-body { min-width: 0; padding: 4px 0 6px 21px; }
+.reasoning-card .process-disclosure-body .markdown-content { color: var(--ink-3); font-size: 13px; line-height: 22px; font-weight: var(--app-font-weight); }
+.reasoning-card .process-disclosure-body .markdown-content p { margin-block: 4px; }
+.reasoning-card .process-disclosure-body .markdown-content p:first-child { margin-top: 0; }
+@media (hover: hover) and (pointer: fine) { .process-disclosure-row:hover { color: var(--ink-2); } .process-disclosure-row:hover .process-disclosure-chevron { opacity: 1; } }

@@ -1,3 +1,5 @@
+import { bindNewSession } from "../runtime/runtime-connection.js";
+import { assertSessionIdentityUpdate } from "../runtime/session-binding-guard.js";
 import { randomUUID } from "node:crypto";
 import type { Message, Session } from "@agenthub/domain";
 import type { IpcRequestMap } from "@agenthub/schemas";
@@ -29,7 +31,8 @@ export class SessionService {
   }
   create(input: IpcRequestMap["session.create"]["input"]): Session {
     const now = new Date().toISOString();
-    const session: Session = { id: randomUUID(), projectId: input.projectId, memberId: input.memberId, title: input.title ?? "New session", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+    let session: Session = { id: randomUUID(), projectId: input.projectId, memberId: input.memberId, connectionId: input.connectionId, connectionRevision: input.connectionRevision, title: input.title ?? "New session", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+    if (session.connectionId) session = bindNewSession(this.database, session, this.members.resolveSession(session));
     this.database.sessions.save(session);
     return session;
   }
@@ -65,7 +68,9 @@ export class SessionService {
     // so Enter behaves the same across providers instead of erroring out.
     if (input.mode === "steer" && this.runs.canSteer(session.id)) {
       await this.runs.steerSession(session.id, text);
-      this.database.sessions.saveMessage(followUpMessage(session, text));
+      const message = followUpMessage(session, text, input.messageId);
+      this.database.sessions.saveMessage(message);
+      this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_steered", { messageId: message.id });
       return { accepted: true, mode: "steer" };
     }
 
@@ -78,11 +83,11 @@ export class SessionService {
       currentText: text,
       messages: existingMessages,
       artifacts,
-      recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt,
-      workMode: session.mode === "work",
+      fullHistory: session.connectionContextRebuildRequired,
+      recoverProviderContext: !!session.connectionContextRebuildRequired || !session.providerSessionId || !session.providerContextSyncedAt || this.runs.requiresProviderRecovery(session, agent),
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
-    const message = followUpMessage(session, text);
+    const message = followUpMessage(session, text, input.messageId);
     this.database.sessions.saveMessage(message);
     this.trackPendingFollowUp(session.id, { messageId: message.id, text, queuedAt: message.createdAt });
     this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_queued", { messageId: message.id, text });
@@ -124,11 +129,26 @@ export class SessionService {
       this.database.sessions.deleteMessage(input.sessionId, input.messageId);
       return { cancelled: true };
     }
-    this.runs.cancelQueued(input.sessionId, input.messageId);
+    if (!this.runs.cancelQueued(input.sessionId, input.messageId)) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is already being sent." });
+    }
     this.untrackPendingFollowUp(input.sessionId, input.messageId);
     this.database.sessions.deleteMessage(input.sessionId, input.messageId);
     this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_cancelled", { messageId: input.messageId });
     return { cancelled: true };
+  }
+  async followUpSteer(input: IpcRequestMap["session.followUp.steer"]["input"]): Promise<{ accepted: true; mode: "steer" | "queue" }> {
+    const session = this.database.sessions.get(input.sessionId);
+    if (!session) throw new CoreError("IPC_NOT_FOUND", { resource: "session", id: input.sessionId });
+    const entry = this.pendingFollowUps.get(session.id)?.find((item) => item.messageId === input.messageId);
+    if (!entry) throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is no longer queued." });
+    if (!this.runs.canSteer(session.id)) return { accepted: true, mode: "queue" };
+    if (!await this.runs.steerQueued(session.id, entry.messageId, entry.text)) {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "messageId", reason: "Follow-up is already being sent." });
+    }
+    this.untrackPendingFollowUp(session.id, entry.messageId);
+    this.events.appendForSession(session, { projectRunId: session.projectRunId, taskId: session.taskId }, "session.follow_up_steered", { messageId: entry.messageId });
+    return { accepted: true, mode: "steer" };
   }
   /**
    * Journals session.follow_up_cancelled for every queued follow-up in this
@@ -146,7 +166,7 @@ export class SessionService {
       const rows = this.database.connection.raw
         .prepare(
           "SELECT data FROM runtime_events WHERE session_id = ? \
-           AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled') \
+           AND json_extract(data, '$.type') IN ('session.follow_up_queued', 'session.follow_up_cancelled', 'session.follow_up_steered') \
            ORDER BY sequence, rowid"
         )
         .all(sessionId) as Array<{ data: string }>;
@@ -190,32 +210,59 @@ export class SessionService {
    * would start a new provider thread and lose conversational context.
    */
   upsert(input: IpcRequestMap["session.upsert"]["input"]): Session {
-    const current = this.database.sessions.get(input.id);
+    const { permissionMode, connectionId, connectionRevision, confirmConnectionChange, connectionContextRebuildRequired: _untrustedRebuild, ...metadata } = input;
+    let normalized: Session = {
+      ...metadata,
+      ...(Object.prototype.hasOwnProperty.call(input, "connectionId") ? { connectionId: connectionId ?? undefined, connectionRevision: connectionId === null ? undefined : connectionRevision ?? undefined } : {}),
+      ...(Object.prototype.hasOwnProperty.call(input, "permissionMode")
+        ? { permissionMode: permissionMode?.trim() || undefined } : {})
+    };
+    const current = this.database.sessions.get(normalized.id);
     if (!current) {
-      this.database.sessions.save(input);
-      return input;
+      if (normalized.connectionId) normalized = bindNewSession(this.database, normalized, this.members.resolveSession(normalized));
+      this.database.sessions.save(normalized);
+      return normalized;
+    }
+
+    assertSessionIdentityUpdate(current, normalized, this.database);
+    if (!Object.prototype.hasOwnProperty.call(input, "connectionId")) {
+      normalized.connectionId = current.connectionId;
+      normalized.connectionRevision = current.connectionRevision;
+    } else if (normalized.connectionId) {
+      normalized = bindNewSession(this.database, normalized, this.members.resolveSession({ ...current, ...normalized }));
+    }
+    const connectionChanged = current.connectionId !== normalized.connectionId || current.connectionRevision !== normalized.connectionRevision;
+    const hasHistory = Boolean(current.providerSessionId) || this.database.runs.list().some((run) => run.sessionId === current.id) || this.database.sessions.messages(current.id).length > 0;
+    if (connectionChanged) {
+      if ((hasHistory || current.connectionId) && confirmConnectionChange !== true) throw new CoreError("IPC_INVALID_REQUEST", { field: "confirmConnectionChange", reason: "Confirm rebuilding text context when switching account or supplier" });
+      const active = this.database.runs.list().some((run) => run.sessionId === current.id && !["completed", "failed", "cancelled", "crashed", "timed_out"].includes(run.status));
+      if (active || (this.pendingFollowUps.get(current.id)?.length ?? 0) > 0) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "Wait for active and queued turns before changing connection" });
+      const bytes = Buffer.byteLength(this.database.sessions.messages(current.id).map((message) => message.text).join("\n"), "utf8");
+      if (bytes > 1024 * 1024) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "History is too large to rebuild safely (1 MiB). Create a new conversation with an explicit summary instead" });
     }
 
     // The orchestrator temporarily rebinds `memberId` from the renderer's
     // agent-instance id to the selected team-member id. That is presentation /
     // routing metadata, not a provider-thread boundary. Reset the native
     // provider session only when the project or actual CLI instance changes.
-    const sameProviderBinding = current.projectId === input.projectId
-      && current.agentInstanceId === input.agentInstanceId;
+    const sameProviderBinding = current.projectId === normalized.projectId
+      && current.agentInstanceId === normalized.agentInstanceId && !connectionChanged;
     const updated: Session = {
       ...current,
-      ...input,
+      ...normalized,
       createdAt: current.createdAt,
-      projectRunId: input.projectRunId ?? current.projectRunId,
-      parentSessionId: input.parentSessionId ?? current.parentSessionId,
-      taskId: input.taskId ?? current.taskId,
+      projectRunId: normalized.projectRunId ?? current.projectRunId,
+      parentSessionId: normalized.parentSessionId ?? current.parentSessionId,
+      taskId: normalized.taskId ?? current.taskId,
       providerSessionId: sameProviderBinding
-        ? current.providerSessionId ?? input.providerSessionId
-        : input.providerSessionId,
+        ? current.providerSessionId ?? normalized.providerSessionId
+        : connectionChanged ? undefined : normalized.providerSessionId,
       providerContextSyncedAt: sameProviderBinding ? current.providerContextSyncedAt : undefined,
       runtimeToolVersion: sameProviderBinding
-        ? current.runtimeToolVersion ?? input.runtimeToolVersion
-        : input.runtimeToolVersion
+        ? current.runtimeToolVersion ?? normalized.runtimeToolVersion
+        : connectionChanged ? undefined : normalized.runtimeToolVersion,
+      connectionContextRebuildRequired: (connectionChanged && hasHistory) || current.connectionContextRebuildRequired,
+      providerContextWindow: connectionChanged ? undefined : current.providerContextWindow
     };
     this.database.sessions.save(updated);
     return updated;
@@ -246,13 +293,13 @@ export class SessionService {
       messages: existingMessages,
       artifacts,
       currentAttachments,
-      recoverProviderContext: !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration,
-      workMode: session.mode === "work",
+      fullHistory: session.connectionContextRebuildRequired,
+      recoverProviderContext: !!session.connectionContextRebuildRequired || !session.providerSessionId || !session.providerContextSyncedAt || needsRuntimeToolMigration || this.runs.requiresProviderRecovery(session, agent),
       workspaceRoot: this.database.projects.get(session.projectId)?.rootPath
     });
     const message: Message = editedMessage
       ? { ...editedMessage, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), editedAt: new Date().toISOString() }
-      : { id: randomUUID(), sessionId: session.id, sender: "user", kind: "chat", projectRunId: session.projectRunId, taskId: session.taskId, toMemberId: session.memberId, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), createdAt: new Date().toISOString() };
+      : { id: input.messageId || randomUUID(), sessionId: session.id, sender: "user", kind: "chat", projectRunId: session.projectRunId, taskId: session.taskId, toMemberId: session.memberId, text: input.text, attachmentIds: currentAttachments.map((artifact) => artifact.id), createdAt: new Date().toISOString() };
     this.database.sessions.saveMessage(message);
     const runId = await this.runs.start(session, agent, turnContext.prompt, {
       projectRunId: session.projectRunId,
@@ -280,9 +327,9 @@ function descendantSessionIds(sessions: Session[], rootId: string): string[] {
   return [...ids];
 }
 
-function followUpMessage(session: Session, text: string): Message {
+function followUpMessage(session: Session, text: string, messageId?: string): Message {
   return {
-    id: randomUUID(),
+    id: messageId || randomUUID(),
     sessionId: session.id,
     sender: "user",
     kind: "chat",

@@ -100,7 +100,7 @@ function plainSkill(capability: ProviderCapability): string {
 function skillTargets(): SkillTarget[] {
   const home = homedir();
   const kimiHome = process.env.KIMI_CODE_HOME?.trim() || join(home, ".kimi-code");
-  return [
+  const targets: SkillTarget[] = [
     {
       providerId: "claude-code",
       filePath: (slug) => join(home, ".claude", "skills", slug, "SKILL.md"),
@@ -127,6 +127,18 @@ function skillTargets(): SkillTarget[] {
       render: frontmatterSkill
     }
   ];
+  const profile = process.env.OMP_PROFILE || process.env.PI_PROFILE;
+  const ompRoot = profile && profile !== "default" ? join(home, process.env.PI_CONFIG_DIR || ".omp", "profiles", profile, "agent")
+    : process.env.PI_CODING_AGENT_DIR || join(home, ".omp", "agent");
+  const roots = {
+    pi: process.env.PI_CODING_AGENT_DIR || join(home, ".pi", "agent"),
+    omp: ompRoot,
+    opencode: process.env.OPENCODE_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "opencode"),
+    commandcode: join(home, ".commandcode")
+  };
+  for (const [providerId, root] of Object.entries(roots)) targets.push({providerId,
+    filePath: slug => join(root,"skills",slug,"SKILL.md"),skillDir:slug=>join(root,"skills",slug),render:frontmatterSkill});
+  return targets;
 }
 
 /** Writes/removes provider-native skill files for Nautilo-managed skills. */
@@ -159,7 +171,7 @@ export class SkillFileSync {
       const filePath = target.filePath(slug);
       if (existsSync(filePath)) {
         const existing = readFileSync(filePath, "utf8");
-        if (!existing.includes(SKILL_FILE_MARKER)) return; // Never overwrite user-owned skills.
+        if (!existing.includes(`${SKILL_FILE_MARKER}${capability.id}`)) return; // Only update this capability's files.
       }
       mkdirSync(join(filePath, ".."), { recursive: true });
       writeFileSync(filePath, target.render(capability, slug), "utf8");
@@ -206,6 +218,7 @@ export class CapabilityService {
   private readonly skillFiles: SkillFileSync;
   constructor(private readonly database: Database, skillFiles?: SkillFileSync) {
     this.skillFiles = skillFiles ?? new SkillFileSync();
+    for (const capability of database.capabilities.list()) this.skillFiles.sync(capability);
   }
 
   list(): ProviderCapability[] {

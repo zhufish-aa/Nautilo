@@ -1,8 +1,13 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { imagePromptBlocks } from "../images.js";
+import { privateClaudeConfig } from "./private-config.js";
 import type { AgentInstance, ProviderModelCatalog } from "@agenthub/domain";
 import type { ProcessHandle } from "../../process-runtime.js";
 import { ProcessAdapter, streamEvents } from "../process-adapter.js";
 import { normalizeJson } from "../normalize.js";
 import { startRuntimeMcpBridge, type RuntimeMcpBridge } from "../runtime-mcp-bridge.js";
+import { startClaudeApiProxy } from "./api-proxy.js";
 import type { AdapterDiscoveryContext, AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartRequest, ProviderDescriptor } from "../types.js";
 import { buildClaudeResumeArgs, buildClaudeStartArgs, claudePermissionPromptToolArgs, claudeRuntimeMcpArgs } from "./commands.js";
 import { createClaudeParseState, parseClaudeJsonEvent } from "./events.js";
@@ -83,12 +88,12 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
   }
 
   override start(request: AdapterStartRequest): AdapterRun {
-    // Custom baseArgs take over the whole CLI surface, so MCP config cannot be injected.
-    return request.instance.baseArgs.length ? super.start(request) : this.launch(request, false);
+    // Wrappers retain the same model, permission, attachment and MCP flow.
+    return this.launch(request, false);
   }
 
   override resume(request: AdapterResumeRequest): AdapterRun {
-    return request.instance.baseArgs.length ? super.resume(request) : this.launch(request, true);
+    return this.launch(request, true);
   }
 
   listModels(_instance: AgentInstance, context?: AdapterDiscoveryContext): Promise<ProviderModelCatalog> {
@@ -105,9 +110,15 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
     const state = createClaudeParseState();
     let handle: ProcessHandle | undefined;
     let bridge: RuntimeMcpBridge | undefined;
+    let config: Awaited<ReturnType<typeof privateClaudeConfig>> | undefined;
+    let apiProxy: Awaited<ReturnType<typeof startClaudeApiProxy>>;
+    let cancelled = false;
 
     const events = async function* (this: ClaudeCodeAdapter): AsyncGenerator<AdapterEvent> {
       try {
+        if (cancelled) return;
+        apiProxy = await startClaudeApiProxy(request);
+        if (apiProxy) request = { ...request, env: apiProxy.env };
         let args = resume
           ? buildClaudeResumeArgs(instance, (request as AdapterResumeRequest).providerSessionId, request.prompt, request as AdapterResumeRequest)
           : buildClaudeStartArgs(instance, request.prompt, request);
@@ -125,9 +136,19 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
           // Keep the prompt in the final position after injecting MCP flags.
           args = [...args.slice(0, -1), ...injectedArgs, args.at(-1)!];
         }
+        if (cancelled) return;
+        const schemaPath = request.outputSchemaPath ?? instance.providerOptions?.outputSchemaPath;
+        if (typeof schemaPath === "string") args = [...args.slice(0,-1),"--json-schema",JSON.stringify(JSON.parse(readFileSync(resolve(request.cwd,schemaPath),"utf8"))),args.at(-1)!];
+        let stdin: string | undefined;
+        if (request.localImagePaths?.length) {
+          stdin = JSON.stringify({type:"user",message:{role:"user",content:imagePromptBlocks(request,true)}}) + "\n";
+          args = [...args.slice(0,-1), "--input-format", "stream-json"];
+        }
+        config = await privateClaudeConfig(args);
+        if (cancelled) return;
         handle = this.runtime.start({
           command: instance.executable,
-          args,
+          args: config.args,
           cwd: request.cwd,
           // The CLI gates output_config.effort behind a hardcoded model-name
           // allowlist (only the *-4-6 families in 2.1.x), so an explicit user
@@ -140,12 +161,19 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
           idleTimeoutMs: request.idleTimeoutMs,
           maxOutputBytes: request.maxOutputBytes ?? 20 * 1024 * 1024
         });
-        handle.child.stdin.end();
-        yield* streamEvents(handle, true, (value) => parseClaudeJsonEvent(value, state));
+        await config.recordChild(handle.pid);
+        handle.child.stdin.end(stdin);
+        yield* streamEvents(handle, true, (value) => {
+          const parsed = parseClaudeJsonEvent(value,state);
+          return parsed.length || !instance.baseArgs.length ? parsed : normalizeJson(value);
+        });
       } catch (error) {
         yield { kind: "error", error: error instanceof Error ? error : new Error(String(error)) };
       } finally {
+        await handle?.cancel().catch(() => undefined);
         await bridge?.close().catch(() => undefined);
+        await config?.cleanup();
+        await apiProxy?.close();
       }
     }.call(this);
 
@@ -162,8 +190,10 @@ export class ClaudeCodeAdapter extends ProcessAdapter {
       },
       write: (input: string) => handle?.write(input),
       cancel: async () => {
+        cancelled = true;
         await handle?.cancel();
         await bridge?.close().catch(() => undefined);
+        await config?.cleanup();
       },
       wait: () => (handle ? handle.wait() : Promise.resolve({ exitCode: null }))
     };

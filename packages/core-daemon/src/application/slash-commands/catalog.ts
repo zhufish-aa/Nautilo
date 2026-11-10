@@ -13,7 +13,7 @@ interface ProviderCommandReport {
   name: string;
   description: string;
   inputHint?: string;
-  providerCommand?: "compact";
+  providerCommand?: string;
 }
 
 const PROVIDER_COMMAND_FACTORIES: Readonly<Record<string, (input: ProviderCommandReport) => SlashCommandDefinition | undefined>> = {

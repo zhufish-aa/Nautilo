@@ -50,6 +50,11 @@ const MAX_TEXT_WRITE_BYTES = 8 * 1024 * 1024;
  */
 export function registerInteractionHandlers(): void {
   // Resolves to "" on success or an error message string (shell.openPath contract).
+  ipcMain.handle("shell:open-external", async (_event, value: string) => {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) throw new Error("Expected an HTTPS authorization URL");
+    await shell.openExternal(url.href);
+  });
   ipcMain.handle("shell:open-path", (_event, path: string) => shell.openPath(path));
 
   ipcMain.handle("shell:show-item-in-folder", (_event, path: string) => {

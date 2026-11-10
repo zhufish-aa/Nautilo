@@ -8,7 +8,6 @@ use crate::database::{lock, Database, Repositories};
 use crate::errors::{invalid, not_found, now_iso, CoreError, CoreResult, ErrorCode};
 use crate::application::project_inspector::inspect_project;
 use uuid::Uuid;
-use std::path::Path;
 
 
 pub struct ProjectService {
@@ -39,6 +38,7 @@ impl ProjectService {
             "rootPath": root_path,
             "repositoryType": "none",
             "workspaceMode": "direct",
+            "nonGitDiffMode": "off",
             "frontendPaths": [],
             "backendPaths": [],
             "ignoredPaths": [],
@@ -61,8 +61,15 @@ impl ProjectService {
             .get(project_id)?
             .ok_or_else(|| not_found("project", project_id))?;
         let inspection = inspect_project(&project);
-        let mut updated = project.clone();
-        let root = Path::new(project.get("rootPath").and_then(Value::as_str).unwrap_or(""));
+        // Inspection runs without the DB lock. Re-read under one write guard so
+        // concurrent settings changes cannot be replaced by the old snapshot.
+        let guard = lock(&self.db);
+        let latest = Repositories::new(&guard.raw).projects().get(project_id)?
+            .ok_or_else(|| not_found("project", project_id))?;
+        if latest.get("rootPath") != project.get("rootPath") {
+            return Err(invalid("rootPath", "Project directory changed during inspection; scan again."));
+        }
+        let mut updated = latest;
         let is_repo = inspection.get("git").and_then(|g| g.get("isRepo")).and_then(Value::as_bool).unwrap_or(false);
         updated["repositoryType"] = json!(if is_repo { "git" } else { "none" });
         match inspection.get("git").and_then(|g| g.get("defaultBranch")).cloned() {
@@ -75,8 +82,7 @@ impl ProjectService {
         updated["backendPaths"] = inspection.get("backendPaths").cloned().unwrap_or(json!([]));
         updated["updatedAt"] = inspection.get("scannedAt").cloned().unwrap_or(json!(now_iso()));
         let scanned_at = updated["updatedAt"].as_str().unwrap_or("").to_string();
-        let _ = root;
-        Repositories::new(&lock(&self.db).raw).projects().save(&updated, &scanned_at)?;
+        Repositories::new(&guard.raw).projects().save(&updated, &scanned_at)?;
         Ok(json!({ "project": updated, "inspection": inspection }))
     }
 }

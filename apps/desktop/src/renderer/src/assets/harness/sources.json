@@ -1,0 +1,60 @@
+{
+  "note": "Official project marks, bundled locally for identification only. Original artwork and trademarks belong to the respective owners; no recoloring or redrawing.",
+  "retrievedAt": "2026-11-04T13:26:50.440Z",
+  "assets": [
+    {
+      "id": "codex",
+      "file": "codex.png",
+      "url": "https://github.com/openai.png?size=128",
+      "homepage": "https://github.com/openai/codex"
+    },
+    {
+      "id": "claude-code",
+      "file": "claude-code.png",
+      "url": "https://code.claude.com/docs/mintlify-assets/_mintlify/favicons/claude-code/pLsy-mRpNksna2sx/_generated/favicon/android-chrome-192x192.png",
+      "homepage": "https://code.claude.com/docs/en/overview"
+    },
+    {
+      "id": "kimi-code",
+      "file": "kimi-code.png",
+      "url": "https://www.kimi.com/pwa-192.png",
+      "homepage": "https://www.kimi.com/code"
+    },
+    {
+      "id": "omp",
+      "file": "omp.svg",
+      "url": "https://omp.sh/favicon.svg",
+      "homepage": "https://omp.sh"
+    },
+    {
+      "id": "pi",
+      "file": "pi.svg",
+      "url": "https://pi.dev/favicon.svg",
+      "homepage": "https://pi.dev"
+    },
+    {
+      "id": "opencode",
+      "file": "opencode.png",
+      "url": "https://opencode.ai/favicon-96x96-v3.png",
+      "homepage": "https://opencode.ai/brand"
+    },
+    {
+      "id": "commandcode",
+      "file": "commandcode.svg",
+      "url": "https://raw.githubusercontent.com/CommandCodeAI/command-code/refs/heads/main/.github/commandcode/symbols/black-symbol-commandcode.svg",
+      "homepage": "https://commandcode.ai/brand"
+    },
+    {
+      "id": "trae",
+      "file": "trae.png",
+      "url": "https://lf16-web-neutral.traecdn.ai/obj/trae-ai-static/trae_website/favicon.png",
+      "homepage": "https://www.trae.ai"
+    },
+    {
+      "id": "deepseek",
+      "file": "deepseek.png",
+      "url": "https://github.com/deepseek-ai.png?size=128",
+      "homepage": "https://github.com/deepseek-ai/deepseek-harness"
+    }
+  ]
+}

@@ -1,78 +1,210 @@
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { NavLink, useLocation } from "react-router-dom";
-import { useI18n, type MessageKey } from "../../lib/i18n";
-import { cn } from "../../lib/utils";
-import { useSettingsStore } from "../../stores/settings";
-import { useIconOverrides } from "../../lib/use-icon-overrides";
-import { Tooltip } from "../ui/Tooltip";
-import { NAV_ENTRIES } from "./nav";
+import { UI_EASE_OUT, useUiReducedMotion } from "../../lib/ui-motion";
+import { Orbit, BarChart3, Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { useI18n } from "../../lib/i18n";
+import { NautiloMark } from "../ui/IdentityAvatar";
+import { cn, formatRelativeTime } from "../../lib/utils";
+import { searchSidebarSessions, sessionLocation } from "../../lib/sidebar-navigation";
+import { useProjectsStore } from "../../stores/projects";
+import { useSessionsStore } from "../../stores/sessions";
+import { deleteWorkbenchSession } from "../../lib/orchestration-runtime";
+import { toast } from "../../stores/toast";
+import type { UiSession } from "../../lib/types";
+import { useInteractionsStore } from "../../stores/interactions";
+import { pendingCountsBySession } from "../../lib/notification-policy";
+import { groupSessionsForDashboard } from "../../lib/runs-dashboard";
 
-export function Sidebar(): JSX.Element {
-  const { t } = useI18n();
+import { SessionListPanel } from "../../features/sessions/SessionListPanel";
+import { AddProjectDialog } from "../../features/projects/AddProjectDialog";
+import { Dialog } from "../ui/Dialog";
+import { Button } from "../ui/Button";
+import { Input } from "../ui/Input";
+
+const rowClass = "sidebar-command flex h-9 w-full min-w-0 items-center gap-2.5 rounded-lg px-3 text-left text-[13px] text-ink transition-colors hover:bg-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50";
+
+/** One navigation surface: commands, projects, session history and settings. */
+export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean; onCollapse?: () => void }): JSX.Element {
+  const { t, locale } = useI18n();
+  const zh = locale === "zh-CN";
   const location = useLocation();
-  const hiddenNav = useSettingsStore((state) => state.hiddenNav);
-  const iconOverrides = useIconOverrides();
+  const reducedMotion = useUiReducedMotion();
+  const isNewConversation = location.pathname === "/sessions" && new URLSearchParams(location.search).get("new") === "1";
+  const activeSurface = <motion.span layoutId="workspace-nav-active" className="nav-active-surface" aria-hidden
+    transition={{ duration: reducedMotion ? 0 : 0.18, ease: UI_EASE_OUT }} />;
+  const navigate = useNavigate();
+  const routeRef = useRef(location.pathname + location.search);
+  routeRef.current = location.pathname + location.search;
+  const projects = useProjectsStore((state) => state.projects);
+  const sessions = useSessionsStore((state) => state.sessions);
+  const foreground = useSessionsStore(state => state.foreground);
+  const running = useSessionsStore(state => state.running);
+  const interactions = useInteractionsStore(state => state.bySession);
+  const attentionCount = useMemo(() => {
+    const groups = groupSessionsForDashboard({ sessions, foreground, running, pending: pendingCountsBySession(interactions) });
+    return groups.waiting.length + groups.running.length;
+  }, [sessions, foreground, running, interactions]);
+  const activeSessionId = useSessionsStore((state) => state.activeSessionId);
+  const setActiveSession = useSessionsStore((state) => state.setActiveSession);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [searchLimit, setSearchLimit] = useState(60);
+  const [addProjectOpen, setAddProjectOpen] = useState(false);
+  const [deletingSession, setDeletingSession] = useState<UiSession>();
+  const [deleting, setDeleting] = useState(false);
+  const searchTrigger = useRef<HTMLButtonElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchResults = useRef<HTMLDivElement>(null);
 
-  const entries = NAV_ENTRIES.filter((entry) => !hiddenNav.includes(entry.key));
-  const primary = entries.filter((entry) => entry.key !== "settings");
-  const settingsEntry = entries.find((entry) => entry.key === "settings");
+  const newConversation = useCallback((projectId?: string) => {
+    setActiveSession(undefined);
+    navigate(`/sessions?new=1${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`);
+  }, [navigate, setActiveSession]);
 
-  const renderLink = (entry: (typeof NAV_ENTRIES)[number]): JSX.Element => {
-    const Icon = iconOverrides?.[entry.key] ?? entry.icon;
-    const label = t(`nav.${entry.key}` as MessageKey);
-    const active =
-      location.pathname === entry.path || location.pathname.startsWith(`${entry.path}/`);
-    return (
-      <li key={entry.key}>
-        <Tooltip content={label} side="right">
-          <NavLink
-            to={entry.path}
-            aria-label={label}
-            aria-current={active ? "page" : undefined}
-            data-nav={entry.key}
-            className={cn(
-              "group relative grid h-10 w-10 place-items-center rounded-xl outline-none transition-[background-color,color,box-shadow,transform] duration-200",
-              "focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:ring-offset-2 focus-visible:ring-offset-panel",
-              active
-                ? "bg-card text-accent shadow-[0_1px_2px_rgba(21,26,35,0.06),0_8px_24px_-14px_rgba(101,83,240,0.72),inset_0_0_0_1px_var(--line)]"
-                : "text-ink-3 hover:-translate-y-px hover:bg-card/75 hover:text-ink hover:shadow-[inset_0_0_0_1px_var(--line)]"
-            )}
-          >
-            {active && (
-              <motion.span
-                layoutId="nav-active-rail"
-        transition={{ type: "spring", stiffness: 460, damping: 43 }}
-                className="absolute -left-2 h-5 w-0.5 rounded-r-full bg-accent shadow-[0_0_10px_var(--accent)]"
-                aria-hidden
-              />
-            )}
-            <Icon
-              className={cn(
-                "relative z-10 h-[18px] w-[18px] transition-transform duration-200",
-                active ? "scale-105 text-accent" : "[@media(hover:hover)]:group-hover:scale-105"
-              )}
-              aria-hidden
-            />
-            <span className="sr-only">{label}</span>
-          </NavLink>
-        </Tooltip>
-      </li>
-    );
+  const selectSession = (id: string): void => {
+    const session = sessions.find((item) => item.id === id);
+    if (!session) return;
+    setActiveSession(id);
+    setSearchOpen(false);
+    setQuery("");
+    navigate(sessionLocation(session));
+    requestAnimationFrame(() => document.getElementById("main-content")?.focus());
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable=true], [role=dialog]")) return;
+      if (event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+      } else if (event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        newConversation();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [newConversation]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const frame = requestAnimationFrame(() => searchInput.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [searchOpen]);
+
+  const closeSearch = (open: boolean): void => {
+    setSearchOpen(open);
+    if (!open) {
+      setQuery("");
+      setSearchLimit(60);
+      requestAnimationFrame(() => {
+        if (collapsed) document.getElementById("sidebar-expand")?.focus();
+        else searchTrigger.current?.focus();
+      });
+    }
+  };
+
+  const deferredQuery = useDeferredValue(query);
+  const results = useMemo(() => searchSidebarSessions(sessions, projects, deferredQuery), [deferredQuery, sessions, projects]);
+  const projectNames = useMemo(() => new Map(projects.map((project) => [project.id, project.name])), [projects]);
+  const projectResults = useMemo(() => {
+    const needle = deferredQuery.trim().toLocaleLowerCase();
+    return projects.filter((project) => !needle || project.name.toLocaleLowerCase().includes(needle));
+  }, [deferredQuery, projects]);
+  const openProject = (id: string): void => {
+    setSearchOpen(false);
+    setQuery("");
+    navigate(`/projects/${encodeURIComponent(id)}`);
+    requestAnimationFrame(() => document.getElementById("main-content")?.focus());
+  };
+
+  const removeSession = async (): Promise<void> => {
+    if (!deletingSession) return;
+    const routeAtDelete = routeRef.current;
+    setDeleting(true);
+    try {
+      await deleteWorkbenchSession(deletingSession.id);
+      const current = useSessionsStore.getState();
+      if (activeSessionId && !current.sessions.some((session) => session.id === activeSessionId)
+        && routeRef.current === routeAtDelete) newConversation();
+      setDeletingSession(undefined);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
-    <nav
-      aria-label={t("nav.section")}
-      className="sidebar-rail relative z-20 flex w-[64px] shrink-0 flex-col border-r border-line/80 bg-panel/90 backdrop-blur-2xl"
-    >
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3.5">
-        <ul className="flex flex-col items-center gap-1.5">{primary.map(renderLink)}</ul>
-      </div>
-      {settingsEntry && (
-        <div className="relative px-3 pt-3 pb-3.5 before:absolute before:top-0 before:right-3 before:left-3 before:h-px before:bg-line/80">
-          <ul className="flex justify-center">{[settingsEntry].map(renderLink)}</ul>
+    <>
+      <nav id="workspace-sidebar" aria-label={t("nav.section")} hidden={collapsed}
+        className={cn("sidebar-rail relative z-20 min-w-0 shrink-0 flex-col border-r border-line/70 bg-panel", collapsed ? "hidden" : "flex w-[232px] max-[1100px]:w-[208px] max-[760px]:w-[184px]")}>
+        <div className="sidebar-brand-row">
+          <div className="sidebar-wordmark"><NautiloMark /><div><strong>Nautilo</strong><span>{zh ? "本地 Agent 工作台" : "Local agent workspace"}</span></div></div>
+          {onCollapse && <button id="sidebar-collapse" type="button" onClick={onCollapse} aria-label={zh ? "收起侧栏" : "Collapse sidebar"} title={zh ? "收起侧栏" : "Collapse sidebar"} aria-expanded="true" aria-controls="workspace-sidebar"
+            className="rounded-md p-1.5 text-ink-2 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"><PanelLeftClose className="h-4 w-4" aria-hidden /></button>}
         </div>
-      )}
-    </nav>
+        <div className="sidebar-primary-nav">
+          <NavLink to="/assistant" className={({isActive}) => cn(rowClass, isActive && "bg-card-hover font-medium")}>
+            {location.pathname === "/assistant" && activeSurface}
+            <Orbit className="h-4 w-4 shrink-0" aria-hidden />{zh ? "助手" : "Assistant"}
+          </NavLink>
+          <button className={rowClass} aria-current={isNewConversation ? "page" : undefined} onClick={() => newConversation()} data-tour="sessions-new" title={zh ? "新会话 · Ctrl/⌘ N" : "New chat · Ctrl/⌘ N"}>
+            {isNewConversation && activeSurface}
+            <Plus className="h-4 w-4 shrink-0" aria-hidden />{zh ? "新建任务" : "New task"}
+          </button>
+          <button ref={searchTrigger} className={rowClass} onClick={() => setSearchOpen(true)} title={zh ? "搜索 · Ctrl/⌘ K" : "Search · Ctrl/⌘ K"}>
+            <Search className="h-4 w-4 shrink-0" aria-hidden />{zh ? "搜索" : "Search"}
+          </button>
+        </div>
+        <div className="sidebar-feature-nav">
+          <NavLink to="/settings?section=agents" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Boxes size={16} />{zh ? "Harness 管理" : "Harnesses"}</NavLink>
+          <NavLink to="/settings?section=skills" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Puzzle size={16} />{zh ? "技能与连接器" : "Skills & connectors"}</NavLink>
+          <NavLink to="/runs" className={rowClass}>
+            {location.pathname === "/runs" && activeSurface}
+            <BarChart3 size={16} aria-hidden/>{t("runsPage.title")}{attentionCount > 0 && <span className="sidebar-run-count">{attentionCount}</span>}
+          </NavLink>
+        </div>
+        <div className="sidebar-project-history" data-nav="sessions">
+          <div className="sidebar-section-heading"><span>{zh ? "项目与任务" : "Projects & tasks"}</span><button onClick={() => setAddProjectOpen(true)} aria-label={t("projects.addTitle")}><Plus size={15} /></button></div>
+          <SessionListPanel embedded activeSessionId={location.pathname === "/assistant" || new URLSearchParams(location.search).get("new") === "1" ? undefined : activeSessionId} onSelect={selectSession} onNew={newConversation} onDelete={setDeletingSession} />
+        </div>
+        <div className="mx-3 mt-2 border-t border-line/60 py-3">
+          <NavLink to="/settings" state={{ returnTo: location.pathname + location.search }} data-nav="settings" className={rowClass}><Settings className="h-4 w-4 shrink-0" aria-hidden />{t("nav.settings")}</NavLink>
+        </div>
+      </nav>
+      <Dialog open={searchOpen} onOpenChange={closeSearch} title={zh ? "搜索" : "Search"} widthClass="max-w-[660px]" footer={<p className="mr-auto text-xs text-ink-3">{zh ? "↑ ↓ 选择　 Enter 打开　 Esc 关闭" : "↑ ↓ Select　 Enter Open　 Esc Close"}</p>}>
+        <Input ref={searchInput} autoFocus value={query} onChange={(event) => { setQuery(event.target.value); setSearchLimit(60); }} placeholder={zh ? "搜索标题或项目" : "Search titles or projects"} aria-label={zh ? "搜索标题或项目" : "Search titles or projects"} onKeyDown={(event) => {
+          if (event.key === "ArrowDown") { event.preventDefault(); searchResults.current?.querySelector<HTMLButtonElement>("button")?.focus(); }
+          if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+            // A deferred search may still paint the previous query for one frame.
+            const firstSession = searchSidebarSessions(sessions, projects, query)[0];
+            const firstProject = projects.find((project) => project.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+            if (firstSession) selectSession(firstSession.id);
+            else if (firstProject) openProject(firstProject.id);
+          }
+        }} />
+        <div ref={searchResults} className="mt-3 max-h-[45vh] space-y-1 overflow-y-auto" onKeyDown={(event) => {
+          const buttons = Array.from(searchResults.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          if (event.key === "ArrowDown") { event.preventDefault(); buttons[Math.min(index + 1, buttons.length - 1)]?.focus(); }
+          if (event.key === "ArrowUp") { event.preventDefault(); if (index <= 0) searchInput.current?.focus(); else buttons[index - 1]?.focus(); }
+        }}>
+          {results.length > 0 && <p className="px-3 pb-2 text-xs text-ink-3">{zh ? "会话" : "Chats"}</p>}
+          {results.slice(0, searchLimit).map((session) => <button key={session.id} className={cn(rowClass, "h-auto min-h-14 items-start py-2.5")} onClick={() => selectSession(session.id)}><FileText className="mt-0.5 h-4 w-4 shrink-0 text-ink-2" aria-hidden /><span className="min-w-0"><span className="block truncate">{session.title}</span><span className="mt-1 block truncate text-xs text-ink-3">{projectNames.get(session.projectId) ?? (zh ? "未分组" : "Ungrouped")}</span></span></button>)}
+          {results.length > searchLimit && <button className={cn(rowClass, "text-ink-3")} onClick={() => setSearchLimit((limit) => limit + 60)}>{zh ? "显示更多结果" : "Show more results"}</button>}
+          {projectResults.length > 0 && <><p className="mt-3 border-t border-line px-3 pt-4 pb-2 text-xs text-ink-3">{zh ? "项目" : "Projects"}</p>{projectResults.slice(0, searchLimit).map((project) => <button key={project.id} onClick={() => openProject(project.id)} className={rowClass}><Folder className="h-4 w-4 shrink-0 text-ink-2" aria-hidden /><span className="truncate">{project.name}</span></button>)}{projectResults.length > searchLimit && <button className={cn(rowClass, "text-ink-3")} onClick={() => setSearchLimit((limit) => limit + 60)}>{zh ? "显示更多项目" : "Show more projects"}</button>}</>}
+          {!results.length && !projectResults.length && <p className="py-8 text-center text-sm text-ink-3">{zh ? "没有找到结果" : "No results found"}</p>}
+
+        </div>
+      </Dialog>
+      <AddProjectDialog open={addProjectOpen} onOpenChange={setAddProjectOpen} />
+      <Dialog open={Boolean(deletingSession)} onOpenChange={(open) => { if (!open && !deleting) setDeletingSession(undefined); }} title={t("sessions.deleteTitle")} description={t("sessions.deleteDesc", { name: deletingSession?.title || t("sessions.header.untitled") })} footer={<><Button variant="outline" disabled={deleting} onClick={() => setDeletingSession(undefined)}>{t("common.cancel")}</Button><Button variant="danger" disabled={deleting} onClick={() => void removeSession()}>{deleting ? t("sessions.deleting") : t("sessions.delete")}</Button></>}>
+        <p className="text-sm text-ink-2">{t("sessions.deleteHint")}</p>
+      </Dialog>
+    </>
   );
 }

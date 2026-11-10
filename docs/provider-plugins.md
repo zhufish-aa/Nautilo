@@ -1,5 +1,33 @@
 # Provider 插件开发指南
 
+当前桌面主线为 **Electron + React + Rust core**。新增 harness 使用 `rust/plugin-sdk` 的 `ProviderPlugin` 契约，参考 `rust/plugins/opencode`、`pi`、`omp`、`commandcode`、`trae`、`deepseek`。下文的 TypeScript 模板和 Node 加载说明保留给旧入口，不能用它们推断 Rust 原生插件已经完成某项能力。
+
+现有内置 Codex、Claude Code、Kimi Code 保持内置接入，不进行插件化迁移。插件式 harness 的协议、启动参数、账号资源合并、能力声明及新增功能均由各自插件维护；主程序只处理统一接口、事件归属、持久化和界面展示。
+
+## Rust 原生插件的完整能力契约
+
+接入新 harness 不需要向主程序或公共 SDK 增加 provider 名称判断。`capabilities.nativeExperience` 在插件中提供默认能力和基于实例 JSON pointer 的可选变体，主程序只解释声明。未提供证据的能力使用 `unknown`，不能由“支持续聊”推断“支持历史同步”或“支持后台子会话”。各插件的声明位于自己的 `src/native_experience.rs`。
+
+| 能力 | 插件负责实现 | 主程序负责 |
+|---|---|---|
+| 单轮、续聊、引导、取消 | `start`、`steer`、`cancel`；保留真正的原生会话 ID | 输入、调度、统一事件与结果 |
+| 常驻与后台子会话 | 持有原生协议进程；通过 `session_sink`、`SessionDaemonChannel` 保留来源；请求结束后再释放绑定 | 按来源轮次保存事件，显示子会话和交互 |
+| 交互 | `DaemonChannel` 的问题/工具请求；等待用户回答；原生撤销时结束等待 | 展示统一交互并路由回应 |
+| 原生终端 | `terminal_plan`、`release_session`、`close_terminal`；需要共享 server 时声明 `sharedTerminalServer` | PTY、输出、窗口挂接和终端生命周期 |
+| 原生消息同步 | `read_session_history`；声明 `nativeHistory` 且 `session.history = native` | 运行中轮询、原生 ID 去重、事务导入、刷新聊天 |
+| 交接后的事件恢复 | `resume_terminal_events`；仅在终端退出后将交互归还宿主 | 完成回读后允许聊天继续 |
+| 安全释放 | 核实子会话、交互、后台任务及终端租约，再实现 `release_session` / `dispose` | 等待退出和输出尾部，保留失败的待同步记录 |
+
+`read_session_history` 返回 `history::validate` 认可的 v1 快照，包含真实原生 `providerSessionId`、消息/活动 ID、父消息 ID、轮次 ID、文本/附件、完成标记及可选 `turnStatus`。原生格式没有事件 ID 时，可使用其持久化记录的稳定文件位置；不能用文本相同、屏幕终端转义文本或猜测最近会话来确定身份。读取期间不得启动新轮次、恢复写会话、切换账号或中断正在使用的原生 CLI。
+
+快照可以是运行中的前缀：`settled = false` 不会阻止已持久化的用户消息和部分回答进入界面。完成、取消、失败分别保留原生状态。`request.nativeTerminalLive` 是宿主观测到的 PTY 状态，只供历史读取参考；插件不能将它转成 CLI 启动选项。对仅落盘读取的插件，宿主确认终端退出后，缺少完成标记的输出应保留为未完成，而不是永远等待或假报成功。
+
+历史可读与前台事件 ID 稳定是两项独立声明。只有前台输出使用真正的原生消息 ID、且跨轮和进程恢复仍保持唯一时，插件才能声明 `nativeEventIdentities: true`。仅有历史读取的插件仍可同步终端消息，但宿主不会用可能复用的 `message-1` 等流式编号覆盖其他轮次的消息。
+
+通用 JSONL 读取和限定目录查找在 `rust/plugin-sdk/src/history_files.rs`；格式、目录、树分支、角色、工具与原生状态解析仍在插件自己的 `history.rs`。目前 OpenCode、Pi、OMP、Command Code 分别提供对应实现。Trae 尚未声明原生终端/历史读取能力；DeepSeek 原生 Web 交接按用户要求排除。这些缺口不能因为统一接口已经具备就标成已实现。
+
+新插件至少需要使用离线协议夹具检查：同文不同 ID 不被合并；跨轮子会话不会串入其他轮次；问题可回答和撤销；取消不会结束其他会话；终端运行时可回读；重试不重复导入；退出后尾部输出和资源完成回收。真实安装版本的验证应单独记录，不能把离线格式检查称为所有版本兼容。
+
 Nautilo 的 Provider（agent CLI 接入层）是插件式的。内置的 codex / kimi-code / claude-code / custom 四个 Provider 与第三方插件走**同一套契约**：`@agenthub/provider-sdk` 定义的 `AgentCliAdapter` 接口 + `ProviderDescriptor` 元数据。OpenCode 和 Trae 不内置，分别由 `packages/provider-plugin-opencode/`、`packages/provider-plugin-trae/` 插件提供——它们是本指南之外最好的参考实现。
 
 本文档基于以下源码整理，引用类型时以这些文件为准：
@@ -131,6 +159,8 @@ Descriptor 是 Provider 的"展示 + 集成"元数据：**渲染端的 CLI 检�
 | `credentialEnv` | string[] | 否 | 用户在 UI 保存的 API Key 注入为哪些环境变量。**每个列出的变量都会注入同一把 key**（例如 Codex 同时需要 `OPENAI_API_KEY` 和 `CODEX_API_KEY`） |
 | `envPassthrough` | string[] | 否 | 允许从 shell 环境透传给探测/运行进程的变量名 |
 | `baseUrlEnv` | string | 否 | 实例配置的 `baseUrl` 写入哪个环境变量 |
+| `nativeApiProtocol` | `"responses"` / `"anthropic"` | 否 | CLI 只接受一种原生协议时，声明所需协议，宿主为所选连接提供转换桥 |
+| `connectionProtocolDiscovery` | boolean | 否 | 原生插件需要按已安装 CLI 版本选择协议时，启用 `connectionProtocol` 调用 |
 | `permissionModes` | array | 否 | CLI 原生权限模式（见下）；不配则 UI 不显示模式选择器 |
 | `configProfile` | boolean | 否 | CLI 支持命名配置档案（如 `codex --profile`）时开启；否则实例编辑器隐藏 profile 字段 |
 | `modelSuggestions` | string[] | 否 | 模型发现完成前，在模型选择器里展示的静态建议 |
@@ -214,6 +244,30 @@ interface AdapterDetectionResult {
 ### start(request) / resume(request)
 
 启动一次运行，返回 `AdapterRun`。**同步返回**，事件通过 `events` 异步流持续产出。
+
+### 独立 API 连接与插件配置
+
+API 连接不使用 Harness 名称白名单。用户选定供应商后，宿主按会话固定的连接版本提供运行配置；插件负责把它转换为自己 CLI 的原生配置。新增 Provider 插件无需修改前端兼容列表或核心的 CLI 判断分支。
+
+插件在 `start` / `resume` 中收到：
+
+| 位置 | 内容 |
+|---|---|
+| `instance.providerOptions.runtimeConnectionId` / `runtimeConnectionRevision` | 本次运行绑定的连接及不可变版本 |
+| `instance.providerOptions.runtimeConnectionName` | 供应商显示名称 |
+| `instance.providerOptions.baseUrl` / `apiType` | 所选端点和 `openai-completions`、`openai-responses` 或 `anthropic-messages` |
+| `instance.models` | 该版本中保存的模型；聊天只允许选其中已启用的项 |
+| `request.model` / `reasoningEffort` | 实际选择的上游模型 ID 与推理档位 |
+| `request.env.NAUTILO_CONNECTION_API_KEY` | 仅在运行环境中传递的所选连接密钥 |
+| `request.env.NAUTILO_CONNECTION_DIRECTORY` | 此连接版本的专用配置目录 |
+
+宿主同时按插件的 `credentialEnv` 和 `baseUrlEnv` 注入密钥与端点。配置文件应使用环境变量引用，不能把明文密钥写入文件或参数；不要再次合并 `process.env`，否则会重新引入其他账号的认证。CLI 不能读取配置文件时，应由插件使用其原生参数或环境变量入口。需要转换协议时，CLI 收到的是本机转换端点及临时凭据，真实密钥只用于用户选定的上游。
+
+TS 适配器可实现可选的 `connectionProtocol(request)`，返回 `"responses"` 或 `"anthropic"`。Rust 插件实现 SDK 的 `connection_protocol`，并在 descriptor 声明 `connectionProtocolDiscovery: true`；宿主只在插件声明后调用，旧插件继续使用原契约。协议选择和 CLI 版本识别属于插件，不能据此在核心增加 Harness 名称白名单。
+
+原生 CLI 的登录前置条件需要在执行失败时如实呈现。例如部分旧版 Kimi ACP 只接受登录身份，API 连接使用其原生提示词模式；部分 Trae 企业版即使加载了自定义模型配置，执行时仍要求 Trae 登录。插件须报告具体原因，不能把这些错误改成空回复，也不能自动借用其他账号或悄悄换成另一个 CLI。
+
+本地端到端验证可运行 `apps/desktop/test/native-connection-smoke.mjs`。它启动隔离的 Rust daemon、真实 CLI 和本机 API 测试端点，检查保存连接、模型选择、凭据传递及回复入库；不使用用户数据、真实 API 密钥或计费请求。设置 `NAUTILO_NATIVE_CORE`、`NAUTILO_NATIVE_PLUGINS` 指向构建产物，`NAUTILO_NATIVE_PROTOCOL` 可选 `chat` / `responses` / `anthropic`。
 
 `AdapterStartRequest` 关键字段：
 
@@ -376,6 +430,15 @@ CLI 支持在一轮运行中追加输入时，实现 `AdapterRun.steer(input)`�
 
 上架 = 向 [registry 仓库](https://github.com/zhufish-aa/nautilo-provider-registry)提 PR：官方插件把 `.tgz` 放进 PR 的 `packages/` 目录（raw URL 直接可下载），第三方插件把 tar 球托管在自己仓库的 Release 里；条目需带 `sha256`（缺失会跳过校验，不建议）。详细流程和自检清单见 registry 仓库的 README 与 PR 模板。
 
+## 管理 Harness 的原生插件
+
+支持原生扩展的 Harness 可以在自己的 Nautilo 插件中声明 `descriptor.harnessPlugins: true`，并实现 TypeScript 的 `harnessPlugins(instance, context, operation)` 或 Rust 的 `ProviderPlugin::harness_plugins`。宿主会在该 Harness 的配置页显示「原生插件」。其他 Harness 可以省略这项能力。
+
+- `list` 读取当前配置的清单，返回 `{ items, installBySpec? }`。每项提供稳定的 `id`、名称、安装状态和当前允许的 `actions`。受保护的条目返回空操作列表。
+- 列表操作通过 `{ action, id }` 发送，支持的动作有 `install`、`remove`、`enable` 和 `disable`。支持按包名或来源安装的插件还可以接收 `{ action: "install", spec }`。实现应调用 Harness 的原生管理接口并检查操作是否仍然有效。
+- 宿主传入用户配置的可执行文件和所选账号的环境。管理进程须使用此环境。修改成功返回 `{ application }`，取值为 `applied`、`restart-required` 或 `overridden`。操作失败时向宿主返回原生错误。
+- 给内置 Harness 添加管理能力时，可提供独立的 Nautilo 插件，ID 为 `<providerId>-plugins`，在 descriptor 中声明 `pluginManagerFor` 指向该 Harness。Codex 使用这种方式，DeepSeek 的实现直接在其现有 Harness 插件中。
+
 ## 调试与常见问题
 
 **插件显示「加载失败」？**
@@ -394,6 +457,18 @@ CLI 支持在一轮运行中追加输入时，实现 `AdapterRun.steer(input)`�
 
 **resume 不生效？**
 确认三点：`start` 时发出过 `session` 事件上报 `providerSessionId`；`supportsResume` 和 `capabilities.nativeResume` 都为 true；`resume()` 里真正使用了 `request.providerSessionId`。
+
+原生插件的请求还包含稳定的 `localSessionId`。会话目录必须按这个标识隔离，不能按每轮新建的 run id 隔离，也不能使用全局“最近一个会话”。需要续聊的运行不要传 `--no-session`。
+
+当插件更改原生上下文的保存方式时，可在 descriptor 声明 `nativeContextVersion`。宿主会比较会话中保存的版本；旧版本首次续聊时重建已保存的聊天上下文，之后使用新原生会话恢复。没有原生 resume 能力的适配器每轮都需要恢复聊天上下文。
+
+**CLI 的 JSON 输出不包含推理，或只在结束时返回文本？**
+
+插件可声明 `observeApiOutput: true`。宿主在 API 连接中读取所选协议的实时输出，保留原生 CLI 的工具循环，并将原生终态文本去重。这个观察层保持 Chat / Responses / Messages 原协议；协议转换仅用于 CLI 原生协议和连接协议不同时。没有返回推理的上游不会被补造推理内容。
+
+**Windows 上 Node CLI 在退出阶段触发 `UV_HANDLE_CLOSING`？**
+
+本地验证中 Node 24.15 下的 Pi / Command Code 推理请求出现了此问题；独立 Node 22 LTS 运行时通过了相同的流式与多轮验证。可通过绝对路径环境变量 `AGENTHUB_NODE_PATH` 选择运行时。Electron 与 Tauri 都会将所选运行时目录传入 daemon 的 PATH，使 npm CLI 使用同一运行时；不需要更换全局 Node。
 
 **如何本地迭代？**
 改代码 → `pnpm --filter <你的包> build` → 应用内重新从本地目录安装（会覆盖 `~/.agenthub/plugins/<id>/` 并热重载，无需重启应用）。

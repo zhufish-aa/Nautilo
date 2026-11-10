@@ -1,19 +1,20 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import type { SlashCommandDefinition } from "@agenthub/domain";
-import { ArrowUp, FileText, ListPlus, Loader2, Paperclip, SendHorizontal, Square, X } from "lucide-react";
+import { ArrowUp, FileText, Loader2, Plus, SendHorizontal, Square, X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { sendWorkbenchFollowUp, sendWorkbenchMessage, stopWorkbenchRun } from "../../lib/orchestration-runtime";
 import { getBridge } from "../../lib/bridge";
+import { connectionSendError } from "../../lib/session-connections";
 import { artifactUrlForPath } from "../timeline/media-actions";
 import type { DesktopAttachment } from "../../types/bridge";
+import { deliverComposerSubmission, EMPTY_COMPOSER_DRAFT, useComposerDraftsStore, type ComposerSubmission } from "../../stores/composer-drafts";
 import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
-import { useIconOverrides } from "../../lib/use-icon-overrides";
 import { filterSnippets, snippetQuery } from "../../lib/snippets";
 import { toast } from "../../stores/toast";
-import { PlanModeToggle } from "./PlanModeToggle";
+import { SessionPermissionControl } from "./PermissionModeSelect";
 import { SessionModelControl } from "./SessionModelControl";
 import { ContextUsageIndicator, useContextUsage } from "./ContextUsageIndicator";
 import { CommandResultDialog } from "./slash-commands/CommandResultDialog";
@@ -21,27 +22,46 @@ import { SlashCommandMenu } from "./slash-commands/SlashCommandMenu";
 import { SnippetMenu } from "./slash-commands/SnippetMenu";
 import { filterSlashCommands, parseSlashCommand, slashCommandQuery } from "./slash-commands/slash-command-utils";
 import { useSlashCommands } from "./slash-commands/useSlashCommands";
+import { QueuedFollowUpBar } from "./QueuedFollowUpBar";
+import { SessionHarnessModeControl } from "./HarnessModeControl";
 
-const EMPTY_LIST: never[] = [];
 
 /** Chat composer plus per-session model/effort controls, matching the Codex interaction model. */
 export function Composer({
   sessionId,
   targetName,
   running,
-  disabled
+  disabled,
+  submissionDisabledReason,
+  onCreateSession,
+  starterControls,
+  trailingControls,
+  draftId
 }: {
   sessionId?: string;
   targetName?: string;
   running: boolean;
   disabled?: boolean;
+  /** Configuration can block sending while the user continues writing a draft. */
+  submissionDisabledReason?: string;
+  /** The landing creates a real session only when its first message is sent. */
+  onCreateSession?: (text: string) => string | undefined;
+  starterControls?: ReactNode;
+  trailingControls?: ReactNode;
+  /** Distinguishes independent new Code and Work drafts. */
+  draftId?: string;
 }): JSX.Element {
-  const { t } = useI18n();
-  const iconOverrides = useIconOverrides();
-  const QueueIcon = iconOverrides?.["composer.queue"] ?? ListPlus;
-  const SteerIcon = iconOverrides?.["composer.steer"] ?? SendHorizontal;
-  const [value, setValue] = useState("");
-  const [attachments, setAttachments] = useState<DesktopAttachment[]>([]);
+  const { t, locale } = useI18n();
+  const draftKey = sessionId ?? draftId ?? "new";
+  const draft = useComposerDraftsStore((state) => state.drafts[draftKey] ?? EMPTY_COMPOSER_DRAFT);
+  const value = draft.text;
+  const attachments = draft.attachments;
+  const updateText = useComposerDraftsStore((state) => state.setText);
+  const updateAttachments = useComposerDraftsStore((state) => state.setAttachments);
+  const submitting = useComposerDraftsStore((state) => !!state.pending[draftKey]);
+  const failedSubmissions = useComposerDraftsStore((state) => state.failed[draftKey]);
+  const setValue = (text: string): void => updateText(draftKey, text);
+  const setAttachments = (next: DesktopAttachment[] | ((current: DesktopAttachment[]) => DesktopAttachment[])): void => updateAttachments(draftKey, next);
   const [importing, setImporting] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string>();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -92,12 +112,8 @@ export function Composer({
     [compactCommand, slash.execute, sessionId, t]
   );
 
-  const queuedCount = useSessionsStore((state) => (sessionId ? state.queuedFollowUps[sessionId]?.length ?? 0 : 0));
-
   useEffect(() => setActiveCommandIndex(0), [commandQuery, snippetQ, sessionId]);
   useEffect(() => {
-    setValue("");
-    setAttachments([]);
     setAttachmentError(undefined);
   }, [sessionId]);
   useEffect(() => {
@@ -108,8 +124,9 @@ export function Composer({
   }, [editingMessage]);
   // Queued follow-ups live in the sessions store (daemon queue + events).
 
-  const canSend = !!sessionId && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled;
-  const canFollowUp = !!sessionId && running && !importing && !disabled && !editingMessage && attachments.length === 0 && value.trim().length > 0;
+  const canCompose = !!sessionId || !!onCreateSession;
+  const canSend = canCompose && !submitting && !running && !importing && (value.trim().length > 0 || attachments.length > 0) && !disabled && !submissionDisabledReason;
+  const canFollowUp = !!sessionId && !submitting && running && !importing && !disabled && !editingMessage && attachments.length === 0 && value.trim().length > 0;
 
   const appendAttachments = (next: DesktopAttachment[]): void => {
     setAttachments((current) => {
@@ -122,10 +139,13 @@ export function Composer({
   const pickFiles = async (): Promise<void> => {
     const bridge = getBridge();
     if (!bridge) return;
+    setImporting(true);
     try {
       appendAttachments(await bridge.dialog.pickFiles());
     } catch (error) {
       setAttachmentError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImporting(false);
     }
   };
   const importClipboardFiles = async (files: File[]): Promise<void> => {
@@ -170,30 +190,46 @@ export function Composer({
     }
     return false;
   };
+  const dispatchSubmission = (kind: ComposerSubmission["kind"], retryToken?: number): void => {
+    if (disabled || submissionDisabledReason) return;
+    const store = useComposerDraftsStore.getState();
+    let submission = store.begin(draftKey, kind, editingMessage?.messageId, retryToken);
+    if (!submission) return; // Atomic across double-clicks and mounted composers.
+    if (retryToken !== undefined && submission.kind !== "message" && !running) submission = { ...submission, kind: "message" };
+    try {
+      const destinationId = sessionId ?? onCreateSession?.(submission.draft.text.trim());
+      if (!destinationId) throw new Error(locale === "zh-CN" ? "未能创建会话，内容已保留" : "Could not create the conversation. Your draft is retained.");
+      submission = store.move(submission, destinationId);
+      const sent = submission;
+      void deliverComposerSubmission(sent, async () => {
+        const text = sent.draft.text.trim() || t("sessions.composer.attachmentPrompt");
+        if (sent.kind === "message") {
+          await sendWorkbenchMessage(destinationId, text, sent.draft.attachments, sent.editMessageId);
+          // Do not cancel a different edit the user began while awaiting IPC.
+          const currentEdit = useSessionsStore.getState().editingMessage;
+          if (sent.editMessageId && currentEdit?.sessionId === destinationId && currentEdit.messageId === sent.editMessageId && useComposerDraftsStore.getState().drafts[destinationId] === sent.draft) cancelEditingMessage();
+        } else {
+          const appliedMode = await sendWorkbenchFollowUp(destinationId, text, sent.kind);
+          if (!appliedMode) throw new Error(locale === "zh-CN" ? "追加消息未被接受，内容已保留" : "Follow-up was not accepted. Your draft is retained.");
+          if (sent.kind === "steer" && appliedMode === "queue") toast.info(t("sessions.composer.steerDowngraded"));
+        }
+      });
+    } catch (error) {
+      store.finish(submission, error instanceof Error ? error.message : String(error));
+    }
+  };
   const submit = (): void => {
-    if (!sessionId) return;
-    if (tryRunSlashCommand()) return;
-    if (!canSend) return;
-    const text = value.trim() || t("sessions.composer.attachmentPrompt");
-    const edit = editingMessage;
-    setValue("");
-    setAttachments([]);
-    if (edit) cancelEditingMessage();
-    void sendWorkbenchMessage(sessionId, text, attachments, edit?.messageId);
+    if (submitting) return;
+    if (sessionId && tryRunSlashCommand()) return;
+    if (running) submitFollowUp("steer");
+    else if (canSend) dispatchSubmission("message");
   };
   const submitFollowUp = (mode: "steer" | "queue"): void => {
-    if (!sessionId || !canFollowUp) return;
-    const targetSessionId = sessionId;
-    const text = value.trim();
-    setValue("");
-    void sendWorkbenchFollowUp(targetSessionId, text, mode)
-      .then((appliedMode) => {
-        // Steer may have been downgraded to queue by the daemon (non-Codex CLIs).
-        if (mode === "steer" && appliedMode === "queue") toast.info(t("sessions.composer.steerDowngraded"));
-      })
-      .catch((error) => setAttachmentError(error instanceof Error ? error.message : String(error)));
+    if (sessionId && canFollowUp) dispatchSubmission(mode);
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    // Enter confirms IME composition before it may submit a message.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (snippetMenuOpen) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -246,11 +282,6 @@ export function Composer({
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (running) {
-        if (tryRunSlashCommand()) return;
-        submitFollowUp("steer");
-        return;
-      }
       submit();
     }
   };
@@ -261,13 +292,11 @@ export function Composer({
     void importClipboardFiles(files);
   };
   return (
-    <div className="composer shrink-0 border-t border-line/70 bg-panel/95 px-5 pb-4 pt-3 backdrop-blur-xl">
+    <div data-tour="sessions-composer" className={sessionId ? "composer shrink-0 bg-card px-4 pb-5 pt-3 sm:px-7" : "composer w-full shrink-0 bg-card"}>
+      {sessionId && <QueuedFollowUpBar sessionId={sessionId} disabled={disabled} />}
       <div
         className={cn(
-          "composer-box relative mx-auto w-full max-w-4xl rounded-2xl border bg-card transition-[border-color,box-shadow] duration-300",
-          running
-            ? "run-border border-accent/40 shadow-[0_18px_52px_-18px_var(--accent)]"
-            : "border-line-strong shadow-[0_12px_36px_-24px_rgba(15,23,42,0.42)] focus-within:border-accent/50 focus-within:shadow-[0_0_0_1px_var(--accent-soft),0_18px_48px_-20px_var(--accent)]"
+          "composer-box relative mx-auto w-full max-w-3xl rounded-2xl border border-line-strong bg-card shadow-[0_2px_10px_rgba(0,0,0,0.045)] transition-[border-color,box-shadow] duration-150 focus-within:border-ink-3/50 focus-within:shadow-[0_2px_14px_rgba(0,0,0,0.06)]"
         )}
       >
         <AnimatePresence>
@@ -331,7 +360,7 @@ export function Composer({
                   <p className="truncate text-xs font-medium text-ink-2">{attachment.name}</p>
                   <p className="mt-0.5 text-[10px] text-ink-3">{formatFileSize(attachment.sizeBytes)}</p>
                 </div>
-                <button type="button" onClick={() => setAttachments((current) => current.filter((item) => item.path !== attachment.path))} className="absolute right-1 top-1 rounded-full bg-card/90 p-1 text-ink-3 opacity-0 shadow-sm transition-opacity hover:text-danger group-hover:opacity-100" aria-label={t("sessions.composer.removeAttachment")}>
+                <button type="button" onClick={() => setAttachments((current) => current.filter((item) => item.path !== attachment.path))} className="absolute right-1 top-1 rounded-full bg-card/90 p-1 text-ink-3 opacity-60 shadow-sm transition-opacity hover:text-danger group-hover:opacity-100 focus-visible:opacity-100" aria-label={t("sessions.composer.removeAttachment")}>
                   <X className="h-3 w-3" aria-hidden />
                 </button>
               </div>
@@ -345,19 +374,24 @@ export function Composer({
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           rows={2}
-          disabled={!sessionId || disabled}
-          placeholder={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
+          disabled={!canCompose || disabled}
+          placeholder={locale === "zh-CN" ? "今天帮你做些什么？输入任务，或添加文件" : "What can I help with? Describe a task, or add files"}
           aria-label={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
-          className="block max-h-48 min-h-[58px] w-full resize-none rounded-t-2xl bg-transparent px-4 pb-1.5 pt-3.5 font-mono text-[13px] leading-6 text-ink outline-none placeholder:font-sans placeholder:text-sm placeholder:text-ink-3/65 disabled:opacity-50"
+          className="block max-h-48 min-h-[76px] w-full resize-none rounded-t-2xl bg-transparent px-4 pb-2 pt-4 text-[14px] leading-6 text-ink outline-none placeholder:text-ink-3/70 disabled:opacity-50"
         />
+        {failedSubmissions?.map((failedSubmission) => <div key={failedSubmission.submission.token} role="alert" className="flex flex-wrap items-center gap-2 px-4 pb-2 text-xs text-danger">
+          <span className="min-w-0 flex-1" title={failedSubmission.submission.draft.text}>{connectionSendError(failedSubmission.error, locale === "zh-CN")} · {failedSubmission.submission.draft.text.slice(0, 48) || (locale === "zh-CN" ? "附件" : "Attachments")}</span>
+          <button type="button" disabled={submitting || disabled || !!submissionDisabledReason || (failedSubmission.submission.kind === "message" && running)} onClick={() => dispatchSubmission(failedSubmission.submission.kind, failedSubmission.submission.token)} className="rounded px-2 py-1 text-ink-2 underline disabled:opacity-40">{failedSubmission.submission.kind !== "message" && !running ? (locale === "zh-CN" ? "作为新消息重试" : "Retry as new message") : (locale === "zh-CN" ? "重试未发送内容" : "Retry unsent content")}</button>
+        </div>)}
         {attachmentError && <p className="px-4 pb-1 text-[11px] text-danger">{attachmentError}</p>}
-        <div className="flex min-h-11 items-center gap-3 px-3 pb-2.5">
-          <button type="button" onClick={() => void pickFiles()} disabled={!sessionId || disabled || importing || running} className="composer-attach flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
-            {importing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Paperclip className="h-4 w-4" aria-hidden />}
+        <div className="composer-toolbar flex min-h-11 flex-wrap items-center gap-1.5 px-2.5 pb-2.5">
+          <button type="button" onClick={() => void pickFiles()} disabled={!canCompose || disabled || importing || running} className="composer-attach flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-card-hover hover:text-ink disabled:opacity-40" aria-label={t("sessions.composer.addAttachment")} title={t("sessions.composer.addAttachment")}>
+            {importing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-[18px] w-[18px]" aria-hidden />}
           </button>
-          <p className="min-w-0 flex-1 truncate px-1 text-[11px] text-ink-3">{running ? t("sessions.composer.runningHint") : t("sessions.composer.hint")}</p>
-          <PlanModeToggle sessionId={sessionId} disabled={running || disabled} />
-          <SessionModelControl sessionId={sessionId} disabled={running || disabled} />
+          {sessionId ? <SessionPermissionControl sessionId={sessionId} disabled={running || disabled} /> : starterControls}
+          {sessionId && <SessionHarnessModeControl sessionId={sessionId} disabled={running || disabled} />}
+          <span className="min-w-0 flex-1" />
+          {sessionId ? <SessionModelControl sessionId={sessionId} disabled={running || disabled} /> : trailingControls}
           <ContextUsageIndicator
             sessionId={sessionId}
             compactCommand={compactCommand}
@@ -365,55 +399,27 @@ export function Composer({
             compactDisabled={!sessionId || disabled || running || slash.loading}
             compactLoading={slash.loading}
           />
-          {running ? (
-            <>
-              <button
-                type="button"
-                onClick={() => submitFollowUp("queue")}
-                disabled={!canFollowUp}
-                aria-label={t("sessions.composer.queue")}
-                title={t("sessions.composer.queueTitle")}
-                className="composer-queue relative flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-line-strong bg-card px-3 text-xs font-medium text-ink-2 transition-colors hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <QueueIcon className="h-3.5 w-3.5" aria-hidden />
-                {t("sessions.composer.queue")}
-                {queuedCount > 0 && (
-                  <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-info px-1 text-[10px] font-semibold text-white">
-                    {queuedCount}
-                  </span>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => submitFollowUp("steer")}
-                disabled={!canFollowUp}
-                aria-label={t("sessions.composer.steer")}
-                title={t("sessions.composer.steerTitle")}
-                className="composer-steer flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 text-xs font-medium text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
-              >
-                <SteerIcon className="h-3.5 w-3.5 stroke-[2.4]" aria-hidden />
-                {t("sessions.composer.steer")}
-              </button>
-              <button
-                type="button"
-                onClick={() => sessionId && void stopWorkbenchRun(sessionId)}
-                aria-label={t("sessions.composer.stop")}
-                title={t("sessions.composer.stop")}
-                className="composer-stop flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-danger/35 bg-danger/10 text-danger shadow-[0_0_18px_-6px_var(--danger)] transition-colors hover:bg-danger/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/35"
-              >
-                <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
-              </button>
-            </>
-          ) : (
+          {(!running || value.trim().length > 0 || attachments.length > 0 || submitting) && (
             <button
               type="button"
               onClick={submit}
-              disabled={!canSend}
-              aria-label={t("sessions.composer.send")}
-              title={t("sessions.composer.send")}
-              className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:-translate-y-0.5 hover:bg-ink-2 active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
+              disabled={running ? !canFollowUp : !canSend}
+              aria-label={t(running ? "sessions.composer.steer" : "sessions.composer.send")}
+              title={submissionDisabledReason ?? t(running ? "sessions.composer.runningHint" : "sessions.composer.send")}
+              className="composer-send flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-canvas shadow-sm transition-[transform,opacity,background-color] hover:bg-ink-2 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-30"
             >
-              <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden />
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : sessionId ? <ArrowUp className="h-4 w-4 stroke-[2.4]" aria-hidden /> : <SendHorizontal className="h-5 w-5" aria-hidden />}
+            </button>
+          )}
+          {running && (
+            <button
+              type="button"
+              onClick={() => sessionId && void stopWorkbenchRun(sessionId)}
+              aria-label={t("sessions.composer.stop")}
+              title={t("sessions.composer.stop")}
+              className="composer-stop flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-line-strong bg-ink text-canvas transition-colors hover:bg-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-3/50"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
             </button>
           )}
         </div>

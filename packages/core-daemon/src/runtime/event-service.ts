@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentRun, ProjectRunId, Session, TaskId } from "@agenthub/domain";
 import type { RuntimeEvent, RuntimeEventPayloadMap, RuntimeEventType } from "@agenthub/event-protocol";
+import {browserRunUpdate} from "@agenthub/event-protocol";
 import { Database } from "../database/index.js";
 import { RedactionService } from "./security/redaction-service.js";
 
@@ -46,19 +47,25 @@ export class EventService {
           const chunk = (event.payload as { text?: string }).text ?? "";
           (event.payload as { text: string }).text = prior.text + chunk;
         }
+        this.database.connection.raw.prepare("INSERT INTO read_projection_event_coalescing(session_id) VALUES(?)").run(session.id);
         this.database.connection.raw
           .prepare("DELETE FROM runtime_events WHERE session_id = ? AND COALESCE(run_id, '') = COALESCE(?, '') AND json_extract(data, '$.type') = ? AND json_extract(data, '$.payload.messageId') = ?")
           .run(session.id, event.runId ?? null, typeName, messageId);
-      } else if (typeName === "run.completed" || typeName === "run.failed") {
+      } else if (typeName === "run.completed" || typeName === "run.failed" || typeName === "run.cancelled") {
         this.database.connection.raw
-          .prepare("DELETE FROM runtime_events WHERE session_id = ? AND json_extract(data, '$.type') = 'agent.message_delta'")
-          .run(session.id);
+          .prepare("DELETE FROM runtime_events AS delta WHERE delta.session_id = ? AND COALESCE(delta.run_id, '') = COALESCE(?, '') AND json_extract(delta.data, '$.type') = 'agent.message_delta' AND EXISTS (SELECT 1 FROM runtime_events AS saved WHERE saved.session_id = delta.session_id AND COALESCE(saved.run_id, '') = COALESCE(delta.run_id, '') AND json_extract(saved.data, '$.type') = 'agent.message' AND json_extract(saved.data, '$.payload.providerMessageId') = json_extract(delta.data, '$.payload.messageId'))")
+          .run(session.id, event.runId ?? null);
       }
       this.database.events.append(event);
+      this.database.connection.raw.prepare("DELETE FROM read_projection_event_coalescing WHERE session_id = ?").run(session.id);
       this.database.connection.raw.exec("COMMIT");
     } catch (error) {
       try { this.database.connection.raw.exec("ROLLBACK"); } catch { /* nothing to roll back */ }
       throw error;
+    }
+    if(process.env.NAUTILO_BROWSER_STREAM === "1") {
+      const update=browserRunUpdate(event);
+      if(update)process.stdout.write(JSON.stringify({event:"browser.run",...update})+"\n");
     }
     for (const listener of this.listeners) listener(event);
     return event;

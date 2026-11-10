@@ -4,7 +4,17 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod runtime;
+mod history;
+#[cfg(test)]
+mod tests;
+
+mod native_experience;
+
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+use runtime::{Route, Runtime};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
@@ -26,6 +36,7 @@ fn descriptor() -> Value {
         "capabilities": ["headless_text", "provider_server"],
         "defaultExecutable": "opencode",
         "credentialEnv": ["OPENCODE_API_KEY"],
+        "envPassthrough": ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"],
         "permissionModes": [
             { "value": "build", "name": { "zh-CN": "执行模式", "en-US": "Build mode" },
               "description": { "zh-CN": "正常执行，可修改文件", "en-US": "Normal execution with file edits" } },
@@ -104,60 +115,17 @@ fn build_opencode_mcp_config(servers: Option<&Value>) -> Option<Value> {
     Some(json!({ "mcp": Value::Object(mcp) }))
 }
 
-/// Injects Nautilo-managed MCP servers by writing `.opencode/opencode.json`
-/// in `cwd` (merged over any existing file; opencode loads and deep-merges
-/// this project-scoped config on top of the global one). Returns the previous
-/// state for restoration: `(cwd, previous_content_or_none, written_content)`.
-fn write_opencode_mcp_config(cwd: &str, servers: Option<&Value>) -> Option<(String, Option<String>, Option<String>)> {
-    let config = build_opencode_mcp_config(servers)?;
-    if cwd.is_empty() {
-        return None;
+/// Add run-scoped MCP entries through OpenCode's native config overlay.
+/// Native global/project files and their unknown fields remain untouched.
+fn runtime_environment(request: &Value) -> anyhow::Result<HashMap<String, String>> {
+    let mut env = agenthub_plugin_sdk::connection::prepare_request(request, env_of(request))?;
+    if let Some(config) = build_opencode_mcp_config(request.get("mcpServers")) {
+        let mut merged: Value = env.get("OPENCODE_CONFIG_CONTENT")
+            .map(|text| serde_json::from_str(text)).transpose()?.unwrap_or_else(||json!({}));
+        agenthub_plugin_sdk::native_config::merge(&mut merged, config);
+        env.insert("OPENCODE_CONFIG_CONTENT".into(), merged.to_string());
     }
-    let dir = std::path::Path::new(cwd).join(".opencode");
-    let path = dir.join("opencode.json");
-    let previous = std::fs::read_to_string(&path).ok();
-    let mut merged: Value = previous
-        .as_deref()
-        .and_then(|text| serde_json::from_str(text).ok())
-        .unwrap_or_else(|| json!({}));
-    if let Some(object) = merged.as_object_mut() {
-        if let Some(mcp) = config.get("mcp").cloned() {
-            object.insert("mcp".to_string(), mcp);
-        }
-    }
-    let written = serde_json::to_string_pretty(&merged).unwrap_or_default();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return None;
-    }
-    if std::fs::write(&path, &written).is_err() {
-        return None;
-    }
-    Some((cwd.to_string(), previous, Some(written)))
-}
-
-/// Restores (or removes) the injected `.opencode/opencode.json`. Only touches
-/// the file if it still contains exactly what we wrote, so a concurrent write
-/// from another server is never clobbered.
-fn restore_opencode_mcp_config(cleanup: Option<&(String, Option<String>, Option<String>)>) {
-    let Some((cwd, previous, written)) = cleanup else { return };
-    let path = std::path::Path::new(cwd).join(".opencode").join("opencode.json");
-    let owns = written
-        .as_deref()
-        .map(|content| std::fs::read_to_string(&path).ok().as_deref() == Some(content))
-        .unwrap_or(false);
-    if !owns {
-        return;
-    }
-    match previous {
-        Some(content) => {
-            let _ = std::fs::write(&path, content);
-        }
-        None => {
-            let _ = std::fs::remove_file(&path);
-            // Best-effort: drop the now-empty .opencode dir.
-            let _ = std::fs::remove_dir(path.parent().unwrap_or(std::path::Path::new("")));
-        }
-    }
+    Ok(env)
 }
 
 fn executable_of(instance: &Value) -> String {
@@ -198,99 +166,273 @@ async fn capture(command: &str, args: &[&str], env: Option<HashMap<String, Strin
 // ---------------------------------------------------------------- server management
 
 struct ManagedServer {
+    key: String,
     base_url: String,
+    cwd: String,
     handle: agenthub_plugin_sdk::process::ProcessHandle,
-    active_runs: usize,
-    retire_when_idle: bool,
-    /// Injected `.opencode/opencode.json` state to restore when the server retires:
-    /// (cwd, previous content or None, written content).
-    config_cleanup: Option<(String, Option<String>, Option<String>)>,
+    events: Arc<Runtime>,
+    terminals: AtomicUsize,
+    external_use: AtomicBool,
 }
-
+impl ManagedServer {
+    async fn close(&self) {
+        self.events.close();
+        self.handle.cancel().await;
+    }
+}
 #[derive(Default)]
 struct ServerPool {
-    servers: HashMap<String, Arc<Mutex<ManagedServer>>>,
+    servers: HashMap<String, Arc<ManagedServer>>,
+    terminals: HashMap<String, Arc<ManagedServer>>,
+    closed: bool,
 }
-
+#[derive(Default)]
+struct RunControl {
+    cancelled: AtomicBool,
+    native: Mutex<Option<(Arc<ManagedServer>, Arc<Route>)>>,
+    process: Mutex<Option<agenthub_plugin_sdk::process::ProcessHandle>>,
+    local_id: String,
+}
+#[derive(Clone)]
 struct OpenCodePlugin {
-    pool: Mutex<ServerPool>,
-    interactions: Mutex<Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>>,
+    pool: Arc<Mutex<ServerPool>>,
+    opening: Arc<tokio::sync::Mutex<()>>,
+    interactions: Arc<Mutex<Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>>>,
+    daemon: Arc<Mutex<Option<Arc<dyn agenthub_plugin_sdk::DaemonChannel>>>>,
+    active: Arc<Mutex<HashMap<String, Arc<RunControl>>>>,
 }
-
 impl OpenCodePlugin {
     fn new() -> Self {
-        Self { pool: Mutex::new(ServerPool::default()), interactions: Mutex::new(None) }
+        Self {
+            pool: Arc::new(Mutex::new(ServerPool::default())),
+            opening: Arc::new(tokio::sync::Mutex::new(())),
+            interactions: Arc::new(Mutex::new(None)),
+            daemon: Arc::new(Mutex::new(None)),
+            active: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
-
     fn server_key(request: &Value) -> String {
         let instance = request.get("instance").cloned().unwrap_or(Value::Null);
         let env = env_of(request);
         let mut pairs: Vec<(&String, &String)> = env.iter().collect();
         pairs.sort();
-        let env_json = serde_json::to_string(&pairs).unwrap_or_default();
-        let hash = format!("{:x}", Sha256::digest(env_json.as_bytes()));
+        let config = json!({"env":pairs,"baseArgs":instance["baseArgs"],"providerOptions":instance["providerOptions"],
+            "models":instance["models"],"skills":request["skills"],"mcpServers":request["mcpServers"],"runtimeTools":request["runtimeTools"]});
+        let hash = format!("{:x}", Sha256::digest(config.to_string().as_bytes()));
         [
-            instance.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-            std::fs::canonicalize(request.get("cwd").and_then(Value::as_str).unwrap_or(""))
+            instance["id"].as_str().unwrap_or("").to_string(),
+            std::fs::canonicalize(request["cwd"].as_str().unwrap_or(""))
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string()),
+                .unwrap_or_else(|_| request["cwd"].as_str().unwrap_or("").into()),
             executable_of(&instance),
             hash,
         ]
         .join("\0")
     }
-
-    async fn server_for(&self, request: &Value) -> anyhow::Result<Arc<Mutex<ManagedServer>>> {
+    // Callers hold opening through registration/release, so a last-session
+    // release cannot retire a server that another turn is about to borrow.
+    async fn server_for(&self, request: &Value) -> anyhow::Result<Arc<ManagedServer>> {
+        self.server_for_control(request, None).await
+    }
+    async fn server_for_control(&self, request: &Value, control: Option<&RunControl>) -> anyhow::Result<Arc<ManagedServer>> {
+        anyhow::ensure!(
+            !self.pool.lock().unwrap().closed,
+            "OpenCode plugin was disposed"
+        );
         let key = Self::server_key(request);
-        if let Some(existing) = self.pool.lock().unwrap().servers.get(&key).cloned() {
-            return Ok(existing);
+        let existing = self.pool.lock().unwrap().servers.get(&key).cloned();
+        if let Some(existing) = existing {
+            if existing.handle.is_alive() && existing.events.alive.load(Ordering::Acquire) {
+                return Ok(existing);
+            }
+            anyhow::ensure!(existing.terminals.load(Ordering::Acquire) == 0 && !existing.external_use.load(Ordering::Acquire),
+                "OpenCode event channel was lost while a native terminal owns the server; close it before reconnecting");
+            // The failed reader first stops its owned sessions. Do not restart
+            // underneath that in-flight native interruption.
+            let mut stopped = existing.events.stopped.subscribe();
+            let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+                let _ = stopped.wait_for(|done| *done).await;
+            })
+            .await
+            .is_ok();
+            if existing.handle.is_alive()
+                && stopped
+                && !existing
+                    .events
+                    .interruption_confirmed
+                    .load(Ordering::Acquire)
+            {
+                self.retire_if_unused(&existing).await;
+            }
+            anyhow::ensure!(!existing.handle.is_alive() || stopped && existing.events.interruption_confirmed.load(Ordering::Acquire),
+                "OpenCode disconnection left unconfirmed native work; the shared server was retained");
+            existing.close().await;
         }
-        let server = self.launch_server(request).await?;
-        let server = Arc::new(Mutex::new(server));
-        self.pool.lock().unwrap().servers.insert(key, server.clone());
+        let server = self.launch_server(request, key.clone(), control).await?;
+        self.pool
+            .lock()
+            .unwrap()
+            .servers
+            .insert(key, server.clone());
         Ok(server)
     }
-
-    async fn launch_server(&self, request: &Value) -> anyhow::Result<ManagedServer> {
-        let instance = request.get("instance").cloned().unwrap_or(Value::Null);
-        let cwd = request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
-        // Inject Nautilo-managed MCP servers via a project-scoped opencode
-        // config before the server starts (opencode reads it at startup).
-        let config_cleanup = write_opencode_mcp_config(&cwd, request.get("mcpServers"));
-        let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    async fn launch_server(
+        &self,
+        request: &Value,
+        key: String,
+        control: Option<&RunControl>,
+    ) -> anyhow::Result<Arc<ManagedServer>> {
+        let instance = &request["instance"];
+        let cwd = request["cwd"].as_str().unwrap_or("").to_string();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
         let started = process::start(&ProcessRequest {
-            command: executable_of(&instance),
-            args: vec!["serve".to_string(), "--hostname".to_string(), "127.0.0.1".to_string(), "--port".to_string(), port.to_string()],
-            cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
-            env: Some(env_of(request)),
-            idle_timeout_ms: None,
+            command: executable_of(instance),
+            args: vec![
+                "serve".into(),
+                "--hostname".into(),
+                "127.0.0.1".into(),
+                "--port".into(),
+                port.to_string(),
+            ],
+            cwd: Some(cwd.clone()),
+            env: Some(runtime_environment(request)?),
             ..Default::default()
-        })
-        .map_err(|error| {
-            restore_opencode_mcp_config(config_cleanup.as_ref());
-            error
         })?;
         let base_url = format!("http://127.0.0.1:{port}");
         let handle = started.handle.clone();
-        // Keep the server output flowing so its buffers never fill.
         tokio::spawn(async move {
             let mut events = started.events;
             while events.recv().await.is_some() {}
         });
-        match wait_for_server(&base_url, &cwd).await {
-            Ok(()) => Ok(ManagedServer { base_url, handle, active_runs: 0, retire_when_idle: false, config_cleanup }),
+        let readiness = async {
+            tokio::select! {
+                ready = wait_for_server(&base_url, &cwd) => ready?,
+                _ = handle.wait() => anyhow::bail!("OpenCode server exited before its HTTP transport was ready"),
+            }
+            Runtime::open(base_url.clone(), cwd.clone()).await
+        };
+        let interrupted = async {
+            loop {
+                if self.pool.lock().unwrap().closed || control.is_some_and(|control| control.cancelled.load(Ordering::Acquire)) { break; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        let ready = tokio::select! {
+            ready = readiness => ready,
+            _ = interrupted => Err(anyhow::anyhow!("OpenCode server startup was cancelled")),
+        };
+        match ready {
+            Ok(events) => Ok(Arc::new(ManagedServer {
+                key,
+                base_url,
+                cwd,
+                handle,
+                events,
+                terminals: AtomicUsize::new(0),
+                external_use: AtomicBool::new(false),
+            })),
             Err(error) => {
-                restore_opencode_mcp_config(config_cleanup.as_ref());
                 handle.cancel().await;
                 Err(error)
             }
         }
     }
+    async fn retire_if_unused(&self, server: &Arc<ManagedServer>) {
+        if server.events.has_sessions()
+            || server.terminals.load(Ordering::Acquire) > 0
+            || server.external_use.load(Ordering::Acquire)
+        {
+            return;
+        }
+        // Unknown/failed status is not proof of safety. Native TUI servers are
+        // retained until unload because they can own untracked background jobs.
+        let clear = async {
+            let statuses = api_json(
+                &server.base_url,
+                &server.cwd,
+                "/session/status",
+                "GET",
+                None,
+            )
+            .await
+            .ok()?;
+            if !statuses
+                .as_object()?
+                .values()
+                .all(|status| status["type"] == "idle")
+            {
+                return None;
+            }
+            for path in ["/question", "/permission", "/pty"] {
+                let values = api_json(&server.base_url, &server.cwd, path, "GET", None)
+                    .await
+                    .ok()?;
+                if !values
+                    .as_array()?
+                    .iter()
+                    .all(|item| path == "/pty" && item["status"] == "exited")
+                {
+                    return None;
+                }
+            }
+            Some(())
+        };
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(3), clear).await,
+            Ok(Some(()))
+        ) {
+            return;
+        }
+        let removed = {
+            let mut pool = self.pool.lock().unwrap();
+            if pool
+                .servers
+                .get(&server.key)
+                .is_some_and(|current| Arc::ptr_eq(current, server))
+            {
+                pool.servers.remove(&server.key);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            server.close().await;
+        }
+    }
+    async fn release_local(
+        &self,
+        local: &str,
+        keep: Option<&Arc<ManagedServer>>,
+    ) -> anyhow::Result<()> {
+        let servers: Vec<_> = self
+            .pool
+            .lock()
+            .unwrap()
+            .servers
+            .values()
+            .cloned()
+            .collect();
+        for server in servers {
+            if server.events.has_local(local) {
+                anyhow::ensure!(
+                    server.events.release(local).await,
+                    "OpenCode did not confirm session interruption; shared server was retained"
+                );
+            }
+            if !keep.is_some_and(|keep| Arc::ptr_eq(keep, &server)) {
+                self.retire_if_unused(&server).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn wait_for_server(base_url: &str, cwd: &str) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().no_proxy().build()?;
     while std::time::Instant::now() < deadline {
         let url = directory_url(base_url, cwd, "/session/status");
         if let Ok(response) = client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -318,7 +460,7 @@ fn urlencoding(value: &str) -> String {
 }
 
 async fn api_json(base_url: &str, cwd: &str, path: &str, method: &str, body: Option<Value>) -> anyhow::Result<Value> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(if path.ends_with("/summarize") { 1800 } else { 30 })).build()?;
     let url = directory_url(base_url, cwd, path);
     let request = match method {
         "POST" => client.post(&url),
@@ -347,11 +489,63 @@ async fn api_json(base_url: &str, cwd: &str, path: &str, method: &str, body: Opt
 
 // ---------------------------------------------------------------- event parsing
 
+fn part_message_id(part: &Value) -> Option<&str> {
+    ["id", "partID", "messageID"].into_iter().find_map(|key| part.get(key).and_then(Value::as_str))
+}
+
+#[derive(Default)]
+struct PartStream {
+    usage: HashMap<String, agenthub_plugin_sdk::usage::TurnUsage>,
+    types: HashMap<String, String>,
+    pending: HashMap<String, Vec<(Value, Value)>>,
+}
+
+impl PartStream {
+    fn event(&mut self, value: &Value) -> Vec<Value> {
+        let mut events = parse_opencode_event(value);
+        let part = &value["part"];
+        if let (Some(id), Some(usage)) = (part_message_id(part), events.iter().find(|e|e["kind"] == "usage").cloned()) {
+            let session = part["sessionID"].as_str().or_else(||value["sessionID"].as_str()).unwrap_or("");
+            events.push(self.usage.entry(session.to_string()).or_default().update(id,&usage));
+        }
+        events
+    }
+
+    fn update(&mut self, part: &Value, raw: &Value, delta: Option<&str>) -> Vec<Value> {
+        let mut events = vec![];
+        if let (Some(id), Some(kind)) = (part_message_id(part), part["type"].as_str()) {
+            self.types.insert(id.to_string(), kind.to_string());
+            for (properties, raw) in self.pending.remove(id).unwrap_or_default() {
+                events.extend(self.delta(&properties, &raw));
+            }
+        }
+        events.extend(parse_opencode_part(part, raw, delta));
+        if let (Some(id), Some(usage)) = (part_message_id(part), events.iter().find(|e| e["kind"] == "usage").cloned()) {
+            let session = part["sessionID"].as_str().unwrap_or("");
+            events.push(self.usage.entry(session.to_string()).or_default().update(id, &usage));
+        }
+        events
+    }
+
+    fn delta(&mut self, properties: &Value, raw: &Value) -> Vec<Value> {
+        let Some(id) = properties["partID"].as_str().filter(|id| !id.is_empty()) else { return vec![] };
+        let Some(text) = properties["delta"].as_str().filter(|s| !s.is_empty()) else { return vec![] };
+        if properties["field"].as_str().is_some_and(|field| field != "text") { return vec![]; }
+        let Some(kind) = self.types.get(id) else {
+            self.pending.entry(id.to_string()).or_default().push((properties.clone(), raw.clone()));
+            return vec![];
+        };
+        if kind != "text" && kind != "reasoning" { return vec![]; }
+        vec![json!({"kind":if kind == "reasoning" {"thinking"} else {"message"},
+            "phase":"delta", "messageId":id, "text":text, "raw":raw})]
+    }
+}
+
 fn parse_opencode_part(part: &Value, raw: &Value, delta: Option<&str>) -> Vec<Value> {
     let part_type = part.get("type").and_then(Value::as_str).unwrap_or("");
     if part_type == "text" || part_type == "reasoning" {
         let kind = if part_type == "text" { "message" } else { "thinking" };
-        let message_id = part.get("messageID").and_then(Value::as_str);
+        let message_id = part_message_id(part);
         if let Some(delta) = delta {
             return vec![json!({
                 "kind": kind,
@@ -381,7 +575,7 @@ fn parse_opencode_event(value: &Value) -> Vec<Value> {
         events.push(json!({ "kind": "session", "providerSessionId": session_id, "raw": value }));
     }
     let part = value.get("part").cloned().unwrap_or(Value::Null);
-    let message_id = part.get("messageID").and_then(Value::as_str);
+    let message_id = part_message_id(&part);
     match value.get("type").and_then(Value::as_str).unwrap_or("") {
         "text" => {
             if let Some(text) = part.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) {
@@ -433,10 +627,13 @@ fn parse_opencode_event(value: &Value) -> Vec<Value> {
                 };
                 events.push(json!({
                     "kind": "usage",
+                    "usageScope": "context",
+                    "inputTokensIncludesCache": false,
                     "inputTokens": input.map(Value::from).unwrap_or(Value::Null),
                     "outputTokens": tokens.get("output").and_then(Value::as_i64).map(Value::from).unwrap_or(Value::Null),
                     "reasoningOutputTokens": tokens.get("reasoning").and_then(Value::as_i64).map(Value::from).unwrap_or(Value::Null),
                     "cachedInputTokens": cache_read.map(Value::from).unwrap_or(Value::Null),
+                    "cacheCreationInputTokens": cache_write.map(Value::from).unwrap_or(Value::Null),
                     "contextUsed": context_used.map(Value::from).unwrap_or(Value::Null),
                     "raw": value
                 }));
@@ -463,14 +660,16 @@ fn parse_opencode_event(value: &Value) -> Vec<Value> {
 fn with_subagent_dispatch(events: Vec<Value>, dispatch_id: &str) -> Vec<Value> {
     events
         .into_iter()
-        .map(|event| {
+        .filter_map(|event| {
             let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
             if ["message", "thinking", "tool", "command"].contains(&kind) {
                 let mut mapped = event.as_object().cloned().unwrap_or_default();
                 mapped.insert("subagentDispatchId".to_string(), json!(dispatch_id));
-                Value::Object(mapped)
+                Some(Value::Object(mapped))
             } else {
-                event
+                // Child lifecycle and usage belong to the child, not the parent run.
+                // In particular, a child session id must never replace the resume id.
+                None
             }
         })
         .collect()
@@ -636,22 +835,96 @@ async fn read_plan(cwd: &str, question: &Value) -> Value {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for OpenCodePlugin {
+    fn native_terminal_supported(&self) -> bool {
+        true
+    }
+    async fn terminal_plan(
+        &self,
+        request: &Value,
+        resume: Option<String>,
+    ) -> anyhow::Result<Value> {
+        let _opening = self.opening.lock().await;
+        let server = self.server_for(request).await?;
+        let environment=runtime_environment(request)?;
+        server.external_use.store(true, Ordering::Release);
+        let session=match resume {
+            Some(session)=>session,
+            None=>api_json(&server.base_url,&server.cwd,"/session","POST",Some(json!({"title":"Nautilo native terminal"}))).await?["id"].as_str().filter(|id|!id.is_empty()).ok_or_else(||anyhow::anyhow!("OpenCode server did not return a native session ID"))?.to_string(),
+        };
+        let (output,_events)=mpsc::unbounded_channel();
+        let binding=request["sessionBindingId"].as_str().map(str::to_string).unwrap_or_else(||next_native_id("terminal-binding"));
+        let daemon=self.daemon.lock().unwrap().clone();let legacy=self.interactions.lock().unwrap().clone();
+        let route=Route::new(&binding,request,output,daemon,legacy).await;
+        route.finish(0,None);
+        server.events.park(&session,route.clone())?;
+        server.events.pause_terminal_interactions(&route.local_id);
+        let token = next_native_id("terminal");
+        server.terminals.fetch_add(1, Ordering::AcqRel);
+        server.external_use.store(true, Ordering::Release);
+        self.pool
+            .lock()
+            .unwrap()
+            .terminals
+            .insert(token.clone(), server.clone());
+        let mut args = vec!["attach".to_string(), server.base_url.clone()];
+        args.extend(["--session".into(), session.clone()]);
+        Ok(
+            json!({"command":executable_of(&request["instance"]),"args":args,"env":environment,"token":token,"providerSessionId":session}),
+        )
+    }
+    async fn close_terminal(&self, token: &str) {
+        let _opening = self.opening.lock().await;
+        let server = self.pool.lock().unwrap().terminals.remove(token);
+        if let Some(server) = server {
+            server.terminals.fetch_sub(1, Ordering::AcqRel);
+            self.retire_if_unused(&server).await;
+        }
+    }
+
     fn descriptor(&self) -> Value {
         descriptor()
     }
 
-    fn capabilities(&self) -> Value {
-        json!({
+    fn capabilities(&self)->Value {
+        agenthub_plugin_sdk::capabilities::with_profile(json!({
             "structuredOutput": true,
             "textOutput": true,
             "interactiveStdin": false,
             "nativeResume": true,
+            "sessionBackgroundEvents": true,
+            "nativeHistory": true,
+            "nativeEventIdentities": true,
+            "sharedTerminalServer": true,
+            "nativeExperienceVersion": 1,
             "pty": false
-        })
+        }),native_experience::declarations())
     }
 
     fn set_interaction_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::InteractionChannel>) {
         *self.interactions.lock().unwrap() = Some(channel);
+    }
+    async fn read_session_history(&self, request: &Value, session: &str) -> anyhow::Result<Option<Value>> {
+        if !base_args(&request["instance"]).is_empty() {return Ok(None);}
+        history::read(self, request, session).await.map(Some)
+    }
+    async fn resume_terminal_events(&self,request:&Value,session:&str,snapshot:&Value)->anyhow::Result<()> {
+        let _opening=self.opening.lock().await;
+        let server=self.server_for(request).await?;
+        let local=request["localSessionId"].as_str().ok_or_else(||anyhow::anyhow!("A local session is required"))?;
+        if !server.events.has_local(local) {
+            agenthub_plugin_sdk::history::validate(snapshot,session)?;
+            let (output,_events)=mpsc::unbounded_channel();
+            let binding=request["sessionBindingId"].as_str().ok_or_else(||anyhow::anyhow!("A session event binding is required"))?;
+            let daemon=self.daemon.lock().unwrap().clone();let legacy=self.interactions.lock().unwrap().clone();
+            let route=Route::new(binding,request,output,daemon,legacy).await;
+            route.finish(0,None);server.events.park(session,route.clone())?;
+            server.events.seed_history(session,&route,snapshot);
+        }
+        server.events.resume_terminal_interactions(local).await
+    }
+
+    fn set_daemon_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::DaemonChannel>) {
+        *self.daemon.lock().unwrap() = Some(channel);
     }
 
     async fn detect(&self, instance: &Value) -> Value {
@@ -688,63 +961,154 @@ impl ProviderPlugin for OpenCodePlugin {
         Ok(parse_opencode_models(&text))
     }
 
-    async fn start(&self, _run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
-        let provider_command = request.get("providerCommand").and_then(Value::as_str).map(str::to_string);
-        if provider_command.as_deref() == Some("compact") && resume.is_none() {
+    async fn start(
+        &self,
+        run_id: &str,
+        request: Value,
+        resume: Option<String>,
+    ) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+        if request["providerCommand"] == "compact" && resume.is_none() {
             anyhow::bail!("OpenCode context compaction requires an existing provider session");
         }
-        let instance = request.get("instance").cloned().unwrap_or(Value::Null);
-        let has_base_args = !base_args(&instance).is_empty();
-        // Provider commands always use the server transport; `run` has no
-        // headless summarize surface.
-        if has_base_args && resume.is_none() {
-            let args = start_args(&instance, &request);
-            return self.spawn_run(request, args).await;
-        }
-        if has_base_args && provider_command.is_none() {
-            let mut args = base_args(&instance);
-            args.push("--session".to_string());
-            args.push(resume.clone().unwrap_or_default());
-            args.push(request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string());
-            return self.spawn_run(request, args).await;
-        }
-        let interactions = self.interactions.lock().unwrap().clone();
-        self.server_run(request, resume, interactions).await
-    }
-
-    async fn dispose(&self) {
-        let servers: Vec<Arc<Mutex<ManagedServer>>> = self.pool.lock().unwrap().servers.drain().map(|(_, s)| s).collect();
-        for server in servers {
-            let (handle, cleanup) = {
-                let mut server = server.lock().unwrap();
-                server.retire_when_idle = true;
-                if server.active_runs == 0 {
-                    (Some(server.handle.clone()), server.config_cleanup.clone())
-                } else {
-                    (None, None)
+        agenthub_plugin_sdk::images::read_request_images(&request)?;
+        anyhow::ensure!(
+            !self.pool.lock().unwrap().closed,
+            "OpenCode plugin was disposed"
+        );
+        let control = Arc::new(RunControl {
+            local_id: request["localSessionId"].as_str().unwrap_or(run_id).into(),
+            ..Default::default()
+        });
+        self.active
+            .lock()
+            .unwrap()
+            .insert(run_id.into(), control.clone());
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let plugin = self.clone();
+        let run_id = run_id.to_string();
+        tokio::spawn(async move {
+            let result = if !base_args(&request["instance"]).is_empty()
+                && request["providerCommand"].is_null()
+            {
+                let mut args = start_args(&request["instance"], &request);
+                if let Some(resume) = resume {
+                    args.extend(["--session".into(), resume]);
                 }
+                match plugin.spawn_run(&control, request, args).await {
+                    Ok(mut events) => {
+                        while let Some(mut event) = events.recv().await {
+                            let exit = event["kind"] == "exit";
+                            if exit && control.cancelled.load(Ordering::Acquire) {
+                                event["exitCode"] = json!(130);
+                            }
+                            let _ = sender.send(event);
+                            if exit {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                plugin
+                    .server_run(&run_id, &control, request, resume, sender.clone())
+                    .await
             };
-            if let Some(handle) = handle {
-                restore_opencode_mcp_config(cleanup.as_ref());
-                handle.cancel().await;
+            if let Err(error) = result {
+                if !control.cancelled.load(Ordering::Acquire) {
+                    let _ = sender.send(json!({"kind":"error","message":error.to_string()}));
+                }
+                let _ = sender.send(json!({"kind":"exit","exitCode":if control.cancelled.load(Ordering::Acquire) {130} else {1}}));
+            }
+            plugin.active.lock().unwrap().remove(&run_id);
+        });
+        Ok(receiver)
+    }
+    async fn cancel(&self, run_id: &str) {
+        let control = self.active.lock().unwrap().get(run_id).cloned();
+        let Some(control) = control else { return };
+        control.cancelled.store(true, Ordering::Release);
+        let native = control.native.lock().unwrap().clone();
+        if let Some((server, route)) = native {
+            if route.foreground() {
+                route.cancelled.store(true, Ordering::Release);
+                let confirmed = server.events.interrupt(&route, 130, None).await;
+                if !confirmed {
+                    route.emit(json!({"kind":"raw","stream":"stderr","text":"OpenCode interruption was not confirmed; the shared server is retained"}));
+                }
+            }
+        }
+        let process = control.process.lock().unwrap().clone();
+        if let Some(process) = process {
+            process.cancel().await;
+        }
+    }
+    async fn release_session(&self, request: &Value) -> anyhow::Result<()> {
+        let Some(local) = request["localSessionId"].as_str() else {
+            return Ok(());
+        };
+        let controls: Vec<_> = self
+            .active
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|c| c.local_id == local)
+            .cloned()
+            .collect();
+        for control in controls {
+            control.cancelled.store(true, Ordering::Release);
+            let process = control.process.lock().unwrap().clone();
+            if let Some(process) = process {
+                process.cancel().await;
+            }
+        }
+        let _opening = self.opening.lock().await;
+        self.release_local(local, None).await
+    }
+    async fn dispose(&self) {
+        self.pool.lock().unwrap().closed = true;
+        let controls: Vec<_> = self.active.lock().unwrap().values().cloned().collect();
+        for control in &controls {
+            control.cancelled.store(true, Ordering::Release);
+        }
+        let _opening = self.opening.lock().await;
+        let servers: Vec<_> = {
+            let mut pool = self.pool.lock().unwrap();
+            pool.closed = true;
+            pool.terminals.clear();
+            pool.servers.drain().map(|(_, server)| server).collect()
+        };
+        for server in servers {
+            server.close().await;
+        }
+        for control in controls {
+            let process = control.process.lock().unwrap().clone();
+            if let Some(process) = process {
+                process.cancel().await;
             }
         }
     }
+
+
 }
 
 impl OpenCodePlugin {
-    async fn spawn_run(&self, request: Value, args: Vec<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+    async fn spawn_run(&self, control: &Arc<RunControl>, request: Value, args: Vec<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+        agenthub_plugin_sdk::images::read_request_images(&request)?;
         let instance = request.get("instance").cloned().unwrap_or(Value::Null);
         let started = process::start(&ProcessRequest {
             command: executable_of(&instance),
             args,
             cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
-            env: Some(env_of(&request)),
+            env: Some(runtime_environment(&request)?),
             timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
             idle_timeout_ms: request.get("idleTimeoutMs").and_then(Value::as_u64),
             max_output_bytes: Some(request.get("maxOutputBytes").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20 * 1024 * 1024)),
             ..Default::default()
         })?;
+        *control.process.lock().unwrap() = Some(started.handle.clone());
+        if control.cancelled.load(Ordering::Acquire) { started.handle.cancel().await; }
         started.handle.end_stdin();
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
         tokio::spawn(async move {
@@ -752,6 +1116,7 @@ impl OpenCodePlugin {
             let mut pending_stdout = String::new();
             let mut pending_stderr = String::new();
             let mut events = started.events;
+            let mut parts = PartStream::default();
             while let Some(event) = events.recv().await {
                 let is_stdout = matches!(&event, ProcessEvent::Stdout(_));
                 match event {
@@ -765,7 +1130,7 @@ impl OpenCodePlugin {
                             if line.trim().is_empty() {
                                 continue;
                             }
-                            let parsed = serde_json::from_str::<Value>(line).ok().map(|v| parse_opencode_event(&v)).unwrap_or_default();
+                            let parsed = serde_json::from_str::<Value>(line).ok().map(|v| parts.event(&v)).unwrap_or_default();
                             if parsed.is_empty() {
                                 let _ = sender.send(json!({ "kind": "raw", "stream": if is_stdout { "stdout" } else { "stderr" }, "text": line }));
                             } else {
@@ -778,6 +1143,13 @@ impl OpenCodePlugin {
                         }
                     }
                     ProcessEvent::Exit { exit_code, .. } => {
+                        for (stream,buffer) in [("stdout",&mut pending_stdout),("stderr",&mut pending_stderr)] {
+                            let text = std::mem::take(buffer);
+                            if text.trim().is_empty() {continue;}
+                            let parsed=serde_json::from_str::<Value>(&text).ok().map(|value|parts.event(&value)).unwrap_or_default();
+                            if parsed.is_empty() { let _=sender.send(json!({"kind":"raw","stream":stream,"text":text})); }
+                            else {for event in parsed {let _=sender.send(event);}}
+                        }
                         let _ = sender.send(json!({ "kind": "exit", "exitCode": exit_code }));
                         return;
                     }
@@ -795,77 +1167,142 @@ impl OpenCodePlugin {
 
     async fn server_run(
         &self,
+        run_id: &str,
+        control: &Arc<RunControl>,
         request: Value,
         resume: Option<String>,
-        interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
-    ) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
-        let (sender, receiver) = mpsc::unbounded_channel::<Value>();
-        let server = self.server_for(&request).await?;
-        server.lock().unwrap().active_runs += 1;
-        let server_for_task = server.clone();
-        tokio::spawn(async move {
-            let result = server_run_loop(request, resume, server, sender.clone(), interactions).await;
-            if let Err(error) = result {
-                let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
-                let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
+        sender: mpsc::UnboundedSender<Value>,
+    ) -> anyhow::Result<()> {
+        let attached = Instant::now();
+        let daemon = self.daemon.lock().unwrap().clone();
+        let interactions = self.interactions.lock().unwrap().clone();
+        let route = Route::new(run_id, &request, sender.clone(), daemon, interactions).await;
+        let server;
+        let session_id;
+        let user_message = next_native_id("msg");
+        {
+            let _opening = self.opening.lock().await;
+            if control.cancelled.load(Ordering::Acquire) {
+                route.cancelled.store(true, Ordering::Release);
+                route.finish(130, None);
+                return Ok(());
             }
-            let (handle, cleanup) = {
-                let mut server = server_for_task.lock().unwrap();
-                server.active_runs = server.active_runs.saturating_sub(1);
-                if server.retire_when_idle && server.active_runs == 0 {
-                    (Some(server.handle.clone()), server.config_cleanup.clone())
-                } else {
-                    (None, None)
-                }
+            let reused = self
+                .pool
+                .lock()
+                .unwrap()
+                .servers
+                .get(&Self::server_key(&request))
+                .is_some_and(|s| s.handle.is_alive() && s.events.alive.load(Ordering::Acquire));
+            server = self.server_for_control(&request, Some(control)).await?;
+            if control.cancelled.load(Ordering::Acquire) {
+                self.retire_if_unused(&server).await;
+                route.cancelled.store(true, Ordering::Release);
+                route.finish(130, None);
+                return Ok(());
+            }
+            // Changed account/config identity must detach the old local binding.
+            let previous: Vec<_> = self
+                .pool
+                .lock()
+                .unwrap()
+                .servers
+                .values()
+                .filter(|s| !Arc::ptr_eq(s, &server) && s.events.has_local(&route.local_id))
+                .cloned()
+                .collect();
+            for old in previous {
+                anyhow::ensure!(
+                    old.events.release(&route.local_id).await,
+                    "Previous OpenCode session could not be interrupted"
+                );
+                self.retire_if_unused(&old).await;
+            }
+            session_id = match resume {
+                Some(id) => id,
+                None => api_json(&server.base_url, &server.cwd, "/session", "POST", Some(json!({"title":request["prompt"].as_str().unwrap_or("").chars().take(80).collect::<String>()}))).await?["id"].as_str().filter(|id| !id.is_empty()).ok_or_else(||anyhow::anyhow!("OpenCode server did not return a session id"))?.to_string(),
             };
-            if let Some(handle) = handle {
-                restore_opencode_mcp_config(cleanup.as_ref());
-                handle.cancel().await;
+            server
+                .events
+                .begin(&session_id, &user_message, route.clone())?;
+            *control.native.lock().unwrap() = Some((server.clone(), route.clone()));
+            let _ = sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"opencode","transport":"http-sse","reused":reused,"pid":server.handle.pid,"attachMs":attached.elapsed().as_millis()}}));
+            let _ = sender.send(json!({"kind":"status","phase":"runtime_capabilities","raw":{"providerId":"opencode","source":"native-handshake","transport":"http-sse","reported":{"sessionStatusReady":true,"sessionBackgroundEvents":true}}}));
+            let _ = sender.send(json!({"kind":"commands","commands":native_commands()}));
+            let _ = sender.send(json!({"kind":"session","providerSessionId":session_id,"raw":{"providerUserMessageId":user_message}}));
+            let _ = sender.send(json!({"kind":"status","phase":"turn_started"}));
+        }
+        if control.cancelled.load(Ordering::Acquire) {
+            self.cancel(run_id).await;
+            return Ok(());
+        }
+        let began = Instant::now();
+        let mut done = route.done.subscribe();
+        let mut submission = Box::pin(submit_prompt(
+            &request,
+            &server.base_url,
+            &server.cwd,
+            &session_id,
+            &user_message,
+        ));
+        let mut submitted = false;
+        let mut interval = tokio::time::interval(Duration::from_millis(25));
+        loop {
+            tokio::select! {
+                _ = async { let _ = done.wait_for(|finished| *finished).await; } => break,
+                result = &mut submission, if !submitted => {
+                    submitted = true;
+                    match result {
+                        Ok(()) if request["providerCommand"] == "compact" => route.finish(0, None),
+                        Err(error) => { server.events.interrupt(&route, 1, Some(&error.to_string())).await; },
+                        _ => {}
+                    }
+                },
+                _ = interval.tick() => {
+                    if control.cancelled.load(Ordering::Acquire) { self.cancel(run_id).await; break; }
+                    if let Some(reason) = route.limit(&request, began) {
+                        if reason != "receiver_closed" { route.emit(json!({"kind":"timeout","reason":reason})); }
+                        server.events.interrupt(&route, 1, Some(reason)).await;
+                        break;
+                    }
+                }
             }
-        });
-        Ok(receiver)
+        }
+        Ok(())
     }
+
+
 }
 
-async fn server_run_loop(
-    request: Value,
-    resume: Option<String>,
-    server: Arc<Mutex<ManagedServer>>,
-    sender: mpsc::UnboundedSender<Value>,
-    interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
+fn next_native_id(prefix: &str) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let count = NEXT.fetch_add(1, Ordering::Relaxed);
+    // OpenCode accepts caller-supplied IDs with the native prefix. Retain its
+    // sortable 48-bit time encoding; the suffix separates processes and calls.
+    let time = ((chrono::Utc::now().timestamp_millis() as u64) << 12) | (count & 0xfff);
+    format!(
+        "{prefix}_{:012x}{:08x}{:06x}",
+        time & 0xffffffffffff,
+        std::process::id(),
+        count & 0xffffff
+    )
+}
+
+async fn submit_prompt(
+    request: &Value,
+    base_url: &str,
+    cwd: &str,
+    session_id: &str,
+    user_message: &str,
 ) -> anyhow::Result<()> {
-    let (base_url, cwd) = {
-        let server = server.lock().unwrap();
-        (server.base_url.clone(), request.get("cwd").and_then(Value::as_str).unwrap_or("").to_string())
-    };
-    let _ = sender.send(json!({ "kind": "commands", "commands": native_commands() }));
-
-    // Open the SSE event stream first so no event is missed.
-    let client = reqwest::Client::new();
-    let stream_response = client
-        .get(directory_url(&base_url, &cwd, "/event"))
-        .header("accept", "text/event-stream")
-        .send()
-        .await?;
-    if !stream_response.status().is_success() {
-        anyhow::bail!("OpenCode event stream failed ({})", stream_response.status().as_u16());
-    }
-
-    let mut session_id = resume;
-    if session_id.is_none() {
-        let title = request.get("prompt").and_then(Value::as_str).unwrap_or("").chars().take(80).collect::<String>();
-        let created = api_json(&base_url, &cwd, "/session", "POST", Some(json!({ "title": title }))).await?;
-        session_id = created.get("id").and_then(Value::as_str).map(str::to_string);
-        if session_id.is_none() {
-            anyhow::bail!("OpenCode server did not return a session id");
-        }
-    }
-    let session_id = session_id.unwrap();
-    let _ = sender.send(json!({ "kind": "session", "providerSessionId": session_id }));
-    let _ = sender.send(json!({ "kind": "status", "phase": "turn_started" }));
-
     if request.get("providerCommand").and_then(Value::as_str) == Some("compact") {
-        let model = resolve_summarize_model(&base_url, &cwd, &session_id, request.get("model").and_then(Value::as_str)).await?;
+        let model = resolve_summarize_model(
+            &base_url,
+            &cwd,
+            &session_id,
+            request.get("model").and_then(Value::as_str),
+        )
+        .await?;
         api_json(
             &base_url,
             &cwd,
@@ -891,21 +1328,39 @@ async fn server_run_loop(
                     .filter(|m| !m.is_empty())
                     .map(str::to_string)
             });
-        let mut parts = vec![json!({ "type": "text", "text": request.get("prompt").and_then(Value::as_str).unwrap_or("") })];
-        for path in request.get("localImagePaths").and_then(Value::as_array).cloned().unwrap_or_default() {
-            if let Some(path) = path.as_str() {
-                let filename = path.split(['/', '\\']).next_back().unwrap_or("image");
-                parts.push(json!({
-                    "type": "file",
-                    "url": format!("file:///{path}"),
-                    "filename": filename,
-                    "mime": "application/octet-stream"
-                }));
-            }
+        let mut parts = vec![
+            json!({ "type": "text", "text": request.get("prompt").and_then(Value::as_str).unwrap_or("") }),
+        ];
+        for image in agenthub_plugin_sdk::images::read_request_images(&request)? {
+            let url = reqwest::Url::from_file_path(&image.path).map_err(|_| {
+                anyhow::anyhow!("Invalid absolute image path: {}", image.path.display())
+            })?;
+            parts.push(json!({
+                "type": "file", "url": url.as_str(),
+                "filename": image.path.file_name().map(|s|s.to_string_lossy()),
+                "mime": image.mime_type
+            }));
         }
         let mut body = Map::new();
-        if let Some(model) = opencode_model(request.get("model").and_then(Value::as_str)) {
+        let selected = request.get("model").and_then(Value::as_str).map(|model| {
+            if instance
+                .pointer("/providerOptions/runtimeConnectionId")
+                .is_some()
+            {
+                format!("nautilo/{model}")
+            } else {
+                model.to_string()
+            }
+        });
+        if let Some(model) = opencode_model(selected.as_deref()) {
             body.insert("model".to_string(), model);
+        }
+        if let Some(effort) = request
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            body.insert("variant".to_string(), json!(effort));
         }
         if let Some(mode) = mode.as_deref() {
             if mode == "plan" || mode == "build" {
@@ -913,6 +1368,7 @@ async fn server_run_loop(
             }
         }
         body.insert("parts".to_string(), Value::Array(parts));
+        body.insert("messageID".to_string(), json!(user_message));
         api_json(
             &base_url,
             &cwd,
@@ -922,262 +1378,7 @@ async fn server_run_loop(
         )
         .await?;
     }
-
-    // Sub-agent (task tool) child sessions also publish on the event bus.
-    let mut pending_task_parts: Vec<String> = vec![];
-    let mut child_sessions: HashMap<String, String> = HashMap::new();
-    let mut rejected_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Part-id -> part type ("text"/"reasoning"/"tool"/...). OpenCode >=1.18.x
-    // streams incremental output through `message.part.delta` events which only
-    // carry a partID; we learn the part type from the preceding
-    // `message.part.updated` events.
-    let mut part_types: HashMap<String, String> = HashMap::new();
-    // Deltas that arrive before their part type is known (rare reordering) are
-    // buffered here until the matching `message.part.updated` arrives.
-    let mut pending_deltas: HashMap<String, Vec<Value>> = HashMap::new();
-
-    let mut stream = stream_response;
-    let mut pending = String::new();
-    loop {
-        let chunk = match tokio::time::timeout(std::time::Duration::from_secs(600), stream.chunk()).await {
-            Ok(Ok(Some(chunk))) => chunk,
-            Ok(Ok(None)) => break,
-            Ok(Err(error)) => anyhow::bail!(error.to_string()),
-            Err(_) => anyhow::bail!("OpenCode event stream timed out"),
-        };
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        let mut frames: Vec<String> = pending.split("\n\n").map(str::to_string).collect();
-        pending = frames.pop().unwrap_or_default();
-        for frame in frames {
-            let data = frame
-                .lines()
-                .filter(|line| line.starts_with("data:"))
-                .map(|line| line[5..].trim_start())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() {
-                continue;
-            }
-            let Ok(raw) = serde_json::from_str::<Value>(&data) else { continue };
-            let event = unwrap_server_event(&raw);
-            let properties = event.get("properties").cloned().unwrap_or(Value::Null);
-            let event_type = event.get("type").and_then(Value::as_str).unwrap_or("").to_string();
-            let event_session_id = properties.get("sessionID").and_then(Value::as_str).unwrap_or("").to_string();
-            let known_child = !event_session_id.is_empty() && child_sessions.contains_key(&event_session_id);
-            if !event_session_id.is_empty()
-                && event_session_id != session_id
-                && !known_child
-                && event_type != "message.part.updated"
-                && event_type != "message.part.delta"
-            {
-                continue;
-            }
-            match event_type.as_str() {
-                "message.part.updated" => {
-                    let part = properties.get("part").cloned().unwrap_or(Value::Null);
-                    let part_session_id = part.get("sessionID").and_then(Value::as_str).unwrap_or("").to_string();
-                    let is_main = part_session_id.is_empty() || part_session_id == session_id;
-                    if is_main
-                        && part.get("type").and_then(Value::as_str) == Some("tool")
-                        && part.get("tool").and_then(Value::as_str) == Some("task")
-                    {
-                        let call_id = part
-                            .get("callID")
-                            .and_then(Value::as_str)
-                            .or_else(|| part.get("id").and_then(Value::as_str))
-                            .unwrap_or("")
-                            .to_string();
-                        if !call_id.is_empty() && !pending_task_parts.contains(&call_id) {
-                            pending_task_parts.push(call_id.clone());
-                        }
-                        // Exact pairing: opencode puts the child session id into
-                        // the task part's metadata before the child starts.
-                        let child_id = part
-                            .get("state")
-                            .and_then(|s| s.get("metadata"))
-                            .and_then(|m| m.get("sessionId"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        if !call_id.is_empty() && !child_id.is_empty() && !child_sessions.contains_key(&child_id) {
-                            child_sessions.insert(child_id, call_id.clone());
-                            if let Some(index) = pending_task_parts.iter().position(|p| p == &call_id) {
-                                pending_task_parts.remove(index);
-                            }
-                        }
-                    }
-                    let mut dispatch_id: Option<String> = None;
-                    if !is_main {
-                        dispatch_id = child_sessions.get(&part_session_id).cloned();
-                        if dispatch_id.is_none() && !rejected_sessions.contains(&part_session_id) {
-                            let parent = fetch_session_parent(&base_url, &cwd, &part_session_id).await;
-                            if parent.as_deref() == Some(session_id.as_str()) {
-                                if !pending_task_parts.is_empty() {
-                                    let dispatch = pending_task_parts.remove(0);
-                                    child_sessions.insert(part_session_id.clone(), dispatch.clone());
-                                    dispatch_id = Some(dispatch);
-                                }
-                            } else {
-                                rejected_sessions.insert(part_session_id.clone());
-                            }
-                        }
-                        if dispatch_id.is_none() {
-                            continue;
-                        }
-                    }
-                    // Remember the part's type so later `message.part.delta`
-                    // events for the same part can be classified as
-                    // thinking/message, and flush any deltas that arrived
-                    // before this update (out-of-order frames).
-                    let part_id = part
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .or_else(|| part.get("partID").and_then(Value::as_str))
-                        .map(str::to_string);
-                    if let Some(part_id) = &part_id {
-                        if let Some(part_type) = part.get("type").and_then(Value::as_str) {
-                            part_types.insert(part_id.clone(), part_type.to_string());
-                            if let Some(pending) = pending_deltas.remove(part_id) {
-                                for event in match &dispatch_id {
-                                    Some(id) => with_subagent_dispatch(pending, id),
-                                    None => pending,
-                                } {
-                                    if sender.send(event).is_err() {
-                                        return Ok(());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let delta = properties.get("delta").and_then(Value::as_str);
-                    let events = parse_opencode_part(&part, &raw, delta);
-                    for event in match dispatch_id {
-                        Some(id) => with_subagent_dispatch(events, &id),
-                        None => events,
-                    } {
-                        if sender.send(event).is_err() {
-                            return Ok(());
-                        }
-                    }
-                }
-                // OpenCode >=1.18.x streams part output as dedicated
-                // `message.part.delta` events (properties.partID / delta).
-                // Older versions carried the delta on `message.part.updated`
-                // instead; both are handled so the plugin keeps working across
-                // opencode versions.
-                "message.part.delta" => {
-                    let part_id = properties.get("partID").and_then(Value::as_str).unwrap_or("").to_string();
-                    let delta_text = properties.get("delta").and_then(Value::as_str).unwrap_or("").to_string();
-                    if part_id.is_empty() || delta_text.is_empty() {
-                        continue;
-                    }
-                    let message_id = properties
-                        .get("messageID")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .map(Value::String)
-                        .unwrap_or(Value::Null);
-                    let mut dispatch_id: Option<String> = None;
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        dispatch_id = child_sessions.get(&event_session_id).cloned();
-                        if dispatch_id.is_none() && !rejected_sessions.contains(&event_session_id) {
-                            let parent = fetch_session_parent(&base_url, &cwd, &event_session_id).await;
-                            if parent.as_deref() == Some(session_id.as_str()) {
-                                if !pending_task_parts.is_empty() {
-                                    let dispatch = pending_task_parts.remove(0);
-                                    child_sessions.insert(event_session_id.clone(), dispatch.clone());
-                                    dispatch_id = Some(dispatch);
-                                }
-                            } else {
-                                rejected_sessions.insert(event_session_id.clone());
-                            }
-                        }
-                        if dispatch_id.is_none() {
-                            continue;
-                        }
-                    }
-                    let part_type = part_types.get(&part_id).map(|s| s.as_str()).unwrap_or("");
-                    let kind = if part_type == "reasoning" { "thinking" } else { "message" };
-                    let event = json!({
-                        "kind": kind,
-                        "phase": "delta",
-                        "messageId": message_id,
-                        "text": delta_text,
-                        "raw": raw
-                    });
-                    if part_type.is_empty() {
-                        pending_deltas.entry(part_id).or_default().push(event);
-                    } else {
-                        let event = match &dispatch_id {
-                            Some(id) => with_subagent_dispatch(vec![event], id).remove(0),
-                            None => event,
-                        };
-                        if sender.send(event).is_err() {
-                            return Ok(());
-                        }
-                    }
-                }
-                "question.asked" => {
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        continue;
-                    }
-                    handle_question(&base_url, &cwd, &request, &properties, interactions.clone()).await;
-                }
-                "permission.asked" => {
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        continue;
-                    }
-                    handle_permission(&base_url, &cwd, &properties, interactions.clone(), &session_id).await;
-                }
-                "session.status" => {
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        continue;
-                    }
-                    let status_type = properties
-                        .get("status")
-                        .and_then(|s| s.get("type"))
-                        .and_then(Value::as_str)
-                        .or_else(|| properties.get("status").and_then(Value::as_str))
-                        .unwrap_or("");
-                    if status_type != "idle" {
-                        continue;
-                    }
-                    let _ = sender.send(json!({ "kind": "status", "phase": "turn_completed", "raw": raw }));
-                    let _ = sender.send(json!({ "kind": "exit", "exitCode": 0 }));
-                    return Ok(());
-                }
-                "session.error" => {
-                    if !event_session_id.is_empty() && event_session_id != session_id {
-                        continue;
-                    }
-                    let message = properties
-                        .get("error")
-                        .and_then(|e| e.get("data"))
-                        .and_then(|d| d.get("message"))
-                        .and_then(Value::as_str)
-                        .or_else(|| properties.get("error").and_then(|e| e.get("message")).and_then(Value::as_str))
-                        .unwrap_or("OpenCode session failed");
-                    let _ = sender.send(json!({ "kind": "status", "phase": "turn_failed", "raw": raw }));
-                    let _ = sender.send(json!({ "kind": "error", "message": message }));
-                    // Every terminal path must end the stream — the daemon
-                    // finalizes the turn only when the exit frame arrives.
-                    let _ = sender.send(json!({ "kind": "exit", "exitCode": 1 }));
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-    }
     Ok(())
-}
-
-fn unwrap_server_event(value: &Value) -> Value {
-    let payload = value.get("payload").cloned().unwrap_or(Value::Null);
-    if payload.get("type").is_some() {
-        payload
-    } else {
-        value.clone()
-    }
 }
 
 fn opencode_model(model: Option<&str>) -> Option<Value> {
@@ -1209,18 +1410,13 @@ async fn resolve_summarize_model(base_url: &str, cwd: &str, session_id: &str, mo
     anyhow::bail!("OpenCode summarize needs a model; pick a session model first")
 }
 
-async fn fetch_session_parent(base_url: &str, cwd: &str, child_session_id: &str) -> Option<String> {
-    let info = api_json(base_url, cwd, &format!("/session/{}", urlencoding(child_session_id)), "GET", None).await.ok()?;
-    info.get("parentID").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
-}
-
 async fn handle_question(
     base_url: &str,
     cwd: &str,
-    request: &Value,
     properties: &Value,
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
-) {
+    run_id: &str,
+) -> anyhow::Result<()> {
     let request_id = properties
         .get("id")
         .and_then(Value::as_str)
@@ -1228,13 +1424,13 @@ async fn handle_question(
         .unwrap_or("")
         .to_string();
     if request_id.is_empty() {
-        return;
+        return Ok(());
     }
     let reject_path = format!("/question/{}/reject", urlencoding(&request_id));
     let reject = || api_json(base_url, cwd, &reject_path, "POST", None);
     let Some(channel) = interactions else {
-        let _ = reject().await;
-        return;
+        reject().await?;
+        return Ok(());
     };
     let channel = channel.clone();
     let (is_plan, questions, options) = classify_question(properties);
@@ -1242,33 +1438,33 @@ async fn handle_question(
         let question = questions.first().cloned().unwrap_or(Value::Null);
         let plan = read_plan(cwd, &question).await;
         let response = channel
-            .ask("", json!({ "kind": "plan_approval", "title": "计划已就绪", "plan": plan, "options": options }))
+            .ask(run_id, json!({ "kind": "plan_approval", "nativeRequestId":request_id, "providerSessionId":properties["sessionID"], "title": "计划已就绪", "plan": plan, "options": options }))
             .await;
         let option_id = response.get("optionId").and_then(Value::as_str);
         let selected = options.iter().find(|option| option.get("id").and_then(Value::as_str) == option_id);
         if response.get("outcome").and_then(Value::as_str) == Some("selected") {
             if let Some(selected) = selected {
                 let label = selected.get("label").cloned().unwrap_or(Value::Null);
-                let _ = api_json(
+                api_json(
                     base_url,
                     cwd,
                     &format!("/question/{}/reply", urlencoding(&request_id)),
                     "POST",
                     Some(json!({ "answers": [[label]] })),
                 )
-                .await;
-                return;
+                .await?;
+                return Ok(());
             }
         }
-        let _ = reject().await;
-        return;
+        reject().await?;
+        return Ok(());
     }
     let response = channel
-        .ask("", json!({ "kind": "question", "title": "OpenCode question", "questions": questions }))
+        .ask(run_id, json!({ "kind": "question", "nativeRequestId":request_id, "providerSessionId":properties["sessionID"], "title": "OpenCode question", "questions": questions }))
         .await;
     if response.get("outcome").and_then(Value::as_str) != Some("selected") {
-        let _ = reject().await;
-        return;
+        reject().await?;
+        return Ok(());
     }
     let answers: Vec<Value> = questions
         .iter()
@@ -1277,15 +1473,15 @@ async fn handle_question(
             response.get("answers").and_then(|a| a.get(id)).cloned().unwrap_or_else(|| json!([]))
         })
         .collect();
-    let _ = api_json(
+    api_json(
         base_url,
         cwd,
         &format!("/question/{}/reply", urlencoding(&request_id)),
         "POST",
         Some(json!({ "answers": answers })),
     )
-    .await;
-    let _ = request;
+    .await?;
+    Ok(())
 }
 
 async fn handle_permission(
@@ -1294,7 +1490,7 @@ async fn handle_permission(
     properties: &Value,
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
     run_id: &str,
-) {
+) -> anyhow::Result<()> {
     let request_id = properties
         .get("id")
         .and_then(Value::as_str)
@@ -1302,7 +1498,7 @@ async fn handle_permission(
         .unwrap_or("")
         .to_string();
     if request_id.is_empty() {
-        return;
+        return Ok(());
     }
     let mut reply = "reject".to_string();
     if let Some(channel) = interactions.clone() {
@@ -1319,7 +1515,7 @@ async fn handle_permission(
             .ask(
                 run_id,
                 json!({
-                    "kind": "approval",
+                    "kind": "approval", "nativeRequestId":request_id, "providerSessionId":properties["sessionID"],
                     "title": properties.get("permission").and_then(Value::as_str).unwrap_or("OpenCode permission"),
                     "detail": detail_parts.join("\n"),
                     "options": [
@@ -1339,14 +1535,15 @@ async fn handle_permission(
             }
         }
     }
-    let _ = api_json(
+    api_json(
         base_url,
         cwd,
         &format!("/permission/{}/reply", urlencoding(&request_id)),
         "POST",
         Some(json!({ "reply": reply })),
     )
-    .await;
+    .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------- models
@@ -1415,25 +1612,83 @@ fn enrich_model(model: &mut Value, json_text: &str) {
 }
 
 fn start_args(instance: &Value, request: &Value) -> Vec<String> {
-    let custom = base_args(instance);
-    if !custom.is_empty() {
-        return custom.into_iter().chain(std::iter::once(request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string())).collect();
+    let mut args = base_args(instance);
+    if !args.iter().any(|arg|arg=="run") { args.push("run".into()); }
+    set_cli_flag(&mut args, "--format", "json", None);
+    if let Some(model) = request["model"].as_str().filter(|m|!m.is_empty()) { set_cli_flag(&mut args,"--model",model,Some("-m")); }
+    if let Some(effort) = request["reasoningEffort"].as_str().filter(|e|!e.is_empty()) { set_cli_flag(&mut args,"--variant",effort,None); }
+    if let Some(mode) = request["permissionMode"].as_str().filter(|mode|["build","plan"].contains(mode)) { set_cli_flag(&mut args,"--agent",mode,None); }
+    args.push(request["prompt"].as_str().unwrap_or("").to_string());
+    if let Some(paths) = request["localImagePaths"].as_array().filter(|paths|!paths.is_empty()) {
+        args.push("--file".into());
+        for path in paths.iter().filter_map(Value::as_str) {
+            args.push(std::path::Path::new(request["cwd"].as_str().unwrap_or(".")).join(path).to_string_lossy().into_owned());
+        }
     }
-    let mut args = vec!["run".to_string(), "--format".to_string(), "json".to_string()];
-    if let Some(model) = request.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()) {
-        args.push("--model".to_string());
-        args.push(model.to_string());
-    }
-    // OpenCode's reasoning effort is a model "variant" (run --variant).
-    if let Some(effort) = request.get("reasoningEffort").and_then(Value::as_str).filter(|e| !e.is_empty()) {
-        args.push("--variant".to_string());
-        args.push(effort.to_string());
-    }
-    args.push(request.get("prompt").and_then(Value::as_str).unwrap_or("").to_string());
     args
+}
+
+fn set_cli_flag(args: &mut Vec<String>, flag: &str, value: &str, alias: Option<&str>) {
+    let mut index=0;
+    while index < args.len() {
+        if args[index] == flag || alias == Some(args[index].as_str()) {
+            args.remove(index); if index < args.len() { args.remove(index); }
+        } else if args[index].starts_with(&format!("{flag}=")) { args.remove(index); }
+        else {index+=1;}
+    }
+    args.extend([flag.into(),value.into()]);
 }
 
 #[tokio::main]
 async fn main() {
     agenthub_plugin_sdk::serve(OpenCodePlugin::new()).await;
+}
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn usage_is_cumulative_deduplicated_and_separate_for_child_sessions() {
+        let mut stream = PartStream::default();
+        for (session,id,input,total) in [("main","one",10,10),("child","child-one",99,99),("main","two",20,30),("main","two",20,30)] {
+            let events=stream.update(&json!({"id":id,"sessionID":session,"type":"step-finish","tokens":{"input":input,"output":1,"cache":{"read":0,"write":0}}}),&Value::Null,None);
+            assert_eq!(events.last().unwrap()["usageScope"],"turn");
+            assert_eq!(events.last().unwrap()["inputTokens"],total);
+        }
+    }
+    #[test]
+    fn stream_parts_remain_distinct_and_early_reasoning_is_preserved() {
+        let mut stream = PartStream::default();
+        assert!(stream.delta(&json!({"partID":"r","field":"text","delta":"thinking"}), &Value::Null).is_empty());
+        let events = stream.update(&json!({"id":"r","messageID":"m","type":"reasoning"}), &Value::Null, None);
+        assert_eq!(events[0]["kind"], "thinking");
+        assert_eq!(events[0]["messageId"], "r");
+        assert_eq!(events[0]["text"], "thinking");
+        for id in ["first", "second"] {
+            stream.update(&json!({"id":id,"messageID":"m","type":"text"}), &Value::Null, None);
+            let delta = stream.delta(&json!({"partID":id,"field":"text","delta":id}), &Value::Null);
+            let completed = stream.update(&json!({"id":id,"messageID":"m","type":"text","text":id,"time":{"end":1}}), &Value::Null, None);
+            assert_eq!(delta[0]["messageId"], id);
+            assert_eq!(completed.iter().find(|e| e["kind"] == "message").unwrap()["messageId"], id);
+        }
+        assert!(stream.delta(&json!({"partID":"first","field":"metadata","delta":"no"}), &Value::Null).is_empty());
+    }
+    #[test]
+    fn child_lifecycle_does_not_replace_parent_resume_or_usage() {
+        let mut events = parse_opencode_event(&json!({"type":"text","sessionID":"child","part":{"id":"p","text":"reply"}}));
+        events.extend([json!({"kind":"usage","inputTokens":99}), json!({"kind":"status","phase":"turn_completed"}),
+            json!({"kind":"error","message":"child failed"}), json!({"kind":"exit","exitCode":0})]);
+        let mapped = with_subagent_dispatch(events, "task-call");
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0]["subagentDispatchId"], "task-call");
+        assert_eq!(mapped[0]["kind"], "message");
+    }
+    #[test]
+    fn cache_creation_is_preserved_without_counting_output_in_context() {
+        let events = parse_opencode_event(&json!({"type":"step_finish","part":{"tokens":{"input":10,"output":7,"cache":{"read":20,"write":5}}}}));
+        let usage = events.iter().find(|e| e["kind"] == "usage").unwrap();
+        assert_eq!(usage["cacheCreationInputTokens"], 5);
+        assert_eq!(usage["contextUsed"], 35);
+        assert_eq!(usage["usageScope"], "context");
+        assert_eq!(usage["inputTokensIncludesCache"], false);
+    }
 }

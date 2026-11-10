@@ -6,11 +6,14 @@ import { parseCodexJsonEvent } from "./events.js";
 import { resolveCodexInvocation } from "./executable.js";
 import { discoverCodexModels } from "./models.js";
 import type { AdapterResumeRequest, AdapterRun } from "../types.js";
+import { CodexAppServerOwner, assertCodexAppServerRunning, shutdownCodexAppServerOwner } from "./app-server-pool.js";
 import { startCodexAppServer } from "./app-server-run.js";
 import { resolveCodexWireApi } from "./provider-config.js";
 import { startCodexChatCompatAppServer } from "./chat-compat-proxy.js";
 
 export class CodexAdapter extends ProcessAdapter {
+  private readonly appServerOwner = new CodexAppServerOwner();
+  shutdown(): Promise<void> { return shutdownCodexAppServerOwner(this.appServerOwner); }
   readonly providerId = "codex";
   readonly descriptor: ProviderDescriptor = {
     providerId: "codex",
@@ -69,12 +72,14 @@ export class CodexAdapter extends ProcessAdapter {
     return parseCodexJsonEvent(value);
   }
   override start(request: AdapterStartRequest): AdapterRun {
-    if (resolveCodexWireApi(request.instance) === "chat") return startCodexChatCompatAppServer(request, false);
-    return request.instance.baseArgs.length ? super.start(request) : startCodexAppServer(request, false);
+    assertCodexAppServerRunning(this.appServerOwner);
+    if (resolveCodexWireApi(request.instance) !== "responses") return startCodexChatCompatAppServer(request, false, { owner: this.appServerOwner, anthropic: resolveCodexWireApi(request.instance) === "anthropic" });
+    return request.instance.baseArgs.length ? super.start(request) : startCodexAppServer(request, false, { owner: this.appServerOwner });
   }
   override resume(request: AdapterResumeRequest): AdapterRun {
-    if (resolveCodexWireApi(request.instance) === "chat") return startCodexChatCompatAppServer(request, true);
-    return request.instance.baseArgs.length ? super.resume(request) : startCodexAppServer(request, true);
+    assertCodexAppServerRunning(this.appServerOwner);
+    if (resolveCodexWireApi(request.instance) !== "responses") return startCodexChatCompatAppServer(request, true, { owner: this.appServerOwner, anthropic: resolveCodexWireApi(request.instance) === "anthropic" });
+    return request.instance.baseArgs.length ? super.resume(request) : startCodexAppServer(request, true, { owner: this.appServerOwner });
   }
   listModels(instance: AgentInstance, context?: AdapterDiscoveryContext) { return discoverCodexModels(instance, context); }
 }

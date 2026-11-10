@@ -16,6 +16,17 @@ export function appendPrompt(defaultArgs: string[], instance: AgentInstance, pro
 export function streamEvents(process: ProcessHandle, structured: boolean, parse: StructuredEventParser = (value) => normalizeJson(value)): AsyncIterable<AdapterEvent> {
   async function* iterate(): AsyncGenerator<AdapterEvent> {
     const pending: Record<"stdout" | "stderr", string> = { stdout: "", stderr: "" };
+    const flush = (): AdapterEvent[] => {
+      const events: AdapterEvent[] = [];
+      for (const stream of ["stdout", "stderr"] as const) {
+        const text = pending[stream]; pending[stream] = "";
+        if (!text.trim()) continue;
+        let parsed: AdapterEvent[] = [];
+        if (structured) { try { parsed = parse(JSON.parse(text), stream); } catch { /* raw diagnostic */ } }
+        events.push(...(parsed.length ? parsed : [{kind:"raw" as const,stream,text}]));
+      }
+      return events;
+    };
     for await (const event of process.events) {
       if (event.kind === "stdout" || event.kind === "stderr") {
         if (!structured) { yield { kind: "raw", stream: event.kind, text: event.text }; continue; }
@@ -29,11 +40,12 @@ export function streamEvents(process: ProcessHandle, structured: boolean, parse:
             yield* (parsed.length ? parsed : [{ kind: "raw", stream: event.kind, text: line }]);
           } catch { yield { kind: "raw", stream: event.kind, text: line }; }
         }
-      } else if (event.kind === "exit" || event.kind === "timeout" || event.kind === "error") yield event;
+      } else if (event.kind === "exit" || event.kind === "timeout" || event.kind === "error") {
+        if (event.kind === "exit") yield* flush();
+        yield event;
+      }
     }
-    for (const stream of ["stdout", "stderr"] as const) {
-      if (pending[stream].trim()) yield { kind: "raw", stream, text: pending[stream] };
-    }
+    yield* flush();
   }
   return { [Symbol.asyncIterator]: iterate };
 }
@@ -113,4 +125,22 @@ export abstract class ProcessAdapter implements AgentCliAdapter {
     if (this.closeStdinAfterStart()) process.child.stdin.end();
     return { process, events: streamEvents(process, this.supportsStructuredOutput, (value, stream) => this.parseStructuredEvent(value, stream)), cancel: process.cancel, write: process.write };
   }
+}
+
+/** Custom arguments are a prefix; explicitly selected native options still apply. */
+export function mergeCliArgs(base: string[], managed: string[]): string[] {
+  const result = [...base];
+  for (let index=0; index<managed.length;) {
+    const name = managed[index];
+    const takesValue = managed[index+1] !== undefined && !managed[index+1].startsWith("-");
+    if (!["--settings","--config","-c"].includes(name)) for (let cursor=0; cursor<result.length;) {
+      const alias = ({"--model":"-m","--profile":"-p","--sandbox":"-s","--ask-for-approval":"-a","--resume":"-r","-p":"--print"} as Record<string,string>)[name];
+      const exact = result[cursor] === name || (alias !== undefined && result[cursor] === alias);
+      if (exact || result[cursor].startsWith(name+"=")) result.splice(cursor, exact && takesValue ? 2 : 1);
+      else cursor++;
+    }
+    result.push(...managed.slice(index,index+(takesValue?2:1)));
+    index += takesValue ? 2 : 1;
+  }
+  return result;
 }

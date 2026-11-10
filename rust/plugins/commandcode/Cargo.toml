@@ -1,0 +1,13 @@
+[package]
+name = "agenthub-plugin-commandcode"
+version = "0.1.0"
+edition = "2021"
+description = "Nautilo native provider plugin for Command Code (command-code CLI, headless JSON NDJSON)"
+
+[dependencies]
+agenthub-plugin-sdk = { path = "../../plugin-sdk" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

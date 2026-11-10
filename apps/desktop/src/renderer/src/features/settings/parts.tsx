@@ -1,4 +1,5 @@
-import type { LucideIcon } from "lucide-react";
+import { HelpCircle, type LucideIcon } from "lucide-react";
+import { Tooltip } from "../../components/ui/Tooltip";
 import type { ReactNode } from "react";
 import { cn } from "../../lib/utils";
 
@@ -8,7 +9,7 @@ export function SectionHeader({
   title,
   description,
   actions,
-  className
+  className,
 }: {
   icon: LucideIcon;
   title: string;
@@ -17,17 +18,38 @@ export function SectionHeader({
   className?: string;
 }): JSX.Element {
   return (
-    <div className={cn("flex flex-wrap items-start justify-between gap-3", className)}>
+    <div
+      className={cn(
+        "flex flex-wrap items-start justify-between gap-3",
+        className,
+      )}
+    >
       <div className="flex min-w-0 items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-accent/25 bg-gradient-to-br from-accent/25 to-accent/5 text-accent">
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center text-ink-3">
           <Icon className="h-4.5 w-4.5" aria-hidden />
         </span>
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold tracking-tight text-ink">{title}</h2>
-          {description && <p className="mt-0.5 text-xs leading-relaxed text-ink-3">{description}</p>}
+          <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight text-ink">
+            {title}
+            {description && (
+              <Tooltip content={description}>
+                <button
+                  type="button"
+                  aria-label={description}
+                  className="rounded text-ink-3 outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
+                  <HelpCircle className="h-3.5 w-3.5" />
+                </button>
+              </Tooltip>
+            )}
+          </h2>
         </div>
       </div>
-      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
+      {actions && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {actions}
+        </div>
+      )}
     </div>
   );
 }
@@ -39,7 +61,7 @@ export function Panel({
   count,
   actions,
   className,
-  children
+  children,
 }: {
   icon?: LucideIcon;
   title?: string;
@@ -49,12 +71,16 @@ export function Panel({
   children: ReactNode;
 }): JSX.Element {
   return (
-    <section className={cn("rounded-xl border border-line bg-card-hover/40 p-3.5", className)}>
+    <section
+      className={cn("rounded-lg border border-line bg-card p-4", className)}
+    >
       {(title || actions) && (
         <div className="mb-3 flex items-center justify-between gap-2">
           {title && (
             <h3 className="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-ink">
-              {Icon && <Icon className="h-4 w-4 shrink-0 text-accent" aria-hidden />}
+              {Icon && (
+                <Icon className="h-4 w-4 shrink-0 text-ink-3" aria-hidden />
+              )}
               <span className="truncate">{title}</span>
               {typeof count === "number" && (
                 <span className="shrink-0 rounded-full border border-line bg-card px-1.5 text-[10px] leading-4 font-medium text-ink-3">

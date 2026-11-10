@@ -27,13 +27,24 @@ impl CredentialService {
     }
 
     pub fn set(&self, agent_instance_id: &str, credential: &Value) -> CoreResult<()> {
+        if agent_instance_id.starts_with("connection:") { return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Connection credentials are immutable; create a new revision")); }
         let api_key = credential.get("apiKey").and_then(Value::as_str).unwrap_or("");
         if api_key.trim().is_empty() {
             let mut details = serde_json::Map::new();
             details.insert("field".to_string(), Value::String("apiKey".to_string()));
             return Err(CoreError::details(ErrorCode::IpcInvalidRequest, details));
         }
-        let result = (|| -> CoreResult<Value> {
+        let encrypted = self.encrypt(credential)?;
+        Repositories::new(&self.db.lock().unwrap().raw).credentials().save(agent_instance_id, &encrypted)?;
+        Ok(())
+    }
+
+    /// Encrypt before acquiring a persistence transaction; never store plaintext in entity JSON.
+    pub(crate) fn encrypt(&self, credential: &Value) -> CoreResult<Value> {
+        if credential.get("apiKey").and_then(Value::as_str).is_none_or(|key| key.trim().is_empty()) {
+            return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "API key cannot be empty"));
+        }
+        (|| -> CoreResult<Value> {
             let key = self.key_value()?;
             let cipher = Aes256Gcm::new((&key).into());
             let iv: [u8; 12] = rand_bytes();
@@ -45,22 +56,20 @@ impl CredentialService {
                 "tag": BASE64.encode(&ciphertext[ciphertext.len() - 16..]),
                 "ciphertext": BASE64.encode(&ciphertext[..ciphertext.len() - 16])
             }))
-        })();
-        match result {
-            Ok(encrypted) => {
-                Repositories::new(&self.db.lock().unwrap().raw).credentials().save(agent_instance_id, &encrypted)?;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        })()
     }
 
     pub fn remove(&self, agent_instance_id: &str) -> CoreResult<bool> {
+        if agent_instance_id.starts_with("connection:") { return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "Connection credentials are immutable; create a new revision")); }
         Repositories::new(&self.db.lock().unwrap().raw).credentials().remove(agent_instance_id)
     }
 
     pub fn has(&self, agent_instance_id: &str) -> CoreResult<bool> {
         Repositories::new(&self.db.lock().unwrap().raw).credentials().has(agent_instance_id)
+    }
+
+    pub fn connection_directory(&self, id: &str, revision: u64) -> PathBuf {
+        self.key_path.parent().unwrap().join("runtime-connections").join(id).join(revision.to_string())
     }
 
     pub fn read(&self, agent_instance_id: &str) -> CoreResult<Option<Value>> {
@@ -86,11 +95,14 @@ impl CredentialService {
     /// All stored API keys — feeds the redaction service.
     pub fn secret_values(&self) -> Vec<String> {
         let db = self.db.lock().unwrap();
-        let agents = Repositories::new(&db.raw).agents().list_default().unwrap_or_default();
-        let ids: Vec<String> = agents
-            .iter()
-            .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(str::to_string))
-            .collect();
+        let ids: Vec<String> = match db.raw.prepare("SELECT agent_instance_id FROM credentials") {
+            Ok(mut statement) => {
+                let values = statement.query_map([], |row| row.get::<_, String>(0))
+                    .map(|rows| rows.filter_map(Result::ok).collect()).unwrap_or_default();
+                values
+            },
+            Err(_) => vec![],
+        };
         drop(db);
         ids.into_iter()
             .filter_map(|id| self.read(&id).ok().flatten())

@@ -1,13 +1,14 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { motion } from "framer-motion";
+import { BrowserActivity } from "./BrowserActivity";
+import { isBrowserTool } from "../../lib/browser-display";
 import {
   AlertTriangle,
+  Atom,
   ArrowRightLeft,
   Bot,
-  BrainCircuit,
   Check,
   ChevronDown,
-  ClipboardList,
   Copy,
   FileCode2,
   FileText,
@@ -15,30 +16,34 @@ import {
   GitBranch,
   ImageIcon,
   Loader2,
-  Pencil,
-  RotateCcw,
-  Sparkles,
-  SquareTerminal,
-  User,
-  Wrench,
-  X
+  Pencil
 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
+import { SessionErrorCard } from "./SessionErrorCard";
+import { getBridge } from "../../lib/bridge";
 import { cn, formatDateTime } from "../../lib/utils";
-import type { ApprovalScope, TimelineEvent } from "../../lib/types";
+import type { TimelineEvent } from "../../lib/types";
 import { StatusChip, Tag } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
 import { toolActivityLabel, toolInputFileDiff } from "../../lib/tool-display";
-import { latestReasoningSummary } from "../../lib/tool-group-preview";
 import { MarkdownContent } from "./MarkdownContent";
+import { DelegationCard } from "./DelegationCard";
+import { CodeExecutionCard } from "./CodeExecutionCard";
+import { ProcessDisclosure } from "./ProcessDisclosure";
+import { ToolActivityIcon } from "./ToolActivityIcon";
+import { ManagedApprovalCard } from "./ManagedApprovalCard";
+import { reasoningPreview } from "../../lib/process-display";
+import { useStreamingText } from "../../lib/streaming-text";
+import { useMessageEntrance, useSurfaceEntrance } from "../../lib/ui-motion";
+import { reconcileTimelineKeys, type TimelineKeySequence } from "../../lib/timeline-row-keys";
 import { ToolFileDiffView } from "./ToolFileDiffView";
 import { TimelineImage } from "./TimelineImage";
 import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupTextMenu } from "./media-actions";
 import { openFilePreview } from "../../stores/file-preview";
 import { resolveFileOpenTarget } from "../../lib/file-references";
 import { fileChangeCounts } from "../../lib/changed-files";
-import { useProgressiveRows } from "../../lib/use-progressive-rows";
+import { diffLines } from "../../lib/line-diff";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 const FOLLOW_TAIL_THRESHOLD = 120;
@@ -77,13 +82,20 @@ export function TimelineViewport({
   className?: string;
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useSurfaceEntrance<HTMLDivElement>(sessionKey, active);
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const previousForceFollowKeyRef = useRef(forceFollowKey);
   const previousContentKeyRef = useRef<unknown>(contentKey);
   const previousRowCountRef = useRef(rows.length);
+  const virtualized = rows.length > 80;
+
+  const keySequenceRef = useRef<TimelineKeySequence>();
+  const keySequence = reconcileTimelineKeys(keySequenceRef.current, rows, sessionKey);
+  keySequenceRef.current = keySequence;
 
   const virtualizer = useVirtualizer({
+    enabled: active && virtualized,
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     // A folded turn block (header + fold row + answer) is typically under
@@ -93,7 +105,7 @@ export function TimelineViewport({
     // Keep overscan tight: each row renders markdown on mount, and extra
     // off-screen rows would parse long answers before they are visible.
     overscan: 2,
-    getItemKey: (index) => rows[index]?.key ?? String(index)
+    getItemKey: keySequence.getItemKey
   });
 
   const scrollToTail = useCallback(() => {
@@ -104,7 +116,9 @@ export function TimelineViewport({
     // scrollTop = scrollHeight reflects the real, freshly laid-out content
     // height (no virtualizer state lag). The virtualizer observes scroll via
     // the scroll event and re-windows accordingly.
-    element.scrollTop = element.scrollHeight;
+    if (Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop) > 1) {
+      element.scrollTop = element.scrollHeight;
+    }
     lastScrollTopRef.current = element.scrollTop;
   }, [active]);
 
@@ -142,11 +156,31 @@ export function TimelineViewport({
     scrollToTail();
   }, [forceFollowKey, scrollToTail]);
 
-  // Height-only changes (markdown layout, images, framer-motion settling) and
-  // the virtualizer's own row measurement update the total height. Follow the
-  // tail on those changes WITHOUT a ResizeObserver: observing the sized
-  // container and scrolling from its callback re-measured rows every frame and
-  // produced "ResizeObserver loop completed with undelivered notifications".
+  // Child streams/Markdown workers can commit after the parent's event effect.
+  // Observe actual content and viewport sizes, then pin once on the next frame.
+  // Never write scroll/layout synchronously inside ResizeObserver: that used
+  // to feed back into virtual row measurement and create observer loops.
+  useLayoutEffect(() => {
+    const viewport = scrollRef.current;
+    const content = contentRef.current;
+    if (!active || !viewport || !content) return;
+    let frame: number | undefined;
+    const observer = new ResizeObserver(() => {
+      if (!followTailRef.current || frame !== undefined) return;
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        scrollToTail();
+      });
+    });
+    observer.observe(content);
+    observer.observe(viewport);
+    return () => {
+      observer.disconnect();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
+  }, [active, scrollToTail, sessionKey]);
+
+  // Virtual row measurements also update the spacer's explicit height.
   const totalSize = virtualizer.getTotalSize();
   const previousTotalSizeRef = useRef(totalSize);
   useLayoutEffect(() => {
@@ -160,10 +194,11 @@ export function TimelineViewport({
       ref={scrollRef}
       onScroll={(event) => {
         const element = event.currentTarget;
+        if (event.target !== element) return;
         const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
-        if (element.scrollTop < lastScrollTopRef.current - 1) {
-          // Any upward scroll (wheel, thumb drag, keys) is explicit user
-          // intent ? even inside the re-engage threshold.
+        if (element.scrollTop < lastScrollTopRef.current - 1 && gap > 1) {
+          // Collapsing process rows or enlarging the viewport clamps scrollTop
+          // to a smaller bottom offset. That is not the user scrolling up.
           followTailRef.current = false;
         } else if (gap < FOLLOW_TAIL_THRESHOLD && element.scrollTop > lastScrollTopRef.current) {
           // Only scrolling DOWN into the tail re-engages follow mode.
@@ -179,18 +214,18 @@ export function TimelineViewport({
       className={cn("relative h-full overflow-y-auto", className)}
       aria-live="polite"
     >
-      <div style={{ height: totalSize, position: "relative", width: "100%" }}>
-        {virtualizer.getVirtualItems().map((virtualRow) => (
+      <div ref={contentRef} data-timeline-content="" style={{ height: virtualized ? totalSize : undefined, position: "relative", width: "100%" }}>
+        {(virtualized ? virtualizer.getVirtualItems() : rows.map((row, index) => ({ key: row.key, index, start: 0 }))).map((virtualRow) => (
           <div
             key={virtualRow.key}
-            ref={virtualizer.measureElement}
+            ref={virtualized ? virtualizer.measureElement : undefined}
             data-index={virtualRow.index}
             style={{
-              position: "absolute",
+              position: virtualized ? "absolute" : "relative",
               top: 0,
               left: 0,
               width: "100%",
-              transform: `translateY(${virtualRow.start}px)`
+              transform: virtualized ? `translateY(${virtualRow.start}px)` : undefined
             }}
           >
             {rows[virtualRow.index]?.render()}
@@ -226,35 +261,6 @@ function openTimelineFile(
   else openFilePreview({ path });
 }
 
-function LatestActivityLabel({
-  label,
-  followTail
-}: {
-  label: string;
-  followTail: boolean;
-}): JSX.Element {
-  const labelRef = useRef<HTMLSpanElement>(null);
-
-  useLayoutEffect(() => {
-    const element = labelRef.current;
-    if (!element) return;
-    element.scrollLeft = followTail ? element.scrollWidth : 0;
-  }, [followTail, label]);
-
-  return (
-    <span
-      ref={labelRef}
-      className={cn(
-        "min-w-0 flex-1 whitespace-nowrap font-mono",
-        followTail ? "overflow-hidden" : "truncate"
-      )}
-      title={label}
-    >
-      {label}
-    </span>
-  );
-}
-
 function CardShell({
   icon: Icon,
   tone = "accent",
@@ -270,58 +276,32 @@ function CardShell({
   children?: React.ReactNode;
   className?: string;
 }): JSX.Element {
-  const toneClasses: Record<string, string> = {
-    accent: "border-accent/25 bg-gradient-to-br from-accent/20 via-accent-soft to-info/10 text-accent shadow-[0_3px_10px_-3px_var(--accent-soft)]",
-    ok: "border-ok/20 bg-ok/10 text-ok",
-    warn: "border-warn/20 bg-warn/10 text-warn",
-    danger: "border-danger/20 bg-danger/10 text-danger",
-    info: "border-info/20 bg-info/10 text-info",
-    muted: "border-line bg-card-hover text-ink-3"
-  };
   return (
-    <motion.article
-      initial={{ opacity: 0, y: 10, scale: 0.99 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 500, damping: 45 }}
-      className={cn("flex gap-3", className)}
-    >
-      <span
-        aria-hidden
-        className={cn("mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border", toneClasses[tone])}
-      >
-        <Icon className="h-4 w-4" />
-      </span>
-      <div className="min-w-0 flex-1">
-        {(title || time) && (
-          <div className="mb-1.5 flex items-baseline justify-between gap-3">
-            <div className="min-w-0 text-[13px] font-medium text-ink-2">{title}</div>
-            {time && <time className="shrink-0 text-[11px] text-ink-3">{time}</time>}
-          </div>
-        )}
-        {children}
-      </div>
-    </motion.article>
+    <article className={cn("min-w-0 py-1", className)} data-tone={tone}>
+      {(title || time) && <div className="mb-2 flex min-w-0 items-center gap-2 text-sm text-ink-3" title={time}><Icon className="h-4 w-4 shrink-0" aria-hidden /><div className="min-w-0 flex-1">{title}</div></div>}
+      {children}
+    </article>
   );
 }
 
-function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
+function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor = true }: {
   event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> };
   locale: "zh-CN" | "en-US";
   onEditMessage?: (messageId: string, text: string) => void;
   onOpenLocalFile?: (path: string) => void;
+  showAuthor?: boolean;
 }): JSX.Element {
   const { sender, authorName, text, streaming, messageId, attachments, editedAt } = event.data;
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
   const isSystem = sender === "system";
-  // Historical messages render statically on remounts (mode switches reopen the
-  // whole timeline); only fresh live-conversation rows pay for the spring-in.
-  const animateIn = Date.now() - new Date(event.timestamp).getTime() < 10_000;
+  const entranceRef = useMessageEntrance(event.sessionId, isUser ? messageId : undefined);
+  const visibleText = useStreamingText(text, Boolean(streaming), `${event.sessionId}:${event.id}`);
   if (isSystem) {
     return (
       <motion.p
-        initial={{ opacity: 0 }}
+        initial={false}
         animate={{ opacity: 1 }}
         className="log-line py-1 text-center text-ink-3"
       >
@@ -330,31 +310,23 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
     );
   }
   return (
-      <motion.div
-      initial={animateIn ? { opacity: 0, y: 10 } : false}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ type: "spring", stiffness: 500, damping: 45 }}
-      className="group flex"
+      <div
+      className="group relative flex w-full"
     >
       <div className={cn("min-w-0 flex-1", isUser && "flex flex-col items-end")}>
-        <div className={cn("flex items-baseline gap-2 text-ink-3", isUser && "flex-row-reverse")}>
-          <span className={cn("text-[11px] font-medium tracking-wide", isUser && "text-accent")}>
-            {isUser ? (locale === "zh-CN" ? "你" : "You") : authorName ?? "Agent"}
-          </span>
-          <time className="text-[10px] tabular-nums opacity-70">{formatDateTime(event.timestamp, locale)}</time>
-          {editedAt && <span className="text-[10px] opacity-70">{locale === "zh-CN" ? "已编辑" : "Edited"}</span>}
-        </div>
+        {isUser ? <span className="sr-only">{locale === "zh-CN" ? "你" : "You"}</span> : showAuthor && <div className="assistant-identity"><span className="assistant-mark"><Bot size={16} aria-hidden /></span><strong>{authorName ?? "Nautilo"}</strong></div>}
         <div
+          ref={entranceRef}
           className={cn(
-            "mt-1.5 text-[15px] leading-7 text-ink",
-            isUser && "chat-bubble-user max-w-[85%] rounded-2xl rounded-tr-md border border-accent/20 bg-accent-soft/60 px-4 py-2.5"
+            "text-[15px] leading-7 text-ink",
+            isUser && "chat-bubble-user max-w-[88%] rounded-2xl bg-card-hover px-4 py-3"
           )}
           onContextMenu={(event) => {
             event.preventDefault();
             void popupTextMenu(window.getSelection()?.toString() ?? "", t);
           }}
         >
-          <MarkdownContent source={text} inverted={false} onOpenLocalFile={onOpenLocalFile} />
+          <MarkdownContent source={visibleText} inverted={false} onOpenLocalFile={onOpenLocalFile} streaming={Boolean(streaming)} />
           {attachments && attachments.length > 0 && (
             <div className={cn("mt-2.5 grid gap-2", attachments.length > 1 && "sm:grid-cols-2")}>
               {attachments.map((attachment) => attachment.kind === "image" && attachment.path ? (
@@ -389,6 +361,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
                 >
                   <FileText className="h-4 w-4 shrink-0" aria-hidden />
                   <span className="truncate text-xs">{attachment.name}</span>
+                  {attachment.unavailable && <span className="shrink-0 text-xs text-ink-3">{locale === "zh-CN" ? "请在原生会话中查看" : "View in native session"}</span>}
                 </div>
               ))}
             </div>
@@ -396,7 +369,8 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
           {streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-label={locale === "zh-CN" ? "正在流式生成" : "Streaming"} />}
         </div>
         {!streaming && (
-          <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          <div className="absolute right-0 top-full z-10 flex items-center gap-1 rounded-lg bg-card opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100" title={formatDateTime(event.timestamp, locale)}>
+            {editedAt && <span className="text-xs text-ink-3">{locale === "zh-CN" ? "已编辑" : "Edited"}</span>}
             <button
               type="button"
               onClick={() => {
@@ -425,172 +399,77 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile }: {
           </div>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }
 
 function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind: "activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element | null {
-  const zh = locale === "zh-CN";
-  const labels = zh
-    ? { queued: "请求已发送", starting: "正在启动 Agent", thinking: "正在思考", responding: "正在整理回复", completed: "本轮已完成" }
-    : { queued: "Request sent", starting: "Starting agent", thinking: "Thinking", responding: "Preparing response", completed: "Turn completed" };
-  const time = formatDateTime(event.timestamp, locale);
-  // Turn-completion dividers are hidden: the fold row already marks the end.
-  if (event.data.phase === "completed") {
-    return null;
-  }
+  if (event.data.phase === "stopped") return <p className="py-1 text-[13px] text-ink-3">{locale === "zh-CN" ? "已停止" : "Stopped"}</p>;
+  if (event.data.phase !== "starting") return null;
   return (
-    <motion.div initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} className="log-line flex items-center gap-2 py-0.5 text-ink-3">
-      <span className="relative mx-1 flex h-1.5 w-1.5" aria-hidden>
-        <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" />
-        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-br from-accent to-info" />
-      </span>
-      <span className="shimmer-text">{labels[event.data.phase]}</span>
-      <time className="text-[10px] tabular-nums opacity-70">{time}</time>
-    </motion.div>
+    <details className="text-[13px] text-ink-3">
+      <summary className="w-fit cursor-pointer rounded-md py-1 outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
+        {locale === "zh-CN" ? "会话已初始化" : "Initialized session"}
+      </summary>
+      <time className="mt-1 block text-xs">{formatDateTime(event.timestamp, locale)}</time>
+    </details>
   );
 }
 
 function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kind: "reasoning" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  const reasoningScrollRef = useRef<HTMLDivElement>(null);
-  const followReasoningRef = useRef(true);
-  const zh = locale === "zh-CN";
-  const scrollToLatest = useCallback(() => {
-    const element = reasoningScrollRef.current;
-    if (!element) return;
-    element.scrollTop = element.scrollHeight;
-    followReasoningRef.current = true;
-    setShowJumpToLatest(false);
-  }, []);
-
-  useLayoutEffect(() => {
-    if (!open) return;
-    followReasoningRef.current = true;
-    setShowJumpToLatest(false);
-    scrollToLatest();
-  }, [open, scrollToLatest]);
-
-  // Streaming text replaces the reasoning event on every delta. Keep the
-  // viewport pinned only while the user is already at the tail; a manual
-  // upward scroll opts out until they return to the bottom.
-  useLayoutEffect(() => {
-    if (open && event.data.streaming && followReasoningRef.current) scrollToLatest();
-  }, [event.data.streaming, event.data.text, open, scrollToLatest]);
-
-  const handleReasoningScroll = (): void => {
-    const element = reasoningScrollRef.current;
-    if (!element) return;
-    const atLatest = element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_TAIL_THRESHOLD;
-    followReasoningRef.current = atLatest;
-    setShowJumpToLatest(!atLatest);
-  };
-
-  return (
-    <motion.article initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="reasoning-card rounded-xl border border-line bg-card/70">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[13px] text-ink-2 outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/45"
-      >
-        <BrainCircuit className="h-4 w-4 shrink-0 text-accent" aria-hidden />
-        <span className={cn("font-medium", event.data.streaming && "shimmer-text")}>
-          {event.data.streaming ? (zh ? "推理中" : "Reasoning") : (zh ? "推理完成" : "Reasoning complete")}
-        </span>
-        {event.data.streaming && <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden />}
-        <ChevronDown className={cn("ml-auto h-3.5 w-3.5 text-ink-3 transition-transform duration-200", open && "rotate-180")} aria-hidden />
-      </button>
-      {open && (
-        <motion.div
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          onAnimationComplete={scrollToLatest}
-          className="overflow-hidden"
-        >
-          <div className="relative">
-            <div
-              ref={reasoningScrollRef}
-              onScroll={handleReasoningScroll}
-              className="max-h-96 overscroll-contain overflow-y-auto border-t border-line px-3.5 py-3 pr-2 text-[13px] leading-relaxed text-ink-2"
-            >
-              <MarkdownContent source={event.data.text} />
-              {event.data.streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-hidden />}
-            </div>
-            <AnimatePresence>
-              {showJumpToLatest && (
-                <motion.button
-                  type="button"
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 8 }}
-                  transition={{ duration: 0.15, ease: "easeOut" }}
-                  onClick={scrollToLatest}
-                  className="absolute bottom-2 right-3 inline-flex items-center gap-1 rounded-full border border-line bg-card px-2 py-1 text-[11px] text-ink-2 shadow-pop transition-colors hover:bg-card-hover"
-                  aria-label={zh ? "滚动到最新推理" : "Scroll to latest reasoning"}
-                >
-                  <ChevronDown className="h-3 w-3" aria-hidden />
-                  {zh ? "回到底部" : "Latest"}
-                </motion.button>
-              )}
-            </AnimatePresence>
-          </div>
-        </motion.div>
-      )}
-    </motion.article>
-  );
+  const streaming = Boolean(event.data.streaming);
+  const visibleText = useStreamingText(event.data.text, streaming, `${event.sessionId}:${event.id}`);
+  const preview = useMemo(() => reasoningPreview(visibleText, streaming), [visibleText, streaming]);
+  return <ProcessDisclosure className="reasoning-card" icon={<Atom size={14} />} label={locale === "zh-CN" ? "思考" : "Thinking"}
+    preview={preview} open={open} onToggle={() => setOpen(value => !value)} running={streaming}>
+    <MarkdownContent source={visibleText} streaming={streaming} />
+  </ProcessDisclosure>;
 }
 
 function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { kind: "tool_activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
   const [open, setOpen] = useState(false);
   const { toolName, status, input, output, fileDiff } = event.data;
-  const resolvedFileDiff = fileDiff ?? toolInputFileDiff(toolName, input);
+  const resolvedFileDiff = useMemo(() => fileDiff ?? toolInputFileDiff(toolName, input), [fileDiff, toolName, input]);
+  const counts = useMemo(() => {
+    if (!resolvedFileDiff) return undefined;
+    const rows = diffLines(resolvedFileDiff.before, resolvedFileDiff.after);
+    return { additions: rows.filter((row) => row.type === "added").length, deletions: rows.filter((row) => row.type === "removed").length };
+  }, [resolvedFileDiff]);
   const details = Boolean(resolvedFileDiff || input || output);
   const zh = locale === "zh-CN";
   const label = toolActivityLabel(toolName, status, input, locale);
+  if (isBrowserTool(toolName)) return <BrowserActivity name={toolName} status={status} input={input} output={output} zh={zh}/>;
   return (
-    <motion.article initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} className="flex gap-2.5 text-[13px]">
-      <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-info/10 text-info">
-        {status === "running" ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Wrench className="h-3.5 w-3.5" aria-hidden />}
-      </span>
-      <div className="min-w-0 flex-1">
-        <button
-          type="button"
-          disabled={!details}
-          onClick={() => setOpen((value) => !value)}
-          className="flex w-full items-center gap-2 py-1 text-left text-ink-2 disabled:cursor-default"
-        >
-          <span className="truncate font-medium" title={label}>{label}</span>
-          {details && <ChevronDown className={cn("ml-auto h-3.5 w-3.5 text-ink-3 transition-transform", open && "rotate-180")} aria-hidden />}
-        </button>
-        {details && open && (
-          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} className="mt-1 overflow-hidden rounded-lg border border-line bg-card-hover">
-            {resolvedFileDiff && <ToolFileDiffView diff={resolvedFileDiff} locale={locale} />}
-            {input && !resolvedFileDiff && (
-              <div className="px-3 py-2">
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{zh ? "输入" : "Input"}</div>
-                <pre className="max-h-40 overflow-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-2">{input}</pre>
-              </div>
-            )}
-            {input && resolvedFileDiff && (
-              <details className="border-t border-line">
-                <summary className="cursor-pointer px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">
-                  {zh ? "原始输入" : "Raw input"}
-                </summary>
-                <pre className="max-h-40 overflow-auto border-t border-line px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-2">{input}</pre>
-              </details>
-            )}
-            {output && (
-              <div className={cn("px-3 py-2", (input || resolvedFileDiff) && "border-t border-line")}>
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{zh ? "结果" : "Result"}</div>
-                <pre className="max-h-56 overflow-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-2">{output}</pre>
-              </div>
-            )}
-          </motion.div>
-        )}
-      </div>
-    </motion.article>
+    <article className="text-[13px]">
+      <button
+        type="button"
+        disabled={!details}
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={details ? open : undefined}
+        className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50 disabled:cursor-default"
+      >
+        {status === "running" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />}
+        {status === "failed" && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
+        {status === "done" && <ToolActivityIcon name={toolName} input={input} />}
+        <span className="truncate" title={label}>{label}</span>
+        {counts && <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
+        {details && <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !open && "-rotate-90")} aria-hidden />}
+      </button>
+      {details && open && (
+        <div className="mt-2 overflow-hidden rounded-xl border border-line bg-card">
+          {resolvedFileDiff && <ToolFileDiffView diff={resolvedFileDiff} locale={locale} />}
+          {input && !resolvedFileDiff && <pre className="max-h-40 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2">{input}</pre>}
+          {input && resolvedFileDiff && (
+            <details className="border-t border-line">
+              <summary className="cursor-pointer px-3 py-2 text-xs text-ink-3">{zh ? "原始输入" : "Raw input"}</summary>
+              <pre className="max-h-40 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap text-ink-2">{input}</pre>
+            </details>
+          )}
+          {output && <pre className={cn("max-h-56 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2", (input || resolvedFileDiff) && "border-t border-line")}>{output}</pre>}
+        </div>
+      )}
+    </article>
   );
 }
 
@@ -606,7 +485,8 @@ function UsageLine({ event, locale }: { event: TimelineEvent & { data: { kind: "
 /** A provider CLI's native sub-agent dispatch, rendered like our own delegation cards. */
 function SubagentCard({ event, locale, onOpenSubagent }: { event: TimelineEvent & { data: { kind: "tool_activity" } }; locale: "zh-CN" | "en-US"; onOpenSubagent?: (eventId: string) => void }): JSX.Element {
   const { t } = useI18n();
-  const { status, subagent } = event.data;
+  const { subagent } = event.data;
+  const status = event.data.status === "failed" ? "failed" : subagent?.status ?? event.data.status;
   const tone = status === "running" ? "accent" : status === "done" ? "ok" : "danger";
   const statusLabel = status === "running"
     ? subagent?.background ? t("sessions.cards.subagentBackgroundRunning") : t("sessions.cards.running")
@@ -615,34 +495,22 @@ function SubagentCard({ event, locale, onOpenSubagent }: { event: TimelineEvent 
       : t("sessions.cards.failed");
   const activityCount = subagent?.activities?.length ?? 0;
   return (
-    <CardShell
-      icon={Bot}
-      tone="info"
-      title={
-        <span className="inline-flex min-w-0 items-center gap-2 text-[13px]">
-          <span className="shrink-0 text-ink-3">{t("sessions.cards.subagent")}</span>
-          {subagent?.agentType && <Tag label={subagent.agentType} />}
-          {subagent?.background && <Tag label={t("sessions.cards.subagentBackground")} />}
-          <StatusChip tone={tone} label={statusLabel} pulse={status === "running"} className="h-5 shrink-0 px-1.5 text-[10px]" />
-          {onOpenSubagent && (
-            <button
-              type="button"
-              onClick={() => onOpenSubagent(event.id)}
-              className="shrink-0 rounded-md px-1.5 py-0.5 text-xs font-medium text-accent transition-colors hover:bg-accent-soft focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none"
-            >
-              {activityCount > 0 ? t("sessions.cards.subagentDetailCount", { count: activityCount }) : t("sessions.cards.subagentDetail")} →
-            </button>
-          )}
-        </span>
-      }
+    <DelegationCard
+      name={subagent?.agentType || t("sessions.cards.subagent")}
+      task={subagent?.task}
+      status={statusLabel}
+      tone={tone}
+      running={status === "running"}
+      native
+      zh={locale === "zh-CN"}
+      meta={[subagent?.model, subagent?.background ? t("sessions.cards.subagentBackground") : undefined].filter((value): value is string => Boolean(value))}
+      actionLabel={activityCount > 0 ? t("sessions.cards.subagentDetailCount", { count: activityCount }) : t("sessions.cards.subagentDetail")}
+      onOpen={onOpenSubagent ? () => onOpenSubagent(event.id) : undefined}
+      input={event.data.input}
+      output={event.data.output}
+      toolName={event.data.toolName}
       time={formatDateTime(event.timestamp, locale)}
-    >
-      {subagent?.task && (
-        <p className="rounded-xl border border-line bg-card px-3.5 py-2.5 text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-2">
-          {subagent.task}
-        </p>
-      )}
-    </CardShell>
+    />
   );
 }
 
@@ -732,45 +600,35 @@ function RecoveryDecisionCard({ event, locale }: { event: TimelineEvent & { data
 
 function TaskUpdateCard({ event, t, locale, onOpenSession }: { event: TimelineEvent & { data: { kind: "task_update" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string; onOpenSession?: (id: string) => void }): JSX.Element {
   const statusTone: Record<string, "muted" | "info" | "accent" | "ok" | "danger" | "warn"> = {
+    draft: "muted",
+    ready: "muted",
     queued: "muted",
     running: "accent",
     completed: "ok",
     failed: "danger",
     cancelled: "muted",
     blocked_dependency: "warn",
-    verifying: "info"
+    verifying: "info",
+    waiting_user: "warn",
+    waiting_approval: "warn",
+    review_required: "warn",
+    merge_ready: "info"
   };
   return (
-    <CardShell
-      icon={ClipboardList}
+    <DelegationCard
+      name={event.data.memberName || (locale === "zh-CN" ? "委派任务" : "Delegated task")}
+      task={event.data.title}
+      status={t(`sessions.taskStatus.${event.data.status}` as MessageKey)}
       tone={statusTone[event.data.status] ?? "muted"}
-      title={
-        <span className="inline-flex min-w-0 items-center gap-2">
-          <span className="truncate">{event.data.memberName ? (locale === "zh-CN" ? `已委派给 ${event.data.memberName}` : `Delegated to ${event.data.memberName}`) : event.data.title}</span>
-        </span>
-      }
+      running={event.data.status === "running" || event.data.status === "verifying"}
+      cancelled={event.data.status === "cancelled"}
+      zh={locale === "zh-CN"}
+      onOpen={event.data.sessionId && onOpenSession ? () => onOpenSession(event.data.sessionId!) : undefined}
+      input={event.data.dispatchCall?.input}
+      output={event.data.dispatchCall?.output}
+      toolName={event.data.dispatchCall?.toolName}
       time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-card px-3.5 py-2.5">
-        <span className="min-w-0 truncate text-[13px] text-ink-2">{event.data.title}</span>
-        <span className="inline-flex shrink-0 items-center gap-2">
-          <StatusChip
-            tone={statusTone[event.data.status] ?? "muted"}
-            label={t(`sessions.taskStatus.${event.data.status}` as MessageKey)}
-            pulse={event.data.status === "running"}
-          />
-          {event.data.sessionId && onOpenSession && (
-            <button
-              type="button"
-              onClick={() => onOpenSession(event.data.sessionId!)}
-              className="rounded-md px-1.5 py-0.5 text-xs font-medium text-accent transition-colors hover:bg-accent-soft focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none"
-            >
-              {t("sessions.cards.openSub")}
-            </button>
-          )}
-        </span>
-      </div>
-    </CardShell>
+    />
   );
 }
 
@@ -790,205 +648,29 @@ function commandPresentation(command: string): { summary: string; full: string }
 }
 
 function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "command" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
-  // F-028: commands default to collapsed, expand to see output.
   const [open, setOpen] = useState(false);
   const { command, status, exitCode, output, attempts = 1 } = event.data;
   const presented = commandPresentation(command);
   const zh = locale === "zh-CN";
   return (
-    <CardShell
-      icon={SquareTerminal}
-      tone={status === "failed" ? "danger" : status === "running" ? "accent" : "muted"}
-      title={
-        <span className="flex w-full min-w-0 items-center gap-2 overflow-hidden">
-          <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink-2" title={presented.full}>{presented.summary}</code>
-          {attempts > 1 && <Tag label={zh ? `${attempts} 次尝试` : `${attempts} attempts`} className="h-5 shrink-0" />}
-          {status === "running" ? (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" aria-label={t("sessions.cards.running")} />
-          ) : (
-            exitCode !== undefined && (
-              <StatusChip
-                tone={exitCode === 0 ? "ok" : "danger"}
-                label={t("sessions.cards.exitCode", { code: exitCode })}
-              />
-            )
-          )}
-        </span>
-      }
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      {(command || output) && (
-        <div className="rounded-xl border border-line bg-card">
-          <button
-            type="button"
-            onClick={() => setOpen((prev) => !prev)}
-            aria-expanded={open}
-            className="flex w-full items-center justify-between gap-2 px-3.5 py-2 text-xs text-ink-3 transition-colors hover:text-ink-2 focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none"
-          >
-            <span>{zh ? "详情" : "Details"}</span>
-            <ChevronDown className={cn("h-3.5 w-3.5 transition-transform duration-200", open && "rotate-180")} aria-hidden />
-          </button>
-          {open && (
-            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} className="max-h-72 overflow-auto border-t border-line">
-              <div className="px-3.5 py-2.5">
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{zh ? "命令" : "Command"}</div>
-                <pre className="overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap break-all text-ink-2">{presented.full}</pre>
-              </div>
-              {output && (
-                <div className="border-t border-line px-3.5 py-2.5">
-                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{t("sessions.cards.output")}</div>
-                  <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-ink-2">{output}</pre>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </div>
-      )}
-    </CardShell>
-  );
-}
-
-function ToolGroupCard({ event, t, locale, onViewDiff, onOpenLocalFile }: {
-  event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> };
-  t: (k: MessageKey, v?: Record<string, string | number>) => string;
-  locale: "zh-CN" | "en-US";
-  onViewDiff?: (path?: string) => void;
-  onOpenLocalFile?: (path: string) => void;
-}): JSX.Element {
-  const [open, setOpen] = useState(false);
-  const { items, stepCount, callCount, running } = event.data;
-  // A collapsed group renders nothing; expanding a huge group mounts
-  // progressively so hundreds of step cards are not built in one frame.
-  const { limit, sentinelRef, showAll } = useProgressiveRows(
-    open ? items.length : 0,
-    open ? "expanded" : "collapsed",
-    200,
-    400
-  );
-  const streamingReasoning = items.some(
-    (item) => item.data.kind === "reasoning" && item.data.streaming
-  );
-  const flowRunning = running || streamingReasoning;
-  const calls = items.filter((item) => item.data.kind === "tool_activity" || item.data.kind === "command");
-  // The compact row represents the newest activity. Tool calls and validation
-  // may replace a reasoning preview; when reasoning is newest, its growing text
-  // is summarized again on every render.
-  const preview = items.at(-1);
-  const onlyCommands = calls.every((item) => item.data.kind === "command");
-  const hasSupportingSteps = items.some((item) => item.data.kind !== "tool_activity" && item.data.kind !== "command");
-  const zh = locale === "zh-CN";
-  const title = hasSupportingSteps
-    ? flowRunning
-      ? zh ? `正在处理 ${stepCount} 个步骤` : `Working through ${stepCount} steps`
-      : zh ? `处理了 ${stepCount} 个步骤` : `Completed ${stepCount} steps`
-    : flowRunning
-      ? zh ? `正在运行 ${callCount} 个${onlyCommands ? "命令" : "工具/命令"}` : `Running ${callCount} ${onlyCommands ? "commands" : "tools/commands"}`
-      : zh ? `运行了 ${callCount} 个${onlyCommands ? "命令" : "工具/命令"}` : `Ran ${callCount} ${onlyCommands ? "commands" : "tools/commands"}`;
-  const previewStatus = flowRunning
-    ? "running"
-    : preview?.data.kind === "command" || preview?.data.kind === "tool_activity"
-      ? preview.data.status
-      : preview?.data.kind === "reasoning"
-        ? preview.data.streaming ? "running" : "done"
-        : preview?.data.kind === "verification"
-          ? preview.data.status === "running" ? "running" : preview.data.status === "failed" ? "failed" : "done"
-          : "done";
-  const previewLabel = preview?.data.kind === "command"
-    ? commandPresentation(preview.data.command).summary
-    : preview?.data.kind === "tool_activity"
-      ? preview.data.toolName
-      : preview?.data.kind === "reasoning"
-        ? latestReasoningSummary(preview.data.text)
-        : preview?.data.kind === "file_change"
-          ? zh
-            ? `修改了 ${preview.data.files.length} 个文件 · ${preview.data.files.at(-1)?.path ?? ""}`
-            : `Changed ${preview.data.files.length} files · ${preview.data.files.at(-1)?.path ?? ""}`
-          : preview?.data.kind === "verification"
-            ? preview.data.command
-            : "";
-
-  return (
-    <motion.article
-      initial={{ opacity: 0, y: 10, scale: 0.99 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 500, damping: 45 }}
-      className={cn(
-        "run-border relative overflow-hidden rounded-xl border bg-card/70 transition-[border-color,box-shadow] duration-250",
-        flowRunning
-          ? "run-border-active border-accent/30 shadow-[0_14px_44px_-18px_var(--accent)]"
-          : "border-line"
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="w-full px-3.5 py-2 text-left outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/45"
-      >
-        <span className="flex items-center gap-2.5 text-[13px] font-medium text-ink-2">
-          {/* Status node: the only glowing element while the track is alive. */}
-          {flowRunning ? (
-            <span className="relative mx-1 flex h-2 w-2 shrink-0" aria-hidden>
-              <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-70 motion-safe:animate-[pulse-ring_1.6s_ease-out_infinite]" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-accent shadow-[0_0_8px_var(--accent)]" />
-            </span>
-          ) : (
-            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-line text-ok" aria-hidden>
-              <Check className="h-2.5 w-2.5" />
-            </span>
-          )}
-          <span className={flowRunning ? "shimmer-text" : undefined}>{title}</span>
-          {flowRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden />}
-          <ChevronDown className={cn("ml-auto h-3.5 w-3.5 text-ink-3 transition-transform duration-200", open && "rotate-180")} aria-hidden />
-        </span>
-        {preview && (
-          <span className="mt-1.5 flex min-w-0 items-center gap-2 pl-7 font-mono text-[11px] text-ink-3">
-            {previewStatus === "running"
-              ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-accent" aria-hidden />
-              : previewStatus === "failed"
-                ? <X className="h-3 w-3 shrink-0 text-danger" aria-hidden />
-                : <Check className="h-3 w-3 shrink-0 text-ok" aria-hidden />}
-            <LatestActivityLabel
-              label={previewLabel}
-              followTail={preview.data.kind === "reasoning"}
-            />
-            {preview.data.kind === "command" && preview.data.exitCode !== undefined && (
-              <span className="ml-auto shrink-0">exit {preview.data.exitCode}</span>
-            )}
-          </span>
-        )}
+    <article>
+      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}
+        className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-[13px] text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50">
+        {status === "running" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-label={t("sessions.cards.running")} />}
+        {status === "failed" && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
+        {status === "done" && <ToolActivityIcon name="exec_command" input={JSON.stringify({ command })} />}
+        <span className="truncate" title={presented.full}>{zh ? "运行" : "Ran"} {presented.summary}</span>
+        {attempts > 1 && <span className="shrink-0 text-xs">{zh ? `${attempts} 次` : `${attempts} attempts`}</span>}
+        <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !open && "-rotate-90")} aria-hidden />
       </button>
       {open && (
-        <motion.div
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          className="overflow-hidden border-t border-line"
-        >
-          {/* Workflow rail: steps hang from one quiet hairline. */}
-          <div className="relative ml-[21px] space-y-3 border-l border-line py-3 pl-4 pr-3.5">
-            {items.slice(0, limit).map((item) => {
-              if (item.data.kind === "reasoning") return <ReasoningCard key={item.id} event={item as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
-              if (item.data.kind === "tool_activity") return <ToolActivityCard key={item.id} event={item as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
-              if (item.data.kind === "command") return <CommandCard key={item.id} event={item as TimelineEvent & { data: { kind: "command" } }} t={t} locale={locale} />;
-              if (item.data.kind === "file_change") return <FileChangeCard key={item.id} event={item as TimelineEvent & { data: { kind: "file_change" } }} t={t} locale={locale} onViewDiff={onViewDiff} onOpenLocalFile={onOpenLocalFile} />;
-              if (item.data.kind === "verification") return <VerificationCard key={item.id} event={item as TimelineEvent & { data: { kind: "verification" } }} t={t} locale={locale} />;
-              return null;
-            })}
-            {limit < items.length && (
-              <button
-                type="button"
-                ref={sentinelRef}
-                onClick={showAll}
-                className="mx-3 my-2 w-[calc(100%-24px)] rounded-lg border border-line px-3 py-1.5 text-xs text-ink-3 transition-colors hover:bg-card-hover hover:text-ink-2"
-              >
-                {zh ? `加载更多（共 ${items.length} 步）` : `Load more (${items.length} steps total)`}
-              </button>
-            )}
-          </div>
-        </motion.div>
+        <div className="mt-2 max-h-72 overflow-auto rounded-xl border border-line bg-card">
+          <pre className="px-3.5 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all text-ink-2">{presented.full}</pre>
+          {output && <pre className="border-t border-line px-3.5 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-ink-2">{output}</pre>}
+          {exitCode !== undefined && <p className={cn("border-t border-line px-3.5 py-2 text-xs", exitCode === 0 ? "text-ink-3" : "text-danger")}>{t("sessions.cards.exitCode", { code: exitCode })}</p>}
+        </div>
       )}
-      <span className={cn("run-beam", flowRunning && "run-beam-active")} aria-hidden />
-    </motion.article>
+    </article>
   );
 }
 
@@ -1007,52 +689,33 @@ function FileChangeCard({
 }): JSX.Element {
   const { files } = event.data;
   return (
-    <CardShell
-      icon={FileCode2}
-      tone="info"
-      title={
-        <span className="inline-flex items-center gap-2">
-          {t("sessions.cards.files", { count: files.length })}
-          {onViewDiff && (
-            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => onViewDiff(files[0]?.path)}>
-              {t("sessions.cards.viewDiff")}
-            </Button>
-          )}
-        </span>
-      }
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      <ul className="overflow-hidden rounded-xl border border-line bg-card">
-        {files.map((file) => (
-          <li
-            key={file.path}
-            role="button"
-            tabIndex={0}
-            title={file.path}
-            onClick={() => openTimelineFile(file.path, t, onOpenLocalFile, "drawer")}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
-            }}
-            className="flex cursor-pointer items-center gap-2.5 border-b border-line px-3.5 py-2 transition-colors last:border-0 hover:bg-card-hover"
-          >
-            <span
-              className={cn(
-                "w-1.5 h-1.5 rounded-full shrink-0",
-                file.changeType === "added" ? "bg-ok" : file.changeType === "deleted" ? "bg-danger" : "bg-info"
-              )}
-              aria-label={file.changeType}
-            />
-            <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink-2" title={file.path}>
-              {file.path}
-            </code>
-            <span className="shrink-0 font-mono text-[11px]">
-              <span className="text-ok">+{fileChangeCounts(file).additions}</span>{" "}
-              <span className="text-danger">-{fileChangeCounts(file).deletions}</span>
-            </span>
+    <ul className="overflow-hidden rounded-xl border border-line bg-card">
+      {event.data.source === "provider" && (
+        <li className="border-b border-line px-3.5 py-2 text-xs text-ink-3">
+          {locale === "zh-CN" ? `本轮原生差异 · ${files.length} 个文件` : `Provider turn diff · ${files.length} files`}
+        </li>
+      )}
+      {files.map((file) => {
+        const counts = fileChangeCounts(file);
+        const open = (): void => {
+          if (onViewDiff && (file.diff || !onOpenLocalFile)) onViewDiff(file.path);
+          else openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
+        };
+        return (
+          <li key={file.path} className="border-b border-line last:border-0">
+            <button type="button" title={file.path} onClick={open}
+              className="flex w-full items-center gap-2.5 px-3.5 py-3 text-left text-[13px] outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/50">
+              <FileCode2 className="h-4 w-4 shrink-0 text-ink-3" aria-hidden />
+              <span className="min-w-0 flex-1 truncate text-ink-2">{file.path}</span>
+              {file.comparisonUnavailable
+                ? <span className="shrink-0 text-xs text-ink-3" title={file.reason}>{locale === "zh-CN" ? "无法比较" : "Unavailable"}</span>
+                : <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
+              <ChevronDown className="h-3.5 w-3.5 -rotate-90 text-ink-3" aria-hidden />
+            </button>
           </li>
-        ))}
-      </ul>
-    </CardShell>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -1139,86 +802,13 @@ function GitMergeCard({ event, locale }: { event: TimelineEvent & { data: { kind
   );
 }
 
-const SCOPES: ApprovalScope[] = ["once", "run", "task", "project", "global"];
-
-function ApprovalCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "approval" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
-  const { approval } = event.data;
-  const [scope, setScope] = useState<ApprovalScope>(approval.kind === "merge" ? "project" : approval.kind === "delegate" ? "run" : "once");
-  const pending = approval.status === "pending";
-  return (
-    <CardShell
-      icon={AlertTriangle}
-      tone="warn"
-      title={
-        <span className="inline-flex items-center gap-2">
-          {t("sessions.cards.approval")}
-          <StatusChip
-            tone={pending ? "warn" : approval.status === "approved" ? "ok" : "danger"}
-            label={t(pending ? "sessions.status.waiting_approval" : approval.status === "approved" ? "sessions.cards.approved" : "sessions.cards.rejected")}
-            pulse={pending}
-          />
-        </span>
-      }
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      <div className="rounded-xl border border-warn/25 bg-warn/5 px-4 py-3">
-        <p className="text-sm font-medium text-ink">{approval.title}</p>
-        <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{approval.description}</p>
-        {pending && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1 rounded-lg border border-line bg-card p-0.5" role="radiogroup" aria-label={t("sessions.cards.scope")}>
-              {SCOPES.map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  role="radio"
-                  aria-checked={scope === item}
-                  onClick={() => setScope(item)}
-                  className={cn(
-                    "h-7 rounded-md px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
-                    scope === item ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink-2"
-                  )}
-                >
-                  {t(`sessions.cards.scope${item[0].toUpperCase()}${item.slice(1)}` as MessageKey)}
-                </button>
-              ))}
-            </div>
-            <Button variant="primary" size="sm" onClick={() => void resolveWorkbenchApproval(event.sessionId, approval.id, true, scope)}>
-              <Check className="h-3.5 w-3.5" aria-hidden />
-              {t("sessions.cards.approve")}
-            </Button>
-            <Button variant="danger" size="sm" onClick={() => void resolveWorkbenchApproval(event.sessionId, approval.id, false, scope)}>
-              <X className="h-3.5 w-3.5" aria-hidden />
-              {t("sessions.cards.reject")}
-            </Button>
-          </div>
-        )}
-      </div>
-    </CardShell>
-  );
+function ApprovalCard({ event }: { event: TimelineEvent & { data: { kind: "approval" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
+  return <ManagedApprovalCard approval={event.data.approval} onResolve={(approved, scope) => resolveWorkbenchApproval(event.sessionId, event.data.approval.id, approved, scope)} />;
 }
 
-function ErrorCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "error" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
-  return (
-    <CardShell
-      icon={AlertTriangle}
-      tone="danger"
-      title={
-        <span className="inline-flex items-center gap-2">
-          {t("sessions.cards.error")}
-          <code className="rounded bg-danger/10 px-1.5 py-0.5 font-mono text-[11px] text-danger">{event.data.code}</code>
-          <StatusChip tone={event.data.retryable ? "info" : "muted"} label={t(event.data.retryable ? "sessions.cards.retryable" : "sessions.cards.notRetryable")} />
-        </span>
-      }
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    >
-      <p className="rounded-xl border border-danger/25 bg-danger/5 px-3.5 py-2.5 text-[13px] break-all whitespace-pre-wrap text-ink-2">
-        {event.data.message}
-      </p>
-    </CardShell>
-  );
+function ErrorCard({ event, locale }: { event: TimelineEvent & { data: { kind: "error" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
+  return <SessionErrorCard event={event} locale={locale}/>;
 }
-
 function HandoffCard({ event, t, locale, onOpenSession }: { event: TimelineEvent & { data: { kind: "handoff" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string; onOpenSession?: (id: string) => void }): JSX.Element {
   return (
     <CardShell
@@ -1256,7 +846,8 @@ function TimelineEventViewImpl({
   onOpenSession,
   onEditMessage,
   onOpenSubagent,
-  onOpenLocalFile
+  onOpenLocalFile,
+  showAuthor = true
 }: {
   event: TimelineEvent;
   onViewDiff?: (path?: string) => void;
@@ -1265,26 +856,27 @@ function TimelineEventViewImpl({
   onOpenSubagent?: (eventId: string) => void;
   /** Work mode only: local file clicks route to the session's preview pane. */
   onOpenLocalFile?: (path: string) => void;
+  showAuthor?: boolean;
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const data = event.data;
 
   switch (data.kind) {
     case "message":
-      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} />;
+      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />;
+    case "provider_ui":
+      if (data.method === "open_url" && data.url) return <a href={data.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 py-1 text-[13px] text-accent underline underline-offset-4" onClick={(event) => { const bridge = getBridge(); if (bridge) { event.preventDefault(); void bridge.shell.openExternal(data.url!).catch(() => {}); } }}>{data.text || (locale === "zh-CN" ? "打开授权链接" : "Open authorization link")} ↗</a>;
+      return data.method === "notify" ? <p className="whitespace-pre-wrap py-1 text-[13px] text-ink-2">{data.text}</p> : null;
     case "activity":
-      // Transient per-turn phases (queued/starting/thinking/responding) are already
-      // surfaced by the live run indicator; keep only the completed milestone so
-      // history isn't littered with repeated "thinking" lines.
-      if (data.phase !== "completed") return null;
       return <ActivityLine event={event as TimelineEvent & { data: { kind: "activity" } }} locale={locale} />;
     case "reasoning":
       return <ReasoningCard event={event as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
     case "tool_activity":
       if (data.subagent) return <SubagentCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} onOpenSubagent={onOpenSubagent} />;
+      if (data.toolName === "run_code" || data.codeExecution) return <CodeExecutionCard data={data} locale={locale} />;
       return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
     case "tool_group":
-      return <ToolGroupCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "tool_group" }> }} t={t} locale={locale} onViewDiff={onViewDiff} onOpenLocalFile={onOpenLocalFile} />;
+        return <div className="space-y-1">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onViewDiff={onViewDiff} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />)}</div>;
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
     case "artifact":
@@ -1342,4 +934,10 @@ function TimelineEventViewImpl({
 export const TimelineEventView = memo(
   TimelineEventViewImpl,
   (prev, next) => prev.event === next.event
+    && prev.onViewDiff === next.onViewDiff
+    && prev.onOpenSession === next.onOpenSession
+    && prev.onEditMessage === next.onEditMessage
+    && prev.onOpenSubagent === next.onOpenSubagent
+    && prev.onOpenLocalFile === next.onOpenLocalFile
+    && prev.showAuthor === next.showAuthor
 );

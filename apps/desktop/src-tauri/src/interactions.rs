@@ -9,6 +9,7 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, WebviewWindow};
@@ -58,6 +59,15 @@ const MAX_TEXT_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TEXT_WRITE_BYTES: usize = 8 * 1024 * 1024;
 
 // --- shell ---------------------------------------------------------------
+
+#[tauri::command]
+pub fn shell_open_external(url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Expected an HTTPS authorization URL".into());
+    }
+    opener::open(parsed.as_str()).map_err(|e| e.to_string())
+}
 
 /// Resolves to "" on success or an error message string (shell.openPath contract).
 #[tauri::command]
@@ -288,20 +298,19 @@ pub fn file_read_text(payload: FileReadTextPayload) -> Value {
         }
     };
 
-    let bytes = match std::fs::read(&resolved_path) {
-        Ok(bytes) => bytes,
+    let file = match std::fs::File::open(&resolved_path) {
+        Ok(file) => file,
         Err(_) => return json!({ "ok": false, "reason": "not-found" }),
+    };
+    let (bytes, truncated) = match read_text_preview(file) {
+        Ok(preview) => preview,
+        Err(_) => return json!({ "ok": false, "reason": "read-failed" }),
     };
     // Binary sniff: a NUL byte in the first chunk means this is not text.
     if bytes.iter().take(8192).any(|b| *b == 0) {
         return json!({ "ok": false, "reason": "binary" });
     }
-    let truncated = size_bytes > MAX_TEXT_PREVIEW_BYTES;
-    let preview = if truncated {
-        &bytes[..MAX_TEXT_PREVIEW_BYTES as usize]
-    } else {
-        &bytes[..]
-    };
+    let preview = &bytes[..];
     json!({
         "ok": true,
         "resolvedPath": resolved_path.to_string_lossy(),
@@ -338,5 +347,42 @@ pub fn file_delete(payload: FilePathPayload) -> Value {
     match trash::delete(&payload.path) {
         Ok(()) => json!({ "ok": true }),
         Err(error) => json!({ "ok": false, "reason": "delete-failed", "message": error.to_string() }),
+    }
+}
+
+/// Cap allocation and reads regardless of stale metadata, file growth, or shrinkage.
+fn read_text_preview(reader: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::new();
+    reader.take(MAX_TEXT_PREVIEW_BYTES + 1).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > MAX_TEXT_PREVIEW_BYTES as usize;
+    bytes.truncate(MAX_TEXT_PREVIEW_BYTES as usize);
+    Ok((bytes, truncated))
+}
+
+#[cfg(test)]
+mod preview_read_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn huge_stream_is_bounded_and_marked_truncated() {
+        let (bytes, truncated) = read_text_preview(std::io::repeat(b'a')).unwrap();
+        assert_eq!(bytes.len(), MAX_TEXT_PREVIEW_BYTES as usize);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn shrunken_file_uses_actual_bytes_without_metadata_slicing() {
+        let (bytes, truncated) = read_text_preview(Cursor::new(b"small")).unwrap();
+        assert_eq!(bytes, b"small");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn exact_limit_is_not_truncated() {
+        let source = vec![b'a'; MAX_TEXT_PREVIEW_BYTES as usize];
+        let (bytes, truncated) = read_text_preview(Cursor::new(&source)).unwrap();
+        assert_eq!(bytes, source);
+        assert!(!truncated);
     }
 }

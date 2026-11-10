@@ -68,5 +68,96 @@ pub fn build_environment(policy: Option<&Value>, additions: HashMap<String, Stri
     for (key, value) in additions {
         environment.insert(key, value);
     }
+    // Respect the explicitly selected CLI runtime in both desktop shells and
+    // headless daemons, without changing the machine's global PATH or adding
+    // PATH when the permission policy excluded it.
+    if let Ok(runtime)=std::env::var("AGENTHUB_NODE_PATH") {
+        let runtime=std::path::PathBuf::from(runtime);
+        if runtime.is_absolute() && runtime.is_file() {
+            if let (Some(directory),Some(path_key))=(runtime.parent(),environment.keys().find(|key|key.eq_ignore_ascii_case("PATH")).cloned()) {
+                let mut paths=vec![directory.to_path_buf()];
+                paths.extend(std::env::split_paths(&environment[&path_key]).filter(|path|path!=directory));
+                if let Ok(path)=std::env::join_paths(paths) {environment.insert(path_key,path.to_string_lossy().into_owned());}
+            }
+        }
+    }
     environment
+}
+
+/// Validates metadata only; the CLI owns credentials and authentication.
+pub fn login_profile_directory(instance: &Value) -> crate::errors::CoreResult<Option<String>> {
+    use crate::errors::invalid;
+    let raw = instance.get("providerOptions").and_then(|o| o.get("loginProfileDirectory"));
+    if raw.is_none() || raw == Some(&Value::String(String::new())) { return Ok(None); }
+    let directory = raw.and_then(Value::as_str).unwrap_or("").trim();
+    if directory.is_empty() || !std::path::Path::new(directory).is_absolute() || directory.chars().any(|c| c == '\r' || c == '\n' || c == '\0') {
+        return Err(invalid("loginProfileDirectory", "Use an absolute account configuration directory"));
+    }
+    let provider = instance.get("providerId").and_then(Value::as_str).unwrap_or("");
+    if provider != "codex" && provider != "claude-code" {
+        return Err(invalid("loginProfileDirectory", "This harness does not support isolated login profiles"));
+    }
+    if instance.get("providerOptions").and_then(|o| o.get("baseUrl")).and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+        || instance.get("baseArgs").and_then(Value::as_array).is_some_and(|v| !v.is_empty())
+        || instance.get("profile").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+        return Err(invalid("loginProfileDirectory", "Account profiles cannot be combined with API endpoints, CLI profiles, or custom arguments"));
+    }
+    Ok(Some(directory.to_string()))
+}
+
+/// Apply after all policy and vault merges so a chosen login cannot be overridden.
+pub fn isolate_login_profile(instance: &Value, mut environment: HashMap<String, String>) -> crate::errors::CoreResult<HashMap<String, String>> {
+    if let Some(directory) = login_profile_directory(instance)? {
+        environment.retain(|key, _| {
+            let key = key.to_ascii_uppercase();
+            !["OPENAI_", "CODEX_", "ANTHROPIC_", "CLAUDE_CODE_OAUTH", "CLAUDE_CODE_API", "CLAUDE_CODE_USE_", "CLAUDE_CODE_SESSION_ACCESS"].iter().any(|prefix| key.starts_with(prefix))
+                && key != "CLAUDE_CONFIG_DIR" && key != "AGENTHUB_API_KEY"
+        });
+        let key = if instance.get("providerId").and_then(Value::as_str) == Some("codex") { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" };
+        if key == "CLAUDE_CONFIG_DIR" {
+            environment.insert("ANTHROPIC_CONFIG_DIR".to_string(), std::path::Path::new(&directory).join("anthropic").to_string_lossy().into_owned());
+        }
+        environment.insert(key.to_string(), directory);
+    }
+    Ok(environment)
+}
+
+#[cfg(test)]
+mod login_profile_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn account_environment_overrides_api_credentials() {
+        let directory = std::env::temp_dir().join("nautilo-account-test").to_string_lossy().to_string();
+        let instance = json!({ "providerId": "codex", "baseArgs": [], "providerOptions": { "loginProfileDirectory": directory } });
+        let env = HashMap::from([("OPENAI_API_KEY".to_string(), "secret".to_string()), ("PATH".to_string(), "bin".to_string()), ("CODEX_HOME".to_string(), "wrong".to_string())]);
+        let isolated = isolate_login_profile(&instance, env).unwrap();
+        assert_eq!(isolated.get("CODEX_HOME"), Some(&directory));
+        assert!(!isolated.contains_key("OPENAI_API_KEY"));
+        assert_eq!(isolated.get("PATH").map(String::as_str), Some("bin"));
+    }
+
+    #[test]
+    fn claude_accounts_override_the_global_federation_config_root() {
+        let directory = std::env::temp_dir().join("nautilo-claude-account");
+        let instance = json!({ "providerId": "claude-code", "baseArgs": [], "providerOptions": { "loginProfileDirectory": directory.to_string_lossy() } });
+        let env = HashMap::from([
+            ("HOME".to_string(), "unchanged-user-home".to_string()),
+            ("ANTHROPIC_CONFIG_DIR".to_string(), "global-root".to_string()),
+            ("ANTHROPIC_PROFILE".to_string(), "global-federation-profile".to_string()),
+        ]);
+        let isolated = isolate_login_profile(&instance, env).unwrap();
+        assert_eq!(isolated.get("ANTHROPIC_CONFIG_DIR"), Some(&directory.join("anthropic").to_string_lossy().into_owned()));
+        assert_eq!(isolated.get("CLAUDE_CONFIG_DIR"), Some(&directory.to_string_lossy().into_owned()));
+        assert!(!isolated.contains_key("ANTHROPIC_PROFILE"));
+        assert_eq!(isolated.get("HOME").map(String::as_str), Some("unchanged-user-home"));
+    }
+
+    #[test]
+    fn rejects_relative_and_unsupported_profiles() {
+        assert!(login_profile_directory(&json!({ "providerId": "codex", "providerOptions": { "loginProfileDirectory": "relative" } })).is_err());
+        let directory = std::env::temp_dir().to_string_lossy().to_string();
+        assert!(login_profile_directory(&json!({ "providerId": "kimi", "providerOptions": { "loginProfileDirectory": directory } })).is_err());
+    }
 }

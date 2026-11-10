@@ -8,9 +8,20 @@ import type {
   TaskId
 } from "@agenthub/domain";
 
+export interface CodeExecution {
+  /** Incremental native dispatch update; omitted on historical full snapshots. */
+  partial?: boolean;
+  description?: string;
+  calls: Array<{ callId: string; parentCallId?: string; name: string; input?: unknown; output?: string; meta?: unknown; status: "running" | "done" | "failed" }>;
+}
+
 export type RuntimeEventType =
   | "run.started"
+  | "run.diff_updated"
   | "agent.status"
+  | "provider.extension_ui"
+  | "provider.runtime_ready"
+  | "provider.runtime_capabilities"
   | "agent.message_delta"
   | "agent.message"
   | "agent.thinking_delta"
@@ -20,8 +31,10 @@ export type RuntimeEventType =
   | "task.updated"
   | "handoff.created"
   | "tool.started"
+  | "tool.updated"
   | "tool.finished"
   | "command.started"
+  | "command.updated"
   | "command.finished"
   | "file.changed"
   | "approval.requested"
@@ -36,12 +49,17 @@ export type RuntimeEventType =
   | "git.conflict"
   | "usage.updated"
   | "provider.commands_updated"
+  | "provider.runtime_closed"
+  | "provider.background_error"
   | "session.checkpoint_reverted"
+  | "session.native_history_synced"
   | "session.follow_up_queued"
   | "session.follow_up_cancelled"
+  | "session.follow_up_steered"
   | "artifact.created"
   | "run.waiting"
   | "run.completed"
+  | "run.cancelled"
   | "run.failed";
 
 export interface ToolFileDiff {
@@ -54,6 +72,10 @@ export interface ToolFileDiff {
 
 /** A provider CLI's native sub-agent dispatch (Claude's Task, Kimi's Agent, opencode's task, …). */
 export interface SubagentDispatch {
+  /** State reported by the Harness, independently of the spawn tool's completion. */
+  status?: "running" | "done" | "failed";
+  model?: string;
+  nativeAgentIds?: string[];
   /** CLI-specific sub-agent type (e.g. Claude's subagent_type), when declared. */
   agentType?: string;
   /** Short task description (the dispatch's description, else a truncated prompt). */
@@ -63,12 +85,26 @@ export interface SubagentDispatch {
 }
 
 export interface RuntimeEventPayloadMap {
+  "session.native_history_synced": { providerSessionId: string; messageIds: string[]; messageCount: number };
+  "provider.runtime_closed": { providerId: string; exitCode?: number | null; signal?: string | null };
+  "provider.background_error": { providerId: string; message: string };
+  "run.diff_updated": {
+    diff: string;
+    providerThreadId: string;
+    providerTurnId: string;
+    source: "provider";
+  };
   "run.started": {
     runId: AgentRunId;
     providerSessionId?: string;
+    /** Exact submitted input consumed by this turn, including queued follow-ups. */
+    userMessageId?: string;
   };
+  "provider.extension_ui": { method: string; key?: string; text: string; raw?: unknown };
+  "provider.runtime_ready": { providerId: string; transport: string; pid?: number; reused: boolean; attachMs: number };
+  "provider.runtime_capabilities": { providerId: string; source: "native-handshake"; transport: string; protocolVersion?: string | number; cliVersion?: string; nativeSessionId?: string; commands?: unknown; reported?: unknown };
   "agent.status": {
-    phase: "turn_started" | "turn_completed" | "turn_failed";
+    phase: "provider_queued" | "provider_starting" | "turn_started" | "turn_completed" | "turn_failed";
   };
   "agent.message_delta": {
     messageId: string;
@@ -76,6 +112,7 @@ export interface RuntimeEventPayloadMap {
     subagentDispatchId?: string;
   };
   "agent.message": {
+    providerMessageId?: string;
     messageId: string;
     text: string;
     isFinal?: boolean;
@@ -116,6 +153,7 @@ export interface RuntimeEventPayloadMap {
     targetSessionId?: SessionId;
   };
   "tool.started": {
+    codeExecution?: CodeExecution;
     callId?: string;
     toolName: string;
     inputSummary?: string;
@@ -126,9 +164,20 @@ export interface RuntimeEventPayloadMap {
     subagentDispatchId?: string;
   };
   "tool.finished": {
+    codeExecution?: CodeExecution;
     callId?: string;
     toolName: string;
     success: boolean;
+    inputSummary?: string;
+    outputSummary?: string;
+    fileDiff?: ToolFileDiff;
+    subagent?: SubagentDispatch;
+    subagentDispatchId?: string;
+  };
+  "tool.updated": {
+    codeExecution?: CodeExecution;
+    callId?: string;
+    toolName: string;
     inputSummary?: string;
     outputSummary?: string;
     fileDiff?: ToolFileDiff;
@@ -150,6 +199,12 @@ export interface RuntimeEventPayloadMap {
     outputSummary?: string;
     subagentDispatchId?: string;
   };
+  "command.updated": {
+    callId?: string;
+    command: string;
+    outputSummary?: string;
+    subagentDispatchId?: string;
+  };
   "file.changed": {
     path: string;
     changeType: "added" | "modified" | "deleted" | "renamed";
@@ -161,6 +216,7 @@ export interface RuntimeEventPayloadMap {
     approvalId: string;
     category: "command" | "file" | "network" | "merge" | "delegate";
     summary: string;
+    operation?: string;
   };
   "approval.resolved": {
     approvalId: string;
@@ -207,6 +263,21 @@ export interface RuntimeEventPayloadMap {
     taskId?: TaskId;
   };
   "usage.updated": {
+    connectionId?: string;
+    connectionRevision?: number;
+    model?: string;
+    pricingSnapshot?: import("@agenthub/domain").ModelPricing;
+    agentInstanceId?: string;
+    /** Cumulative snapshots: replace the same scope/key, never sum repeated snapshots. */
+    usageScope?: "context" | "turn" | "session";
+    usageKey?: string;
+    inputTokensIncludesCache?: boolean;
+    cachedInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    reasoningOutputTokens?: number;
+    /** Provider-reported accounting cost, not evidence of a billed payment. */
+    reportedCost?: number;
+    currency?: string;
     inputTokens?: number;
     outputTokens?: number;
     contextUsed?: number;
@@ -215,7 +286,7 @@ export interface RuntimeEventPayloadMap {
   };
   "provider.commands_updated": {
     providerId: string;
-    commands: Array<{ name: string; description: string; inputHint?: string; providerCommand?: "compact" }>;
+    commands: Array<{ name: string; description: string; inputHint?: string; providerCommand?: string }>;
   };
   "session.checkpoint_reverted": {
     checkpointId: string;
@@ -226,7 +297,7 @@ export interface RuntimeEventPayloadMap {
   };
   "artifact.created": {
     artifactId: ArtifactId;
-    kind: "image" | "file";
+    kind: "image" | "file" | "diff";
     name: string;
     mimeType?: string;
     path?: string;
@@ -238,6 +309,7 @@ export interface RuntimeEventPayloadMap {
     summary: string;
     resultArtifactId?: ArtifactId;
   };
+  "run.cancelled": { reason: "user" };
   "run.failed": {
     code: string;
     message: string;
@@ -248,6 +320,9 @@ export interface RuntimeEventPayloadMap {
     text: string;
   };
   "session.follow_up_cancelled": {
+    messageId: string;
+  };
+  "session.follow_up_steered": {
     messageId: string;
   };
 }
@@ -263,9 +338,21 @@ export interface EventEnvelope<TType extends RuntimeEventType = RuntimeEventType
   sessionId?: SessionId;
   type: TType;
   timestamp: string;
+  background?: boolean;
   payload: RuntimeEventPayloadMap[TType];
 }
 
 export type RuntimeEvent = {
   [TType in RuntimeEventType]: EventEnvelope<TType>;
 }[RuntimeEventType];
+
+/** Compact, journal-backed lifecycle signal for the owning desktop's browser UI. */
+export interface BrowserRunUpdate {
+  sessionId: string; runId: string; sequence: number;
+  state: "running" | "waiting" | "completed" | "cancelled" | "failed";
+}
+export function browserRunUpdate(event:Pick<RuntimeEvent,"sessionId"|"runId"|"sequence"|"type">):BrowserRunUpdate|undefined {
+  const states:Record<string,BrowserRunUpdate["state"]>={"run.started":"running","run.waiting":"waiting","run.completed":"completed","run.cancelled":"cancelled","run.failed":"failed"};
+  const state=states[event.type];
+  return state && event.sessionId && event.runId ? {sessionId:event.sessionId,runId:event.runId,sequence:event.sequence,state} : undefined;
+}

@@ -18,10 +18,16 @@ readline.createInterface({ input: process.stdin, terminal: false }).on("line", (
   if (logPath && typeof message.method === "string") fs.appendFileSync(logPath, `${message.method}\n`);
   if (message.id === undefined || typeof message.method !== "string") return;
   if (message.method === "initialize") return send({ jsonrpc: "2.0", id: message.id, result: {} });
+  if (message.method === "model/list") return send({ jsonrpc: "2.0", id: message.id, result: {
+    data: [{ id: "gpt-fake-codex", model: "gpt-fake-codex", displayName: "Fake Codex", isDefault: true,
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }] }], nextCursor: null
+  } });
   if (message.method === "thread/resume") return send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-123" } } });
   if (message.method === "thread/compact/start") {
     send({ jsonrpc: "2.0", id: message.id, result: {} });
-    return send({ jsonrpc: "2.0", method: "thread/compacted", params: { threadId: "thread-123" } });
+    send({ method: "turn/started", params: { threadId: "thread-123", turn: { id: "compact-turn" } } });
+    send({ method: "item/started", params: { threadId: "thread-123", turnId: "compact-turn", item: { id: "compact", type: "contextCompaction" } } });
+    return send({ method: "item/completed", params: { threadId: "thread-123", turnId: "compact-turn", item: { id: "compact", type: "contextCompaction" } } });
   }
   return send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: `unexpected method ${message.method}` } });
 });

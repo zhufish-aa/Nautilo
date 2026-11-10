@@ -1,3 +1,4 @@
+import { RuntimeConnectionRepository } from "./runtime-connection-repository.js";
 import { DatabaseConnection } from "./connection.js";
 import { migrateDatabase } from "./migrations.js";
 import { AgentRepository } from "./agent-repository.js";
@@ -21,6 +22,7 @@ export class Database {
   readonly connection: DatabaseConnection;
   readonly projects: ProjectRepository;
   readonly agents: AgentRepository;
+  readonly runtimeConnections: RuntimeConnectionRepository;
   readonly teams: TeamRepository;
   readonly projectRuns: ProjectRunRepository;
   readonly sessions: SessionRepository;
@@ -50,6 +52,7 @@ export class Database {
     }
     this.projects = new ProjectRepository(this.connection.raw);
     this.agents = new AgentRepository(this.connection.raw);
+    this.runtimeConnections = new RuntimeConnectionRepository(this.connection.raw);
     this.teams = new TeamRepository(this.connection.raw);
     this.projectRuns = new ProjectRunRepository(this.connection.raw);
     this.sessions = new SessionRepository(this.connection.raw);

@@ -4,8 +4,8 @@ import type { ToolFileDiff } from "@agenthub/event-protocol";
  * Reverse-applying recorded changes to a file's current content ("撤回").
  * Pure functions: the caller handles reading/writing the file. Everything is
  * exact-match based — when the file has diverged since the agent's edit the
- * functions report failure instead of guessing, so a revert can never corrupt
- * unrelated content.
+ * functions reject ambiguous matches instead of guessing. The caller must still
+ * guard truncated reads and concurrent writes.
  */
 
 export type RevertResult = { ok: true; content: string } | { ok: false };
@@ -35,7 +35,7 @@ export function revertFileDiffs(content: string, diffs: ToolFileDiff[]): RevertR
     const after = (diff.after ?? "").replace(/\r\n/g, "\n");
     if (!after) return { ok: false };
     const index = current.indexOf(after);
-    if (index < 0) return { ok: false };
+    if (index < 0 || current.indexOf(after, index + 1) >= 0) return { ok: false };
     current = current.slice(0, index) + before + current.slice(index + after.length);
   }
   return { ok: true, content: restoreEol(current, hadCrlf) };
@@ -82,9 +82,9 @@ export function parseUnifiedHunks(patch: string): UnifiedHunk[] {
   return hunks.filter((hunk) => hunk.preImage.length > 0 || hunk.postImage.length > 0);
 }
 
-/** Locates an exact line block; when ambiguous, the match nearest the @@ hint wins. */
-function findBlock(lines: string[], block: string[], hint: number): number {
-  if (block.length === 0) return hint >= 0 && hint <= lines.length ? hint : -1;
+/** A line hint cannot prove identity after other edits. Reject ambiguous or unanchored patches. */
+function findBlock(lines: string[], block: string[]): number {
+  if (block.length === 0) return -1;
   const matches: number[] = [];
   outer: for (let i = 0; i + block.length <= lines.length; i += 1) {
     for (let j = 0; j < block.length; j += 1) {
@@ -92,9 +92,7 @@ function findBlock(lines: string[], block: string[], hint: number): number {
     }
     matches.push(i);
   }
-  if (matches.length === 0) return -1;
-  matches.sort((a, b) => Math.abs(a - hint) - Math.abs(b - hint));
-  return matches[0];
+  return matches.length === 1 ? matches[0] : -1;
 }
 
 /**
@@ -108,7 +106,7 @@ export function reverseApplyUnifiedPatch(content: string, patch: string): Revert
   const { text, hadCrlf } = normalizeEol(content);
   const lines = text.split("\n");
   for (const hunk of [...hunks].reverse()) {
-    const index = findBlock(lines, hunk.postImage, hunk.hintLine - 1);
+    const index = findBlock(lines, hunk.postImage);
     if (index < 0) return { ok: false };
     lines.splice(index, hunk.postImage.length, ...hunk.preImage);
   }

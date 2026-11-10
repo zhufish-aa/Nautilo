@@ -1,5 +1,6 @@
+import { MAX_MODEL_RESPONSE_BYTES, ModelResponseLimitError, readModelResponseJson } from "../bounded-model-response.js";
 import type { ProviderModel, ProviderModelCatalog } from "@agenthub/domain";
-import { discoverOpenAiCompatibleModels } from "../model-config.js";
+import { discoverOpenAiCompatibleModels, validateModelEndpoint } from "../model-config.js";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const LARGE_CONTEXT_WINDOW = 1_000_000;
@@ -68,13 +69,15 @@ async function fetchAnthropicModels(env: Record<string, string | undefined>): Pr
   const apiKey = env.ANTHROPIC_API_KEY?.trim();
   const authToken = env.ANTHROPIC_AUTH_TOKEN?.trim();
   if (!apiKey && !authToken) return { ok: false, reason: "missing_credential" };
-  const baseUrl = (env.ANTHROPIC_BASE_URL?.trim() || "https://api.anthropic.com").replace(/\/+$/, "");
-  if (!/^https?:\/\//i.test(baseUrl)) return { ok: false, reason: `invalid_base_url:${baseUrl}` };
+  let baseUrl: string;
+  try { baseUrl = validateModelEndpoint(env.ANTHROPIC_BASE_URL?.trim() || "https://api.anthropic.com"); }
+  catch { return { ok: false, reason: "invalid_base_url" }; }
   const headers: Record<string, string> = { "anthropic-version": "2023-06-01" };
   if (apiKey) headers["x-api-key"] = apiKey;
   if (authToken) headers.authorization = `Bearer ${authToken}`;
 
   const entries: AnthropicModelEntry[] = [];
+  const budget = { remainingBytes: MAX_MODEL_RESPONSE_BYTES };
   let after: string | undefined;
   for (let page = 0; page < 5; page += 1) {
     const url = new URL(`${baseUrl}/v1/models`);
@@ -82,12 +85,17 @@ async function fetchAnthropicModels(env: Record<string, string | undefined>): Pr
     if (after) url.searchParams.set("after_id", after);
     let response: Response;
     try {
-      response = await fetch(url, { headers, signal: AbortSignal.timeout(8_000) });
+      response = await fetch(url, { headers, redirect: "error", signal: AbortSignal.timeout(8_000) });
     } catch (error) {
       return { ok: false, reason: `network:${error instanceof Error ? error.message : String(error)}` };
     }
-    if (!response.ok) return { ok: false, reason: `http_${response.status}` };
-    const body = await response.json().catch(() => undefined) as { data?: AnthropicModelEntry[]; has_more?: boolean; last_id?: string } | undefined;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return { ok: false, reason: `http_${response.status}` };
+    }
+    let body: { data?: AnthropicModelEntry[]; has_more?: boolean; last_id?: string } | undefined;
+    try { body = await readModelResponseJson(response, budget) as typeof body; }
+    catch (error) { return { ok: false, reason: error instanceof ModelResponseLimitError ? "response_too_large" : "invalid_response" }; }
     if (!body || !Array.isArray(body.data)) return { ok: false, reason: "invalid_response" };
     entries.push(...body.data);
     if (!body.has_more || typeof body.last_id !== "string" || !body.last_id) break;
@@ -101,11 +109,14 @@ function discoveryWarning(reason: string, env: Record<string, string | undefined
   if (reason === "missing_credential") {
     return "未找到 Anthropic 凭证（ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN），无法在线拉取模型列表，已回退到内置别名目录。";
   }
-  if (reason.startsWith("invalid_base_url:")) {
-    return `ANTHROPIC_BASE_URL 不是合法的 http(s) 地址（${reason.slice("invalid_base_url:".length)}），已回退到内置别名目录。`;
+  if (reason === "invalid_base_url") {
+    return "ANTHROPIC_BASE_URL 必须使用 HTTPS（本机可用 HTTP），且不能包含凭证、查询参数或片段。已回退到内置别名目录。";
   }
   if (reason.startsWith("http_")) {
     return `模型列表接口 ${baseUrl}/v1/models 返回 HTTP ${reason.slice("http_".length)}（凭证或中转站不支持该接口），已回退到内置别名目录。`;
+  }
+  if (reason === "response_too_large") {
+    return "模型列表响应超过 8 MiB 安全上限，已停止读取并回退到内置别名目录。";
   }
   if (reason === "invalid_response") {
     return `模型列表接口 ${baseUrl}/v1/models 返回了无法解析的内容，已回退到内置别名目录。`;

@@ -1,3 +1,6 @@
+import type { AssistantModelStep, AssistantDecision, AssistantLookup, AssistantRead, AssistantSessionPage, AssistantExcerptPage } from "./assistant.js";
+import type { RuntimeConnection, RuntimeConnectionInput } from "@agenthub/domain";
+import type { HarnessPluginChange, HarnessPluginInventory, HarnessPluginOperation } from "@agenthub/provider-sdk";
 import type {
   AgentInstance,
   AgentRun,
@@ -23,6 +26,16 @@ import type {
   Task,
   VerificationResult
 } from "@agenthub/domain";
+
+/** Missing permissionMode preserves the stored override; null explicitly resets inheritance. */
+export type SessionUpsertInput = Omit<Session, "permissionMode" | "connectionId" | "connectionRevision"> & { permissionMode?: string | null; connectionId?: string | null; connectionRevision?: number | null; confirmConnectionChange?: boolean };
+
+export interface NativeHistorySync {
+  status: "none" | "opening" | "running" | "syncing" | "synced" | "failed" | "unsupported";
+  messageCount?: number;
+  nativeBusy?: boolean;
+  error?: string | null;
+}
 
 export interface MessageAttachmentInput {
   path: string;
@@ -52,8 +65,120 @@ import type {
   DiscoveredMcpSource
 } from "./capability-import.js";
 
+/** Independent of event replay: bound to one database and history scope. */
+export interface HistoryCursor { epoch: string; scope: string; revision: number }
+export interface HistoryItem<T> { value: T; order: { createdAt: string; ordinal: number } }
+export interface HistoryProjection<T> { cursor: HistoryCursor; reset: boolean; items: HistoryItem<T>[] }
+export interface SessionHistoryInput { sessionId: string; cursor?: HistoryCursor }
+export type SessionHistory = HistoryProjection<Message> & { session: Session };
+export type ArtifactChangesInput = ({ sessionId: string; projectRunId?: never } | { projectRunId: string; sessionId?: never }) & { cursor?: HistoryCursor };
+
+export interface ProjectEventCursor extends HistoryCursor { sequence: number }
+export interface ProjectPollInput {
+  projectRunId: string;
+  visibleSessionIds?: string[];
+  sessions?: Array<{ sessionId: string; eventCursor?: ProjectEventCursor; historyCursor?: HistoryCursor }>;
+  artifactCursor?: HistoryCursor;
+}
+export interface ProjectPollSnapshot {
+  projectRun: ProjectRun; sessions: Session[]; tasks: Task[]; runs: AgentRun[]; verifications: VerificationResult[];
+  artifacts: HistoryProjection<Artifact>; histories: SessionHistory[];
+  feeds: Array<{ sessionId: string; reset: boolean; cursor: ProjectEventCursor; events: RuntimeEvent[] }>;
+  followUps: Array<{ sessionId: string; afterSequence: number; interactions?: InteractionRequest[]; items: Array<{ messageId: string; text: string; queuedAt: string }> }>;
+}
+
+export type ProjectPollResult = ProjectPollSnapshot | { fallback: true; projectRun: ProjectRun };
+
+export interface TerminalMetadata {
+  id: string; cwd: string; pid?: number; kind: "shell" | "harness"; tabId?: string;
+  exited?: boolean; exitCode?: number;
+}
+export interface SourceControlScope { sessionId?: string; projectId?: string }
+export interface CoreFeatures { sourceControl?: 1; sourceControlHistory?: 1; sourceControlHistoryPaging?: 1; sourceControlEditing?: 1; terminalTabs?: 1 }
+export interface SourceControlCommitSummary { hash: string; subject: string; author: string; committedAt: string }
+export interface SourceControlHistoryInput extends SourceControlScope { query?: string; cursor?: string; limit?: number }
+export interface SourceControlHistoryPage {
+  rootPath: string; reference: string; query: string; head?: string; currentHead?: string;
+  items: SourceControlCommitSummary[]; nextCursor?: string;
+}
+export interface SourceControlChange {
+  path: string; originalPath?: string; indexStatus: string; worktreeStatus: string;
+  untracked: boolean; conflict: boolean; submodule: boolean;
+  additions?: number; deletions?: number; binary?: boolean; directory?: boolean;
+}
+export interface SourceControlRepository {
+  schemaVersion: 1; available: true; workingDirectory: string; rootPath: string; token: string;
+  branch?: string; head?: string; upstream?: string; upstreamRemote?: string; pushRemote?: string; pushRef?: string;
+  ahead: number; behind: number; detached: boolean;
+  operation?: "merge" | "rebase" | "cherry-pick" | "revert";
+  changes: SourceControlChange[]; remotes: string[];
+  branches: Array<{ name: string; current: boolean; upstream?: string; worktree?: string }>;
+  recent: SourceControlCommitSummary[];
+}
+export type SourceControlStatus = SourceControlRepository | { schemaVersion: 1; available: false; workingDirectory: string };
+export interface SourceControlDiff {
+  path: string; source: "worktree" | "index" | "commit"; patch: string; binary: boolean; truncated: boolean; fileToken?: string; rootPath?: string;
+  patchToken?: string; hunks?: SourceControlHunk[]; partialReason?: string; editable?: boolean;
+  before?: string; after?: string; previewReason?: "binary" | "large" | "encoding" | "submodule" | "conflict" | "directory"; commitHash?: string;
+}
+export interface SourceControlCommitFile { path: string; originalPath?: string; status: string; additions?: number; deletions?: number; binary: boolean }
+export interface SourceControlCommit {
+  rootPath: string; hash: string; parents: string[]; subject: string; body: string;
+  author: string; authorEmail: string; committedAt: string; files: SourceControlCommitFile[];
+}
+/** Patch row numbers are one-based; both boundaries include their rows. */
+export interface SourceControlHunk { id: string; header: string; startLine: number; endLine: number }
+export interface SourceControlFileVersion {
+  exists: boolean; content?: string; binary: boolean; truncated: boolean; mode?: string;
+}
+export interface SourceControlFile {
+  rootPath: string; path: string; token: string; conflict: boolean; editable: boolean; working: SourceControlFileVersion;
+  base: SourceControlFileVersion; ours: SourceControlFileVersion; theirs: SourceControlFileVersion;
+  index: SourceControlFileVersion;
+}
+export interface SourceControlSave extends SourceControlScope {
+  path: string; fileVersion: string; content?: string;
+  resolution?: "edited" | "ours" | "theirs" | "base" | "delete"; stage?: boolean;
+}
+export interface SourceControlSaveResult {
+  status?: SourceControlRepository; file?: SourceControlFile; saved: true; staged: boolean; error?: string;
+}
+export interface SourceControlMutation extends SourceControlScope {
+  action: "init" | "stage" | "unstage" | "stage-hunks" | "unstage-hunks" | "discard" | "commit" | "create-branch" | "switch-branch" | "fetch" | "pull" | "push";
+  token: string; paths?: string[]; message?: string; branch?: string; remote?: string; fileToken?: string;
+  patchToken?: string; hunkIds?: string[]; lines?: number[];
+}
 export interface IpcRequestMap {
-  "health.get": { input: undefined; output: { status: "ok"; version: string } };
+  "scm.status": { input: SourceControlScope; output: SourceControlStatus };
+  "scm.diff": { input: SourceControlScope & { path: string; source: "worktree" | "index" }; output: SourceControlDiff };
+  "scm.commit": { input: SourceControlScope & { hash: string }; output: SourceControlCommit };
+  "scm.commitDiff": { input: SourceControlScope & { hash: string; path: string }; output: SourceControlDiff };
+  "scm.history": { input: SourceControlHistoryInput; output: SourceControlHistoryPage };
+  "scm.mutate": { input: SourceControlMutation; output: { status: SourceControlRepository; output?: string } };
+  "scm.file": { input: SourceControlScope & {path:string}; output: SourceControlFile };
+  "scm.save": { input: SourceControlSave; output: SourceControlSaveResult };
+  "terminal.open": { input: { sessionId?: string; projectId?: string; tabId?: string; restoreOnly?: boolean; cols?: number; rows?: number }; output: TerminalMetadata };
+  "terminal.list": { input: { sessionId?: string; projectId?: string }; output: { items: TerminalMetadata[] } };
+  "terminal.native": { input: { sessionId: string; cols?: number; rows?: number }; output: { id: string; cwd: string; pid?: number; kind: "harness" } };
+  "terminal.read": { input: { terminalId: string; cursor: number; retrySync?: boolean }; output: { data: string; cursor: number; reset: boolean; exited: boolean; exitCode?: number; historySync?: NativeHistorySync } };
+  "terminal.write": { input: { terminalId: string; data: string }; output: { ok: true } };
+  "terminal.resize": { input: { terminalId: string; cols: number; rows: number }; output: { ok: true } };
+  "terminal.close": { input: { terminalId: string } | { sessionId?: string; projectId?: string; tabId: string }; output: { ok: true; historySync?: NativeHistorySync } };
+  "terminal.stop": { input: { terminalId: string }; output: { ok: true; historySync?: NativeHistorySync } };
+  "terminal.status": { input: { sessionId: string; retrySync?: boolean }; output: { nativeActive: boolean; terminalId?: string; historySync?: NativeHistorySync } };
+  "agent.runtimeCapabilities": { input: { sessionId?: string; agentInstanceId?: string }; output: import("@agenthub/provider-sdk").NativeRuntimeCapabilities };
+  "assistant.records": { input: { kind: "turn" | "settings" | "memory"; after?: number; before?: number; limit?: number; query?: string; oldest?: boolean }; output: Array<{seq:number;value:unknown}> };
+  "assistant.save": { input: { kind: "turn" | "settings" | "memory"; id: string; value: object }; output: {seq:number} };
+  "assistant.modelStep": { input: AssistantModelStep; output: AssistantDecision };
+  "assistant.sessions": { input: AssistantLookup; output: AssistantSessionPage };
+  "assistant.excerpts": { input: AssistantRead; output: AssistantExcerptPage };
+  "connection.list": { input: Record<string, never>; output: RuntimeConnection[] };
+  "connection.get": { input: { connectionId: string; revision?: number }; output: RuntimeConnection };
+  "connection.upsert": { input: { connection: RuntimeConnectionInput; expectedRevision?: number; apiKey?: string; clearApiKey?: boolean }; output: RuntimeConnection };
+  "connection.remove": { input: { connectionId: string }; output: { removed: boolean } };
+  "connection.models": { input: { connectionId: string; revision?: number; agentInstanceId?: string }; output: ProviderModelCatalog };
+
+  "health.get": { input: undefined; output: { status: "ok"; version: string; features?: CoreFeatures } };
   "project.list": { input: undefined; output: Project[] };
   "project.add": { input: { rootPath: string; name?: string }; output: Project };
   "project.upsert": { input: Project; output: Project };
@@ -76,32 +201,43 @@ export interface IpcRequestMap {
   "capability.scanSkills": { input: { dir: string }; output: CapabilityScanResult };
   "capability.importMany": { input: { items: ProviderCapability[]; onConflict?: CapabilityImportConflictPolicy }; output: { results: CapabilityImportOutcome[] } };
   "provider.models": { input: { providerId: string; agentInstanceId?: string; executable?: string; baseUrl?: string; apiKey?: string; apiType?: string }; output: ProviderModelCatalog };
+  "provider.harnessPlugins": {
+    input: { agentInstanceId: string; connectionId?: string; operation: HarnessPluginOperation };
+    output: HarnessPluginInventory | HarnessPluginChange;
+  };
+  "provider.modes": { input: { agentInstanceId: string; cwd?: string }; output: { modes: Array<{ id: string; name?: string; broken?: string; order?: number }>; defaultMode?: string } };
   "team.list": { input: undefined; output: TeamDefinition[] };
   "team.get": { input: { teamId: string }; output: TeamDefinition };
   "team.upsert": { input: TeamDefinition; output: TeamDefinition };
   "team.remove": { input: { teamId: string }; output: { removed: true } };
   "projectRun.list": { input: { projectId: string }; output: ProjectRun[] };
+  "projectRun.poll": { input: ProjectPollInput; output: ProjectPollResult };
   "projectRun.get": { input: { projectRunId: string }; output: { projectRun: ProjectRun; mainSession: Session } };
-  "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string; attachments?: MessageAttachmentInput[] }; output: { projectRun: ProjectRun; mainSession: Session } };
+  "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string; messageId?: string; attachments?: MessageAttachmentInput[] }; output: { projectRun: ProjectRun; mainSession: Session } };
   "orchestration.resolveDelegation": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.resolveMerge": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.recover": { input: { projectRunId: string; memberId: string; mode: "resume" | "replace" }; output: ProjectRun };
   "orchestration.cancel": { input: { projectRunId: string }; output: ProjectRun };
   "session.list": { input: { projectId: string; memberId?: string }; output: Session[] };
+  "session.history": { input: SessionHistoryInput; output: SessionHistory };
+  "session.historyBatch": { input: { items: SessionHistoryInput[] }; output: { items: SessionHistory[] } };
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
-  "session.create": { input: { projectId: string; memberId: string; title?: string }; output: Session };
-  "session.upsert": { input: Session; output: Session };
+  "session.generateTitle": { input: { sessionId: string }; output: { title?: string } };
+  "session.create": { input: { projectId: string; memberId: string; title?: string; connectionId?: string; connectionRevision?: number }; output: Session };
+  "session.upsert": { input: SessionUpsertInput; output: Session };
   "session.delete": { input: { sessionId: string }; output: { removed: true; sessionIds: string[] } };
-  "session.followUp": { input: { sessionId: string; text: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };
+  "session.followUp": { input: { sessionId: string; text: string; messageId?: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };
   "session.followUp.list": { input: { sessionId: string }; output: { items: Array<{ messageId: string; text: string; queuedAt: string }> } };
   "session.followUp.cancel": { input: { sessionId: string; messageId: string }; output: { cancelled: true } };
-  "session.send": { input: { sessionId: string; text: string; attachments?: MessageAttachmentInput[]; editMessageId?: string }; output: { accepted: true; runId: string } };
+  "session.followUp.steer": { input: { sessionId: string; messageId: string }; output: { accepted: true; mode: "steer" | "queue" } };
+  "session.send": { input: { sessionId: string; text: string; messageId?: string; attachments?: MessageAttachmentInput[]; editMessageId?: string }; output: { accepted: true; runId: string } };
   "slashCommand.list": { input: { sessionId: string }; output: SlashCommandDefinition[] };
   "slashCommand.execute": { input: { sessionId: string; commandId: string; argument?: string }; output: SlashCommandResult };
   "slashCommand.continue": { input: { sessionId: string; commandId: string; actionId: string; selectedOptionIds?: string[] }; output: SlashCommandResult };
   "run.cancel": { input: { runId: string }; output: { cancelled: true } };
   "run.list": { input: { sessionId?: string; projectRunId?: string }; output: AgentRun[] };
   "task.list": { input: { projectRunId: string }; output: Task[] };
+  "artifact.changes": { input: ArtifactChangesInput; output: HistoryProjection<Artifact> };
   "artifact.list": { input: { projectRunId?: string; taskId?: string; sessionId?: string }; output: Artifact[] };
   "artifact.read": { input: { projectId: string; path: string }; output: { base64: string; mimeType: string; size: number; modifiedAt: string } };
   "verification.list": { input: { projectRunId: string; taskId?: string }; output: VerificationResult[] };

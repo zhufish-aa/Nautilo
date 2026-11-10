@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::adapters::registry::AdapterRegistry;
+use crate::adapters::model_config::configured_model_reasoning_effort;
 use crate::adapters::{AdapterEvent, AdapterRun, AdapterStartRequest, TimeoutKind};
 use crate::application::interaction_service::InteractionService;
 use crate::application::session_context::{build_session_turn_context, TurnContextInput};
@@ -21,7 +22,7 @@ use crate::runtime::message_attachment_service::MessageAttachmentService;
 use crate::runtime::orchestration::member_router::MemberRouter;
 use crate::runtime::run_diff_collector as diff_collector;
 use crate::runtime::run_workspace_snapshot::{capture_workspace_snapshot, WorkspaceSnapshot};
-use crate::runtime::security::environment_policy::{build_environment, provider_environment_passthrough};
+use crate::runtime::security::environment_policy::{build_environment, provider_environment_passthrough, isolate_login_profile};
 use crate::runtime::security::{ApprovalService, CommandPolicyService, CredentialService, RedactionService};
 use crate::runtime::session_run_queue::SessionRunQueue;
 use crate::runtime::subagent_detection::subagent_meta;
@@ -30,6 +31,10 @@ use crate::runtime::RuntimeToolProvider;
 use crate::runtime::observability::AuditService;
 
 const TERMINAL_RUN_STATUSES: [&str; 5] = ["completed", "failed", "timed_out", "crashed", "cancelled"];
+#[path = "session_events.rs"]
+mod session_events;
+#[path = "native_history.rs"]
+mod native_history;
 
 pub struct RunCompletion {
     pub run: Value,
@@ -59,6 +64,7 @@ pub struct RunContext {
     pub runtime_tool_version: Option<i64>,
     pub context_window_override: Option<i64>,
     pub queue_key: Option<String>,
+    pub user_message_id: Option<String>,
 }
 
 pub struct RunService {
@@ -74,22 +80,29 @@ pub struct RunService {
     session_queue: SessionRunQueue,
     runtime_tool_provider: RwLock<Option<Arc<dyn RuntimeToolProvider>>>,
     interactions: RwLock<Option<Arc<InteractionService>>>,
+    terminals: RwLock<Option<Arc<crate::runtime::terminal_service::TerminalService>>>,
     active: Arc<Mutex<HashMap<String, ActiveRun>>>,
     output_tails: Arc<Mutex<HashMap<String, String>>>,
-    message_buffers: Arc<Mutex<HashMap<String, HashMap<String, String>>>>,
+    message_buffers: Arc<Mutex<HashMap<String, HashMap<session_events::MessageKey, session_events::BufferedMessage>>>>,
     touched_files: Arc<Mutex<HashMap<String, HashMap<String, (String, String)>>>>,
     workspace_baselines: Arc<Mutex<HashMap<String, WorkspaceSnapshot>>>,
     completion_waiters: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Receiver<RunCompletionSnapshot>>>>,
+    native_origins: Mutex<HashMap<(String,String,String),session_events::NativeOrigin>>,
+    session_event_gates: Mutex<HashMap<String, std::sync::Weak<session_events::SessionEventGate>>>,
 }
 
 /// Serializable view of a finished run (orchestration consumes it later).
 #[derive(Clone)]
 pub struct RunCompletionSnapshot {
     pub run: Value,
+    pub failure_detail: Option<String>,
     pub final_message: Option<String>,
 }
 
 impl RunService {
+    pub async fn generate_session_title(&self, session_id: &str) -> CoreResult<Value> {
+        crate::runtime::session_title::generate(self.db.clone(),self.credentials.clone(),session_id).await
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Mutex<Database>>,
@@ -114,12 +127,15 @@ impl RunService {
             session_queue: SessionRunQueue::default(),
             runtime_tool_provider: RwLock::new(None),
             interactions: RwLock::new(None),
+            terminals: RwLock::new(None),
             active: Arc::new(Mutex::new(HashMap::new())),
             output_tails: Arc::new(Mutex::new(HashMap::new())),
             message_buffers: Arc::new(Mutex::new(HashMap::new())),
             touched_files: Arc::new(Mutex::new(HashMap::new())),
             workspace_baselines: Arc::new(Mutex::new(HashMap::new())),
             completion_waiters: Arc::new(Mutex::new(HashMap::new())),
+            native_origins: Mutex::new(HashMap::new()),
+            session_event_gates: Mutex::new(HashMap::new()),
         })
     }
 
@@ -129,6 +145,45 @@ impl RunService {
 
     pub fn set_interaction_service(&self, interactions: Arc<InteractionService>) {
         *self.interactions.write().unwrap() = Some(interactions);
+    }
+    pub fn set_terminal_service(&self,terminals:Arc<crate::runtime::terminal_service::TerminalService>){*self.terminals.write().unwrap()=Some(terminals);}
+    pub fn native_request(&self,session_id:&str)->CoreResult<(Value,AdapterStartRequest)> {
+        let (session,agent,connection,project)={
+            let db=self.db.lock().unwrap();let repos=Repositories::new(&db.raw);
+            let session=repos.sessions().get(session_id)?.ok_or_else(||crate::errors::not_found("session",session_id))?;
+            let id=crate::application::session_service::effective_agent_id(&db.raw,&session)?;
+            let agent=repos.agents().get(&id)?.ok_or_else(||crate::errors::not_found("agent",&id))?;
+            let (agent,connection)=crate::application::connection_service::resolve_session_connection(&db.raw,&session,&agent)?;
+            let project=repos.projects().get(session["projectId"].as_str().unwrap_or(""))?.ok_or_else(||crate::errors::not_found("project",""))?;
+            (session,agent,connection,project)
+        };
+        let descriptor=self.adapters.get(agent["providerId"].as_str().unwrap_or(""))?.descriptor();
+        let policy=self.command_policies.get(project["policyId"].as_str().unwrap_or("default"))?;
+        let evaluation=self.command_policies.evaluate(&json!({"policyId":policy["id"],"command":agent["executable"],"args":agent["baseArgs"],"source":"agent"}))?;
+        if evaluation["action"]=="blocked" {
+            return Err(CoreError::details(ErrorCode::CommandBlocked, Map::from_iter([
+                ("command".into(), agent["executable"].clone()), ("ruleId".into(), evaluation["ruleId"].clone())
+            ])));
+        }
+        // Opening the user's configured native CLI is a direct UI action.
+        // Its own tool permissions remain in the Harness; do not add a host
+        // launch approval before displaying the native terminal.
+        let mut additions=provider_environment_passthrough(&agent,Some(&descriptor));
+        if connection.is_none(){additions.extend(self.credentials_environment(agent["id"].as_str().unwrap_or(""),agent["providerId"].as_str().unwrap_or("")));}
+        let env=build_environment(Some(&policy),additions);
+        let env=match connection {Some(connection)=>crate::application::connection_service::connection_environment_with_descriptor(&agent,&connection,&self.credentials,env,Some(&descriptor))?,None=>isolate_login_profile(&agent,env)?};
+        let cwd = session["nativeWorkingDirectory"].as_str().unwrap_or_else(||project["rootPath"].as_str().unwrap_or(""));
+        let request=AdapterStartRequest{instance:agent.clone(),local_session_id:Some(session_id.into()),cwd:cwd.into(),
+            model:session["model"].as_str().map(str::to_string),reasoning_effort:session["reasoningEffort"].as_str().map(str::to_string),permission_mode:session["permissionMode"].as_str().map(str::to_string),agent_mode:session["agentMode"].as_str().map(str::to_string),
+            service_tier:session["serviceTier"].as_str().map(str::to_string),env:Some(env),skills:Some(self.resolve_skills(&agent)),mcp_servers:Some(self.resolve_mcp_servers(&agent, session_id)?),..Default::default()};
+        Ok((session,request))
+    }
+
+    pub fn requires_provider_recovery(&self, session:&Value, agent:&Value)->bool {
+        let Some(adapter)=self.adapters.find(agent["providerId"].as_str().unwrap_or("")) else {return true};
+        if !adapter.capabilities().native_resume {return true}
+        let descriptor=adapter.descriptor();
+        descriptor["nativeContextVersion"].as_str().is_some_and(|version|session["providerContextVersion"].as_str()!=Some(version))
     }
 
     pub async fn cancel(&self, run_id: &str) -> CoreResult<()> {
@@ -143,7 +198,9 @@ impl RunService {
                     updated.insert("status".to_string(), json!("cancelled"));
                     updated.insert("endedAt".to_string(), json!(now_iso()));
                     updated.insert("failureCode".to_string(), json!("RUN_CANCELLED"));
-                    Repositories::new(&self.db.lock().unwrap().raw).runs().save(&Value::Object(updated))?;
+                    let updated = Value::Object(updated);
+                    Repositories::new(&self.db.lock().unwrap().raw).runs().save(&updated)?;
+                    self.record_cancelled(&updated);
                     let session_id = existing.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
                     self.update_session_status(&session_id, "idle");
                 }
@@ -155,13 +212,13 @@ impl RunService {
             updated.insert("status".to_string(), json!("cancelling"));
             Repositories::new(&self.db.lock().unwrap().raw).runs().save(&Value::Object(updated))?;
         }
-        (active.cancel)().await;
         // Resolve any pending provider approvals for this run right away.
         // Otherwise the plugin-side interaction handler stays parked on its
         // oneshot and the run's own stream never finalizes.
         if let Some(interactions) = self.interactions.read().unwrap().clone() {
             interactions.cancel_for_run(run_id);
         }
+        (active.cancel)().await;
         let latest = Repositories::new(&self.db.lock().unwrap().raw).runs().get(run_id)?.or(existing);
         if let Some(latest) = latest {
             let mut updated = latest.as_object().cloned().unwrap_or_default();
@@ -273,8 +330,14 @@ impl RunService {
     }
 
     /// Withdraws a queued (not yet started) turn by its queue key.
+    pub fn session_busy(&self, session_id: &str) -> bool { self.session_queue.busy(session_id) }
+
     pub fn cancel_queued(&self, session_id: &str, key: &str) -> bool {
         self.session_queue.cancel_pending(session_id, key)
+    }
+
+    pub async fn steer_queued(&self, session_id: &str, key: &str, text: &str) -> CoreResult<bool> {
+        self.session_queue.promote_pending(session_id, key, || self.steer_session(session_id, text)).await
     }
 
     async fn launch_now(
@@ -284,10 +347,63 @@ impl RunService {
         prompt: &str,
         mut context: RunContext,
     ) -> CoreResult<(String, watch::Receiver<bool>)> {
+        let terminals=self.terminals.read().unwrap().clone();
+        let _ownership=if let Some(terminals)=terminals.as_ref(){Some(terminals.lock_session(session["id"].as_str().unwrap_or("")).await)}else{None};
+        if terminals.as_ref().is_some_and(|terminals|terminals.owns(session["id"].as_str().unwrap_or(""))){return Err(invalid_field("sessionId","会话正在原生终端中运行，请先结束终端，再继续聊天。"));}
+        let sync=self.reconcile_native_history_locked(session["id"].as_str().unwrap_or(""),true).await?;
+        if !matches!(sync["status"].as_str(),Some("none"|"synced"|"unsupported")) {return Err(invalid_field("nativeHistory",sync["error"].as_str().unwrap_or("正在同步原生会话，请稍后继续聊天。")));}
+        // Re-read after reaching the head of the queue. Its predecessor may
+        // have learned a native thread id or saved newer settings meanwhile.
+        let mut latest_session = Repositories::new(&self.db.lock().unwrap().raw)
+            .sessions()
+            .get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
+            .unwrap_or_else(|| session.clone());
+        if latest_session.get("projectId") != session.get("projectId")
+            || latest_session.get("agentInstanceId") != session.get("agentInstanceId")
+
+        {
+            return Err(invalid_field("sessionId", "The session target changed while this turn was queued. Send the message again."));
+        }
+        let binding_changed = latest_session.get("connectionId") != session.get("connectionId") || latest_session.get("connectionRevision") != session.get("connectionRevision");
+        // A queued request owns the connection selection captured when it was submitted.
+        for field in ["connectionId","connectionRevision","model","reasoningEffort","serviceTier"] {
+            if let Some(value) = session.get(field) { latest_session[field] = value.clone(); }
+            else { latest_session.as_object_mut().unwrap().remove(field); }
+        }
+        if binding_changed {
+            for field in ["providerSessionId","providerContextSyncedAt","providerContextWindow","runtimeToolVersion"] {
+                if let Some(value) = session.get(field) { latest_session[field] = value.clone(); }
+                else { latest_session.as_object_mut().unwrap().remove(field); }
+            }
+        }
+        let session = &latest_session;
+        let (resolved_agent, bound_connection) = {
+            let db = self.db.lock().unwrap();
+            crate::application::connection_service::resolve_session_connection(&db.raw, session, agent)?
+        };
+        let agent = &resolved_agent;
         // An explicit per-model context window from the instance editor wins;
         // live discovery only runs when nothing is configured.
         let session_model = session.get("model").and_then(Value::as_str).unwrap_or("");
         let models = agent.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
+        let configured_model = models.iter().find(|entry| entry.get("id").and_then(Value::as_str).map(str::trim) == Some(session_model));
+        if configured_model.and_then(|entry| entry.get("enabled")).and_then(Value::as_bool) == Some(false) {
+            return Err(invalid_field("model", "This model is disabled. Choose an enabled model."));
+        }
+        let reasoning_effort = session.get("reasoningEffort").and_then(Value::as_str)
+            .map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+            .or_else(|| {
+                let anthropic_bridge = agent.get("providerId").and_then(Value::as_str) == Some("codex")
+                    && agent.pointer("/providerOptions/wireApi").and_then(Value::as_str) == Some("anthropic");
+                if anthropic_bridge {
+                    // Preserve an explicit default, but do not interpret a legacy list of
+                    // advertised efforts as a user choice for an unsupported conversion.
+                    configured_model.and_then(|model| model.get("defaultReasoningEffort"))
+                        .and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+                } else {
+                    configured_model.and_then(configured_model_reasoning_effort)
+                }
+            });
         let configured_context_window = models
             .iter()
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(session_model))
@@ -310,13 +426,13 @@ impl RunService {
             .filter(|window| *window > 0)
             .or(configured_context_window);
         let provider_id = agent.get("providerId").and_then(Value::as_str).unwrap_or("");
-        if context_window.is_none() {
+        if context_window.is_none() && bound_connection.is_none() {
             let discovery = self.adapters
                 .find(provider_id)
                 .map(|adapter| adapter.descriptor().get("contextWindowDiscovery").and_then(Value::as_bool) == Some(true))
                 .unwrap_or(false);
             if discovery {
-                let catalog = self.adapters.list_models(agent, None).await.ok();
+                let catalog = self.adapters.list_models_for_run(agent).await;
                 let model_id = if session_model.is_empty() {
                     catalog.as_ref().and_then(|c| c.get("defaultModel")).and_then(Value::as_str).map(str::to_string)
                 } else {
@@ -373,6 +489,7 @@ impl RunService {
                 project.as_ref().and_then(|p| p.get("id")).and_then(Value::as_str),
                 context.project_run_id.as_deref(),
                 context.task_id.as_deref(),
+                session.get("id").and_then(Value::as_str),
             )? {
                 let approval = self.approvals.request(&json!({
                     "category": "command",
@@ -384,10 +501,16 @@ impl RunService {
                     "sessionId": session.get("id").cloned().unwrap_or(Value::Null),
                     "requestedBy": member_id.clone()
                 }))?;
-                let mut waiting = session.as_object().cloned().unwrap_or_default();
-                waiting.insert("status".to_string(), json!("waiting_approval"));
-                waiting.insert("updatedAt".to_string(), json!(now_iso()));
-                Repositories::new(&self.db.lock().unwrap().raw).sessions().save(&Value::Object(waiting))?;
+                {
+                    let db = self.db.lock().unwrap();
+                    let sessions = Repositories::new(&db.raw).sessions();
+                    let current = sessions.get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
+                        .unwrap_or_else(|| session.clone());
+                    let mut waiting = current.as_object().cloned().unwrap_or_default();
+                    waiting.insert("status".to_string(), json!("waiting_approval"));
+                    waiting.insert("updatedAt".to_string(), json!(now_iso()));
+                    sessions.save(&Value::Object(waiting))?;
+                }
                 let _ = self.events.append_for_session(
                     session,
                     &json!({ "projectRunId": context.project_run_id, "taskId": context.task_id }),
@@ -395,7 +518,8 @@ impl RunService {
                     json!({
                         "approvalId": approval.get("id").cloned().unwrap_or(Value::Null),
                         "category": "command",
-                        "summary": approval.get("summary").cloned().unwrap_or(Value::Null)
+                        "summary": approval.get("summary").cloned().unwrap_or(Value::Null),
+                        "operation": operation
                     }),
                 );
                 let mut audit_record = Map::new();
@@ -412,6 +536,17 @@ impl RunService {
             }
         }
 
+        let descriptor = self.adapters.find(provider_id).map(|a| a.descriptor());
+        let mut additions = provider_environment_passthrough(agent, descriptor.as_ref());
+        if bound_connection.is_none() {
+            additions.extend(self.credentials_environment(agent.get("id").and_then(Value::as_str).unwrap_or(""), provider_id));
+        }
+        let environment = build_environment(Some(&policy), additions);
+        let environment = match bound_connection.as_ref() {
+            Some(connection) => crate::application::connection_service::connection_environment_with_descriptor(agent, connection, &self.credentials, environment, descriptor.as_ref())?,
+            None => isolate_login_profile(agent, environment)?,
+        };
+
         let run_id = Uuid::new_v4().to_string();
         let started_at = now_iso();
         let mut run = Map::new();
@@ -424,6 +559,8 @@ impl RunService {
         }
         run.insert("sessionId".to_string(), session.get("id").cloned().unwrap_or(Value::Null));
         run.insert("agentInstanceId".to_string(), agent.get("id").cloned().unwrap_or(Value::Null));
+        for field in ["connectionId","connectionRevision","model"] { if let Some(value) = session.get(field) { run.insert(field.into(),value.clone()); } }
+        if let Some(pricing) = configured_model.and_then(|model| model.get("pricing")) { run.insert("pricingSnapshot".into(),pricing.clone()); }
         run.insert("memberId".to_string(), member_id.clone().map(Value::String).unwrap_or(Value::Null));
         run.insert("mode".to_string(), json!("headless_structured"));
         run.insert("status".to_string(), json!("starting"));
@@ -438,17 +575,24 @@ impl RunService {
         audit_record.insert("resourceId".to_string(), json!(run_id));
         audit_record.insert("outcome".to_string(), json!("success"));
         self.audit.record(audit_record);
-        let mut running = session.as_object().cloned().unwrap_or_default();
-        running.insert("status".to_string(), json!("running"));
-        running.insert("updatedAt".to_string(), json!(started_at));
-        Repositories::new(&self.db.lock().unwrap().raw).sessions().save(&Value::Object(running))?;
+        {
+            let db = self.db.lock().unwrap();
+            let sessions = Repositories::new(&db.raw).sessions();
+            let current = sessions.get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
+                .unwrap_or_else(|| session.clone());
+            let mut running = current.as_object().cloned().unwrap_or_default();
+            running.insert("status".to_string(), json!("running"));
+            running.insert("updatedAt".to_string(), json!(started_at));
+            sessions.save(&Value::Object(running))?;
+        }
         if context.presentation.as_deref() != Some("provider_command") {
-            let _ = self.events.append(&run, session, "run.started", json!({ "runId": run_id }));
+            let mut started = json!({ "runId": run_id });
+            if let Some(message_id) = context.user_message_id.as_deref().or(context.queue_key.as_deref()) {
+                started["userMessageId"] = json!(message_id);
+            }
+            let _ = self.events.append(&run, session, "run.started", started);
         }
 
-        let descriptor = self.adapters.find(provider_id).map(|a| a.descriptor());
-        let mut additions = provider_environment_passthrough(agent, descriptor.as_ref());
-        additions.extend(self.credentials_environment(agent.get("id").and_then(Value::as_str).unwrap_or(""), provider_id));
         let provider_command = context.presentation.as_deref() == Some("provider_command");
         let runtime_tool_binding = if provider_command {
             None
@@ -457,8 +601,17 @@ impl RunService {
                 provider.for_run(session, &json!({ "projectRunId": context.project_run_id, "taskId": context.task_id }), agent)
             })
         };
+        let image_generation = if provider_command { None } else {
+            crate::runtime::image_generation::image_generation_executor(self.db.clone(), self.credentials.clone(), agent.clone(), session.clone(),
+                context.working_directory.clone().or_else(|| project.as_ref().and_then(|p| p["rootPath"].as_str()).map(str::to_string))
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned()))
+        };
+        let background = self.session_callbacks(session, agent, &run, &context);
+        let background_handoff = background.handoff;
         let request = AdapterStartRequest {
+            native_terminal_live: None,
             instance: agent.clone(),
+            local_session_id: session.get("id").and_then(Value::as_str).map(str::to_string),
             prompt: prompt.to_string(),
             cwd: context
                 .working_directory
@@ -466,18 +619,22 @@ impl RunService {
                 .or_else(|| project.as_ref().and_then(|p| p.get("rootPath")).and_then(Value::as_str).map(str::to_string))
                 .unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
             model: session.get("model").and_then(Value::as_str).map(str::to_string),
-            reasoning_effort: session.get("reasoningEffort").and_then(Value::as_str).map(str::to_string),
+            agent_mode: session.get("agentMode").and_then(Value::as_str).map(str::to_string),
+            reasoning_effort,
             service_tier: session.get("serviceTier").and_then(Value::as_str).map(str::to_string),
-            permission_mode: session.get("permissionMode").and_then(Value::as_str).map(str::to_string),
+            permission_mode: session.get("permissionMode").and_then(Value::as_str).map(str::trim).filter(|mode| !mode.is_empty())
+                .or_else(|| agent.pointer("/providerOptions/permissionMode").and_then(Value::as_str).map(str::trim).filter(|mode| !mode.is_empty()))
+                .map(str::to_string),
             context_window,
-            env: Some(build_environment(Some(&policy), additions)),
-            timeout_ms: Some(30 * 60_000),
+            env: Some(environment),
+            timeout_ms: Some(if context.provider_command.as_deref()==Some("compact") {5 * 60_000} else {30 * 60_000}),
             idle_timeout_ms: Some(30 * 60_000),
             max_output_bytes: None,
             output_schema_path: None,
             local_image_paths: context.local_image_paths.clone(),
             runtime_tools: runtime_tool_binding.as_ref().map(|binding| Value::Array(binding.tools.clone())),
             execute_runtime_tool: runtime_tool_binding.map(|binding| binding.execute),
+            image_generation: image_generation.clone(),
             request_interaction: if provider_command {
                 None
             } else {
@@ -497,13 +654,16 @@ impl RunService {
                 })
             },
             skills: Some(self.resolve_skills(agent)),
-            mcp_servers: Some(self.resolve_mcp_servers(agent)?),
+            mcp_servers: Some(self.resolve_mcp_servers(agent, session["id"].as_str().unwrap_or(""))?),
             provider_command: context.provider_command.clone(),
+            session_events: Some(background.events),
+            session_interaction: Some(background.interaction),
+            session_tool: Some(background.tool),
         };
 
         if !provider_command {
             let is_git = diff_collector::is_git_workspace(&request.cwd).await;
-            if !is_git {
+            if !is_git && project.as_ref().and_then(|p| p.get("nonGitDiffMode")).and_then(Value::as_str) != Some("off") {
                 if let Ok(snapshot) = capture_workspace_snapshot(&request.cwd) {
                     self.workspace_baselines.lock().unwrap().insert(run_id.clone(), snapshot);
                 }
@@ -514,11 +674,14 @@ impl RunService {
             .get(session.get("id").and_then(Value::as_str).unwrap_or(""))?
             .unwrap_or_else(|| session.clone());
         let must_recreate_codex_thread = provider_id == "codex"
-            && request.runtime_tools.is_some()
-            && current_session.get("runtimeToolVersion").and_then(Value::as_i64)
-                != Some(crate::runtime::RUNTIME_TOOL_SCHEMA_VERSION);
-        let provider_session_id = current_session.get("providerSessionId").and_then(Value::as_str).map(str::to_string);
-        let native_resume = provider_session_id.is_some()
+            && (current_session["runtimeToolVersion"] == 0 || (request.runtime_tools.is_some()
+                && current_session.get("runtimeToolVersion").and_then(Value::as_i64)
+                    != Some(crate::runtime::RUNTIME_TOOL_SCHEMA_VERSION)));
+        let same_connection = current_session.get("connectionId") == session.get("connectionId") && current_session.get("connectionRevision") == session.get("connectionRevision");
+        let resume_session = if same_connection { &current_session } else { session };
+        let provider_session_id = resume_session.get("providerSessionId").and_then(Value::as_str).map(str::to_string);
+        let native_resume = session["connectionContextRebuildRequired"] != true && provider_session_id.is_some()
+            && !self.requires_provider_recovery(resume_session,agent)
             && self.adapters
                 .capabilities(agent)
                 .map(|capabilities| capabilities.native_resume)
@@ -541,6 +704,11 @@ impl RunService {
             }
         };
         let (events, cancel, steer, _write) = adapter_run.into_parts();
+        let image_generation_cleanup = image_generation.clone();
+        let cancel: Box<dyn FnOnce() -> crate::adapters::BoxFuture<()> + Send> = Box::new(move || {
+            if let Some(executor) = image_generation { (executor.cancel)(); }
+            cancel()
+        });
         context.runtime_tool_version = if context.runtime_tool_version.is_some() {
             context.runtime_tool_version
         } else if !provider_command {
@@ -558,8 +726,9 @@ impl RunService {
         let consume_run_id = run_id.clone();
         tokio::spawn(async move {
             let completion = consume_service
-                .consume(&consume_run, &consume_session, events, consume_context)
+                .consume(&consume_run, &consume_session, events, consume_context, background_handoff)
                 .await;
+            if let Some(executor) = image_generation_cleanup { (executor.cancel)(); }
             let _ = snapshot_sender.send(completion);
             let _ = completion_sender.send(true);
             let service = consume_service;
@@ -615,10 +784,10 @@ impl RunService {
     }
 
     /// User-managed MCP servers enabled for this run's provider.
-    fn resolve_mcp_servers(&self, agent: &Value) -> CoreResult<Vec<Value>> {
+    fn resolve_mcp_servers(&self, agent: &Value, session_id: &str) -> CoreResult<Vec<Value>> {
         let provider_id = agent.get("providerId").and_then(Value::as_str).unwrap_or("");
         let capabilities = Repositories::new(&self.db.lock().unwrap().raw).capabilities().list_default()?;
-        let servers = capabilities
+        let mut servers: Vec<Value> = capabilities
             .iter()
             .filter(|capability| {
                 capability.get("enabled").and_then(Value::as_bool) == Some(true)
@@ -629,6 +798,14 @@ impl RunService {
             })
             .filter_map(|capability| capability_to_mcp_server(capability))
             .collect();
+        if let Some(mut browser) = super::desktop_browser::server(session_id) {
+            let mut name = "nautilo_browser".to_owned();
+            while servers.iter().any(|s| s["name"].as_str() == Some(&name)) {
+                name.push('_');
+            }
+            browser["name"] = json!(name);
+            servers.push(browser);
+        }
         Ok(servers)
     }
 
@@ -673,13 +850,18 @@ impl RunService {
         session: &Value,
         mut adapter_events: tokio::sync::mpsc::UnboundedReceiver<AdapterEvent>,
         context: RunContext,
+        background_handoff: session_events::ForegroundHandoff,
     ) -> RunCompletionSnapshot {
         let mut messages: Vec<Value> = vec![];
+        let mut provider_error: Option<String> = None;
         let provider_command = context.presentation.as_deref() == Some("provider_command");
         let mut saw_exit = false;
         let consume_run_id = run.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         run_log::run_event(&consume_run_id, "consume_enter", json!({}));
         while let Some(event) = adapter_events.recv().await {
+            if let AdapterEvent::Error { message } = &event {
+                provider_error = Some(self.redaction.text(message));
+            }
             if matches!(event, AdapterEvent::Exit { .. }) {
                 saw_exit = true;
             }
@@ -687,6 +869,10 @@ impl RunService {
                 messages.push(message);
             }
         }
+        // An interrupt or transport failure may close a stream before its
+        // final message frame. Commit already-visible main-agent text first.
+        messages.extend(self.handoff_message_buffers(run, session, &context));
+        drop(background_handoff);
         if !provider_command {
             self.collect_run_diff(run, session, &context).await;
         }
@@ -698,18 +884,22 @@ impl RunService {
             let detail = if cancelled {
                 "CLI process cancelled".to_string()
             } else {
-                self.output_tails
+                provider_error.filter(|message| !message.trim().is_empty()).or_else(|| self.output_tails
                     .lock()
                     .unwrap()
                     .get(run_id)
                     .map(|tail| tail.trim().to_string())
-                    .filter(|tail| !tail.is_empty())
+                    .filter(|tail| !tail.is_empty()))
                     .unwrap_or_else(|| run_failure_detail(&latest))
             };
-            if !provider_command {
+            let detail = self.redaction.text(&detail);
+            let detail = detail.chars().skip(detail.chars().count().saturating_sub(4_000)).collect::<String>();
+            if cancelled {
+                self.record_cancelled(&latest);
+            } else if !provider_command {
                 let _ = self.events.append(&latest, session, "run.failed", json!({
                     "code": latest.get("failureCode").and_then(Value::as_str).unwrap_or("RUN_START_FAILED"),
-                    "message": detail.chars().skip(detail.chars().count().saturating_sub(4_000)).collect::<String>(),
+                    "message": detail,
                     "retryable": !cancelled
                 }));
             }
@@ -721,7 +911,7 @@ impl RunService {
             self.touched_files.lock().unwrap().remove(run_id);
             self.workspace_baselines.lock().unwrap().remove(run_id);
             run_log::run_event(run_id, "consume_exit", json!({ "status": status, "sawExit": saw_exit, "messages": messages.len() }));
-            return RunCompletionSnapshot { run: latest, final_message: last_message_text(&messages) };
+            return RunCompletionSnapshot { run: latest, failure_detail: Some(detail), final_message: last_message_text(&messages) };
         }
         if !saw_exit {
             // The stream closed without a real exit event: the provider
@@ -750,7 +940,16 @@ impl RunService {
             self.touched_files.lock().unwrap().remove(run_id);
             self.workspace_baselines.lock().unwrap().remove(run_id);
             run_log::run_event(run_id, "consume_exit", json!({ "status": "crashed", "sawExit": saw_exit, "messages": messages.len() }));
-            return RunCompletionSnapshot { run: crashed, final_message: last_message_text(&messages) };
+            return RunCompletionSnapshot { run: crashed, failure_detail: Some("Provider process exited mid-run; the turn was interrupted.".into()), final_message: last_message_text(&messages) };
+        }
+        if session["connectionContextRebuildRequired"] == true && !provider_command {
+            let db = self.db.lock().unwrap(); let sessions = Repositories::new(&db.raw).sessions();
+            if let Ok(Some(mut current)) = sessions.get(session["id"].as_str().unwrap_or("")) {
+                if current.get("connectionId") == session.get("connectionId") && current.get("connectionRevision") == session.get("connectionRevision") {
+                    current.as_object_mut().unwrap().remove("connectionContextRebuildRequired");
+                    let _ = sessions.save(&current);
+                }
+            }
         }
         let mut completed = latest.as_object().cloned().unwrap_or_default();
         completed.insert("status".to_string(), json!("completed"));
@@ -780,7 +979,7 @@ impl RunService {
         self.touched_files.lock().unwrap().remove(run_id);
         self.workspace_baselines.lock().unwrap().remove(run_id);
         run_log::run_event(run_id, "consume_exit", json!({ "status": "completed", "sawExit": saw_exit, "messages": messages.len() }));
-        RunCompletionSnapshot { run: completed, final_message: last_message_text(&messages) }
+        RunCompletionSnapshot { run: completed, failure_detail: None, final_message: last_message_text(&messages) }
     }
 
     fn fail_run(&self, run: &Value, session: &Value, error: &str, provider_command: bool) -> CoreResult<Value> {
@@ -788,6 +987,11 @@ impl RunService {
             .runs()
             .get(run.get("id").and_then(Value::as_str).unwrap_or(""))?
             .unwrap_or_else(|| run.clone());
+        if matches!(current["status"].as_str(), Some("cancelled" | "cancelling")) {
+            self.record_cancelled(&current);
+            self.update_session_status(session["id"].as_str().unwrap_or(""), "idle");
+            return Ok(current);
+        }
         let mut failed = current.as_object().cloned().unwrap_or_default();
         failed.insert("status".to_string(), json!("failed"));
         failed.insert("endedAt".to_string(), json!(now_iso()));
@@ -816,6 +1020,14 @@ impl RunService {
         Ok(failed)
     }
 
+    fn record_cancelled(&self, run: &Value) {
+        let session_id = run["sessionId"].as_str().unwrap_or("");
+        let session = Repositories::new(&self.db.lock().unwrap().raw).sessions().get(session_id).ok().flatten();
+        if let Some(session) = session {
+            let _ = self.events.append(run, &session, "run.cancelled", json!({"reason":"user"}));
+        }
+    }
+
     fn update_session_status(&self, session_id: &str, status: &str) {
         let guard = self.db.lock().unwrap();
         let repos = Repositories::new(&guard.raw);
@@ -828,11 +1040,21 @@ impl RunService {
     }
 
     fn persist(&self, run: &Value, session: &Value, event: &AdapterEvent, context: &RunContext) -> Option<Value> {
-        let provider_command = context.presentation.as_deref() == Some("provider_command");
+        if let Some(mut origin)=self.native_origin(run,session,event,context) {
+            if self.queue_native_origin(origin.run["id"].as_str().unwrap_or(""), event.clone()) { return None; }
+            origin.run["backgroundEvent"]=json!(true);
+            self.persist(&origin.run,session,event,&origin.context);
+            return None;
+        }
+        let background = run["backgroundEvent"] == true;
+        let provider_command = !background && context.presentation.as_deref() == Some("provider_command");
         let run_id = run.get("id").and_then(Value::as_str).unwrap_or("");
+        let buffer_run_id = if background {format!("{run_id}:background")} else {run_id.to_string()};
         match event {
             AdapterEvent::Message { text, phase, message_id, subagent_dispatch_id, .. } => {
-                let message_id = message_id.clone().unwrap_or_else(|| "default".to_string());
+                let native_message_id = message_id.clone();
+                let message_id = message_id.clone().unwrap_or_else(|| if background { "background:default".into() } else { "default".into() });
+                let key = session_events::MessageKey { message_id: message_id.clone(), subagent_dispatch_id: subagent_dispatch_id.clone() };
                 // Sub-agent messages share the run; keep their delta buffers
                 // separate and never persist them as chat history.
                 let buffer_key = subagent_dispatch_id
@@ -841,8 +1063,10 @@ impl RunService {
                     .unwrap_or_else(|| message_id.clone());
                 if phase.as_deref() == Some("delta") {
                     let mut buffers = self.message_buffers.lock().unwrap();
-                    let run_buffers = buffers.entry(run_id.to_string()).or_default();
-                    run_buffers.entry(buffer_key.clone()).or_default().push_str(text);
+                    let run_buffers = buffers.entry(buffer_run_id.clone()).or_default();
+                    run_buffers.entry(key.clone()).or_insert_with(|| session_events::BufferedMessage {
+                        text: String::new(), message_id: native_message_id, subagent_dispatch_id: subagent_dispatch_id.clone(),
+                    }).text.push_str(text);
                     drop(buffers);
                     if !provider_command {
                         let _ = self.events.append(run, session, "agent.message_delta", json!({
@@ -857,14 +1081,23 @@ impl RunService {
                     .message_buffers
                     .lock()
                     .unwrap()
-                    .get_mut(run_id)
-                    .and_then(|buffers| buffers.remove(&buffer_key));
-                let final_text = if !text.is_empty() { text.clone() } else { buffered.unwrap_or_default() };
+                    .get_mut(&buffer_run_id)
+                    .and_then(|buffers| buffers.remove(&key));
+                let final_text = if !text.is_empty() { text.clone() } else { buffered.map(|message| message.text).unwrap_or_default() };
                 if final_text.is_empty() {
                     return None;
                 }
-                let mut message = Map::new();
-                message.insert("id".to_string(), json!(Uuid::new_v4().to_string()));
+                let sid=session["id"].as_str().unwrap_or("");
+                let native_identity_supported={let db=self.db.lock().unwrap();Repositories::new(&db.raw).agents().get(run["agentInstanceId"].as_str().unwrap_or("")).ok().flatten().is_some_and(|agent|self.adapters.find(agent["providerId"].as_str().unwrap_or("")).is_some_and(|adapter|adapter.native_message_ids_supported(&agent)))};
+                let (native_session,previous) = if native_identity_supported && !provider_command && subagent_dispatch_id.is_none() && native_message_id.is_some() {
+                    let db=self.db.lock().unwrap();let repos=Repositories::new(&db.raw);
+                    let native=repos.sessions().get(sid).ok().flatten().and_then(|session|session["providerSessionId"].as_str().map(str::to_string));
+                    let previous=native.as_deref().and_then(|native|crate::database::native_history::NativeHistoryRepository::new(&db.raw).binding(sid,native,"messages",native_message_id.as_deref().unwrap_or("")).ok().flatten()).and_then(|binding|binding["localId"].as_str().and_then(|id|repos.sessions().message(sid,id).ok().flatten()));
+                    (native,previous)
+                }else{(None,None)};
+                let local_id=native_session.as_deref().zip(native_message_id.as_deref()).map(|(native,id)|native_history::native_message_id(sid,native,id)).unwrap_or_else(||Uuid::new_v4().to_string());
+                let mut message = previous.as_ref().and_then(Value::as_object).cloned().unwrap_or_default();
+                message.entry("id".to_string()).or_insert_with(||json!(local_id));
                 message.insert("sessionId".to_string(), session.get("id").cloned().unwrap_or(Value::Null));
                 message.insert("sender".to_string(), json!("agent"));
                 message.insert("kind".to_string(), context.message_kind.clone().map(Value::String).unwrap_or_else(|| json!("chat")));
@@ -874,20 +1107,29 @@ impl RunService {
                 if let Some(id) = &context.task_id {
                     message.insert("taskId".to_string(), json!(id));
                 }
-                message.insert("runId".to_string(), json!(run_id));
+                message.entry("runId".to_string()).or_insert_with(||json!(run_id));
+                if background {message.insert("background".into(),json!(true));}
                 message.insert(
                     "fromMemberId".to_string(),
                     context.member_id.clone().or_else(|| session.get("memberId").and_then(Value::as_str).map(str::to_string)).map(Value::String).unwrap_or(Value::Null),
                 );
                 message.insert("text".to_string(), json!(self.redaction.text(&final_text)));
-                message.insert("createdAt".to_string(), json!(now_iso()));
+                message.entry("createdAt".to_string()).or_insert_with(||json!(now_iso()));
+                if let Some(native)=native_session.as_deref() {
+                    message.insert("nativeIdentity".into(),json!({"providerSessionId":native,"id":native_message_id,"source":"native-stream","completed":true}));
+                }
                 let message = Value::Object(message);
                 if !provider_command {
                     if subagent_dispatch_id.is_none() {
-                        let _ = Repositories::new(&self.db.lock().unwrap().raw).sessions().save_message(&message);
+                        let db=self.db.lock().unwrap();
+                        let _ = Repositories::new(&db.raw).sessions().save_message(&message);
+                        if let (Some(native),Some(id))=(native_session.as_deref(),native_message_id.as_deref()) {
+                            let _=crate::database::native_history::NativeHistoryRepository::new(&db.raw).bind(sid,native,"messages",id,message["id"].as_str(),"");
+                        }
                     }
                     let _ = self.events.append(run, session, "agent.message", json!({
-                        "messageId": message.get("id").cloned().unwrap_or(Value::Null),
+                        "providerMessageId": buffer_key,
+                        "messageId": if subagent_dispatch_id.is_some() { json!(buffer_key) } else { message.get("id").cloned().unwrap_or(Value::Null) },
                         "text": message.get("text").cloned().unwrap_or(Value::Null),
                         "subagentDispatchId": subagent_dispatch_id.clone().map(Value::String).unwrap_or(Value::Null)
                     }));
@@ -913,29 +1155,74 @@ impl RunService {
                 }
                 None
             }
-            AdapterEvent::Status { phase, .. } => {
+            AdapterEvent::Status { phase, raw } => {
+                if ["runtime_ready","runtime_capabilities"].contains(&phase.as_str()) {
+                    let _=self.events.append(run,session,&format!("provider.{phase}"),raw.clone().unwrap_or(Value::Null));return None;
+                }
+                if phase == "extension_ui" {
+                    if let Some(native_id) = raw.as_ref().filter(|raw|raw["method"] == "cancel").and_then(|raw|raw.pointer("/raw/targetId")).and_then(Value::as_str) {
+                        if let Some(interactions) = self.interactions.read().unwrap().as_ref() { interactions.cancel_native(run["id"].as_str().unwrap_or(""), native_id); }
+                    }
+                    let _ = self.events.append(run, session, "provider.extension_ui", raw.clone().unwrap_or(Value::Null));
+                    return None;
+                }
                 if !provider_command {
                     let _ = self.events.append(run, session, "agent.status", json!({ "phase": phase }));
                 }
                 None
             }
-            AdapterEvent::Session { provider_session_id, .. } => {
+            AdapterEvent::Session { provider_session_id, raw } => {
                 let guard = self.db.lock().unwrap();
                 let repos = Repositories::new(&guard.raw);
                 if let Ok(Some(current)) = repos.sessions().get(session.get("id").and_then(Value::as_str).unwrap_or("")) {
+                    if current.get("connectionId") != session.get("connectionId") || current.get("connectionRevision") != session.get("connectionRevision") { return None; }
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("providerSessionId".to_string(), json!(provider_session_id));
+                    if let Some(cwd) = &context.working_directory {
+                        updated.insert("nativeWorkingDirectory".into(), json!(cwd));
+                    }
                     updated.insert("providerContextSyncedAt".to_string(), json!(now_iso()));
+                    if let Ok(Some(agent))=repos.agents().get(run["agentInstanceId"].as_str().unwrap_or("")) {
+                        if let Some(version)=self.adapters.find(agent["providerId"].as_str().unwrap_or("")).and_then(|adapter|adapter.descriptor()["nativeContextVersion"].as_str().map(str::to_string)) {
+                            updated.insert("providerContextVersion".into(),json!(version));
+                        }
+                    }
                     if let Some(version) = context.runtime_tool_version {
                         updated.insert("runtimeToolVersion".to_string(), json!(version));
                     }
                     updated.insert("updatedAt".to_string(), json!(now_iso()));
                     let _ = repos.sessions().save(&Value::Object(updated));
+                    if let (Some(native),Some(local))=(raw.as_ref().and_then(|raw|raw["providerUserMessageId"].as_str()),context.user_message_id.as_deref().or(context.queue_key.as_deref())) {
+                        let _=crate::database::native_history::NativeHistoryRepository::new(&guard.raw).bind(session["id"].as_str().unwrap_or(""),provider_session_id,"messages",native,Some(local),"");
+                    }
+                }
+                drop(guard);
+                if let Some(native)=raw.as_ref().and_then(|raw|raw["providerUserMessageId"].as_str()) {
+                    let scope=json!([run["agentInstanceId"],run["connectionId"],run["connectionRevision"]]).to_string();
+                    self.native_origins.lock().unwrap().entry((session["id"].as_str().unwrap_or("").into(),scope,format!("native-turn:{native}"))).or_insert_with(||session_events::NativeOrigin{run:run.clone(),context:context.clone()});
                 }
                 None
             }
-            AdapterEvent::Usage { input_tokens, output_tokens, context_used, context_window, raw, .. } => {
+            AdapterEvent::Usage { input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, usage_scope, usage_key, input_tokens_includes_cache, cache_creation_input_tokens, reported_cost, estimated_cost, currency, context_used, context_window, raw } => {
                 let _ = self.events.append(run, session, "usage.updated", json!({
+                    "usageScope": usage_scope,
+                    "usageKey": usage_key.clone().or_else(|| match usage_scope.as_deref() {
+                        Some("turn") => run.get("id").and_then(Value::as_str).map(str::to_string),
+                        Some("session") => session.get("providerSessionId").or_else(|| session.get("id")).and_then(Value::as_str).map(str::to_string),
+                        _ => None,
+                    }),
+                    "model": run.get("model").or_else(|| session.get("model")),
+                    "connectionId": run.get("connectionId"),
+                    "connectionRevision": run.get("connectionRevision"),
+                    "pricingSnapshot": run.get("pricingSnapshot"),
+                    "agentInstanceId": run.get("agentInstanceId"),
+                    "inputTokensIncludesCache": input_tokens_includes_cache,
+                    "cachedInputTokens": cached_input_tokens,
+                    "cacheCreationInputTokens": cache_creation_input_tokens,
+                    "reasoningOutputTokens": reasoning_output_tokens,
+                    "reportedCost": reported_cost,
+                    "estimatedCost": estimated_cost,
+                    "currency": currency,
                     "inputTokens": input_tokens.map(Value::from).unwrap_or(Value::Null),
                     "outputTokens": output_tokens.map(Value::from).unwrap_or(Value::Null),
                     "contextUsed": context_used.map(Value::from).unwrap_or(Value::Null),
@@ -1000,14 +1287,23 @@ impl RunService {
                 }
                 None
             }
-            AdapterEvent::Tool { call_id, name, phase, input, output, success, file_diff, subagent_dispatch_id, .. } => {
+            AdapterEvent::Tool { call_id, name, phase, input, output, success, file_diff, subagent_dispatch_id, raw } => {
                 let completed = phase.as_deref() == Some("completed");
-                let event_type = if completed { "tool.finished" } else { "tool.started" };
+                let updated = phase.as_deref() == Some("updated");
+                let event_type = if completed { "tool.finished" } else if updated { "tool.updated" } else { "tool.started" };
                 let mut payload = Map::new();
                 payload.insert("callId".to_string(), call_id.clone().map(Value::String).unwrap_or(Value::Null));
                 payload.insert("toolName".to_string(), json!(name));
+                if let Some(execution) = raw.as_ref().and_then(|v| v.get("codeExecution")).filter(|v| v.is_object()) {
+                    // PTC emits an incremental dispatch patch. Preserve its
+                    // JSON structure: truncating serialized JSON could erase
+                    // the entire tool tree, including small sibling calls.
+                    payload.insert("codeExecution".to_string(), self.redaction.value(execution));
+                }
                 if completed {
                     payload.insert("success".to_string(), json!(success.unwrap_or(true)));
+                }
+                if completed || updated {
                     payload.insert(
                         "outputSummary".to_string(),
                         self.event_detail(output.as_ref(), 2_000).map(Value::String).unwrap_or(Value::Null),
@@ -1030,7 +1326,13 @@ impl RunService {
                 None
             }
             AdapterEvent::Command { call_id, command, phase, exit_code, output, subagent_dispatch_id, .. } => {
-                if phase.as_deref() == Some("completed") {
+                if phase.as_deref() == Some("updated") {
+                    let _ = self.events.append(run, session, "command.updated", json!({
+                        "callId": call_id, "command":command,
+                        "outputSummary":output.as_ref().map(|o| self.redaction.text(&o.chars().take(2_000).collect::<String>())),
+                        "subagentDispatchId":subagent_dispatch_id
+                    }));
+                } else if phase.as_deref() == Some("completed") {
                     let _ = self.events.append(run, session, "command.finished", json!({
                         "callId": call_id.clone().map(Value::String).unwrap_or(Value::Null),
                         "command": command,
@@ -1053,6 +1355,28 @@ impl RunService {
                         "command": command,
                         "cwd": cwd.map(Value::String).unwrap_or(Value::Null),
                         "subagentDispatchId": subagent_dispatch_id.clone().map(Value::String).unwrap_or(Value::Null)
+                    }));
+                }
+                None
+            }
+            AdapterEvent::TurnDiff { diff, thread_id, turn_id, .. } => {
+                let diff = self.redaction.text(diff);
+                let metadata = json!({ "runId": run_id, "source": "provider", "threadId": thread_id, "turnId": turn_id });
+                let name = "run.native.diff.json";
+                let input = artifact_input("diff", name, context.project_run_id.as_deref(), context.task_id.as_deref(),
+                    session.get("id").and_then(Value::as_str), Some(metadata.clone()));
+                let content = json!({ "files": [], "diff": diff, "source": "provider", "runId": run_id, "threadId": thread_id, "turnId": turn_id });
+                let content = content.to_string();
+                let artifact_id = format!("native-diff:{run_id}");
+                let unchanged = Repositories::new(&self.db.lock().unwrap().raw).artifacts().get(&artifact_id).ok().flatten()
+                    .and_then(|artifact| artifact.get("content").and_then(Value::as_str).map(|old| old == content)).unwrap_or(false);
+                if unchanged { return None; }
+                if let Ok(artifact) = self.artifacts.save_with_id(&input, &content, &artifact_id) {
+                    let _ = self.events.append(run, session, "run.diff_updated", json!({
+                        "diff": diff, "providerThreadId": thread_id, "providerTurnId": turn_id, "source": "provider"
+                    }));
+                    let _ = self.events.append(run, session, "artifact.created", json!({
+                        "artifactId": artifact.get("id"), "kind": "diff", "name": name
                     }));
                 }
                 None
@@ -1100,6 +1424,7 @@ impl RunService {
                 let guard = self.db.lock().unwrap();
                 let repos = Repositories::new(&guard.raw);
                 if let Ok(Some(current)) = repos.runs().get(run_id) {
+                    if matches!(current["status"].as_str(), Some("cancelling" | "cancelled")) { return None; }
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("status".to_string(), json!(if *reason == TimeoutKind::MaxOutput { "failed" } else { "timed_out" }));
                     updated.insert("endedAt".to_string(), json!(now_iso()));
@@ -1113,6 +1438,7 @@ impl RunService {
                 let guard = self.db.lock().unwrap();
                 let repos = Repositories::new(&guard.raw);
                 if let Ok(Some(current)) = repos.runs().get(run_id) {
+                    if matches!(current["status"].as_str(), Some("cancelling" | "cancelled")) { return None; }
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("status".to_string(), json!("failed"));
                     updated.insert("endedAt".to_string(), json!(now_iso()));
@@ -1178,26 +1504,52 @@ impl RunService {
             .or_else(|| project.as_ref().and_then(|p| p.get("rootPath")).and_then(Value::as_str).map(str::to_string));
         let Some(cwd) = cwd else { return };
         let baseline = self.workspace_baselines.lock().unwrap().remove(run_id);
-        let files = diff_collector::collect(&cwd, &touched, baseline.as_ref()).await;
-        if files.is_empty() {
+        let native_diff = Repositories::new(&self.db.lock().unwrap().raw).artifacts()
+            .get(&format!("native-diff:{run_id}")).ok().flatten();
+        if native_diff.is_some() && project.as_ref().and_then(|p| p.get("nonGitDiffMode")).and_then(Value::as_str) == Some("off")
+            && diff_collector::is_non_git_workspace(&cwd).await {
+            return;
+        }
+        let comparison_unavailable = baseline.is_none() && diff_collector::is_non_git_workspace(&cwd).await;
+        let files = if comparison_unavailable { vec![] } else { diff_collector::collect(&cwd, &touched, baseline.as_ref()).await };
+        if files.is_empty() && !comparison_unavailable {
             return;
         }
         let title = session.get("title").and_then(Value::as_str).unwrap_or("");
         let title = if title.is_empty() { "run".to_string() } else { title.chars().take(80).collect::<String>() };
         let name = format!("{title}.diff.json");
+        let paths: Vec<Value> = if comparison_unavailable {
+            touched.iter().map(|file| json!(file.path)).collect()
+        } else {
+            files.iter().filter_map(|file| file.get("path").cloned()).collect()
+        };
+        let mut content = json!({ "files": files, "source": "filesystem" });
+        let mut metadata = json!({ "runId": run_id, "source": "filesystem", "paths": paths, "fileCount": files.len() });
+        if comparison_unavailable {
+            for target in [&mut content, &mut metadata] {
+                target["comparisonUnavailable"] = json!(true);
+                target["reason"] = json!("non_git_baseline_unavailable");
+                target["paths"] = json!(paths);
+            }
+        }
+        let unavailable_paths: Vec<Value> = files.iter().filter(|file| file.get("comparisonUnavailable").and_then(Value::as_bool) == Some(true))
+            .filter_map(|file| file.get("path").cloned()).collect();
+        if !unavailable_paths.is_empty() {
+            for target in [&mut content, &mut metadata] {
+                target["comparisonUnavailable"] = json!(true);
+                target["reason"] = json!("file_versions_unavailable");
+                target["unavailablePaths"] = json!(unavailable_paths);
+            }
+        }
         let input = artifact_input(
             "diff",
             &name,
             context.project_run_id.as_deref(),
             context.task_id.as_deref(),
             session.get("id").and_then(Value::as_str),
-            Some(json!({
-                "runId": run_id,
-                "paths": files.iter().filter_map(|f| f.get("path").cloned()).collect::<Vec<_>>(),
-                "fileCount": files.len()
-            })),
+            Some(metadata),
         );
-        if let Ok(artifact) = self.artifacts.save(&input, &json!({ "files": files }).to_string()) {
+        if let Ok(artifact) = self.artifacts.save(&input, &content.to_string()) {
             let _ = self.events.append(run, session, "git.diff_collected", json!({
                 "artifactId": artifact.get("id").cloned().unwrap_or(Value::Null),
                 "taskId": context.task_id.clone().map(Value::String).unwrap_or(Value::Null),
@@ -1227,7 +1579,9 @@ fn tool_input_limit(tool_name: &str) -> usize {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    if ["todolist", "todo_list", "todowrite", "todo_write", "update_plan"].contains(&normalized.as_str()) {
+    if normalized == "run_code" {
+        256_000
+    } else if ["todolist", "todo_list", "todowrite", "todo_write", "update_plan"].contains(&normalized.as_str()) {
         16_000
     } else {
         2_000

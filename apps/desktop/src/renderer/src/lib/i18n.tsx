@@ -688,9 +688,11 @@ const zh = {
       noEnabled: "所有成员都被禁用，主 Agent 无人可用",
       mainMissing: "尚未指定主 Agent",
       mainDisabled: "主 Agent「{name}」已被禁用",
-      duplicateInstance: "成员 {names} 绑定了同一个实例",
-      instanceMissing: "成员「{name}」绑定的实例已被删除",
-      instanceDisabled: "成员「{name}」绑定的实例「{instance}」已禁用",
+      duplicateInstance: "成员 {names} 使用相同的 Harness、账号与模型",
+      needsMigration: "请为成员「{name}」选择 Harness 和供应商或登录账号",
+      connectionUnavailable: "成员「{name}」绑定的连接已停用、已移除或与 Harness 不兼容",
+      instanceMissing: "成员「{name}」绑定的 Harness 已被删除",
+      instanceDisabled: "成员「{name}」绑定的 Harness「{instance}」已禁用",
       memberDisabled: "成员「{name}」已禁用，不会被委派",
       ok: "校验通过，团队配置可用"
     }
@@ -729,7 +731,9 @@ const zh = {
       title: "排队消息",
       badge: "排队中",
       cancel: "撤回",
-      cancelFailed: "撤回失败：消息可能已开始执行"
+      cancelFailed: "撤回失败：消息可能已开始执行",
+      steerFailed: "引导失败，消息仍保留在队列中",
+      steerUnavailable: "当前 Agent 不支持即时引导，消息仍在队列中"
     },
     panel: {
       title: "Agent 分配",
@@ -820,7 +824,7 @@ const zh = {
       rejected: "已拒绝",
       decision: { direct: "直接完成", delegate: "单次委派", plan: "任务计划" },
       handoff: "上下文交接",
-      subagent: "派发子 Agent",
+      subagent: "原生子 Agent",
       subagentDetail: "查看详情",
       subagentDetailCount: "查看详情（{count} 条活动）",
       subagentBackground: "后台",
@@ -1780,9 +1784,11 @@ const en: Messages = {
       noEnabled: "Every member is disabled; no one can act as main agent",
       mainMissing: "No main agent selected",
       mainDisabled: "Main agent “{name}” is disabled",
-      duplicateInstance: "Members {names} share the same instance",
-      instanceMissing: "Member “{name}” is bound to a deleted instance",
-      instanceDisabled: "Member “{name}” is bound to disabled instance “{instance}”",
+      duplicateInstance: "Members {names} share the same harness, account and model",
+      needsMigration: "Choose a harness and provider or login account for member “{name}”",
+      connectionUnavailable: "Member “{name}” uses a disabled, removed or incompatible connection",
+      instanceMissing: "Member “{name}” is bound to a deleted harness",
+      instanceDisabled: "Member “{name}” is bound to disabled harness “{instance}”",
       memberDisabled: "Member “{name}” is disabled and will not be delegated to",
       ok: "Validation passed — the team is ready"
     }
@@ -1821,7 +1827,9 @@ const en: Messages = {
       title: "Queued messages",
       badge: "Queued",
       cancel: "Withdraw",
-      cancelFailed: "Couldn't withdraw — the message may have already started"
+      cancelFailed: "Couldn't withdraw — the message may have already started",
+      steerFailed: "Could not steer. The message remains queued.",
+      steerUnavailable: "This agent does not support immediate guidance. The message remains queued."
     },
     panel: {
       title: "Agent assignment",
@@ -1912,7 +1920,7 @@ const en: Messages = {
       rejected: "Rejected",
       decision: { direct: "Direct", delegate: "Delegate", plan: "Plan" },
       handoff: "Context handoff",
-      subagent: "Sub-agent dispatched",
+      subagent: "Native sub-agent",
       subagentDetail: "View detail",
       subagentDetailCount: "View detail ({count} activities)",
       subagentBackground: "Background",

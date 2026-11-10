@@ -1,3 +1,4 @@
+import type { AccountLoginInput, AccountLoginStatus } from "../main/account-login";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { DesktopAttachment } from "../main/attachment-file-service";
 import type { FileDeleteResult, FileReadTextPayload, FileReadTextResult, FileWriteTextPayload, FileWriteTextResult, ImagePayload, NativeMenuItemPayload } from "../main/desktop-interactions";
@@ -18,7 +19,41 @@ export interface AppInfo {
  * Core Daemon over its own authenticated channel (backend scope); this bridge
  * exposes just the desktop shell primitives the workbench UI needs.
  */
+const panelArgument = process.argv.find(arg => arg.startsWith("--nautilo-panel="));
+const panelContext = panelArgument ? JSON.parse(decodeURIComponent(panelArgument.slice("--nautilo-panel=".length))) : undefined;
 const bridge = {
+  assistant: {
+    view: (before?:number) => ipcRenderer.invoke("assistant:view",before),
+    configure: (settings:import("../shared/workspace-assistant").AssistantSettings) => ipcRenderer.invoke("assistant:configure",settings),
+    submit: (id:string,text:string) => ipcRenderer.invoke("assistant:submit",id,text),
+    stop: (id:string) => ipcRenderer.invoke("assistant:stop",id),
+    onOutput:(cb:(output:import("../shared/workspace-assistant").AssistantLiveOutput)=>void)=>{
+      const listener=(_event:Electron.IpcRendererEvent,draft:import("../shared/workspace-assistant").AssistantLiveOutput)=>cb(draft);
+      ipcRenderer.on("assistant:output",listener);return ()=>{ipcRenderer.removeListener("assistant:output",listener);};
+    },
+    onChange: (cb:(sessionId?:string)=>void) => {
+      const listener=(_event:Electron.IpcRendererEvent,id?:string)=>cb(id);
+      ipcRenderer.on("assistant:changed",listener);
+      return ()=>{ipcRenderer.removeListener("assistant:changed",listener);};
+    },
+  },
+  panels: {
+    context:panelContext,
+    open:(target:import("../shared/panel-window").PanelTarget,focusOnly=false)=>ipcRenderer.invoke("panels:open",target,focusOnly),
+    dock:()=>ipcRenderer.invoke("panels:dock"),
+    cycle:()=>ipcRenderer.invoke("panels:cycle"),
+    current:()=>ipcRenderer.invoke("panels:current"),
+    onBrowserTarget:(cb:(target:import("../shared/panel-window").PanelTarget)=>void)=>{
+      const listener=(_event:Electron.IpcRendererEvent,target:import("../shared/panel-window").PanelTarget)=>cb(target);
+      ipcRenderer.on("panels:browser-target",listener);
+      return ()=>{ipcRenderer.removeListener("panels:browser-target",listener);};
+    },
+    onDock:(cb:(target:import("../shared/panel-window").PanelTarget)=>void)=>{
+      const listener=(_event:Electron.IpcRendererEvent,target:import("../shared/panel-window").PanelTarget)=>cb(target);
+      ipcRenderer.on("panels:docked",listener);
+      return ()=>{ipcRenderer.removeListener("panels:docked",listener);};
+    },
+  },
   isElectron: true,
   platform: process.platform,
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke("app:get-info"),
@@ -48,6 +83,7 @@ const bridge = {
       ipcRenderer.invoke("attachment:import-clipboard", input)
   },
   shell: {
+    openExternal: (url: string): Promise<void> => ipcRenderer.invoke("shell:open-external", url),
     openPath: (path: string): Promise<string> => ipcRenderer.invoke("shell:open-path", path),
     showItemInFolder: (path: string): Promise<void> => ipcRenderer.invoke("shell:show-item-in-folder", path)
   },
@@ -62,6 +98,14 @@ const bridge = {
     readText: (input: FileReadTextPayload): Promise<FileReadTextResult> => ipcRenderer.invoke("file:read-text", input),
     writeText: (input: FileWriteTextPayload): Promise<FileWriteTextResult> => ipcRenderer.invoke("file:write-text", input),
     delete: (input: { path: string }): Promise<FileDeleteResult> => ipcRenderer.invoke("file:delete", input)
+  },
+  accounts: {
+    recoverableLogins: (): Promise<Array<{ profileId: string; providerId: string; directory: string; createdAt: number }>> => ipcRenderer.invoke("account:login-recoverable"),
+    acknowledgeLogin: (input: { profileId: string; providerId: string }): Promise<void> => ipcRenderer.invoke("account:login-attached", input),
+    prepareLogin: (providerId: string): Promise<{ profileId: string; directory: string }> => ipcRenderer.invoke("account:login-prepare", providerId),
+    startLogin: (input: AccountLoginInput): Promise<{ ok: boolean; reason?: string }> => ipcRenderer.invoke("account:login-start", input),
+    loginStatus: (profileId: string): Promise<AccountLoginStatus> => ipcRenderer.invoke("account:login-status", profileId),
+    cancelLogin: (profileId: string): Promise<void> => ipcRenderer.invoke("account:login-cancel", profileId)
   },
   providers: {
     startUpdate: (input: ProviderUpdateStartPayload): Promise<ProviderUpdateStartResult> => ipcRenderer.invoke("provider:update-start", input),
@@ -84,6 +128,11 @@ const bridge = {
         ipcRenderer.removeListener("provider:update-exit", listener);
       };
     }
+  },
+  browser: {
+    profile: (command:"inspect"|"import"|"login",input:import("../shared/browser-profile").BrowserProfileInput) => ipcRenderer.invoke("browser:profile",command,input),
+    spaces: (command: "list" | "create" | "rename", input?: import("../shared/browser-spaces").BrowserSpacesInput) => ipcRenderer.invoke("browser:spaces", command, input),
+    panel: (sessionId: string, command: string, value?: unknown) => ipcRenderer.invoke("browser:panel",sessionId,command,value)
   },
   core: {
     request: (request: { requestId?: string; method: string; input?: unknown }): Promise<unknown> => ipcRenderer.invoke("core:request", request)

@@ -69,7 +69,7 @@ function readRecord(value: unknown, warnings: string[], label: string): Record<s
       record[key] = raw;
     } else if (typeof raw === "number" || typeof raw === "boolean") {
       record[key] = String(raw);
-      warnings.push(`${label}.${key} 不是字符串，已转换为 "${String(raw)}"`);
+      warnings.push(`${label}.${key} 不是字符串，已转换为字符串`);
     } else {
       warnings.push(`${label}.${key} 类型不支持，已忽略`);
     }
@@ -86,7 +86,7 @@ function resolveTransport(source: Json, warnings: string[]): "stdio" | "http" | 
       warnings.push("SSE 传输已按 HTTP 处理");
       return "http";
     }
-    warnings.push(`未知的传输类型 "${declared}"，已按字段推断`);
+    warnings.push(`未知的传输类型，已按字段推断`);
   }
   if (readString(source, "command")) return "stdio";
   if (readString(source, "url", "serverUrl", "endpoint")) return "http";
@@ -118,7 +118,7 @@ function splitEnv(
       continue;
     }
     if (value.includes("${")) {
-      warnings.push(`env.${key} 含无法解析的占位符 "${value}"，请手动确认`);
+      warnings.push(`env.${key} 含无法解析的占位符，请手动确认`);
     } else if (looksLikeSecret(key, value)) {
       warnings.push(`env.${key} 是明文密钥，建议改用环境变量透传`);
     }
@@ -147,7 +147,7 @@ function splitHeaders(
       continue;
     }
     if (value.includes("${")) {
-      warnings.push(`请求头 ${header} 含无法解析的占位符 "${value}"，请手动确认`);
+      warnings.push(`请求头 ${header} 含无法解析的占位符，请手动确认`);
     } else if (looksLikeSecret(header, value)) {
       warnings.push(`请求头 ${header} 含明文密钥，建议改用环境变量`);
     }
@@ -252,8 +252,8 @@ export function parseMcpConfigJson(text: string, origin?: string): { servers: Mc
   let root: unknown;
   try {
     root = JSON.parse(trimmed);
-  } catch (error) {
-    return { servers: [], errors: [`JSON 解析失败：${error instanceof Error ? error.message : String(error)}`] };
+  } catch {
+    return { servers: [], errors: ["JSON 解析失败，请检查格式"] };
   }
 
   // An array of named servers, e.g. an export from a registry.

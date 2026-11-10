@@ -12,6 +12,10 @@ export function toUiProviderId(providerId: string): string {
   return providerId === "custom" ? "custom-cli" : providerId;
 }
 
+function codexPoolSize(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
   return {
     id: instance.id,
@@ -22,11 +26,16 @@ export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
     profile: instance.profile,
     models: instance.models?.length ? instance.models : undefined,
     providerOptions: {
+      ...(instance.configurationKind ? { configurationKind: instance.configurationKind } : {}),
       envPolicyId: instance.envPolicyId,
+      ...(instance.loginProfileDirectory ? { loginProfileDirectory: instance.loginProfileDirectory.trim() } : {}),
+      ...(instance.loginProfileLabel ? { loginProfileLabel: instance.loginProfileLabel.trim() } : {}),
       ...(instance.permissionMode ? { permissionMode: instance.permissionMode } : {}),
       ...(instance.baseUrl ? { baseUrl: instance.baseUrl } : {}),
       ...(instance.apiType ? { apiType: instance.apiType } : {}),
       ...(instance.wireApi ? { wireApi: instance.wireApi } : {}),
+      ...(instance.providerId === "codex" && codexPoolSize(instance.appServerPoolSize) !== undefined ? { appServerPoolSize: codexPoolSize(instance.appServerPoolSize) } : {}),
+      ...(instance.providerId === "codex" && instance.imageGenerationConnectionId ? { imageGenerationConnectionId: instance.imageGenerationConnectionId } : {}),
       ...(instance.webSearchMode ? { webSearchMode: instance.webSearchMode } : {}),
       ...(instance.webSearchInstanceId ? { webSearchInstanceId: instance.webSearchInstanceId } : {}),
       ...(instance.webSearchModel ? { webSearchModel: instance.webSearchModel } : {}),
@@ -42,6 +51,7 @@ export function toDomainAgent(instance: AgentInstanceConfig): AgentInstance {
 
 export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
   return {
+    configurationKind: instance.providerOptions?.configurationKind === "harness" ? "harness" : undefined,
     id: instance.id,
     providerId: instance.providerId === "custom" ? "custom-cli" : instance.providerId,
     displayName: instance.displayName,
@@ -50,9 +60,13 @@ export function toUiAgent(instance: AgentInstance): AgentInstanceConfig {
     profile: instance.profile,
     envPolicyId: typeof instance.providerOptions?.envPolicyId === "string" ? instance.providerOptions.envPolicyId : "env-standard",
     permissionMode: typeof instance.providerOptions?.permissionMode === "string" ? instance.providerOptions.permissionMode : undefined,
+    loginProfileDirectory: typeof instance.providerOptions?.loginProfileDirectory === "string" ? instance.providerOptions.loginProfileDirectory : undefined,
+    loginProfileLabel: typeof instance.providerOptions?.loginProfileLabel === "string" ? instance.providerOptions.loginProfileLabel : undefined,
     baseUrl: typeof instance.providerOptions?.baseUrl === "string" ? instance.providerOptions.baseUrl : undefined,
     apiType: typeof instance.providerOptions?.apiType === "string" ? instance.providerOptions.apiType : undefined,
     wireApi: instance.providerOptions?.wireApi === "chat" ? "chat" : "responses",
+    appServerPoolSize: instance.providerId === "codex" ? codexPoolSize(instance.providerOptions?.appServerPoolSize) : undefined,
+    imageGenerationConnectionId: instance.providerId === "codex" && typeof instance.providerOptions?.imageGenerationConnectionId === "string" ? instance.providerOptions.imageGenerationConnectionId : undefined,
     webSearchMode: instance.providerOptions?.webSearchMode === "official" || instance.providerOptions?.webSearchMode === "off"
       ? instance.providerOptions.webSearchMode
       : instance.providerOptions?.wireApi === "chat" ? "off" : "native",
@@ -81,6 +95,8 @@ export function toDomainTeam(team: UiTeam): TeamDefinition {
       id: member.id,
       displayName: member.displayName,
       agentInstanceId: member.agentInstanceId,
+      connectionId: member.connectionId,
+      connectionRevision: member.connectionRevision,
       model: member.model,
       reasoningEffort: member.reasoningEffort,
       serviceTier: member.serviceTier,
@@ -107,6 +123,8 @@ export function toUiTeam(team: TeamDefinition): UiTeam {
         id: member.id,
         displayName: member.displayName,
         agentInstanceId: member.agentInstanceId,
+        connectionId: member.connectionId,
+        connectionRevision: member.connectionRevision,
         model: member.model,
         reasoningEffort: member.reasoningEffort,
         serviceTier: member.serviceTier,
@@ -147,6 +165,12 @@ export function toUiProject(project: Project, inspection?: ProjectInspection, pr
     rootPath: project.rootPath,
     repositoryType: project.repositoryType,
     workspaceMode: project.workspaceMode ?? "direct",
+    nonGitDiffMode: project.nonGitDiffMode ?? "full",
+    defaultBranch: project.defaultBranch,
+    frontendPaths: project.frontendPaths,
+    backendPaths: project.backendPaths,
+    ignoredPaths: project.ignoredPaths,
+    policyId: project.policyId,
     scan: inspection ? toUiInspection(inspection) : previous?.scan,
     scanning: false,
     activeRun: previous?.activeRun,
@@ -174,17 +198,20 @@ export function toDomainProject(project: UiProject): Project {
     rootPath: project.rootPath,
     repositoryType: project.repositoryType,
     workspaceMode: project.workspaceMode,
-    defaultBranch: project.scan?.git.defaultBranch,
-    frontendPaths: project.scan?.frontendPaths ?? [],
-    backendPaths: project.scan?.backendPaths ?? [],
-    ignoredPaths: [],
-    policyId: "default",
+    nonGitDiffMode: project.nonGitDiffMode ?? "full",
+    defaultBranch: project.defaultBranch ?? project.scan?.git.defaultBranch,
+    frontendPaths: project.frontendPaths ?? project.scan?.frontendPaths ?? [],
+    backendPaths: project.backendPaths ?? project.scan?.backendPaths ?? [],
+    ignoredPaths: project.ignoredPaths ?? [],
+    policyId: project.policyId ?? "default",
     verificationTemplates: project.verificationTemplates
   };
 }
 
 export function toStandaloneUiSession(session: Session): UiSession {
   return {
+    connectionId: session.connectionId,
+    connectionRevision: session.connectionRevision,
     id: session.id,
     projectId: session.projectId,
     // Mirror MemberRouter.resolveSession: an explicit agentInstanceId means an
@@ -198,6 +225,7 @@ export function toStandaloneUiSession(session: Session): UiSession {
     title: session.title,
     model: session.model,
     reasoningEffort: session.reasoningEffort,
+    agentMode: session.agentMode,
     serviceTier: session.serviceTier,
     permissionMode: session.permissionMode?.trim() || undefined,
     mode: session.mode,

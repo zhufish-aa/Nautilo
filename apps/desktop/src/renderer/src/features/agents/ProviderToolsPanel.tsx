@@ -1,79 +1,110 @@
 import { useEffect, useMemo, useState, type DragEvent } from "react";
-import { Blocks, Import, Pencil, Plus, Search, Server, Sparkles, Trash2, Wrench, type LucideIcon } from "lucide-react";
+import {
+  Blocks,
+  ChevronRight,
+  Import,
+  Pencil,
+  Plus,
+  Search,
+  Server,
+  Sparkles,
+  Trash2,
+  Wrench,
+} from "lucide-react";
 import type { CapabilityKind, ProviderCapability } from "@agenthub/domain";
 import { isElectron } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
-import { toUiProviderId } from "../../lib/core-mappers";
+import { toDaemonProviderId } from "../../lib/core-mappers";
+import { capabilityEnabledFor } from "../../lib/capability-enablement";
+import { capabilityOrigin, capabilityDescription, type CapabilityOriginKind } from "../../lib/capability-origin";
 import { providerMeta, useProviderMetas } from "../../lib/provider-catalog";
 import { Button } from "../../components/ui/Button";
-import { Card, MotionCard, StaggerGroup } from "../../components/ui/Card";
+import { Card } from "../../components/ui/Card";
 import { Dialog } from "../../components/ui/Dialog";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { safeMcpSummary } from "./import-safety";
 import { Input } from "../../components/ui/Input";
+import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
-import { Tag, StatusChip } from "../../components/ui/Badge";
 import { toast } from "../../stores/toast";
 import { useProviderToolsStore } from "../../stores/provider-tools";
 import { CapabilityEditorDialog } from "./CapabilityEditorDialog";
-import { CapabilityImportDialog, type CapabilityImportSeed } from "./CapabilityImportDialog";
+import {
+  CapabilityImportDialog,
+  type CapabilityImportSeed,
+} from "./CapabilityImportDialog";
 
 /** A dropped file can seed the wizard: .json goes to the MCP tab, .md to Skills. */
 const DROP_EXTENSIONS = [".json", ".md", ".markdown"];
-
-const PROVIDER_GRADIENTS = [
-  "from-violet-500/25 to-fuchsia-500/15 text-violet-400",
-  "from-amber-500/25 to-orange-500/15 text-amber-400",
-  "from-sky-500/25 to-cyan-500/15 text-sky-400",
-  "from-emerald-500/25 to-teal-500/15 text-emerald-400",
-  "from-slate-500/25 to-gray-500/15 text-slate-400"
-];
-
-function mcpCommandLine(tool: ProviderCapability): string | undefined {
-  if (tool.kind !== "mcp" || !tool.mcp) return undefined;
-  if (tool.mcp.transport === "http") return tool.mcp.url;
-  const line = [tool.mcp.command, ...(tool.mcp.args ?? [])].filter(Boolean).join(" ");
-  return line || undefined;
-}
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function ProviderToolsPanel(): JSX.Element {
-  const { t } = useI18n();
+export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }): JSX.Element {
+  const { t, locale } = useI18n();
   const providers = useProviderMetas();
   const tools = useProviderToolsStore((state) => state.tools);
   const loading = useProviderToolsStore((state) => state.loading);
   const loaded = useProviderToolsStore((state) => state.loaded);
   const loadError = useProviderToolsStore((state) => state.error);
   const load = useProviderToolsStore((state) => state.load);
-  const toggle = useProviderToolsStore((state) => state.toggle);
+  const toggle = useProviderToolsStore((state) => state.toggleForHarness);
   const remove = useProviderToolsStore((state) => state.remove);
 
-  const [kind, setKind] = useState<CapabilityKind | "all">("all");
-  const [providerId, setProviderId] = useState("all");
+  const [selectedProviderId, setProviderId] = useState("");
+  const providerId = providers.some((provider) => provider.id === selectedProviderId) ? selectedProviderId : providers[0]?.id || "";
+  const daemonProviderId = toDaemonProviderId(providerId);
+  const harnessName = providerMeta(providerId).name;
+  const [toggling, setToggling] = useState<string[]>([]);
+  const zh = locale === "zh-CN";
   const [query, setQuery] = useState("");
+  const [view, setView] = useState("enabled");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [detail, setDetail] = useState<ProviderCapability>();
   const [editorOpen, setEditorOpen] = useState(false);
-  const [editing, setEditing] = useState<ProviderCapability | undefined>(undefined);
+  const [editing, setEditing] = useState<ProviderCapability | undefined>(
+    undefined,
+  );
   const [importOpen, setImportOpen] = useState(false);
-  const [importSeed, setImportSeed] = useState<CapabilityImportSeed | undefined>(undefined);
+  const [importSeed, setImportSeed] = useState<
+    CapabilityImportSeed | undefined
+  >(undefined);
   const [dropActive, setDropActive] = useState(false);
-  const [deleting, setDeleting] = useState<ProviderCapability | undefined>(undefined);
+  const [deleting, setDeleting] = useState<ProviderCapability | undefined>(
+    undefined,
+  );
   const [deleteBusy, setDeleteBusy] = useState(false);
 
   useEffect(() => {
     if (isElectron && !loaded) void load();
   }, [load, loaded]);
 
+  const inventory = useMemo(() => tools.filter(tool => tool.kind === kind), [tools, kind]);
+  const enabledCount = inventory.filter(tool => capabilityEnabledFor(tool, daemonProviderId)).length;
+  const originNames: Record<CapabilityOriginKind, string> = {
+    builtin: zh ? "Nautilo 内置" : "Built into Nautilo",
+    plugin: zh ? "来自插件" : "From plugins",
+    local: zh ? "本机导入" : "Imported locally",
+    custom: zh ? "手动创建" : "Created manually",
+    unknown: zh ? "来源未记录" : "Source not recorded"
+  };
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    return tools.filter((tool) => {
-      if (kind !== "all" && tool.kind !== kind) return false;
-      if (providerId !== "all" && !tool.providerIds.map(toUiProviderId).includes(providerId)) return false;
+    return inventory.filter((tool) => {
+      const enabled = capabilityEnabledFor(tool, daemonProviderId);
+      if (view === "enabled" && !enabled || view === "disabled" && enabled) return false;
+      const origin = capabilityOrigin(tool);
+      if (sourceFilter !== "all" && origin.kind !== sourceFilter) return false;
       if (!normalized) return true;
-      return `${tool.name} ${tool.description} ${tool.tags.join(" ")}`.toLowerCase().includes(normalized);
-    });
-  }, [kind, providerId, query, tools]);
+      return `${tool.name} ${tool.description} ${origin.label} ${origin.path ?? ""} ${tool.tags.join(" ")}`
+        .toLowerCase()
+        .includes(normalized);
+    }).sort((a, b) => a.name.localeCompare(b.name, locale));
+  }, [inventory, query, view, sourceFilter, daemonProviderId, locale]);
+  const groups = (["builtin", "local", "plugin", "custom", "unknown"] as const)
+    .map(origin => ({ origin, items: filtered.filter(tool => capabilityOrigin(tool).kind === origin) }))
+    .filter(group => group.items.length);
 
   if (!isElectron) {
     return (
@@ -85,22 +116,13 @@ export function ProviderToolsPanel(): JSX.Element {
     );
   }
 
-  const skillCount = tools.filter((tool) => tool.kind === "skill").length;
-  const mcpCount = tools.filter((tool) => tool.kind === "mcp").length;
-  const enabledCount = tools.filter((tool) => tool.enabled).length;
-  const stats: Array<{ label: string; count: number; icon: LucideIcon }> = [
-    { label: t("agents.tools.stats.skills"), count: skillCount, icon: Sparkles },
-    { label: t("agents.tools.stats.mcps"), count: mcpCount, icon: Server },
-    { label: t("agents.tools.stats.enabled"), count: enabledCount, icon: Blocks }
-  ];
-
   const openCreate = (): void => {
     setEditing(undefined);
     setEditorOpen(true);
   };
 
   const openImport = (seed?: CapabilityImportSeed): void => {
-    setImportSeed(seed);
+    setImportSeed(seed ?? { tab: kind === "mcp" ? "mcp" : "skills", text: "" });
     setImportOpen(true);
   };
 
@@ -114,7 +136,11 @@ export function ProviderToolsPanel(): JSX.Element {
     void file
       .text()
       .then((text) =>
-        openImport({ tab: lower.endsWith(".json") ? "mcp" : "skills", text, fileName: file.name })
+        openImport({
+          tab: lower.endsWith(".json") ? "mcp" : "skills",
+          text,
+          fileName: file.name,
+        }),
       )
       .catch((error: unknown) => toast.error(messageOf(error)));
   };
@@ -127,7 +153,8 @@ export function ProviderToolsPanel(): JSX.Element {
 
   const onDragLeave = (event: DragEvent<HTMLDivElement>): void => {
     // Only hide when the pointer actually leaves the wrapper, not a child.
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    if (event.currentTarget.contains(event.relatedTarget as Node | null))
+      return;
     setDropActive(false);
   };
 
@@ -137,7 +164,10 @@ export function ProviderToolsPanel(): JSX.Element {
   };
 
   const handleToggle = (tool: ProviderCapability, enabled: boolean): void => {
-    void toggle(tool.id, enabled).catch((error: unknown) => toast.error(messageOf(error)));
+    setToggling((ids) => [...ids, tool.id]);
+    void toggle(tool.id, daemonProviderId, enabled)
+      .catch((error: unknown) => toast.error(messageOf(error)))
+      .finally(() => setToggling((ids) => ids.filter((id) => id !== tool.id)));
   };
 
   const confirmDelete = async (): Promise<void> => {
@@ -156,69 +186,61 @@ export function ProviderToolsPanel(): JSX.Element {
 
   return (
     <div
-      className="relative space-y-4"
+      className="capability-panel capability-library relative space-y-5"
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-info/25 bg-info/10 px-4 py-3">
-        <div className="flex items-start gap-3">
-          <Wrench className="mt-0.5 h-4.5 w-4.5 shrink-0 text-info" aria-hidden />
-          <div>
-            <p className="text-[13px] font-medium text-ink">{t("agents.tools.title")}</p>
-            <p className="mt-0.5 text-xs leading-relaxed text-ink-3">{t("agents.tools.desc")}</p>
-          </div>
-        </div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div><h2 className="text-xl font-semibold">{kind === "mcp" ? (zh ? "MCP 服务" : "MCP servers") : (zh ? "技能库" : "Skill library")}</h2>
+        <p className="mt-1.5 text-[13px] text-ink-2">{zh ? `${harnessName} 已启用 ${enabledCount} 项，共 ${inventory.length} 项。` : `${enabledCount} enabled for ${harnessName} · ${inventory.length} total`}</p></div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => openImport()}>
-            <Import className="h-3.5 w-3.5" aria-hidden /> {t("agents.tools.import.button")}
+            <Import className="h-4 w-4" aria-hidden />
+            {t("agents.tools.import.button")}
           </Button>
           <Button variant="primary" size="sm" onClick={openCreate}>
-            <Plus className="h-3.5 w-3.5" aria-hidden /> {t("agents.tools.add")}
+            <Plus className="h-4 w-4" aria-hidden />
+            {kind === "mcp" ? (zh ? "添加 MCP" : "Add MCP") : (zh ? "添加 Skill" : "Add skill")}
           </Button>
         </div>
       </div>
-
-      <div className="grid grid-cols-3 gap-3">
-        {stats.map(({ label, count, icon: Icon }) => (
-          <Card key={label} className="flex items-center gap-3 px-4 py-3">
-            <span className="grid h-8 w-8 place-items-center rounded-lg bg-accent-soft text-accent"><Icon className="h-4 w-4" aria-hidden /></span>
-            <div><p className="text-xs text-ink-3">{label}</p><p className="text-lg font-semibold text-ink">{count}</p></div>
-          </Card>
-        ))}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-[220px] flex-1">
-          <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-ink-3" aria-hidden />
-          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("agents.tools.searchPlaceholder")} className="pl-9" aria-label={t("agents.tools.searchPlaceholder")} />
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative min-w-[180px] flex-1">
+          <Search
+            className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-ink-3"
+            aria-hidden
+          />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("agents.tools.searchPlaceholder")}
+            className="pl-9"
+            aria-label={t("agents.tools.searchPlaceholder")}
+          />
         </div>
-        <div className="inline-flex rounded-xl border border-line bg-card p-1" role="tablist" aria-label={t("agents.tools.editor.kindLabel")}>
-          {(["all", "skill", "mcp"] as const).map((value) => (
-            <button key={value} type="button" role="tab" aria-selected={kind === value} onClick={() => setKind(value)} className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${kind === value ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink"}`}>
-              {value === "all" ? t("agents.tools.kindAll") : value === "skill" ? t("agents.tools.kindSkill") : t("agents.tools.kindMcp")}
-            </button>
-          ))}
+        <div className="capability-harness-select"><span>Harness</span><SelectField value={providerId} onValueChange={setProviderId} aria-label="Harness" options={providers.map((provider) => ({ value: provider.id, label: provider.name }))} /></div>
+      </div>
+      <div className="capability-library-filters">
+        <div className="capability-view-tabs" role="group" aria-label={zh ? "启用状态" : "Enabled status"}>
+          {[{ id: "enabled", label: zh ? "已启用" : "Enabled", count: enabledCount }, { id: "all", label: zh ? "全部" : "All", count: inventory.length }, { id: "disabled", label: zh ? "未启用" : "Disabled", count: inventory.length - enabledCount }].map(tab => <button key={tab.id} type="button" aria-pressed={view === tab.id} onClick={() => setView(tab.id)}>{tab.label}<span>{tab.count}</span></button>)}
         </div>
+        <SelectField value={sourceFilter} onValueChange={setSourceFilter} aria-label={zh ? "筛选来源" : "Filter by source"} className="capability-source-filter" options={[{ value: "all", label: zh ? "所有来源" : "All sources" }, ...Object.entries(originNames).map(([value, label]) => ({ value, label }))]} />
       </div>
-
-      <div className="flex flex-wrap gap-2" role="list" aria-label={t("agents.tools.editor.providers")}>
-        <button type="button" onClick={() => setProviderId("all")} className={`rounded-full border px-3 py-1 text-xs transition-colors ${providerId === "all" ? "border-accent/40 bg-accent-soft text-accent" : "border-line bg-card text-ink-3 hover:text-ink"}`}>{t("agents.tools.allProviders")}</button>
-        {providers.map((provider, index) => (
-          <button key={provider.id} type="button" onClick={() => setProviderId(provider.id)} className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors ${providerId === provider.id ? "border-accent/40 bg-accent-soft text-accent" : "border-line bg-card text-ink-3 hover:text-ink"}`}>
-            <span className={`grid h-4 w-4 place-items-center rounded bg-gradient-to-br font-mono text-[9px] font-semibold ${PROVIDER_GRADIENTS[index % PROVIDER_GRADIENTS.length]}`}>{provider.name.slice(0, 1)}</span>{provider.name}
-          </button>
-        ))}
-      </div>
-
       {loadError && tools.length === 0 ? (
         <Card className="flex flex-col items-center gap-3 px-5 py-10 text-center">
-          <p className="text-sm font-medium text-ink">{t("agents.tools.loadFailed")}</p>
+          <p className="text-sm font-medium text-ink">
+            {t("agents.tools.loadFailed")}
+          </p>
           <p className="text-xs text-ink-3">{loadError}</p>
-          <Button variant="outline" size="sm" onClick={() => void load()}>{t("common.retry")}</Button>
+          <Button variant="outline" size="sm" onClick={() => void load()}>
+            {t("common.retry")}
+          </Button>
         </Card>
       ) : !loaded || (loading && tools.length === 0) ? (
-        <Card className="px-5 py-10 text-center text-sm text-ink-3">{t("common.loading")}</Card>
+        <Card className="px-5 py-10 text-center text-sm text-ink-3">
+          {t("common.loading")}
+        </Card>
       ) : tools.length === 0 ? (
         <EmptyState
           icon={Blocks}
@@ -226,54 +248,64 @@ export function ProviderToolsPanel(): JSX.Element {
           description={t("agents.tools.emptyDesc")}
           action={
             <Button variant="primary" size="sm" onClick={openCreate}>
-              <Plus className="h-3.5 w-3.5" aria-hidden /> {t("agents.tools.add")}
+              <Plus className="h-3.5 w-3.5" aria-hidden />{" "}
+              {t("agents.tools.add")}
             </Button>
           }
         />
       ) : (
         <>
-          <StaggerGroup className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-            {filtered.map((tool) => {
-              const isMcp = tool.kind === "mcp";
-              const commandLine = mcpCommandLine(tool);
-              return (
-                <MotionCard key={tool.id} className="flex flex-col gap-3 p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex min-w-0 items-start gap-3">
-                      <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-line bg-gradient-to-br ${isMcp ? "from-cyan-500/20 to-blue-500/15 text-cyan-400" : "from-fuchsia-500/20 to-violet-500/15 text-fuchsia-400"}`}>
-                        {isMcp ? <Server className="h-4 w-4" aria-hidden /> : <Sparkles className="h-4 w-4" aria-hidden />}
+          <div className="capability-library-groups">
+            {groups.map(group => <section key={group.origin} aria-label={originNames[group.origin]}>
+              <div className="capability-group-heading"><h3>{originNames[group.origin]}</h3><span>{group.items.length}</span></div>
+              <div className="capability-group-list">
+                {group.items.map(tool => {
+                  const origin = capabilityOrigin(tool);
+                  const description = capabilityDescription(tool);
+                  return <article key={tool.id} className="capability-library-row">
+                    <button type="button" className="capability-row-main" onClick={() => setDetail(tool)} aria-label={`${zh ? "查看详情" : "View details"} · ${tool.name}`}>
+                      <span className="capability-row-icon">{kind === "mcp" ? <Server size={18} /> : <Sparkles size={18} />}</span>
+                      <span className="capability-row-copy"><span className="capability-row-title">{tool.name}</span>
+                        {description && <span className="capability-row-description">{description}</span>}
+                        <span className="capability-row-origin">{origin.label || originNames[origin.kind]}</span>
                       </span>
-                      <div className="min-w-0"><h3 className="truncate text-sm font-semibold text-ink">{tool.name}</h3><p className="mt-0.5 text-xs text-ink-3">{tool.description}</p></div>
-                    </div>
-                    <Switch checked={tool.enabled} onCheckedChange={(checked) => handleToggle(tool, checked)} aria-label={`${tool.name} ${tool.enabled ? t("common.enabled") : t("common.disabled")}`} />
-                  </div>
-                  {commandLine && <code className="truncate rounded-lg border border-line bg-card-hover px-2.5 py-1.5 font-mono text-[11px] text-ink-2" title={commandLine}>{commandLine}</code>}
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {tool.providerIds.map((daemonId) => <Tag key={daemonId} label={providerMeta(toUiProviderId(daemonId)).name} />)}
-                    <Tag label={isMcp ? t("agents.tools.typeMcp") : t("agents.tools.typeSkill")} className={isMcp ? "border-info/25 bg-info/10 text-info" : "border-accent/25 bg-accent-soft text-accent"} />
-                    {tool.skill?.source && <Tag label={tool.skill.source} />}
-                    {tool.tags.map((tag) => <Tag key={tag} label={`#${tag}`} />)}
-                  </div>
-                  <div className="mt-auto flex items-center justify-between border-t border-line pt-3">
-                    <StatusChip tone={tool.enabled ? "ok" : "muted"} label={tool.enabled ? t("agents.tools.running") : t("agents.tools.stopped")} />
-                    <div className="flex items-center gap-1">
-                      <Button variant="ghost" size="icon" onClick={() => openEdit(tool)} aria-label={`${t("common.edit")} ${tool.name}`}>
-                        <Pencil className="h-4 w-4 text-ink-3" aria-hidden />
-                      </Button>
-                      <Button variant="ghost" size="icon" onClick={() => setDeleting(tool)} aria-label={`${t("common.remove")} ${tool.name}`}>
-                        <Trash2 className="h-4 w-4 text-ink-3" aria-hidden />
-                      </Button>
-                    </div>
-                  </div>
-                </MotionCard>
-              );
-            })}
-          </StaggerGroup>
-          {filtered.length === 0 && <Card className="px-5 py-10 text-center text-sm text-ink-3">{t("agents.tools.emptyFiltered")}</Card>}
+                      <ChevronRight size={15} className="capability-row-chevron" aria-hidden />
+                    </button>
+                    <Switch checked={capabilityEnabledFor(tool, daemonProviderId)} disabled={!providerId || toggling.includes(tool.id)} onCheckedChange={checked => handleToggle(tool, checked)} aria-label={`${harnessName} · ${tool.name}`} />
+                  </article>;
+                })}
+              </div>
+            </section>)}
+          </div>
+          {filtered.length === 0 && (
+            <Card className="px-5 py-10 text-center text-sm text-ink-3">
+              {view === "enabled" && !query && sourceFilter === "all" ? <><p>{zh ? `${harnessName} 还没有启用${kind === "skill" ? "技能" : "MCP 服务"}。` : `Nothing is enabled for ${harnessName} yet.`}</p><button className="mt-3 text-ink underline underline-offset-4" onClick={() => setView("all")}>{zh ? "浏览全部" : "Browse all"}</button></> : t("agents.tools.emptyFiltered")}
+            </Card>
+          )}
         </>
       )}
 
-      <CapabilityEditorDialog open={editorOpen} onOpenChange={setEditorOpen} capability={editing} />
+      <p className="capability-library-drop-hint">{t("agents.tools.import.dropTitle")}</p>
+
+      <Dialog open={!!detail} onOpenChange={open => { if (!open) setDetail(undefined); }} title={detail?.name ?? ""} footer={<><Button variant="ghost" onClick={() => { setDeleting(detail); setDetail(undefined); }}><Trash2 size={15} />{t("common.remove")}</Button><Button variant="outline" onClick={() => { if (detail) openEdit(detail); setDetail(undefined); }}><Pencil size={15} />{t("common.edit")}</Button></>}>
+        {detail && <div className="capability-detail">
+          {capabilityDescription(detail) && <p>{capabilityDescription(detail)}</p>}
+          <dl><div><dt>{zh ? "来源" : "Source"}</dt><dd>{originNames[capabilityOrigin(detail).kind]}{capabilityOrigin(detail).label ? ` · ${capabilityOrigin(detail).label}` : ""}</dd></div>
+            {capabilityOrigin(detail).path && <div><dt>{zh ? "原始位置" : "Original location"}</dt><dd className="break-all">{capabilityOrigin(detail).path}</dd></div>}
+            <div><dt>{zh ? "已启用于" : "Enabled for"}</dt><dd>{providers.filter(provider => capabilityEnabledFor(detail, toDaemonProviderId(provider.id))).map(provider => provider.name).join("、") || (zh ? "尚未启用" : "Not enabled yet")}</dd></div>
+          </dl>
+          {detail.mcp && <p className="break-all text-[13px]">{safeMcpSummary(detail.mcp)}</p>}
+          {detail.skill && <details><summary>{zh ? "查看技能内容" : "View skill instructions"}</summary><pre>{detail.skill.instructions}</pre></details>}
+        </div>}
+      </Dialog>
+
+      <CapabilityEditorDialog
+        open={editorOpen}
+        onOpenChange={setEditorOpen}
+        capability={editing}
+        defaultKind={kind}
+        defaultProviderId={providerId}
+      />
 
       <CapabilityImportDialog
         open={importOpen}
@@ -282,26 +314,49 @@ export function ProviderToolsPanel(): JSX.Element {
           if (!open) setImportSeed(undefined);
         }}
         seed={importSeed}
+        defaultProviderId={providerId}
       />
 
       {dropActive && (
         <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-card/70 backdrop-blur-[2px]">
           <div className="rounded-2xl border-2 border-dashed border-accent/50 bg-card px-8 py-6 text-center">
-            <p className="text-sm font-semibold text-ink">{t("agents.tools.import.dropTitle")}</p>
-            <p className="mt-1 text-xs text-ink-3">{t("agents.tools.import.dropDesc")}</p>
+            <p className="text-sm font-semibold text-ink">
+              {t("agents.tools.import.dropTitle")}
+            </p>
+            <p className="mt-1 text-xs text-ink-3">
+              {t("agents.tools.import.dropDesc")}
+            </p>
           </div>
         </div>
       )}
 
       <Dialog
         open={!!deleting}
-        onOpenChange={(open) => { if (!open && !deleteBusy) setDeleting(undefined); }}
+        onOpenChange={(open) => {
+          if (!open && !deleteBusy) setDeleting(undefined);
+        }}
         title={t("agents.tools.deleteTitle")}
-        description={deleting ? t("agents.tools.deleteDesc", { name: deleting.name }) : undefined}
+        description={
+          deleting
+            ? t("agents.tools.deleteDesc", { name: deleting.name })
+            : undefined
+        }
         footer={
           <>
-            <Button variant="ghost" onClick={() => setDeleting(undefined)} disabled={deleteBusy}>{t("common.cancel")}</Button>
-            <Button variant="danger" onClick={() => void confirmDelete()} disabled={deleteBusy}>{t("common.remove")}</Button>
+            <Button
+              variant="ghost"
+              onClick={() => setDeleting(undefined)}
+              disabled={deleteBusy}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => void confirmDelete()}
+              disabled={deleteBusy}
+            >
+              {t("common.remove")}
+            </Button>
           </>
         }
       >

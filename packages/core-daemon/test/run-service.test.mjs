@@ -5,6 +5,101 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AdapterRegistry, Database, EventService, RunService } from "../dist/index.js";
 
+test("queued turns retain native thread and tightened permissions but keep their submitted model", async () => {
+  const database = new Database(":memory:");
+  const timestamp = new Date().toISOString();
+  const project = { id: "queue-project", name: "Queue", rootPath: process.cwd(), repositoryType: "git", nonGitDiffMode: "off", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const session = { id: "queue-session", projectId: project.id, memberId: "queue-agent", agentInstanceId: "queue-agent", model: "submitted-model", reasoningEffort: "low", serviceTier: "fast", title: "Before", status: "idle", unreadCount: 0, createdAt: timestamp, updatedAt: timestamp };
+  const agent = { id: "queue-agent", providerId: "queue-fake", displayName: "Queue fake", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: timestamp, updatedAt: timestamp };
+  database.projects.save(project, timestamp);
+  database.sessions.save(session);
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const requests = [];
+  const run = (request, resumed) => {
+    const index = requests.length;
+    requests.push({ request, resumed });
+    async function* events() {
+      if (index === 0) await firstGate;
+      yield { kind: "session", providerSessionId: "native-thread-first" };
+      yield { kind: "message", text: `answer ${index}` };
+      yield { kind: "exit", exitCode: 0 };
+    }
+    return { process: {}, events: events(), cancel: async () => releaseFirst(), write: () => {} };
+  };
+  const adapter = {
+    providerId: agent.providerId, supportsStructuredOutput: true, supportsResume: true,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: true, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }),
+    start: (request) => run(request, false), resume: (request) => run(request, true)
+  };
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  try {
+    const first = await service.launch(session, agent, "first");
+    const stale = database.sessions.get(session.id);
+    assert.equal(stale.providerSessionId, undefined);
+    const queuedSecond = service.launch(stale, agent, "second");
+    const queuedThird = service.launch(stale, agent, "third");
+    database.sessions.save({ ...database.sessions.get(session.id), title: "Renamed while queued", model: "new-model", reasoningEffort: "high", serviceTier: "flex", permissionMode: "plan" });
+    releaseFirst();
+    await first.completion;
+    await (await queuedSecond).completion;
+    await (await queuedThird).completion;
+    assert.deepEqual(requests.map(({ resumed }) => resumed), [false, true, true]);
+    for (const { request } of requests.slice(1)) {
+      assert.equal(request.providerSessionId, "native-thread-first");
+      assert.equal(request.localSessionId, session.id);
+      assert.equal(request.model, "submitted-model", "already submitted messages keep their original model choice");
+      assert.equal(request.reasoningEffort, "low");
+      assert.equal(request.serviceTier, "fast");
+      assert.equal(request.permissionMode, "plan");
+    }
+    assert.equal(database.sessions.get(session.id).title, "Renamed while queued");
+    assert.equal(database.sessions.get(session.id).providerSessionId, "native-thread-first");
+  } finally {
+    releaseFirst();
+    database.close();
+  }
+});
+
+test("a queued turn cannot restore an agent binding changed while waiting", async () => {
+  const database = new Database(":memory:");
+  const timestamp = new Date().toISOString();
+  const project = { id: "rebind-project", name: "Queue", rootPath: process.cwd(), repositoryType: "git", nonGitDiffMode: "off", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const session = { id: "rebind-session", projectId: project.id, memberId: "old-agent", agentInstanceId: "old-agent", title: "Session", status: "idle", unreadCount: 0, createdAt: timestamp, updatedAt: timestamp };
+  const agent = { id: "old-agent", providerId: "rebind-fake", displayName: "Fake", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: timestamp, updatedAt: timestamp };
+  database.projects.save(project, timestamp);
+  database.sessions.save(session);
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  let launches = 0;
+  const adapter = {
+    providerId: agent.providerId, supportsStructuredOutput: true, supportsResume: false,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }),
+    start: () => {
+      launches += 1;
+      async function* events() { await firstGate; yield { kind: "exit", exitCode: 0 }; }
+      return { process: {}, events: events(), cancel: async () => releaseFirst(), write: () => {} };
+    }
+  };
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  try {
+    const first = await service.launch(session, agent, "first");
+    const queued = service.launch(session, agent, "second");
+    const rejected = assert.rejects(queued, (error) => error?.descriptor?.details?.reason?.includes("target changed") || error?.message?.includes("target changed"));
+    database.sessions.save({ ...database.sessions.get(session.id), agentInstanceId: "new-agent" });
+    releaseFirst();
+    await first.completion;
+    await rejected;
+    assert.equal(launches, 1);
+    assert.equal(database.sessions.get(session.id).agentInstanceId, "new-agent");
+  } finally {
+    releaseFirst();
+    database.close();
+  }
+});
+
 const now = new Date().toISOString();
 
 async function waitForRun(database, runId) {
@@ -62,6 +157,7 @@ test("RunService starts a new provider session and resumes subsequent messages",
   await waitForRun(database, secondRunId);
   assert.equal(starts, 1);
   assert.equal(resumes, 1);
+  assert.deepEqual(requests.map((request) => request.localSessionId), [session.id, session.id]);
   assert.equal(requests[0].timeoutMs, 30 * 60_000);
   assert.equal(requests[0].idleTimeoutMs, 30 * 60_000);
   assert.deepEqual(requests.map(({ model, reasoningEffort, serviceTier }) => ({ model, reasoningEffort, serviceTier })), [
@@ -83,7 +179,7 @@ test("RunService prefers the instance-configured context window over provider-re
     start: (request) => {
       requests.push(request);
       async function* events() {
-        yield { kind: "usage", contextUsed: 80220, contextWindow: 258400 };
+        yield { kind: "usage", usageScope: "turn", inputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 3, reasoningOutputTokens: 2, inputTokensIncludesCache: false, reportedCost: 0, currency: "USD", contextUsed: 80220, contextWindow: 258400 };
         yield { kind: "message", text: "ok" };
         yield { kind: "exit", exitCode: 0 };
       }
@@ -104,6 +200,18 @@ test("RunService prefers the instance-configured context window over provider-re
   const usage = database.events.replay({ sessionId: session.id }).find((event) => event.type === "usage.updated");
   assert.equal(usage?.payload.contextWindow, 1000000);
   assert.equal(usage?.payload.contextUsed, 80220);
+  assert.equal(usage.payload.usageScope, "turn");
+  assert.equal(usage.payload.usageKey, runId);
+  assert.equal(usage.payload.inputTokens, 0);
+  assert.equal(usage.payload.cachedInputTokens, 0);
+  assert.equal(usage.payload.cacheCreationInputTokens, 3);
+  assert.equal(usage.payload.reasoningOutputTokens, 2);
+  assert.equal(usage.payload.inputTokensIncludesCache, false);
+  assert.equal(usage.payload.reportedCost, 0);
+  assert.equal(usage.payload.currency, "USD");
+  assert.equal(usage.payload.estimatedCost, undefined);
+  assert.equal(usage.payload.model, "deepseek-v4-flash");
+  assert.equal(usage.payload.agentInstanceId, "a1");
   database.close();
 });
 
@@ -378,4 +486,116 @@ test("RunService passes only enabled provider-bound skills through the adapter S
     resourceDir: "C:/skills/selected"
   }]);
   database.close();
+});
+
+for (const mode of [undefined, "full", "off", "off-git"]) {
+  test(`RunService non-Git diff mode ${mode ?? "legacy default"} preserves accurate provenance`, async (t) => {
+    const workspace = await mkdtemp(join(tmpdir(), "agenthub-diff-mode-"));
+    t.after(() => rm(workspace, { recursive: true, force: true }));
+    if (mode === "off-git") {
+      const { execFileSync } = await import("node:child_process");
+      execFileSync("git", ["init", "--quiet", workspace]);
+    }
+    await writeFile(join(workspace, "existing.txt"), "before\n");
+    const patch = "--- a/existing.txt\n+++ b/existing.txt\n@@ -1 +1 @@\n-before\n+after\n";
+    let baselineCountAtStart;
+    const adapter = {
+      providerId: "fake", supportsStructuredOutput: true, supportsResume: false,
+      capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: false, pty: false },
+      start: (request) => {
+        baselineCountAtStart = service.workspaceBaselines.size;
+        async function* events() {
+          await writeFile(join(request.cwd, "existing.txt"), "after\n");
+          yield { kind: "file", path: "existing.txt", changeType: "modified", diff: patch };
+          yield { kind: "tool", name: "edit", phase: "completed", fileDiff: { path: "existing.txt", before: "before\n", after: "after\n" } };
+          yield { kind: "exit", exitCode: 0 };
+        }
+        return { process: {}, events: events(), cancel: async () => {}, write: () => {} };
+      }
+    };
+    const database = new Database(":memory:");
+    t.after(() => database.close());
+    const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+    const project = { id: "p-mode", name: "Mode", rootPath: workspace, repositoryType: "none", nonGitDiffMode: mode === "off-git" ? "off" : mode, frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+    const session = { id: "s-mode", projectId: project.id, memberId: "a-mode", title: "Mode", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+    const agent = { id: "a-mode", providerId: "fake", displayName: "Fake", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: now, updatedAt: now };
+    database.projects.save(project, now);
+    database.sessions.save(session);
+    assert.equal(database.projects.get(project.id).nonGitDiffMode, mode === "off-git" ? "off" : mode);
+    const handle = await service.launch(session, agent, "edit");
+    await handle.completion;
+    assert.equal(baselineCountAtStart, mode === "off" || mode === "off-git" ? 0 : 1);
+    const fileEvent = database.events.replay({ sessionId: session.id }).find((event) => event.type === "file.changed");
+    assert.equal(fileEvent.payload.diff, patch);
+    assert.equal(fileEvent.payload.changeType, "modified");
+    const toolEvent = database.events.replay({ sessionId: session.id }).find((event) => event.type === "tool.finished");
+    assert.deepEqual(toolEvent.payload.fileDiff, { path: "existing.txt", before: "before\n", after: "after\n" });
+    const artifact = database.artifacts.list({ sessionId: session.id }).find((item) => item.kind === "diff");
+    assert.ok(artifact);
+    const content = JSON.parse(artifact.content);
+    if (mode === "off") {
+      assert.deepEqual(content.files, []);
+      assert.equal(content.comparisonUnavailable, true);
+      assert.equal(content.reason, "non_git_baseline_unavailable");
+      assert.deepEqual(content.paths, ["existing.txt"]);
+    } else if (mode === "off-git") {
+      assert.equal(content.comparisonUnavailable, undefined);
+      assert.equal(content.files[0].changeType, "added"); // Git reports the untracked file.
+      assert.match(content.files[0].diff, /\+after/);
+    } else {
+      assert.equal(content.files[0].changeType, "modified");
+      assert.match(content.files[0].diff, /-before/);
+      assert.match(content.files[0].diff, /\+after/);
+    }
+  });
+}
+
+test("child sessions sharing one Codex instance reach adapters concurrently with isolated local identities", { timeout: 5_000 }, async () => {
+  const database = new Database(":memory:");
+  const root = await mkdtemp(join(tmpdir(), "nautilo-child-concurrency-"));
+  const timestamp = new Date().toISOString();
+  const project = { id: "parallel-project", name: "Parallel", rootPath: root, repositoryType: "none", nonGitDiffMode: "off", frontendPaths: [], backendPaths: [], ignoredPaths: [], policyId: "default" };
+  const agent = { id: "shared-codex", providerId: "codex", displayName: "Codex", executable: "fake", baseArgs: [], capabilities: [], enabled: true, status: "available", createdAt: timestamp, updatedAt: timestamp };
+  const children = ["left", "right"].map((id) => ({ id, parentSessionId: "parent", projectId: project.id, memberId: id, agentInstanceId: agent.id, title: id, status: "idle", unreadCount: 0, permissionMode: id === "left" ? "read-only" : "plan", createdAt: timestamp, updatedAt: timestamp }));
+  database.projects.save(project, timestamp);
+  for (const session of children) database.sessions.save(session);
+  const requests = [];
+  const releases = new Map();
+  const fakeRun = (request) => {
+    requests.push(request);
+    const gate = new Promise((resolve) => releases.set(request.localSessionId, resolve));
+    async function* events() {
+      yield { kind: "session", providerSessionId: `thread-${request.localSessionId}` };
+      await gate;
+      yield { kind: "message", text: `answer-${request.localSessionId}` };
+      yield { kind: "exit", exitCode: 0 };
+    }
+    return { process: {}, events: events(), cancel: async () => releases.get(request.localSessionId)?.(), write: () => {} };
+  };
+  const adapter = {
+    providerId: "codex", supportsStructuredOutput: true, supportsResume: true,
+    capabilities: { structuredOutput: true, textOutput: true, interactiveStdin: false, nativeResume: true, pty: false },
+    detect: async () => ({ installed: true, executable: "fake" }), start: fakeRun, resume: fakeRun
+  };
+  const service = new RunService(database, new AdapterRegistry([adapter]), new EventService(database));
+  let handles = [];
+  try {
+    handles = await Promise.all(children.map((session) => service.launch(session, agent, session.id)));
+    assert.deepEqual(requests.map((request) => request.localSessionId).sort(), ["left", "right"]);
+    assert.equal(new Set(requests.map((request) => request.instance.id)).size, 1);
+    assert.equal(requests.find((request) => request.localSessionId === "left").permissionMode, "read-only");
+    assert.equal(requests.find((request) => request.localSessionId === "right").permissionMode, "plan");
+    releases.get("left")();
+    await handles[0].completion;
+    assert.equal(database.sessions.get("right").status, "running");
+    assert.equal(database.sessions.get("left").providerSessionId, "thread-left");
+    releases.get("right")();
+    await handles[1].completion;
+    assert.equal(database.sessions.get("right").providerSessionId, "thread-right");
+  } finally {
+    for (const release of releases.values()) release();
+    await Promise.all(handles.map((handle) => handle.completion));
+    database.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -1,0 +1,50 @@
+.composer-model-menu.model-picker-surface {
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  max-height: min(520px, calc(100dvh - 100px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 14px 40px #00000010, 0 3px 8px #00000006;
+  font: 500 14px/1.5 var(--app-font-sans);
+}
+.dark .model-picker-surface { box-shadow: 0 18px 48px #0005, 0 3px 8px #0002; }
+.model-picker-surface .model-menu-heading { padding: 16px 18px 12px; margin: 0; min-height: 49px; flex-shrink: 0; gap: 12px; }
+.model-picker-surface .model-menu-heading > span { font-size: 15px; font-weight: 600; background: none; }
+.model-picker-surface .model-menu-heading a { display: grid; place-items: center; height: 26px; width: 26px; color: var(--ink-2); border-radius: 5px; }
+.model-picker-surface .model-menu-heading a:hover { background: var(--card-hover); }
+.model-picker-surface .model-menu-agent { padding: 0 16px 10px; flex-shrink: 0; }
+.model-picker-surface .model-menu-search { margin: 0 16px 10px; padding: 0 10px; height: 36px; min-height: 36px; gap: 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink-2); background: transparent; box-shadow: none; }
+.model-picker-surface .model-menu-search:focus-within { border-color: var(--line-strong); box-shadow: 0 0 0 2px var(--accent-soft); }
+.model-picker-surface .model-menu-search input { width: 100%; height: 100%; outline: none; background: transparent; font: inherit; font-size: 13px; color: var(--ink); }
+.model-picker-surface .model-menu-search input::placeholder { color: var(--ink-2); }
+.model-picker-connection { display: flex; align-items: center; gap: 6px; min-height: 32px; margin: 0 16px 8px; flex-shrink: 0; }
+.model-picker-connection > svg { color: var(--ink-2); flex-shrink: 0; }
+.model-picker-surface .model-picker-connection .ui-select { background: transparent; border: 0; border-radius: 5px; min-height: 32px; height: 32px; font: 550 13px/1.5 var(--app-font-sans); padding: 0 6px; min-width: 0; width: auto; flex: 1; box-shadow: none; }
+.model-picker-connection .ui-select:hover { background: var(--card-hover); }
+.model-picker-protocol { color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+.model-picker-surface .model-menu-list { padding: 0 8px 6px; min-height: 0; max-height: 252px; overflow-y: auto; flex: 0 1 auto; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.model-picker-surface .model-menu-option { min-height: 36px; height: 36px; padding: 0 10px; gap: 10px; border: 0; border-radius: 6px; background: transparent; margin: 0; color: var(--ink); font: 500 13px/1.5 var(--app-font-sans); }
+.model-picker-surface .model-menu-option > span { min-width: 0; flex: 1; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker-surface .model-menu-option strong { font: inherit; }
+.model-picker-surface .model-menu-option[aria-pressed="true"], .model-picker-surface .model-menu-option:hover:not(:disabled) { background: var(--card-hover); }
+.model-picker-surface .model-menu-option > svg:first-child { border: 0; padding: 0; background: transparent; width: 19px; height: 19px; flex-shrink: 0; }
+.model-picker-surface .model-menu-option > .provider-avatar { height: 19px; width: 19px; min-width: 19px; border: 0; padding: 0; background: transparent; border-radius: 4px; box-shadow: none; }
+.model-picker-surface .model-menu-option .provider-avatar img { height: 19px; width: 19px; object-fit: contain; }
+.model-picker-surface .model-menu-option > svg:last-child { background: transparent; color: var(--ink); width: 15px; height: 15px; padding: 0; border-radius: 0; }
+.model-picker-surface .model-menu-efforts { flex-shrink: 0; margin: 0 18px; padding: 15px 0 16px; border: 0; }
+.model-picker-surface .model-menu-efforts > span { display: block; font-size: 13px; color: var(--ink); margin-bottom: 11px; font-weight: 550; }
+.model-picker-surface .model-menu-efforts > div { display: flex; padding: 3px; gap: 3px; background: var(--card-hover); border-radius: 7px; overflow-x: auto; }
+.model-picker-surface .model-menu-efforts button { flex: 1; min-width: max-content; height: 29px; padding: 0 7px; border-radius: 5px; font: 500 12px/1.5 var(--app-font-sans); color: var(--ink); white-space: nowrap; }
+.model-picker-surface .model-menu-efforts button[aria-pressed="true"] { background: var(--ink); color: var(--card); box-shadow: 0 1px 3px #0002; }
+.model-picker-surface .model-menu-empty { margin: 0; padding: 9px 18px; font-size: 13px; color: var(--ink-2); }
+.model-picker-surface .model-menu-empty[role="alert"] { color: var(--danger); }
+.model-picker-revision { font-size: 13px; text-align: left; padding: 0 18px 12px; color: var(--ink-2); }
+.model-picker-footer { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 5px 18px 14px; gap: 10px; font-size: 12px; color: var(--ink-2); }
+.model-picker-footer a { display: inline-flex; gap: 6px; align-items: center; color: var(--ink); }
+.model-picker-surface button:focus-visible, .model-picker-surface a:focus-visible { outline: 2px solid var(--ink-2); outline-offset: -2px; }

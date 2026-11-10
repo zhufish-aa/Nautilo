@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
+use std::io::Write;
 
 use crate::database::Database;
 use crate::errors::{CoreError, CoreResult, ErrorCode};
@@ -28,6 +29,13 @@ pub struct EventService {
 }
 
 impl EventService {
+    pub fn publish_committed(&self,events:&[Value]) {
+        for event in events {
+            publish_browser_run(event);
+            self.flush_pending_deltas(event["sessionId"].as_str());
+            let _=self.sender.send(event.clone());
+        }
+    }
     pub fn new(db: Arc<Mutex<Database>>, redaction: RedactionService) -> Self {
         let (sender, _) = broadcast::channel(1024);
         Self { db, redaction, sender, pending_deltas: Arc::new(Mutex::new((HashMap::new(), false))) }
@@ -55,6 +63,7 @@ impl EventService {
         }
         event.insert("sessionId".to_string(), json!(session_id));
         event.insert("type".to_string(), json!(event_type));
+        if context["background"] == true { event.insert("background".into(), json!(true)); }
         event.insert("timestamp".to_string(), json!(now_iso()));
         event.insert("payload".to_string(), self.redaction.value(&payload));
         let mut event = Value::Object(event);
@@ -64,6 +73,7 @@ impl EventService {
             // event.sequence; two daemons sharing a data dir cannot collide.
             Repositories::new(&db.raw).events().append_allocating_sequence(&mut event, Some(session_id), None)?;
         }
+        publish_browser_run(&event);
         // Receivers lagging behind simply miss events; replay() is the
         // recovery path, so a send error here is not fatal.
         if event_type.ends_with("_delta") {
@@ -157,7 +167,8 @@ impl EventService {
             &json!({
                 "runId": run.get("id").cloned().unwrap_or(Value::Null),
                 "projectRunId": run.get("projectRunId").cloned().unwrap_or(Value::Null),
-                "taskId": run.get("taskId").cloned().unwrap_or(Value::Null)
+                "taskId": run.get("taskId").cloned().unwrap_or(Value::Null),
+                "background": run["backgroundEvent"]
             }),
             event_type,
             payload,
@@ -166,6 +177,35 @@ impl EventService {
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<Value> {
         self.sender.subscribe()
+    }
+}
+
+fn browser_run_update(event: &Value) -> Option<Value> {
+    let state = match event["type"].as_str()? {
+        "run.started" => "running", "run.waiting" => "waiting",
+        "run.completed" => "completed", "run.cancelled" => "cancelled", "run.failed" => "failed", _ => return None,
+    };
+    Some(json!({"event":"browser.run","sessionId":event["sessionId"].as_str()?,"runId":event["runId"].as_str()?,"sequence":event["sequence"].as_u64()?,"state":state}))
+}
+fn publish_browser_run(event: &Value) {
+    if std::env::var("NAUTILO_BROWSER_STREAM").as_deref() != Ok("1") { return; }
+    if let Some(packet) = browser_run_update(event) {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out,"{packet}");
+        let _ = out.flush();
+    }
+}
+
+#[cfg(test)]
+mod browser_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn lifecycle_is_tied_to_runs_not_individual_tools() {
+        for (kind,state) in [("run.started","running"),("run.waiting","waiting"),("run.completed","completed"),("run.failed","failed"),("run.cancelled","cancelled")] {
+            let update=browser_run_update(&json!({"sessionId":"s","runId":"r","sequence":4,"type":kind,"payload":{"text":"not forwarded"}})).unwrap();
+            assert_eq!(update["state"],state);assert!(update.get("payload").is_none());
+        }
+        assert!(browser_run_update(&json!({"sessionId":"s","runId":"r","sequence":5,"type":"tool.finished"})).is_none());
     }
 }
 

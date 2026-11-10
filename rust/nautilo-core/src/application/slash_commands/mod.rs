@@ -313,7 +313,10 @@ impl SlashCommandService {
             let mut details = Map::new();
             details.insert("commandId".to_string(), command.get("id").cloned().unwrap_or(Value::Null));
             details.insert("failureCode".to_string(), json!(failure_code));
-            return Err(CoreError::details(ErrorCode::RunStartFailed, details));
+            if let Some(reason) = completion.as_ref().and_then(|result| result.failure_detail.as_deref()) {
+                details.insert("reason".to_string(), json!(reason));
+            }
+            return Err(CoreError::details(ErrorCode::ProviderCommandFailed, details));
         }
         let provider_id = context.agent.get("providerId").and_then(Value::as_str).unwrap_or("");
         let label = provider_label(provider_id);

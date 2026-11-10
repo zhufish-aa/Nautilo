@@ -36,6 +36,7 @@ export interface StartOrchestrationInput {
   agentInstanceId?: string;
   goal: string;
   sessionId?: string;
+  messageId?: string;
   attachments?: MessageAttachmentInput[];
 }
 
@@ -108,7 +109,7 @@ export class OrchestrationService {
     const mainSession = this.sessionRouter.main(projectRun, team, input.sessionId);
     projectRun = { ...projectRun, mainSessionId: mainSession.id };
     this.database.projectRuns.save(projectRun);
-    const userMessage = this.messages.userGoal(mainSession, projectRun);
+    const userMessage = this.messages.userGoal(mainSession, projectRun, [], input.messageId);
     this.schedule(projectRun.id, async () => {
       const attachments = await this.attachments.save(mainSession, input.attachments);
       if (attachments.length) {
@@ -196,6 +197,7 @@ export class OrchestrationService {
     if (!["paused", "failed"].includes(projectRun.status)) throw new CoreError("RECOVERY_NOT_AVAILABLE", { projectRunId, status: projectRun.status });
     const team = this.requireTeam(String(projectRun.teamId));
     const previousSession = this.requireMainSession(projectRun);
+    const nativeRuntimeTools = !team.mainMemberId && Boolean(projectRun.mainAgentInstanceId);
     if (mode === "resume" && memberId !== projectRun.mainMemberId) throw new CoreError("RECOVERY_NOT_AVAILABLE", { reason: "resume_requires_same_member" });
     const replacement = mode === "replace" ? this.members.resolve(team, memberId) : undefined;
     const mainSession = mode === "resume"
@@ -214,17 +216,19 @@ export class OrchestrationService {
       mainMemberId: memberId,
       mainAgentInstanceId: replacement?.agent.id ?? projectRun.mainAgentInstanceId,
       mainSessionId: mainSession.id,
-      status: "planning",
+      status: nativeRuntimeTools ? "executing" : "planning",
       recoveryReason: mode === "resume" ? "provider_session_resume" : "main_agent_replaced",
       previousMainMemberIds: [...(projectRun.previousMainMemberIds ?? []), projectRun.mainMemberId]
     });
     this.messages.system(
       mainSession,
       recovered,
-      mode === "resume" ? "已恢复原主 Agent 会话，将重新规划未完成目标。" : `主 Agent 已切换为 ${memberId}，将重新规划未完成目标。`,
+      nativeRuntimeTools
+        ? mode === "resume" ? "已恢复原主 Agent 会话，将继续未完成目标。" : `主 Agent 已切换为 ${memberId}，将继续未完成目标。`
+        : mode === "resume" ? "已恢复原主 Agent 会话，将重新规划未完成目标。" : `主 Agent 已切换为 ${memberId}，将重新规划未完成目标。`,
       "recovery"
     );
-    this.schedule(projectRunId, () => this.plan(projectRunId));
+    this.schedule(projectRunId, () => nativeRuntimeTools ? this.executeMainTurn(projectRunId) : this.plan(projectRunId));
     return recovered;
   }
 
@@ -437,7 +441,8 @@ export class OrchestrationService {
       const memberCounts = new Map<string, number>();
       const wave = ready.filter((task) => {
         const member = team.members.find((candidate) => candidate.id === task.assignedMemberId);
-        const limit = Math.max(1, member?.maxConcurrentTasks ?? 1);
+        const configured = member?.maxConcurrentTasks;
+        const limit = typeof configured === "number" && Number.isSafeInteger(configured) && configured > 0 ? configured : Number.POSITIVE_INFINITY;
         const count = memberCounts.get(String(task.assignedMemberId)) ?? 0;
         if (count >= limit) return false;
         memberCounts.set(String(task.assignedMemberId), count + 1);

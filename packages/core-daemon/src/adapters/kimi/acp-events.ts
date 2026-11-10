@@ -134,7 +134,7 @@ export function parseKimiAcpUpdate(value: unknown, state: KimiAcpParseState): Ad
   }
   if (update.sessionUpdate === "usage_update") {
     return [{
-      kind: "usage",
+      kind: "usage", usageScope: "context",
       contextUsed: typeof update.used === "number" ? update.used : undefined,
       contextWindow: typeof update.size === "number" ? update.size : undefined,
       raw: value

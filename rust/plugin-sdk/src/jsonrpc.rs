@@ -26,7 +26,8 @@ pub struct JsonRpcClient {
 }
 
 impl JsonRpcClient {
-    pub fn new(process: ProcessHandle, process_events: mpsc::UnboundedReceiver<ProcessEvent>) -> Self {
+    pub fn new(process: ProcessHandle, process_events: impl Into<crate::event_stream::ProcessEvents>) -> Self {
+        let process_events=process_events.into();
         let (sender, receiver) = mpsc::unbounded_channel::<JsonRpcEvent>();
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>> = Arc::new(Mutex::new(HashMap::new()));
         let pump_pending = pending.clone();
