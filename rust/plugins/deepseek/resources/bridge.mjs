@@ -17,6 +17,7 @@ export async function apply(ctx, config = {}) {
   const malformedCalls = new Set();
   const sessions = new Set();
   const parents = new Map();
+  const agentLifetimes = new WeakMap();
   const activeRequests = new Set();
   const lifetime = new AbortController();
   function owns(sessionId) {
@@ -28,20 +29,44 @@ export async function apply(ctx, config = {}) {
     return false;
   }
   let binding;
-  function bindConnection() {
+  async function bindConnection() {
     if (!config.connection) return Promise.resolve();
+    if (binding) {
+      await binding;
+      return;
+    }
     return binding ??= (async () => {
+      const started = performance.now();
+      const pendingPlugins = [...ctx.loader.entries()]
+        .filter(entry => entry._initTask || entry.fiber?.inertia)
+        .map(entry => entry.options.name);
       await ctx.loader.await();
+      const loaded = performance.now();
       const entry = [...ctx.loader.entries()].find(entry => entry.options.name === '@deepseek-ai/dsh-llm-pi-ai');
       if (!entry?.fiber) throw new Error('The native profile has no active multi-provider adapter');
       // Volatile snapshots are deeply frozen. Schemastery normalizes nested
       // dictionaries in place (including valid `off: null` entries), so feeding
       // the snapshot back into validation fails even though its values are valid.
       const previous = structuredClone(entry.fiber.config.providers.get());
-      // Cordis noSave updates this runtime only. Keep every native route and
-      // never edit the user's profile or credential files.
-      entry.fiber.update({ providers: { ...previous, [config.connection.provider]: config.connection.profile } }, true);
+      // Entry.update applies native volatile fields in place. Fiber.update
+      // restarts the adapter and its dependants even when only a route changes.
+      // Retain the profile's raw options so later native settings writes cannot
+      // persist this session's temporary gateway address or credential reference.
+      const storedConfig = entry.options.config;
+      try {
+        await entry.update({ config: {
+          ...storedConfig,
+          providers: { ...previous, [config.connection.provider]: config.connection.profile },
+        } });
+      } finally {
+        entry.options.config = storedConfig;
+      }
       await ctx.loader.await();
+      const applied = entry.fiber.config.providers.get()[config.connection.provider];
+      if (applied?.apiKeyEnv !== config.connection.profile.apiKeyEnv || applied?.baseURL !== config.connection.profile.baseURL) {
+        throw new Error('DeepSeek could not apply the selected connection');
+      }
+      return { loaderWaitMs: Math.round(loaded - started), providerUpdateMs: Math.round(performance.now() - loaded), pendingPlugins };
     })();
   }
 
@@ -69,7 +94,15 @@ export async function apply(ctx, config = {}) {
     }
     emit('event', { sessionId: session.id, event });
   });
-  ctx.on('agent/assistant-stream', ({ agent, frame }) => emit('stream', { sessionId: agent.session.id, frame }));
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    // DSH attempt IDs are unique only within one attached Agent lifecycle.
+    // Resuming the same saved session can restart its counter at 1. Keep one
+    // namespace per Agent, so a new reply cannot resolve to an old run while
+    // late frames from an existing agent/child retain their original identity.
+    let lifetime = agentLifetimes.get(agent);
+    if (!lifetime) agentLifetimes.set(agent, lifetime = randomUUID());
+    emit('stream', { sessionId: agent.session.id, frame: { ...frame, attemptId: `${lifetime}:${frame.attemptId}` } });
+  });
   ctx.on('agent/error', ({ agent, error }) => {
     failures.set(agent.session.id, error instanceof Error ? error.message : String(error));
   });
@@ -85,6 +118,8 @@ export async function apply(ctx, config = {}) {
     const parentSessionId = parents.get(info.id);
     if (info.local && parentSessionId) emit('child', { parentSessionId, childSessionId: info.id, phase: 'completed', failed: info.stopReason !== 'completed' });
   });
+  // Native Web remotes are also answerers in this waterfall. Claim only our
+  // sessions before forwarding can wait for a different, unopened native UI.
   ctx.on('approval/request', async (request, next) => {
     if (!request.agent || !owns(request.agent.session.id)) return next();
     const response = await ask('approval', {
@@ -93,7 +128,7 @@ export async function apply(ctx, config = {}) {
     }, request.signal).catch(() => ({ outcome: 'cancelled' }));
     return response.outcome === 'selected' && response.optionId === 'once' ? 'allowed-once'
       : response.outcome === 'cancelled' ? 'cancelled' : 'rejected';
-  });
+  }, { prepend: true });
   ctx.on('user-questions/request', async (request, next) => {
     if (!request.agent || !owns(request.agent.session.id)) return next();
     const questions = request.questions.map(question => ({
@@ -101,14 +136,14 @@ export async function apply(ctx, config = {}) {
       multiSelect: question.multiSelect, isOther: true,
       options: question.options?.map((option, index) => ({ id: String(index), label: option.label, description: option.description }))
     }));
-    const response = await ask('question', { sessionId: request.agent.session.id, questions }, request.signal);
+    const response = await ask('question', { sessionId: request.agent.session.id, callId: request.wait?.callId, questions }, request.signal);
     if (response.outcome !== 'selected') throw new Error('Question cancelled');
     return { answers: request.questions.map(question => {
       const answers = response.answers?.[question.id] ?? [];
       const options = new Set(question.options?.map(option => option.label));
       return { id: question.id, selected: answers.filter(value => options.has(value)), custom: answers.filter(value => !options.has(value)).join('\n') || undefined };
     }) };
-  });
+  }, { prepend: true });
 
   // Host tools are added as ordinary tools; no native tool is replaced.
   for (const tool of config.tools ?? []) {
@@ -132,9 +167,25 @@ export async function apply(ctx, config = {}) {
       if (!children && agent.status === 'idle' && seq === agent.session.seq) break;
     }
     await ctx.sessions.flush(agent.session);
+    emitContext(agent);
     const error = failures.get(agent.session.id);
     if (error) throw new Error(error);
     if (malformedCalls.has(agent.session.id)) throw new Error('上游把工具调用作为 DSML 文本返回，原生 Harness 未执行这段代码。请重试。');
+  }
+
+  function emitContext(agent) {
+    // Reuse DSH's own pressure measurement, including its restored surface and
+    // compaction result. Never use cumulative billed tokens as context size.
+    try {
+      const meter = agent.ctx?.get('tokenMeter') ?? ctx.get('tokenMeter');
+      const measurement = meter?.measure(agent.session);
+      const contextWindow = agent.session.requestContext?.()?.contextWindow;
+      if (Number.isSafeInteger(measurement?.totalTokens) || Number.isSafeInteger(contextWindow)) {
+        emit('context', { sessionId: agent.session.id, contextUsed: measurement?.totalTokens, contextWindow });
+      }
+    } catch (error) {
+      emit('diagnostic', { sessionId: agent.session.id, message: `Native context measurement unavailable: ${error.message ?? error}` });
+    }
   }
 
   async function managePlugins(operation) {
@@ -207,14 +258,17 @@ export async function apply(ctx, config = {}) {
       return { accepted: true };
     }
     if (path === '/open') {
+      const started = performance.now();
       if (typeof body.cwd !== 'string' || !isAbsolute(body.cwd)) throw new Error('缺少该会话的工作区目录');
-      await bindConnection();
+      const bindingTimings = await bindConnection();
+      const bound = performance.now();
       let sessionId = body.sessionId;
       if (!body.resume) {
         const workspace = await ctx.workspaceRegistry.create(body.cwd);
         const created = await ctx.sessionController.create({ sessionId, workspaceId: workspace.id, agentPreset: body.agentMode || undefined });
         sessionId = created.sessionId;
       }
+      const created = performance.now();
       const { agent } = await ctx.sessionController.resolveAgent(sessionId);
       if (!agent) throw new Error('DeepSeek did not restore the requested agent');
       if (body.resume) {
@@ -225,14 +279,19 @@ export async function apply(ctx, config = {}) {
         const workspace = await ctx.workspaceRegistry.create(body.cwd);
         if (!workspace.sessionIds.includes(sessionId)) await workspace.attachSession(sessionId);
       }
+      const resolved = performance.now();
       const selectedMode = ctx.agentPresets.composedPreset(agent.ctx);
       if (body.agentMode && body.agentMode !== selectedMode) await ctx.agentPresets.select(agent, body.agentMode);
       if (body.model) await ctx.sessionController.selectModel({ sessionId, provider: body.provider, model: body.model,
         ...(body.reasoningEffort ? { reasoningEffort: body.reasoningEffort } : {}) });
       if (body.permissionMode) ctx.permissionPresets.set(agent.session, body.permissionMode);
       sessions.add(sessionId);
+      emitContext(agent);
       const compaction = ctx.agentPresets.serviceFor(agent, 'compaction') ?? ctx.get('compaction');
       return { sessionId, agentMode: ctx.agentPresets.composedPreset(agent.ctx), permissionMode: ctx.permissionPresets.current(agent.session),
+        timings: { providerBindMs: Math.round(bound - started), sessionCreateMs: Math.round(created - bound),
+          agentResolveMs: Math.round(resolved - created), preferencesMs: Math.round(performance.now() - resolved),
+          ...bindingTimings },
         supportsCompact: typeof compaction?.compactNow === 'function' };
     }
     if (!sessions.has(body.sessionId)) throw new Error('Session is not owned by this Nautilo connection');

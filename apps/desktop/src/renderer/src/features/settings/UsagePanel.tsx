@@ -9,12 +9,19 @@ import { estimateSnapshot, snapshotTotal, type UsageTotals } from "../../lib/ses
 import { useAgentsStore } from "../../stores/agents";
 import { useSessionsStore } from "../../stores/sessions";
 import { useUsageStore } from "../../stores/usage";
+import { RequestLogsPanel } from "./RequestLogsPanel";
 
 const number = (value: number | undefined) => value === undefined ? "—" : new Intl.NumberFormat("en-US", { maximumFractionDigits: 1, notation: value >= 100_000 ? "compact" : "standard" }).format(value);
 const money = (value: number | undefined) => value === undefined ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(value);
 const sum = (values: Array<number | undefined>) => { const known = values.filter((v): v is number => v !== undefined); return known.length ? known.reduce((a, b) => a + b, 0) : undefined; };
 
 export function UsagePanel(): JSX.Element {
+  const zh=useI18n().locale==="zh-CN",[params,setParams]=useSearchParams();
+  const logs=params.get("tab")==="requests";
+  return <><div className="usage-view-tabs" role="tablist" aria-label={zh?"用量与日志":"Usage and logs"}>{[["usage",zh?"会话用量":"Session usage"],["requests",zh?"请求日志":"Request logs"]].map(([id,label])=><button type="button" role="tab" aria-selected={logs=== (id==="requests")} key={id} onClick={()=>{const next=new URLSearchParams(params);next.set("tab",id);setParams(next,{replace:true});}}>{label}</button>)}</div>{logs?<RequestLogsPanel sessionId={params.get("session")??undefined}/>:<UsageSummaryPanel/>}</>;
+}
+
+function UsageSummaryPanel(): JSX.Element {
   const { locale } = useI18n();
   const zh = locale === "zh-CN";
   const [searchParams, setSearchParams] = useSearchParams();

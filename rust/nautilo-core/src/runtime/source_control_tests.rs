@@ -1,4 +1,17 @@
 use super::*;
+#[tokio::test]
+async fn worktree_revision_changes_for_edits_with_identical_porcelain_and_line_counts() {
+    let fixture=Fixture::new().await;fixture.write("file.txt","baseline\n");fixture.commit().await;
+    let service=SourceControl::default();fixture.write("file.txt","changed1\n");
+    let before=service.status(fixture.cwd()).await.unwrap();
+    assert_eq!(before["token"],service.status(fixture.cwd()).await.unwrap()["token"]);
+    fixture.write("file.txt","changed2\n");
+    std::fs::File::options().write(true).open(fixture.root.join("file.txt")).unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()+std::time::Duration::from_secs(1))).unwrap();
+    let after=service.status(fixture.cwd()).await.unwrap();
+    assert_eq!(before["changes"],after["changes"]);assert_ne!(before["token"],after["token"]);
+    assert!(service.mutate(fixture.cwd(),&json!({"action":"stage","token":before["token"],"paths":["file.txt"]})).await.is_err());
+}
 #[test]
 fn untracked_directory_records_preserve_path_validation() {
     let state = parse_status("? doop/\0? 中文 folder/\0? file.txt\0").unwrap();

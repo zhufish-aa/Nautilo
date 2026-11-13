@@ -108,7 +108,7 @@ function normalizedToolName(toolName: string): string {
   return toolName.trim().replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_");
 }
 
-export type ToolActivityKind = "command" | "read" | "write" | "edit" | "search" | "mcp" | "skill" | "web" | "image" | "code" | "tool";
+export type ToolActivityKind = "command" | "read" | "write" | "edit" | "search" | "mcp" | "skill" | "web" | "image" | "code" | "question" | "tool";
 /** Classify the shared event vocabulary, including native names used by each CLI. */
 export function toolActivityKind(name: string, input?: string): ToolActivityKind {
   const normalized = normalizedToolName(name);
@@ -116,6 +116,7 @@ export function toolActivityKind(name: string, input?: string): ToolActivityKind
   const path = firstText(parsed, PATH_KEYS);
   const command = firstText(parsed, ["command", "cmd", "command_line"]) ?? "";
   const fileKind = toolKind(name);
+  if (/(?:^|_)(?:ask_user_question|askuserquestion|request_user_input)(?:_|$)/.test(normalized)) return "question";
   if (/(?:^|_)(?:load_skill|read_skill|use_skill|skill|skills)(?:_|$)/.test(normalized)
     || fileKind === "read" && /(?:^|[\\/])SKILL\.md$/i.test(path ?? "")
     || /(?:Get-Content|\bcat\b|\btype\b|\bsed\b|\bhead\b).*\bSKILL\.md\b/i.test(command)) return "skill";
@@ -182,6 +183,10 @@ export function toolActivityLabel(
   input: string | undefined,
   locale: Locale
 ): string {
+  if (toolActivityKind(toolName, input) === "question") {
+    const actions = locale === "zh-CN" ? ["等待你的回答", "已提问", "提问未完成"] : ["Waiting for your answer", "Asked a question", "Question not completed"];
+    return actions[status === "running" ? 0 : status === "done" ? 1 : 2];
+  }
   const kind = toolKind(toolName);
   if (!kind) {
     if (locale === "zh-CN") return `${status === "running" ? "正在使用" : status === "done" ? "已使用" : "调用失败"} ${toolName}`;

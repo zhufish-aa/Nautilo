@@ -14,10 +14,17 @@ export function connectionSendError(error: string, zh: boolean): string {
   }
   return message;
 }
-/** API configuration is provider-owned; login identities remain harness-specific. */
+/** A selectable account is enabled for its relay only when the user selects it. */
+export function connectionCanBeSelected(connection: RuntimeConnection, instance: AgentInstanceConfig): boolean {
+  if (!connection.enabled || instance.baseArgs.length > 0 || instance.profile?.trim()) return false;
+  return connectionSupportsAgent(connection, instance) ||
+    (instance.providerId !== "antigravity" && connection.kind === "login" && (connection.harness === "codex" || connection.harness === "claude-code"));
+}
+/** Native accounts keep their identity; other harnesses use an explicit account relay. */
 export function connectionSupportsAgent(connection: RuntimeConnection, instance: AgentInstanceConfig): boolean {
   if (!connection.enabled || instance.baseArgs.length > 0 || instance.profile?.trim()) return false;
-  if (connection.kind === "login") return (instance.providerId === "codex" || instance.providerId === "claude-code") && connection.harness === instance.providerId;
+  if (instance.providerId === "antigravity") return connection.kind === "login" && connection.harness === "antigravity" && connection.nativeLogin === true;
+  if (connection.kind === "login") return connection.accountGateway === true || (["codex", "claude-code"].includes(instance.providerId) && connection.harness === instance.providerId);
   // A provider plugin owns its native API configuration. There is no CLI allowlist.
   return ["responses", "chat", "anthropic"].includes(connection.protocol ?? "");
 }

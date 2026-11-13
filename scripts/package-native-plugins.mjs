@@ -19,7 +19,8 @@ const descriptions = {
   omp: ["接入 Oh My Pi，保留原生会话和扩展。", "Use Oh My Pi with native sessions and extensions."],
   commandcode: ["接入 Command Code CLI。", "Use Command Code CLI."],
   deepseek: ["接入 DeepSeek Harness，支持原生动态模式与 PTC。", "Use DeepSeek Harness with native dynamic modes and PTC."],
-  "codex-plugins": ["管理 Codex 原生插件与授权。", "Manage native Codex plugins and authorization."]
+  "codex-plugins": ["管理 Codex 原生插件与授权。", "Manage native Codex plugins and authorization."],
+  antigravity: ["接入 Google Antigravity，支持官方账号登录与原生 ACP 会话。", "Use Google Antigravity with official sign-in and native ACP sessions."]
 };
 const entries = [];
 for (const id of plugins) {

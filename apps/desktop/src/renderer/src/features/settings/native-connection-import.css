@@ -1,0 +1,33 @@
+.native-import { color: var(--ink); font-family: inherit; font-size: 13px; font-weight: 500; }
+.native-import-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.native-import-search { position: relative; flex: 1; min-width: 0; }
+.native-import-search > svg { position: absolute; left: 12px; top: 12px; pointer-events: none; }
+.native-import-search input { padding-left: 36px; }
+.native-import-list-heading, .native-import-list-heading label { display: flex; align-items: center; gap: 9px; }
+.native-import-list-heading { justify-content: space-between; padding: 0 3px 12px; font-size: 12px; font-weight: 500; }
+.native-import input[type="checkbox"] { appearance: auto; accent-color: var(--ink); width: 15px; height: 15px; flex: 0 0 15px; margin: 0; cursor: pointer; }
+.native-import-list { display: grid; gap: 10px; }
+.native-import-row { border: 1px solid var(--line); border-radius: 12px; padding: 13px 14px 11px; transition: background .16s ease, border-color .16s ease; }
+.native-import-row[data-selected="true"] { border-color: color-mix(in srgb, var(--ink) 35%, transparent); background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.native-import-choice { display: flex; gap: 10px; align-items: center; cursor: pointer; }
+.native-import-identity { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.native-import-identity strong { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.native-import-identity > span { font-size: 12px; font-weight: 500; }
+.native-import-existing, .native-import-key { display: flex; gap: 5px; align-items: center; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.native-import-key[data-ready="false"] { color: var(--danger); }
+.native-import-row-body { padding-left: 60px; margin-top: 8px; min-width: 0; }
+.native-import-endpoint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.native-import-models { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.native-import-models > span { border-radius: 5px; padding: 2px 6px; background: color-mix(in srgb, var(--ink) 5%, transparent); font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.native-import-sources { font-size: 11px; margin-top: 7px; }
+.native-import-sources summary { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; list-style: none; }
+.native-import-sources[open] summary > svg { transform: rotate(180deg); }
+.native-import-sources > span { display: block; overflow-wrap: anywhere; margin-top: 5px; }
+.native-import-empty { min-height: 180px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; text-align: center; }
+.native-import-empty > span { font-size: 12px; }
+.native-import-error { display: flex; gap: 8px; align-items: center; color: var(--danger); padding: 12px 0; }
+.native-import-footer-count { margin-right: auto; font-size: 12px; font-weight: 500; }
+.native-import-read-errors { margin-top: 14px; font-size: 12px; }
+.native-import-read-errors summary { cursor: pointer; display: flex; align-items: center; gap: 7px; }
+.native-import-read-errors > div { display: flex; flex-direction: column; gap: 3px; padding-top: 9px; overflow-wrap: anywhere; }
+@media (max-width: 580px) { .native-import-key, .native-import-existing { font-size: 11px; } .native-import-row-body { padding-left: 25px; } }

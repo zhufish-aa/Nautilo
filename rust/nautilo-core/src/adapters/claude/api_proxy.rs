@@ -202,7 +202,7 @@ pub(super) fn chat_request(input: &Value, model: Option<&str>, effort: Option<&s
     }
     body
 }
-fn responses_request(chat: &Value) -> Value {
+pub(crate) fn responses_request(chat: &Value) -> Value {
     let mut input = Vec::new();
     let mut instructions = Vec::new();
     for message in chat["messages"].as_array().into_iter().flatten() {

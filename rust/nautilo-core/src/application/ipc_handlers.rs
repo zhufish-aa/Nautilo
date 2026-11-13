@@ -10,6 +10,14 @@ use crate::errors::{not_found, now_iso, CoreResult};
 use crate::ipc_gateway::Router;
 
 pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
+    reg(router, daemon, "remote.status", |d, _| d.remote.status().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
+    reg(router, daemon, "remote.invite", |d, _| d.remote.invite().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
+    reg(router, daemon, "remote.cancelInvite", |d, _| d.remote.cancel_invite().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
+    reg(router, daemon, "remote.approve", |d, input| d.remote.approve(input).map_err(|e|crate::errors::invalid("remote", &e.to_string())));
+    reg(router, daemon, "remote.reject", |d, input| d.remote.reject(input).map_err(|e|crate::errors::invalid("remote", &e.to_string())));
+    reg(router, daemon, "remote.revoke", |d, input| d.remote.revoke(input).map_err(|e|crate::errors::invalid("remote", &e.to_string())));
+    reg(router, daemon, "remote.updateDevice", |d, input| d.remote.update_device(input).map_err(|e|crate::errors::invalid("remote", &e.to_string())));
+    { let remote=daemon.remote.clone(); router.register("remote.configure",move|input| { let remote=remote.clone(); async move { remote.configure(input).await } }); }
     for method in ["scm.status","scm.diff","scm.mutate","scm.commit","scm.commitDiff","scm.history","scm.file","scm.save"] {
         let daemon=daemon.clone();
         router.register(method,move|input|{let daemon=daemon.clone();async move{
@@ -134,8 +142,32 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
     });
 
     // ---- versioned, harness-independent runtime connections
+    reg(router, daemon, "requestLog.list", |d,input| d.runs.request_logs.list(&input));
+    reg_str(router, daemon, "session.tools", "sessionId", |d,id| d.runs.request_logs.inventory(id));
+    reg(router,daemon,"resource.inventory",|d,_|d.resources.inventory());
+    reg(router,daemon,"integration.get",|d,_|d.integrations.get());
+    reg(router,daemon,"integration.save",|d,input|d.integrations.save(&input));
+    reg(router,daemon,"configuration.list",|d,_|d.integrations.list());
+    reg(router,daemon,"configuration.capture",|d,input|d.integrations.capture(input["name"].as_str().unwrap_or("")));
+    reg(router,daemon,"configuration.import",|d,input|d.integrations.import(&input["preset"]));
+    reg_str(router,daemon,"configuration.export","presetId",|d,id|d.integrations.export(id));
+    reg_str(router,daemon,"configuration.remove","presetId",|d,id|d.integrations.remove(id));
+    reg(router,daemon,"configuration.preview",|d,input|d.integrations.preview(input["presetId"].as_str().unwrap_or(""),input["replace"]==true));
+    reg_str(router,daemon,"configuration.apply","planId",|d,id|d.integrations.apply(id));
+    reg(router,daemon,"resource.history",|d,_|d.resources.history());
+    reg(router,daemon,"resource.preview",|d,input|d.resources.preview(&input));
+    reg_str(router,daemon,"resource.apply","planId",|d,id|d.resources.apply(id,false));
+    reg_str(router,daemon,"resource.undo","planId",|d,id|d.resources.apply(id,true));
     reg(router, daemon, "connection.list", |d, _| d.connections.list().map(Value::Array));
+    reg(router, daemon, "connection.scanNative", |d, _| d.connection_imports.scan());
+    reg(router, daemon, "connection.importNative", |d, input| d.connection_imports.import(&input));
     reg(router, daemon, "connection.get", |d, input| d.connections.get(input["connectionId"].as_str().unwrap_or(""), input["revision"].as_u64()));
+    reg(router, daemon, "connection.gateway", |d, input| {
+        let id = input["connectionId"].as_str().unwrap_or("");
+        let enabled = input["enabled"].as_bool().ok_or_else(|| crate::errors::invalid("enabled", "Expected a boolean"))?;
+        d.integrations.set_account_route(id, enabled)?;
+        d.connections.get(id, None)
+    });
     reg(router, daemon, "connection.upsert", |d, input| d.connections.upsert(&input));
     reg_str(router, daemon, "connection.remove", "connectionId", |d, id| d.connections.remove(id));
     {
@@ -143,6 +175,22 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         router.register("connection.models", move |input| {
             let daemon = daemon.clone();
             async move { daemon.connections.models(&input).await.map_err(anyhow::Error::new) }
+        });
+    }
+
+    // ---- teams
+    for method in ["connection.diagnose", "capability.diagnose"] {
+        let daemon = daemon.clone();
+        router.register(method, move |input| {
+            let daemon = daemon.clone();
+            async move {
+                let result = if method == "connection.diagnose" {
+                    daemon.connections.diagnose(&input).await?
+                } else {
+                    daemon.capabilities.diagnose(input["capabilityId"].as_str().unwrap_or("")).await?
+                };
+                Ok(daemon.redaction.value(&result))
+            }
         });
     }
 

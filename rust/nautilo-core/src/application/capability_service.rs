@@ -236,6 +236,45 @@ impl CapabilityService {
         Repositories::new(&lock(&self.db).raw).capabilities().list_default()
     }
 
+    pub async fn diagnose(&self, id: &str) -> CoreResult<Value> {
+        use std::time::Instant;
+        use crate::runtime::service_probe::{report, step, finish, probe_mcp};
+        let capability = Repositories::new(&lock(&self.db).raw).capabilities().get(id)?.ok_or_else(|| not_found("capability", id))?;
+        let mut result = report(id, capability["updatedAt"].as_str().unwrap_or(""), "mcp_handshake");
+        let started = Instant::now();
+        if capability["kind"] != "mcp" { return Err(invalid("kind", "Only MCP capabilities have a connection handshake.")); }
+        if let Err(error) = validate_capability(&capability) {
+            step(&mut result, "configuration", "failed", started, Some("INVALID_CONFIGURATION"), Some(&error.to_string()));
+            return Ok(finish(result, started));
+        }
+        let server = crate::runtime::run_service::capability_to_mcp_server(&capability).ok_or_else(||invalid("mcp", "Missing MCP configuration"))?;
+        let mut missing = Vec::new();
+        if let Some(name) = capability.pointer("/mcp/bearerTokenEnvVar").and_then(Value::as_str) {
+            if std::env::var(name).ok().filter(|v|!v.is_empty()).is_none() { missing.push(name.to_string()); }
+        }
+        if let Some(headers) = capability.pointer("/mcp/envHeaders").and_then(Value::as_object) {
+            for name in headers.values().filter_map(Value::as_str) {
+                if std::env::var(name).ok().filter(|v|!v.is_empty()).is_none() { missing.push(name.to_string()); }
+            }
+        }
+        if !missing.is_empty() {
+            step(&mut result, "configuration", "failed", started, Some("ENVIRONMENT_MISSING"), Some(&format!("Required environment variables are unavailable to the daemon: {}", missing.join(", "))));
+            return Ok(finish(result, started));
+        }
+        step(&mut result, "configuration", "passed", started, None, None);
+        let result = probe_mcp(&server, result).await;
+        // Literal MCP headers/env may not be in the credential store. Redact
+        // these too, including values the service echoes in errors/descriptions.
+        let mut secrets: Vec<String> = ["headers", "env"].iter().flat_map(|key|server[*key].as_object().into_iter().flat_map(|m|m.values()).filter_map(Value::as_str).map(str::to_string)).collect();
+        if let Some(headers) = server["headers"].as_object() {
+            for value in headers.values().filter_map(Value::as_str) {
+                if value.get(..7).is_some_and(|prefix|prefix.eq_ignore_ascii_case("bearer ")) { secrets.push(value[7..].to_string()); }
+            }
+        }
+        if let Some(url) = server["url"].as_str().and_then(|url|reqwest::Url::parse(url).ok()) { secrets.extend(url.query_pairs().map(|(_,value)|value.into_owned())); }
+        Ok(crate::runtime::security::RedactionService::new(Arc::new(move ||secrets.clone())).value(&result))
+    }
+
     pub fn upsert(&self, input: &Value) -> CoreResult<Value> {
         validate_capability(input)?;
         let now = now_iso();

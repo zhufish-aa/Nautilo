@@ -1,5 +1,5 @@
 [workspace]
-members = ["nautilo-core", "plugin-sdk", "plugins/pi", "plugins/trae", "plugins/opencode", "plugins/omp", "plugins/commandcode", "plugins/deepseek", "plugins/codex-plugins"]
+members = ["nautilo-core", "plugin-sdk", "plugins/pi", "plugins/trae", "plugins/opencode", "plugins/omp", "plugins/commandcode", "plugins/deepseek", "plugins/codex-plugins", "plugins/antigravity"]
 resolver = "2"
 
 [profile.release]

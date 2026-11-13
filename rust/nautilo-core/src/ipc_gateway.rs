@@ -27,7 +27,7 @@ pub struct GatewayRequest {
 pub type Handler =
     Arc<dyn Fn(Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Value>> + Send>> + Send + Sync>;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Router {
     handlers: std::collections::HashMap<String, Handler>,
     observer: Option<Arc<dyn Fn(&GatewayRequest, &GatewayResponse) + Send + Sync>>,

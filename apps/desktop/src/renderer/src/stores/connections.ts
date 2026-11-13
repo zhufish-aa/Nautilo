@@ -4,7 +4,7 @@ import { requestCore } from "../lib/bridge";
 import { withDefaultReasoning } from "../lib/model-reasoning";
 import { connectionModelCatalog, hasConfiguredConnectionModels } from "../lib/connection-models";
 
-export type ConnectionDraft = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential">;
+export type ConnectionDraft = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential" | "accountGateway">;
 interface ConnectionsState {
   connections: RuntimeConnection[];
   loading: boolean;
@@ -13,6 +13,7 @@ interface ConnectionsState {
   loadModels: (connectionId: string, revision?: number, force?: boolean) => Promise<ProviderModelCatalog>;
   error?: string;
   hydrate: () => Promise<void>;
+  setAccountRoute: (connectionId: string, enabled: boolean) => Promise<RuntimeConnection>;
   save: (connection: ConnectionDraft, expectedRevision?: number, apiKey?: string, clearApiKey?: boolean) => Promise<RuntimeConnection>;
   remove: (connectionId: string) => Promise<void>;
   get: (connectionId: string, revision?: number) => Promise<RuntimeConnection>;
@@ -24,6 +25,12 @@ const MODEL_CACHE_MS = 5 * 60_000;
 let loadGeneration = 0;
 export const useConnectionsStore = create<ConnectionsState>((set, get) => ({
   connections: [], loading: false, modelCatalogs: {}, loadingModels: {},
+  setAccountRoute: async (connectionId, enabled) => {
+    const saved = await requestCore<RuntimeConnection>("connection.gateway", { connectionId, enabled });
+    loadGeneration++;
+    set(state => ({ loading: false, connections: state.connections.map(item => item.id === saved.id ? saved : item) }));
+    return saved;
+  },
   hydrate: async () => {
     const generation = ++loadGeneration;
     set({ loading: true, error: undefined });

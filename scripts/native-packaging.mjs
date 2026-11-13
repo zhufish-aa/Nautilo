@@ -1,7 +1,7 @@
 import { resolve, join } from "node:path";
 import { rustEnvironment, workspace } from "./rust-build.mjs";
 
-export const nativePlugins = ["opencode", "trae", "pi", "omp", "commandcode", "deepseek", "codex-plugins"];
+export const nativePlugins = ["opencode", "trae", "pi", "omp", "commandcode", "deepseek", "codex-plugins", "antigravity"];
 export const nativeTargets = {
   "win32-x64": "x86_64-pc-windows-gnu",
   "darwin-x64": "x86_64-apple-darwin",

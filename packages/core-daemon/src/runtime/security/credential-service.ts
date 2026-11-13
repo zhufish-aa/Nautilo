@@ -61,7 +61,8 @@ export class CredentialService {
     });
   }
 
-  private read(agentInstanceId: string): StoredCredential | undefined {
+  /** Trusted daemon services only; never expose the decrypted value over IPC. */
+  read(agentInstanceId: string): StoredCredential | undefined {
     const encrypted = this.database.credentials.get(agentInstanceId);
     if (!encrypted) return undefined;
     try {

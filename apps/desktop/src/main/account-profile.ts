@@ -7,7 +7,7 @@ const execute = promisify(execFile);
 const PENDING = ".nautilo-pending-login.json";
 export interface PendingAccountProfile { profileId: string; providerId: string; directory: string; createdAt: number }
 function profileName(providerId: string, profileId: string): string {
-  if (!["codex", "claude-code"].includes(providerId) || !/^account-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(profileId)) throw new Error("Invalid managed account profile");
+  if (!["codex", "claude-code", "antigravity"].includes(providerId) || !/^account-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(profileId)) throw new Error("Invalid managed account profile");
   return `${providerId}-${profileId}`;
 }
 async function readPending(baseDirectory: string, providerId: string, profileId: string): Promise<PendingAccountProfile> {
@@ -27,7 +27,7 @@ export async function recoverableAccountProfiles(baseDirectory: string): Promise
   try { await protect(root); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   const result: PendingAccountProfile[] = [];
   for (const entry of (await readdir(root, { withFileTypes: true })).slice(0, 128)) {
-    const match = /^(codex|claude-code)-(account-[0-9a-f-]+)$/i.exec(entry.name);
+    const match = /^(codex|claude-code|antigravity)-(account-[0-9a-f-]+)$/i.exec(entry.name);
     if (!match || !entry.isDirectory() || entry.isSymbolicLink()) continue;
     try { result.push(await readPending(baseDirectory, match[1], match[2])); } catch { /* Not a known pending record; never inspect auth files. */ }
   }
@@ -60,9 +60,9 @@ async function protect(directory: string): Promise<void> {
   }
 }
 
-/** App-owned, fresh directory per login. No user-supplied path or global auth swapping. */
+/** App-owned login/recovery metadata. Antigravity credentials remain in the official OS keyring. */
 export async function prepareAccountProfile(baseDirectory: string, providerId: string): Promise<{ profileId: string; directory: string }> {
-  if (!["codex", "claude-code"].includes(providerId)) throw new Error("This harness does not support isolated account login");
+  if (!["codex", "claude-code", "antigravity"].includes(providerId)) throw new Error("This harness does not support official account login");
   if (!isAbsolute(baseDirectory)) throw new Error("Application data directory must be absolute");
   const root = join(baseDirectory, "account-profiles");
   await mkdir(root, { recursive: true, mode: 0o700 });

@@ -16,6 +16,7 @@ test("shared event icons recognize native names across harnesses", async () => {
     ["Read", { file_path: "C:/skills/github/SKILL.md" }, "skill"], ["skill", {}, "skill"],
     ["exec_command", { command: "Get-Content 'C:/skills/github/SKILL.md'" }, "skill"],
     ["run_code", {}, "code"], ["read_image", {}, "image"], ["Grep", {}, "search"], ["web_fetch", {}, "web"],
+    ["ask_user_question", {}, "question"], ["AskUserQuestion", {}, "question"], ["request_user_input", {}, "question"],
   ]) assert.equal(toolActivityKind(name, JSON.stringify(input)), expected, name);
 });
 

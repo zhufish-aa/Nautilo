@@ -1,0 +1,22 @@
+{
+  "id": "antigravity",
+  "apiVersion": 1,
+  "main": "agenthub-plugin-antigravity",
+  "version": "0.2.15",
+  "descriptor": {
+    "providerId": "antigravity",
+    "name": "Antigravity",
+    "vendor": "Google",
+    "defaultExecutable": "agy",
+    "capabilities": ["headless_structured", "tool_streaming"],
+    "credentialEnv": ["GEMINI_API_KEY"],
+    "envPassthrough": ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"],
+    "contextWindowDiscovery": true,
+    "permissionModes": [
+      {"value":"default","name":{"zh-CN":"请求批准","en-US":"Ask for approval"},"description":{"zh-CN":"按 Antigravity 原生规则请求操作批准","en-US":"Ask for approval according to Antigravity's native rules"}},
+      {"value":"accept-edits","name":{"zh-CN":"自动接受编辑","en-US":"Accept edits"},"description":{"zh-CN":"自动接受文件编辑，其他操作遵循原生权限规则","en-US":"Accept file edits automatically; other actions follow native permission rules"}},
+      {"value":"plan","name":{"zh-CN":"计划模式","en-US":"Plan"},"description":{"zh-CN":"使用 Antigravity 原生计划模式","en-US":"Use Antigravity's native planning mode"}},
+      {"value":"bypassPermissions","name":{"zh-CN":"完全访问权限","en-US":"Full access"},"description":{"zh-CN":"跳过原生权限确认，允许 Agent 直接执行操作","en-US":"Skip native permission prompts and allow the agent to execute actions directly"}}
+    ]
+  }
+}

@@ -1,5 +1,6 @@
 import type { AssistantModelStep, AssistantDecision, AssistantLookup, AssistantRead, AssistantSessionPage, AssistantExcerptPage } from "./assistant.js";
 import type { RuntimeConnection, RuntimeConnectionInput } from "@agenthub/domain";
+import type { RemoteStatus, RemoteSettings, RemoteGrant, RemoteInvitation } from "./remote-access.js";
 import type { HarnessPluginChange, HarnessPluginInventory, HarnessPluginOperation } from "@agenthub/provider-sdk";
 import type {
   AgentInstance,
@@ -149,6 +150,14 @@ export interface SourceControlMutation extends SourceControlScope {
   patchToken?: string; hunkIds?: string[]; lines?: number[];
 }
 export interface IpcRequestMap {
+  "remote.status": { input: Record<string, never>; output: RemoteStatus };
+  "remote.configure": { input: RemoteSettings; output: RemoteStatus };
+  "remote.invite": { input: Record<string, never>; output: RemoteInvitation };
+  "remote.cancelInvite": { input: Record<string, never>; output: { ok: true } };
+  "remote.approve": { input: RemoteGrant & { deviceId: string }; output: { ok: true } };
+  "remote.reject": { input: { deviceId: string }; output: { ok: true } };
+  "remote.revoke": { input: { deviceId: string }; output: { ok: true } };
+  "remote.updateDevice": { input: RemoteGrant & { deviceId: string; name: string }; output: { ok: true } };
   "scm.status": { input: SourceControlScope; output: SourceControlStatus };
   "scm.diff": { input: SourceControlScope & { path: string; source: "worktree" | "index" }; output: SourceControlDiff };
   "scm.commit": { input: SourceControlScope & { hash: string }; output: SourceControlCommit };
@@ -173,10 +182,30 @@ export interface IpcRequestMap {
   "assistant.sessions": { input: AssistantLookup; output: AssistantSessionPage };
   "assistant.excerpts": { input: AssistantRead; output: AssistantExcerptPage };
   "connection.list": { input: Record<string, never>; output: RuntimeConnection[] };
+  "connection.scanNative": { input: Record<string, never>; output: import("./connection-import.js").NativeConnectionScan };
+  "connection.importNative": { input: { scanId: string; candidateIds: string[] }; output: import("./connection-import.js").NativeConnectionImportResult };
   "connection.get": { input: { connectionId: string; revision?: number }; output: RuntimeConnection };
+  "connection.gateway": { input: { connectionId: string; enabled: boolean }; output: RuntimeConnection };
   "connection.upsert": { input: { connection: RuntimeConnectionInput; expectedRevision?: number; apiKey?: string; clearApiKey?: boolean }; output: RuntimeConnection };
   "connection.remove": { input: { connectionId: string }; output: { removed: boolean } };
   "connection.models": { input: { connectionId: string; revision?: number; agentInstanceId?: string }; output: ProviderModelCatalog };
+  "connection.diagnose": { input: { connectionId: string; revision?: number }; output: import("./service-diagnostics.js").ServiceDiagnostic };
+  "requestLog.list": { input: import("./request-log.js").RequestLogQuery; output: import("./request-log.js").RequestLogPage };
+  "session.tools": { input: { sessionId: string }; output: import("./request-log.js").SessionToolInventory };
+  "resource.inventory": { input: Record<string, never>; output: import("./integrations.js").ResourceInventory };
+  "integration.get": { input: Record<string, never>; output: import("./integrations.js").IntegrationSettings };
+  "integration.save": { input: import("./integrations.js").IntegrationSettings; output: import("./integrations.js").IntegrationSettings };
+  "configuration.list": { input: Record<string, never>; output: import("./integrations.js").ConfigurationPreset[] };
+  "configuration.capture": { input: {name:string}; output: import("./integrations.js").ConfigurationPreset };
+  "configuration.import": { input: {preset:import("./integrations.js").ConfigurationPreset}; output: import("./integrations.js").ConfigurationPreset };
+  "configuration.export": { input: {presetId:string}; output: import("./integrations.js").ConfigurationPreset };
+  "configuration.remove": { input: {presetId:string}; output: {removed:boolean} };
+  "configuration.preview": { input: {presetId:string;replace?:boolean}; output: import("./integrations.js").ConfigurationPreview };
+  "configuration.apply": { input: {planId:string}; output: import("./integrations.js").ConfigurationPreview };
+  "resource.preview": { input: import("./integrations.js").ResourcePlanInput; output: import("./integrations.js").ResourceSyncPlan };
+  "resource.apply": { input: { planId: string }; output: import("./integrations.js").ResourceSyncPlan };
+  "resource.undo": { input: { planId: string }; output: import("./integrations.js").ResourceSyncPlan };
+  "resource.history": { input: Record<string, never>; output: import("./integrations.js").ResourceSyncPlan[] };
 
   "health.get": { input: undefined; output: { status: "ok"; version: string; features?: CoreFeatures } };
   "project.list": { input: undefined; output: Project[] };
@@ -196,6 +225,7 @@ export interface IpcRequestMap {
   "capability.list": { input: undefined; output: ProviderCapability[] };
   "capability.upsert": { input: ProviderCapability; output: ProviderCapability };
   "capability.remove": { input: { capabilityId: string }; output: { removed: true } };
+  "capability.diagnose": { input: { capabilityId: string }; output: import("./service-diagnostics.js").ServiceDiagnostic };
   "capability.parseImport": { input: { source: CapabilityImportSource; text: string; fileName?: string }; output: CapabilityImportPreview };
   "capability.discoverMcp": { input: { projectRoot?: string }; output: { sources: DiscoveredMcpSource[] } };
   "capability.scanSkills": { input: { dir: string }; output: CapabilityScanResult };

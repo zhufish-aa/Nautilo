@@ -28,6 +28,7 @@ use crate::runtime::security::{ApprovalService, CommandPolicyService};
 
 pub struct Daemon {
     pub data_dir: PathBuf,
+    pub remote: Arc<crate::runtime::remote::RemoteService>,
     pub db: Arc<Mutex<Database>>,
     pub redaction: RedactionService,
     pub credentials: Arc<CredentialService>,
@@ -36,6 +37,8 @@ pub struct Daemon {
     pub projects: ProjectService,
     pub teams: TeamService,
     pub capabilities: CapabilityService,
+    pub resources: crate::application::resource_service::ResourceService,
+    pub integrations: crate::application::integration_service::IntegrationService,
     pub audit: Arc<AuditService>,
     pub metrics: MetricsService,
     pub command_policies: std::sync::Arc<CommandPolicyService>,
@@ -47,6 +50,7 @@ pub struct Daemon {
     pub source_control: crate::runtime::source_control::SourceControl,
     pub agents: AgentService,
     pub connections: crate::application::ConnectionService,
+    pub connection_imports: crate::application::connection_import::ConnectionImportService,
     pub interactions: std::sync::Arc<InteractionService>,
     pub slash_commands: SlashCommandService,
     pub capability_imports: CapabilityImportService,
@@ -93,13 +97,17 @@ impl Daemon {
         ));
         let recovery = RecoveryService::new(db.clone(), audit.clone(), events.clone());
         let diagnostics = DiagnosticsService::new(db.clone(), audit.clone(), std::sync::Arc::new(MetricsService::new(db.clone())), redaction.clone(), &data_dir);
+        let connections = crate::application::ConnectionService::new(db.clone(), credentials.clone(), adapters.clone());
         let daemon = Arc::new(Self {
+            remote: crate::runtime::remote::RemoteService::new(db.clone(), credentials.clone(), events.clone()),
             data_dir: data_dir.clone(),
             terminals,
             source_control: crate::runtime::source_control::SourceControl::default(),
             projects: ProjectService::new(db.clone()),
             teams: TeamService::new(db.clone()),
             capabilities: CapabilityService::new(db.clone()),
+            resources: crate::application::resource_service::ResourceService::new(db.clone(),credentials.clone(),redaction.clone()),
+            integrations: crate::application::integration_service::IntegrationService::new(db.clone(),credentials.clone(),adapters.clone()),
             metrics: MetricsService::new(db.clone()),
             command_policies: command_policies.clone(),
             approvals: approvals.clone(),
@@ -122,7 +130,8 @@ impl Daemon {
                 orchestration
             },
             plugins: PluginService::new(&data_dir.clone(), adapters.clone()),
-            connections: crate::application::ConnectionService::new(db.clone(), credentials.clone(), adapters.clone()),
+            connection_imports: crate::application::connection_import::ConnectionImportService::new(connections.clone(), credentials.clone()),
+            connections,
             agents,
             adapters,
             runs,
@@ -139,6 +148,7 @@ impl Daemon {
         // Plugin scan runs before IPC so provider.catalog and runs see every
         // loadable plugin; then mark anything a previous daemon left in flight.
         daemon.plugins.load_all().await;
+        daemon.runs.start_mcp_pool().map_err(|error| crate::errors::invalid("mcpPool", &error.to_string()))?;
         daemon.recovery.recover_interrupted()?;
         Ok(daemon)
     }
@@ -161,15 +171,17 @@ impl Daemon {
         // to record ~99.9% of all audit rows (600k+ event.wait rows alone) and
         // ballooned the database. Only failures and mutations keep a trail.
         const READ_ONLY_IPC: &[&str] = &[
+            "remote.status",
             "scm.status", "scm.diff",
             "health.get",
             "terminal.read", "terminal.list", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities",
             "project.list",
             "agent.list",
-            "connection.list", "connection.get", "connection.models",
+            "connection.list", "connection.get", "connection.models", "connection.scanNative",
             "team.list",
             "team.get",
             "capability.list",
+            "resource.inventory", "resource.history", "requestLog.list", "session.tools", "integration.get", "configuration.list", "configuration.export",
             "policy.list",
             "approval.list",
             "credential.status",

@@ -44,6 +44,16 @@ impl CredentialService {
         if credential.get("apiKey").and_then(Value::as_str).is_none_or(|key| key.trim().is_empty()) {
             return Err(CoreError::reason(ErrorCode::IpcInvalidRequest, "API key cannot be empty"));
         }
+        self.encrypt_payload(credential)
+    }
+
+    /// Non-provider secrets use the same authenticated local vault.
+    pub(crate) fn set_secret(&self, id: &str, value: &Value) -> CoreResult<()> {
+        let encrypted = self.encrypt_payload(value)?;
+        Repositories::new(&self.db.lock().unwrap().raw).credentials().save(id, &encrypted)
+    }
+
+    fn encrypt_payload(&self, credential: &Value) -> CoreResult<Value> {
         (|| -> CoreResult<Value> {
             let key = self.key_value()?;
             let cipher = Aes256Gcm::new((&key).into());

@@ -177,13 +177,17 @@ export interface RuntimeConnection {
   baseUrl?: string;
   harness?: string;
   loginProfileDirectory?: string;
+  /** Official unified keyring login, without claiming directory-based account isolation. */
+  nativeLogin?: boolean;
   models?: InstanceModelConfig[];
   createdAt: string;
   updatedAt: string;
   /** Computed on reads; credentials never appear in connection JSON. */
   hasCredential?: boolean;
+  /** Computed from explicit gateway settings; never a stored credential. */
+  accountGateway?: boolean;
 }
-export type RuntimeConnectionInput = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential">;
+export type RuntimeConnectionInput = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential" | "accountGateway">;
 
 export interface AgentInstance {
   id: AgentInstanceId;

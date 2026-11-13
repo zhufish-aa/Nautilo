@@ -8,6 +8,7 @@ import opencodeLogo from "../../assets/harness/opencode.png";
 import commandcodeLogo from "../../assets/harness/commandcode.svg";
 import traeLogo from "../../assets/harness/trae.png";
 import deepseekLogo from "../../assets/harness/deepseek.png";
+import antigravityLogo from "../../assets/harness/antigravity.png";
 
 const TINTS = ["violet", "rose", "blue", "mint", "amber", "peach"];
 
@@ -32,7 +33,8 @@ const PROVIDER_MARKS = {
   opencode: opencodeLogo,
   commandcode: commandcodeLogo,
   trae: traeLogo,
-  deepseek: deepseekLogo
+  deepseek: deepseekLogo,
+  antigravity: antigravityLogo
 };
 
 export function ProviderAvatar({ providerId, size = "md" }: { providerId: string; size?: "sm" | "md" | "lg" }): JSX.Element {

@@ -46,7 +46,20 @@ export const ENV_POLICIES: EnvironmentPolicy[] = [
 ];
 
 export function permissionModesFor(providerId: string): PermissionModeOption[] {
-  return findDescriptor(providerId)?.permissionModes ?? [];
+  const modes = findDescriptor(providerId)?.permissionModes;
+  if (!Array.isArray(modes)) return [];
+  // Plugin JSON crosses a runtime boundary; TS declarations do not guarantee translations exist.
+  return modes.filter((mode) => mode && typeof mode.value === "string" && mode.value.length > 0).map((mode) => ({
+    ...mode,
+    name: {
+      "zh-CN": mode.name?.["zh-CN"] || mode.name?.["en-US"] || mode.value,
+      "en-US": mode.name?.["en-US"] || mode.name?.["zh-CN"] || mode.value,
+    },
+    description: {
+      "zh-CN": mode.description?.["zh-CN"] || mode.description?.["en-US"] || "",
+      "en-US": mode.description?.["en-US"] || mode.description?.["zh-CN"] || "",
+    },
+  }));
 }
 
 /** Upstream wire/API protocols declared by a provider plugin. */

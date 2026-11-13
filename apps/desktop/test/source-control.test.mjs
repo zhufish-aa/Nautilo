@@ -118,16 +118,42 @@ test('hunk and line controls send the reviewed patch identity and preserve sourc
     action=f.calls('scm.mutate')[1].input;assert.equal(action.action,'unstage-hunks');assert.equal(action.lines.join(','),'5');assert.equal(action.patchToken,'reviewed-patch');
   }finally{f.close();}
 });
-test('file checkboxes select only their paths and display mixed native selections',{skip:!JSDOM},async()=>{
+test('working and staged groups keep partial changes separate and submit only the native index',{skip:!JSDOM},async()=>{
   const f=await fixture();const{w}=f;
   try{
-    const checkbox=label=>w.document.querySelector(`input[aria-label="选择提交文件 ${label}"]`);
-    await until(()=>checkbox('file.txt'));assert.equal(checkbox('file.txt').indeterminate,true);assert.equal(checkbox('new.txt').checked,false);
-    checkbox('new.txt').click();await until(()=>checkbox('new.txt').checked);assert.equal(f.calls('scm.mutate')[0].input.action,'stage');assert.deepEqual(Array.from(f.calls('scm.mutate')[0].input.paths),['new.txt']);
-    checkbox('file.txt').click();await until(()=>!checkbox('file.txt').checked);assert.equal(f.calls('scm.mutate')[1].input.action,'unstage');assert.deepEqual(Array.from(f.calls('scm.mutate')[1].input.paths),['file.txt']);
+    const checkbox=(label,group)=>w.document.querySelector(`[data-group="${group}"] input[aria-label="选择提交文件 ${label}"]`);
+    await until(()=>checkbox('file.txt','index'));assert.equal(checkbox('file.txt','index').checked,true);assert.equal(checkbox('file.txt','worktree').checked,false);assert.equal(checkbox('new.txt','untracked').checked,false);
+    checkbox('new.txt','untracked').click();await until(()=>checkbox('new.txt','index')?.checked);assert.equal(f.calls('scm.mutate')[0].input.action,'stage');assert.deepEqual(Array.from(f.calls('scm.mutate')[0].input.paths),['new.txt']);
+    checkbox('file.txt','index').click();await until(()=>!checkbox('file.txt','index'));assert.equal(f.calls('scm.mutate')[1].input.action,'unstage');assert.deepEqual(Array.from(f.calls('scm.mutate')[1].input.paths),['file.txt']);
     inputText(w,w.document.querySelector('textarea'),'Only the chosen file');await until(()=>!f.byText('提交所选 (1)').disabled);f.byText('提交所选 (1)').click();await until(()=>f.calls('scm.mutate').length===3);assert.equal(f.calls('scm.mutate')[2].input.action,'commit');assert.equal(f.calls('scm.mutate')[2].input.paths,undefined);
     assert.equal(w.document.querySelectorAll('.scm-file-row').length,2,'one row per file, including partial changes');assert.equal(f.button('暂存 new.txt'),null);
   }finally{f.close();}
+});
+test('unchanged status refreshes and revisiting a file do not reload its diff',{skip:!JSDOM},async()=>{
+  const f=await fixture();try{
+    await until(()=>f.w.document.querySelector('.scm-diff-code')?.textContent.includes('+working'));assert.equal(f.calls('scm.diff').length,1);
+    f.button('刷新仓库状态').click();await until(()=>f.calls('scm.status').length===2);await new Promise(resolve=>setTimeout(resolve,25));assert.equal(f.calls('scm.diff').length,1);
+    f.button('查看文件差异 new.txt').click();await until(()=>f.calls('scm.diff').length===2);f.button('查看文件差异 file.txt').click();await until(()=>f.w.document.querySelector('.scm-preview-file')?.textContent.includes('file.txt'));assert.equal(f.calls('scm.diff').length,2);
+    f.w.qa.hide();f.w.qa.show();await until(()=>f.w.document.querySelector('textarea'));assert.equal(f.calls('scm.diff').length,2);
+  }finally{f.close();}
+});
+test('staging another file while Git is busy queues its intent against the fresh index token',{skip:!JSDOM},async()=>{
+  let release;const f=await fixture({request:(method,input,base)=>method==='scm.mutate'&&input.action==='stage'&&input.paths.includes('new.txt')?new Promise(resolve=>{release=()=>base(method,input).then(resolve);}):base(method,input)});
+  try{
+    const checkbox=(path,group)=>f.w.document.querySelector(`[data-group="${group}"] input[aria-label="选择提交文件 ${path}"]`);
+    await until(()=>checkbox('new.txt','untracked'));checkbox('new.txt','untracked').click();await until(()=>release);
+    assert.equal(checkbox('file.txt','index').disabled,false);checkbox('file.txt','index').click();assert.equal(f.calls('scm.mutate').length,1);
+    release();await until(()=>f.calls('scm.mutate').length===2&&!checkbox('file.txt','index'));
+    assert.equal(f.calls('scm.mutate')[1].input.action,'unstage');assert.equal(f.calls('scm.mutate')[1].input.token,'state-2');
+  }finally{f.close();}
+});
+test('commit-and-push waits for a successful native commit and uses its new token',{skip:!JSDOM},async()=>{
+  const f=await fixture({initial:{...repository(),remotes:['origin'],upstream:'origin/main',upstreamRemote:'origin'}});
+  try{await until(()=>f.w.document.querySelector('textarea'));inputText(f.w,f.w.document.querySelector('textarea'),'Selected fix');await until(()=>!f.byText('提交并推送').disabled);f.byText('提交并推送').click();await until(()=>f.calls('scm.mutate').length===2);assert.deepEqual(Array.from(f.calls('scm.mutate'),item=>item.input.action),['commit','push']);assert.equal(f.calls('scm.mutate')[1].input.token,'state-2');}finally{f.close();}
+});
+test('a successful commit keeps a newer message draft typed while the commit was pending',{skip:!JSDOM},async()=>{
+  let release;const f=await fixture({request:(method,input,base)=>method==='scm.mutate'&&input.action==='commit'?new Promise(resolve=>{release=()=>base(method,input).then(resolve);}):base(method,input)});
+  try{await until(()=>f.w.document.querySelector('textarea'));inputText(f.w,f.w.document.querySelector('textarea'),'Submitted message');await until(()=>!f.byText('提交所选 (1)').disabled);f.byText('提交所选 (1)').click();await until(()=>release);inputText(f.w,f.w.document.querySelector('textarea'),'Next commit draft');release();await until(()=>f.w.document.body.textContent.includes('所选更改已提交'));assert.equal(f.w.document.querySelector('textarea').value,'Next commit draft');}finally{f.close();}
 });
 test('code previews use complete file versions in a read-only syntax editor and keep advanced controls secondary',{skip:!JSDOM},async()=>{
   const f=await fixture({request:async(method,input,base)=>{const value=await base(method,input);return method==='scm.diff'?{...value,before:'const version = 1;\n',after:'const version = 2;\n',patchToken:'reviewed',hunks:[{id:'hunk',header:'@@ -1 +1 @@',startLine:3,endLine:5}]}:value;}});

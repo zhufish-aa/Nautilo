@@ -15,6 +15,20 @@ pub struct Events {
 }
 
 impl Events {
+    fn record_usage(&mut self, session: &str, key: &str, usage: &Value) -> Vec<Value> {
+        let (Some(input), Some(output)) = (usage["inputTokens"].as_u64(), usage["outputTokens"].as_u64()) else { return vec![]; };
+        // DSH defines input as uncached tokens. Its native pi-ai adapter omits
+        // zero cache buckets; those omitted counters mean zero, not unknown.
+        let read = usage["cacheReadTokens"].as_u64().unwrap_or(0);
+        let write = usage["cacheWriteTokens"].as_u64().unwrap_or(0);
+        let normalized = json!({"kind":"usage","usageScope":"context","inputTokensIncludesCache":false,
+            "inputTokens":input,"outputTokens":output,"cachedInputTokens":read,"cacheCreationInputTokens":write,
+            "reasoningOutputTokens":usage["reasoningTokens"],"contextUsed":input.checked_add(read).and_then(|total|total.checked_add(write)),
+            "contextWindow":self.windows.get(session),"raw":{"source":"deepseek-harness","usage":usage}});
+        let total = self.usage.entry(session.into()).or_default().update(key, &normalized);
+        vec![normalized, total]
+    }
+
     pub fn begin_turn(&mut self, root: &str) {
         self.attempts.remove(root);
         self.usage.remove(root);
@@ -27,6 +41,14 @@ impl Events {
             return events;
         }
         match frame["kind"].as_str().unwrap_or("") {
+            "diagnostic" => events.push(json!({"kind":"raw","stream":"stderr","text":frame["message"]})),
+            "context" => {
+                if frame["contextWindow"].as_u64().is_some_and(|n| n > 0) {
+                    self.windows.insert(session.into(),frame["contextWindow"].clone());
+                }
+                events.push(json!({"kind":"usage","usageScope":"context","contextUsed":frame["contextUsed"],
+                    "contextWindow":self.windows.get(session),"raw":frame}));
+            }
             "child" => {
                 let parent = frame["parentSessionId"].as_str().unwrap_or("");
                 if parent != root && !self.children.contains_key(parent) {
@@ -86,6 +108,7 @@ impl Events {
                                 );
                             }
                         }
+                        "usage" => events.extend(self.record_usage(session, &format!("attempt:{attempt}"), &chunk["usage"])),
                         _ => {}
                     }
                 }
@@ -112,14 +135,6 @@ impl Events {
                             if self.streamed.contains(&id) { continue; }
                             if block["type"]=="reasoning" { events.push(json!({"kind":"thinking","phase":"completed","messageId":id,"text":block["text"]})); }
                             self.streamed.insert(id);
-                        }
-                        if data["usage"].is_object() {
-                            let u=&data["usage"];
-                            let usage=json!({"kind":"usage","usageScope":"context","inputTokensIncludesCache":false,"contextWindow":self.windows.get(session),
-                                "inputTokens":u["inputTokens"],"outputTokens":u["outputTokens"],"cachedInputTokens":u["cacheReadTokens"],
-                                "cacheCreationInputTokens":u["cacheWriteTokens"],"reasoningOutputTokens":u["reasoningTokens"]});
-                            events.push(usage.clone());
-                            events.push(self.usage.entry(session.into()).or_default().update(&format!("{}:{}",data["turn"],data["step"]),&usage));
                         }
                     }
                     "tool/call" => {
@@ -159,6 +174,21 @@ impl Events {
                     "turn/end" if data["reason"]["kind"]=="error" => events.push(json!({"kind":"error","message":data["reason"].to_string(),"retryable":true})),
                     _=>{}
                 }
+                if matches!(event["type"].as_str(), Some("assistant/message" | "assistant/attempt")) {
+                    // Native settlements also embed raw usage chunks in their
+                    // durable stream (including interrupted/retried attempts).
+                    let usage = data.get("usage").filter(|u|u.is_object()).or_else(|| {
+                        data["stream"].as_array()?.iter().rev().find_map(|record| {
+                            let chunk = record.get("chunk").unwrap_or(record);
+                            (chunk["type"] == "usage").then(||chunk.get("usage")).flatten()
+                        })
+                    });
+                    if let Some(usage) = usage {
+                        let key = self.attempts.get(session).map(|id|format!("attempt:{id}"))
+                            .unwrap_or_else(||format!("settlement:{}:{}:{}",data["turn"],data["step"],event["seq"]));
+                        events.extend(self.record_usage(session, &key, usage));
+                    }
+                }
             }
             _ => {}
         }
@@ -180,6 +210,31 @@ impl Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_usage_omits_zero_caches_and_settlement_replaces_stream_sample() {
+        let mut parser=Events::default();parser.begin_turn("s");
+        parser.parse(&json!({"kind":"event","sessionId":"s","event":{"type":"request/context","data":{"contextWindow":128000}}}),"s");
+        let stream=|attempt:&str,usage:Value|json!({"kind":"stream","sessionId":"s","frame":{"type":"chunk","attemptId":attempt,"chunk":{"type":"usage","usage":usage}}});
+        let first=parser.parse(&stream("a",json!({"inputTokens":100,"outputTokens":4})),"s");
+        assert_eq!(first[0]["contextUsed"],100);assert_eq!(first[0]["contextWindow"],128000);
+        assert_eq!(first[1]["cachedInputTokens"],0);assert_eq!(first[1]["cacheCreationInputTokens"],0);
+        let settled=parser.parse(&json!({"kind":"event","sessionId":"s","event":{"seq":10,"type":"assistant/message","data":{"turn":1,"step":1,"message":{"content":[]},"usage":{"inputTokens":100,"outputTokens":8,"cacheReadTokens":200}}}}),"s");
+        assert_eq!(settled[0]["contextUsed"],300);assert_eq!(settled[1]["inputTokens"],100);assert_eq!(settled[1]["outputTokens"],8);
+        let retry=parser.parse(&stream("b",json!({"inputTokens":30,"outputTokens":3})),"s");
+        assert_eq!(retry[1]["inputTokens"],130);assert_eq!(retry[1]["outputTokens"],11);assert_eq!(retry[1]["cachedInputTokens"],200);
+        parser.begin_turn("s");let next=parser.parse(&stream("c",json!({"inputTokens":5,"outputTokens":1})),"s");
+        assert_eq!(next[1]["inputTokens"],5);assert_eq!(next[0]["contextWindow"],128000);
+    }
+    #[test]
+    fn durable_attempt_usage_and_native_context_restore_do_not_fake_billing() {
+        let mut parser=Events::default();
+        let restored=parser.parse(&json!({"kind":"context","sessionId":"s","contextUsed":2048,"contextWindow":64000}),"s");
+        assert_eq!(restored.len(),1);assert_eq!(restored[0]["usageScope"],"context");assert_eq!(restored[0]["contextUsed"],2048);
+        let frame=json!({"kind":"event","sessionId":"s","event":{"seq":1,"type":"assistant/attempt","data":{"turn":1,"step":1,"stream":[{"type":"chunk","chunk":{"type":"usage","usage":{"inputTokens":20,"outputTokens":2}}}]}}});
+        let first=parser.parse(&frame,"s");assert_eq!(first[1]["inputTokens"],20);
+        let duplicate=parser.parse(&frame,"s");assert_eq!(duplicate[1]["inputTokens"],20);
+        let child=parser.parse(&json!({"kind":"context","sessionId":"other","contextUsed":99999}),"s");assert!(child.is_empty());
+    }
     #[test]
     fn ptc_dispatches_patch_the_root_and_only_root_result_finishes_the_batch() {
         let mut state = Events::default();

@@ -5,7 +5,7 @@ import ts from "typescript";
 const lib = new URL("../../src/renderer/src/lib/", import.meta.url);
 const compile = (source) => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 export const helperModules = {};
-for (const name of ["process-display", "orchestration-timeline-policy", "tool-timeline-groups", "subagent-activities", "provider-diff", "tool-display", "changed-files"]) {
+for (const name of ["context-usage", "deepseek-legacy-history", "process-display", "orchestration-timeline-policy", "tool-timeline-groups", "subagent-activities", "provider-diff", "tool-display", "changed-files"]) {
   const exports = {};
   vm.runInNewContext(compile(readFileSync(new URL(`${name}.ts`, lib), "utf8")), {
     exports, TextEncoder, TextDecoder, require: (name) => helperModules[name]

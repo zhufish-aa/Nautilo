@@ -18,6 +18,7 @@
     "dev": "pnpm --filter @agenthub/core-daemon dev",
     "dev:daemon": "pnpm --filter @agenthub/core-daemon serve",
     "dev:desktop": "node scripts/dev-desktop.mjs",
+    "mobile:apk": "node scripts/build-mobile.mjs",
 
     "rust:build": "node scripts/rust-build.mjs",
     "rust:release": "node scripts/rust-build.mjs --release",

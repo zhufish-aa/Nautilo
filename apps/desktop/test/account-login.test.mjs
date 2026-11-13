@@ -12,7 +12,7 @@ function load() {
   const handlers = {}, children = [], calls = [];
   const imports = { './account-profile': { prepareAccountProfile: async () => ({ profileId: 'managed', directory: '/managed' }) }, electron: { ipcMain: { handle: (name, fn) => { handlers[name] = fn; } } }, 'node:fs/promises': { mkdir: async () => {}, realpath: async (path) => path }, 'node:child_process': { spawn: (...args) => { calls.push(args); const child = new EventEmitter(); child.kill = () => { child.killed = true; }; children.push(child); return child; } } };
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', compiled)((name) => imports[name] ?? require(name), module, module.exports);
+  new Function('require', 'module', 'exports', compiled)((name) => name === './antigravity-login' ? { authenticateAntigravity: () => Promise.reject(new Error('not exercised here')) } : imports[name] ?? require(name), module, module.exports);
   module.exports.registerAccountLoginHandlers();
   return { ...module.exports, handlers, children, calls };
 }
@@ -75,4 +75,11 @@ test('Claude login pins both CLI and Anthropic profile roots without changing HO
   assert.equal(invocation.env.ANTHROPIC_CONFIG_DIR, require('node:path').join(input.directory, 'anthropic'));
   if (process.env.HOME) assert.equal(invocation.env.HOME, process.env.HOME);
   assert.equal(invocation.env.ANTHROPIC_PROFILE, undefined);
+});
+
+test('Antigravity sign-in uses official ACP without spoofing an isolated keyring', () => {
+  const invocation = load().loginInvocation({ ...input, providerId:'antigravity', executable:'agy.exe' });
+  assert.deepEqual(invocation.args,['acp']);
+  for (const key of ['CODEX_HOME','CLAUDE_CONFIG_DIR','GEMINI_API_KEY','GOOGLE_API_KEY','AGY_ADC_AUTH']) assert.equal(invocation.env[key],undefined);
+  if(process.env.USERPROFILE) assert.equal(invocation.env.USERPROFILE,process.env.USERPROFILE);
 });

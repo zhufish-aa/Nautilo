@@ -53,6 +53,8 @@ export interface ProviderCapability {
   description: string;
   tags: string[];
   enabled: boolean;
+  /** Recorded at import; absent for legacy records whose source is unknown. */
+  origin?: { kind: "native" | "local" | "plugin" | "builtin" | "custom"; path?: string; label?: string };
   /** Providers this capability is enabled for; empty means none. */
   providerIds: string[];
   mcp?: McpServerConfig;

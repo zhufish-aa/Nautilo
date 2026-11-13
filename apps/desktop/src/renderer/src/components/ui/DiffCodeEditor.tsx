@@ -1,7 +1,8 @@
-import { useEffect, useRef, type MutableRefObject } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import "@fontsource-variable/jetbrains-mono";
 import "../../lib/monaco-workers";
 import * as monaco from "monaco-editor";
+import { bindDiffRecovery } from "../../lib/monaco-diff-provider";
 
 const SHARED_COLORS = {
   "editor.background": "#00000000",
@@ -189,7 +190,7 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
   readOnly?: boolean;
   sideBySide?: boolean;
   hideUnchanged?: boolean;
-  appearance?: "default" | "review";
+  appearance?: "default" | "review" | "source-control";
   navigationRef?: MutableRefObject<DiffReviewNavigation | null>;
   onReviewPosition?: (position: DiffReviewPosition) => void;
 }): JSX.Element {
@@ -199,18 +200,23 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
   const originalModelRef = useRef<monaco.editor.ITextModel | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneDiffEditor | monaco.editor.IStandaloneCodeEditor>();
   const suppressChangeRef = useRef(false);
+  const [diffError, setDiffError] = useState("");
+  const retryDiffRef = useRef<(() => void) | null>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const positionCallback = useRef(onReviewPosition);
   positionCallback.current = onReviewPosition;
 
-  // Mounted once per file (the parent keys the component by resolvedPath).
+  const hasOriginal = before !== undefined;
+  // Preserve models for controlled edits. Recreate only when switching file,
+  // presentation, or plain/diff editor kind (including async reference loads).
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
     const language = languageForFile(filePath ?? "");
     const review = appearance === "review";
-    const theme = (): string => currentTheme(review);
+    const sourceControl = appearance === "source-control";
+    const theme = (): string => currentTheme(review || sourceControl);
     const options: monaco.editor.IStandaloneEditorConstructionOptions = review ? {
       ...EDITOR_OPTIONS,
       fontFamily: '"JetBrains Mono Variable", "Noto Sans SC Variable", "Cascadia Code", Consolas, monospace',
@@ -230,6 +236,22 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
       stickyScroll: { enabled: false },
       scrollBeyondLastColumn: 8,
       unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false, nonBasicASCII: false }
+    } : sourceControl ? {
+      ...EDITOR_OPTIONS,
+      fontFamily: '"JetBrains Mono Variable", "Noto Sans SC Variable", Consolas, monospace',
+      fontSize: 13,
+      lineHeight: 22,
+      fontWeight: "500",
+      fontLigatures: false,
+      lineNumbers: "on",
+      lineNumbersMinChars: 3,
+      lineDecorationsWidth: 12,
+      padding: {top: 12, bottom: 20},
+      renderLineHighlight: "none",
+      smoothScrolling: true,
+      cursorSmoothCaretAnimation: "off",
+      scrollbar: {verticalScrollbarSize: 9, horizontalScrollbarSize: 9, useShadows: false},
+      unicodeHighlight: {ambiguousCharacters: false, invisibleCharacters: false, nonBasicASCII: false}
     } : EDITOR_OPTIONS;
     const models: monaco.editor.ITextModel[] = [];
     const subscriptions: monaco.IDisposable[] = [];
@@ -237,6 +259,7 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
     let changeIndex = 0;
     let disposed = false;
     let editor: monaco.editor.IStandaloneDiffEditor | monaco.editor.IStandaloneCodeEditor;
+    setDiffError("");
 
     const modifiedModel = monaco.editor.createModel(value, language);
     models.push(modifiedModel);
@@ -249,6 +272,7 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
       const originalModel = monaco.editor.createModel(before, language);
       originalModelRef.current = originalModel;
       models.push(originalModel);
+      subscriptions.push(bindDiffRecovery(originalModel, error => { if (!disposed) setDiffError(error); }));
       const diffEditor = monaco.editor.createDiffEditor(container, {
         ...options,
         theme: theme(),
@@ -257,13 +281,20 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
         renderSideBySide: sideBySide,
         useInlineViewWhenSpaceIsLimited: review ? false : !readOnly,
         enableSplitViewResizing: true,
-        renderIndicators: review || !readOnly,
+        renderIndicators: review || sourceControl || !readOnly,
         ...(review ? { renderMarginRevertIcon: false, renderGutterMenu: false, renderOverviewRuler: false, diffCodeLens: false } : {}),
         ignoreTrimWhitespace: false,
         diffAlgorithm: "advanced",
         hideUnchangedRegions: { enabled: hideUnchanged }
       });
       diffEditor.setModel({ original: originalModel, modified: modifiedModel });
+      retryDiffRef.current = () => {
+        if (disposed) return;
+        const view = diffEditor.saveViewState();
+        diffEditor.setModel(null);
+        diffEditor.setModel({original: originalModel, modified: modifiedModel});
+        if (view) diffEditor.restoreViewState(view);
+      };
       // Reveal the first change once the (async) diff computation lands.
       let revealed = false;
       const updatePosition = (): void => {
@@ -350,9 +381,11 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
     return () => {
       themeObserver.disconnect();
       disposed = true;
+      retryDiffRef.current = null;
       cancelAnimationFrame(connectorFrame);
       for (const subscription of subscriptions) subscription.dispose();
       if (navigationRef) navigationRef.current = null;
+      editor.setModel(null);
       editor.dispose();
       for (const model of models) model.dispose();
       modifiedModelRef.current = null;
@@ -361,7 +394,7 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
       if (review) monaco.editor.setTheme(currentTheme());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [filePath, hasOriginal, appearance]);
 
   // Controlled-value sync (parent resets are the only external writes; typing
   // round-trips are no-ops because the model already holds the same text).
@@ -374,9 +407,10 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
     }
   }, [value]);
   useEffect(()=>{const model=originalModelRef.current;if(model&&before!==undefined&&model.getValue()!==before)model.setValue(before);},[before]);
-  useEffect(()=>{const editor=editorRef.current;if(!editor)return;if("getOriginalEditor" in editor)editor.updateOptions({readOnly,renderSideBySide:sideBySide,renderIndicators:appearance === "review" || !readOnly,hideUnchangedRegions:{enabled:hideUnchanged}});else editor.updateOptions({readOnly});},[readOnly,sideBySide,hideUnchanged,appearance]);
+  useEffect(()=>{const editor=editorRef.current;if(!editor)return;if("getOriginalEditor" in editor)editor.updateOptions({readOnly,renderSideBySide:sideBySide,renderIndicators:appearance !== "default" || !readOnly,hideUnchangedRegions:{enabled:hideUnchanged}});else editor.updateOptions({readOnly});},[readOnly,sideBySide,hideUnchanged,appearance]);
 
-  return <div className={appearance === "review" ? "review-editor-shell" : "flex min-h-0 min-w-0 flex-1"}>
+  return <div className={appearance === "review" ? "review-editor-shell" : "flex min-h-0 min-w-0 flex-1"} style={{flexDirection: "column"}}>
+    {diffError && <div role="alert" className="flex items-center justify-between gap-3 px-3 py-2 text-sm" title={diffError}><span>差异计算暂不可用，文件内容和编辑草稿已保留。</span><button type="button" onClick={() => retryDiffRef.current?.()}>重试</button></div>}
     <div ref={containerRef} className="min-h-0 min-w-0 flex-1" />
     {appearance === "review" && <svg ref={connectorsRef} className="review-diff-connectors" aria-hidden />}
   </div>;

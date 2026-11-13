@@ -1,6 +1,9 @@
 import { TerminalService } from "../runtime/terminal-service.js";
 import { SourceControl } from "../runtime/source-control.js";
 import { ConnectionService } from "./connection-service.js";
+import { ConnectionImportService } from "./connection-import/service.js";
+import { ResourceService } from "./resource-service.js";
+import { IntegrationService } from "./integration-service.js";
 import { CodexAdapter } from "../adapters/codex/adapter.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +53,9 @@ export class CoreDaemon {
   readonly projects: ProjectService;
   readonly agents: AgentService;
   readonly connections: ConnectionService;
+  readonly connectionImports: ConnectionImportService;
+  readonly resources: ResourceService;
+  readonly integrations: IntegrationService;
   readonly teams: TeamService;
   readonly sessions: SessionService;
   readonly projections: ProjectionService;
@@ -100,6 +106,8 @@ export class CoreDaemon {
     this.projects = new ProjectService(this.database);
     this.agents = new AgentService(this.database, this.adapters, this.credentials, this.environment);
     this.connections = new ConnectionService(this.database, this.credentials, this.adapters, this.environment);
+    this.connectionImports = new ConnectionImportService(this.connections, this.credentials);
+    this.resources = new ResourceService(this.database,this.credentials,this.redaction);
     this.teams = new TeamService(this.database);
     this.sessions = new SessionService(this.database, this.runs, this.events);
     this.projections = new ProjectionService(this.database);
@@ -115,6 +123,7 @@ export class CoreDaemon {
     this.subscriptions = new EventSubscriptionService(this.events);
     this.slashCommands = new SlashCommandService(this.database, this.agents, this.audit, this.runs);
     this.capabilities = new CapabilityService(this.database);
+    this.integrations = new IntegrationService(this.database,this.credentials,this.connections,this.agents,this.capabilities);
     this.capabilityImports = new CapabilityImportService(this.capabilities);
     this.interactions = new InteractionService(this.database, this.events);
     this.runs.setInteractionService(this.interactions);

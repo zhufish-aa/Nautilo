@@ -1,16 +1,14 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, delimiter, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { developmentEnvironment } from './dev-storage.mjs';
 
 export const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export function rustEnvironment() {
-  const env={...process.env};
-  const localFile=join(workspace,'.nautilo-dev.local.json');
-  const local=existsSync(localFile)?JSON.parse(readFileSync(localFile,'utf8')):{};
-  for(const key of ['RUSTUP_HOME','CARGO_HOME','CARGO_TARGET_DIR','RUSTUP_TOOLCHAIN']) if(!env[key] && local[key]) env[key]=local[key];
+  const env = developmentEnvironment();
   const pathKey=Object.keys(env).find(key=>key.toLowerCase()==='path')??'PATH';
-  const mingw=join(workspace,'.toolchains','mingw64','bin');
+  const mingw=env.NAUTILO_MINGW_DIR ? join(env.NAUTILO_MINGW_DIR,'bin') : join(workspace,'.toolchains','mingw64','bin');
   env[pathKey]=[existsSync(mingw)?mingw:'',env[pathKey]].filter(Boolean).join(delimiter);
   if(!env.RUSTUP_TOOLCHAIN){
     const listed=spawnSync('rustup',['toolchain','list'],{env,encoding:'utf8',windowsHide:true});

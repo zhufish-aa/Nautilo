@@ -7,6 +7,7 @@ import type {
 } from "@agenthub/domain";
 
 export type * from "./assistant.js";
+export type * from "./service-diagnostics.js";
 
 export const schemaVersion = 1 as const;
 
@@ -93,3 +94,7 @@ export function validateRecoveryDecision(value: unknown): RecoveryDecision {
 
 export * from "./capability-import.js";
 export * from "./ipc.js";
+export * from "./request-log.js";
+export * from "./integrations.js";
+export type * from "./connection-import.js";
+export type * from "./remote-access.js";

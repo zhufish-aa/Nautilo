@@ -18,6 +18,7 @@ import {
   Server,
   Puzzle,
   Monitor,
+  Smartphone,
   Orbit,
   Plus,
   RotateCcw,
@@ -51,9 +52,11 @@ import { PermissionPolicyCard } from "./PermissionPolicyCard";
 import { UsagePanel } from "./UsagePanel";
 import { AssistantSettingsPanel } from "../assistant/AssistantSettingsPanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
+import { RemoteAccessPanel } from "./remote/RemoteAccessPanel";
 import { UI_EASE_OUT, useSurfaceEntrance, useUiReducedMotion } from "../../lib/ui-motion";
 
 type SettingsSection =
+  | "remote"
   | "teams"
   | "accounts"
   | "assistant"
@@ -84,6 +87,7 @@ const SECTIONS: Array<{
   { id: "mcp", zh: "MCP 服务", en: "MCP servers", icon: Server },
   { id: "plugins", zh: "插件", en: "Plugins", icon: Puzzle },
   { id: "permissions", zh: "权限与安全", en: "Permissions", icon: Shield },
+  { id: "remote", zh: "远程连接", en: "Remote access", icon: Smartphone },
   {
     id: "notifications",
     zh: "通知与快捷指令",
@@ -297,6 +301,7 @@ export function SettingsPage(): JSX.Element {
           </h1>
 
           {section === "usage" && <div className="settings-panel-card"><UsagePanel /></div>}
+          {section === "remote" && <RemoteAccessPanel />}
 
           {section === "general" && (
             <>

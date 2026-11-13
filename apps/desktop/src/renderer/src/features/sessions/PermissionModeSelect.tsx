@@ -20,7 +20,8 @@ export function PermissionModeSelect({ value, options, onChange, disabled }: {
   const zh = locale === "zh-CN";
   const selected = options.find((option) => option.value === value);
   const fullAccess = (mode: string): boolean => ["full-access", "bypassPermissions", "danger-full-access"].includes(mode);
-  const permissionLabel = value === "default" ? (zh ? "默认权限" : "Default permissions") : selected?.name[locale] ?? value;
+  const labelFor = (option: PermissionModeOption): string => option.name?.[locale] || option.name?.[zh ? "en-US" : "zh-CN"] || option.value;
+  const permissionLabel = value === "default" ? (zh ? "默认权限" : "Default permissions") : selected ? labelFor(selected) : value;
   const Icon = fullAccess(value) ? ShieldAlert : ShieldCheck;
   return <Select.Root value={value} onValueChange={onChange} disabled={disabled || !options.length}>
     <Select.Trigger className="permission-trigger" data-danger={fullAccess(value)} aria-label={zh ? "权限模式" : "Permission mode"} aria-description={permissionLabel} title={permissionLabel}>
@@ -34,12 +35,14 @@ export function PermissionModeSelect({ value, options, onChange, disabled }: {
         <Select.Viewport>
           {options.map((option) => {
             const danger = fullAccess(option.value);
+            const label = labelFor(option);
+            const description = option.description?.[locale] || option.description?.[zh ? "en-US" : "zh-CN"];
             const OptionIcon = danger ? ShieldAlert : option.value === "plan" ? ListChecks : option.value === "default" || option.value === "read-only" ? Hand : ShieldCheck;
-            return <Select.Item key={option.value} value={option.value} textValue={option.name[locale]} className="permission-menu-option" data-danger={danger}>
+            return <Select.Item key={option.value} value={option.value} textValue={label} className="permission-menu-option" data-danger={danger}>
               <OptionIcon size={16} aria-hidden />
               <span className="permission-menu-copy">
-                <Select.ItemText>{option.name[locale]}</Select.ItemText>
-                <span className="permission-description">{option.description[locale]}</span>
+                <Select.ItemText>{label}</Select.ItemText>
+                {description && <span className="permission-description">{description}</span>}
               </span>
               <Select.ItemIndicator className="permission-check"><Check size={15} /></Select.ItemIndicator>
             </Select.Item>;

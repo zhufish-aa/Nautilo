@@ -1,9 +1,10 @@
 import { useLayoutEffect, useRef } from "react";
-import { useReducedMotion } from "framer-motion";
+import { animate, useReducedMotion } from "framer-motion";
 import { useSettingsStore } from "../stores/settings";
 
 export const UI_EASE_OUT = [0.23, 1, 0.32, 1] as const;
 const easing = "cubic-bezier(0.23, 1, 0.32, 1)";
+export const UI_SPRING = { type:"spring" as const, duration:0.5, bounce:0.2 };
 
 export function useUiReducedMotion(): boolean {
   const systemReduced = useReducedMotion();
@@ -18,11 +19,17 @@ export function useSurfaceEntrance<T extends HTMLElement>(key: unknown, active =
   useLayoutEffect(() => {
     const element = ref.current;
     if (!active || reduced || !element?.animate) return;
-    const animation = element.animate([
-      { opacity: 0.5, transform: "translateY(6px)" },
-      { opacity: 1, transform: "translateY(0px)" }
-    ], { duration: 180, easing });
-    return () => animation.cancel();
+    const initialOpacity = element.style.opacity;
+    const initialTransform = element.style.transform;
+    const animation = animate(element, {
+      opacity:[0.6,1],
+      transform:["translateY(10px) scale(0.995)","translateY(0px) scale(1)"]
+    }, UI_SPRING);
+    return () => {
+      animation.stop();
+      element.style.opacity = initialOpacity;
+      element.style.transform = initialTransform;
+    };
   }, [key, active, reduced]);
   return ref;
 }

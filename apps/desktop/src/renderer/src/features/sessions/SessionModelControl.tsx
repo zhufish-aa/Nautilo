@@ -16,6 +16,7 @@ import { useAgentsStore } from "../../stores/agents";
 import { useSessionsStore } from "../../stores/sessions";
 import { toast } from "../../stores/toast";
 import "./model-picker.css";
+import { ConnectionPicker } from "./ConnectionPicker";
 
 export type ComposerConfiguration = ConnectionModelSelection;
 type Draft = { instanceId: string; configuration: ComposerConfiguration; onChange: (patch: ComposerConfiguration) => void; onInstanceChange?: (id: string) => void };
@@ -145,13 +146,6 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
     void configure({ connectionId: approved.id ?? null, connectionRevision: approved.revision, confirmConnectionChange: true, model: "", reasoningEffort: "", serviceTier: "" }).then(success => { if (success) setPendingConnection(undefined); });
   };
   const visibleModels = models.filter((item) => `${item.displayName} ${item.id}`.toLowerCase().includes(query.trim().toLowerCase()));
-  const connectionOptions = [
-    ...(instance.configurationKind === "harness" ? [] : [{ value: "__instance", label: zh ? "旧会话原有连接" : "Legacy connection" }]),
-    ...connections.filter((item) => connectionSupportsAgent(item, instance)).map((item) => ({ value: item.id, label: item.name }))
-  ];
-  if (connectionId && !connectionOptions.some((item) => item.value === connectionId)) {
-    connectionOptions.push({ value: connectionId, label: selectedConnection?.name ?? connectionId });
-  }
   const chooseConnection = (id: string): void => {
     const item = connections.find((connection) => connection.id === id);
     changeConnection(item ? {
@@ -173,7 +167,7 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
       <div className="model-menu-search"><Search size={15} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={zh ? "搜索模型" : "Search models"} aria-label={zh ? "搜索模型" : "Search models"} /></div>
       <section className="model-picker-connection" aria-label={zh ? "账号与供应商" : "Account & provider"}>
         <Server size={16} aria-hidden/>
-        <SelectField value={connectionId ?? (instance.configurationKind === "harness" ? undefined : "__instance")} placeholder={zh ? "选择供应商或账号" : "Choose a provider or account"} disabled={locked} onValueChange={chooseConnection} options={connectionOptions} aria-label={zh ? "选择账号或供应商" : "Choose account or provider"}/>
+        <ConnectionPicker instance={instance} value={connectionId ?? (instance.configurationKind === "harness" ? undefined : "__instance")} disabled={locked} fallback={instance.configurationKind === "harness" ? undefined : { value: "__instance", label: zh ? "旧会话原有连接" : "Legacy connection" }} onChange={item => chooseConnection(item?.id ?? "__instance")}/>
         {selectedConnection && <span className="model-picker-protocol">{selectedConnection.kind === "login" ? (zh ? "账号" : "Account") : selectedConnection.protocol === "responses" ? "Responses" : selectedConnection.protocol === "chat" ? "Chat" : "Anthropic"}</span>}
       </section>
       <div className="model-menu-list">

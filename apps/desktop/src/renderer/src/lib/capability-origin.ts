@@ -2,6 +2,7 @@ import type { ProviderCapability } from "@agenthub/domain";
 
 export type CapabilityOriginKind = "builtin" | "plugin" | "local" | "custom" | "unknown";
 export function capabilityOrigin(tool: ProviderCapability): { kind: CapabilityOriginKind; label: string; path?: string } {
+  if (tool.origin) return { kind: tool.origin.kind === "native" ? "local" : tool.origin.kind, label: tool.origin.label ?? "", path: tool.origin.path };
   const source = tool.skill?.source?.trim();
   const path = tool.skill?.resourceDir?.trim() || (/^(?:[a-z]:[\\/]|\/|~[\\/])/i.test(source ?? "") ? source : undefined);
   const normalized = (path ?? source ?? "").replaceAll("\\", "/");

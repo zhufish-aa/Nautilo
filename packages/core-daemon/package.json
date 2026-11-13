@@ -23,7 +23,8 @@
     "@agenthub/provider-sdk": "workspace:*",
     "@agenthub/schemas": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "smol-toml": "^1.9.1"
+    "smol-toml": "^1.9.1",
+    "yaml": "^2.9.1"
   },
   "optionalDependencies": {
     "node-pty": "^1.0.0"

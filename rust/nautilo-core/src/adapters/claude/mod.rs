@@ -304,7 +304,7 @@ fn file_diff(tool_name: &str, input: &Value) -> Option<Value> {
 
 fn parse_init(event: &Value, raw: &Value) -> Vec<AdapterEvent> {
     let mut events = vec![];
-    events.push(AdapterEvent::Status{phase:"runtime_capabilities".into(),raw:Some(json!({"providerId":"claude-code","source":"native-handshake","transport":"stream-json","cliVersion":event["claude_code_version"],"nativeSessionId":event["session_id"],"commands":event["slash_commands"]}))});
+    events.push(AdapterEvent::Status{phase:"runtime_capabilities".into(),raw:Some(json!({"providerId":"claude-code","source":"native-handshake","transport":"stream-json","cliVersion":event["claude_code_version"],"nativeSessionId":event["session_id"],"commands":event["slash_commands"],"tools":event["tools"],"mcpServers":event["mcp_servers"]}))});
     if let Some(session_id) = event.get("session_id").and_then(text_of) {
         events.push(AdapterEvent::Session { provider_session_id: session_id, raw: Some(raw.clone()) });
     }

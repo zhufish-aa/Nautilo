@@ -65,6 +65,7 @@ function fileDiff(toolName: string, input: unknown): AdapterFileDiff | undefined
 
 function parseInit(event: RecordValue, raw: unknown): AdapterEvent[] {
   const events: AdapterEvent[] = [];
+  events.push({ kind: "status", phase: "runtime_capabilities", raw: { providerId: "claude-code", source: "native-handshake", transport: "stream-json", cliVersion: event.claude_code_version, nativeSessionId: event.session_id, commands: event.slash_commands, tools: event.tools, mcpServers: event.mcp_servers } });
   const sessionId = text(event.session_id);
   if (sessionId) events.push({ kind: "session", providerSessionId: sessionId, raw });
   const commands = Array.isArray(event.slash_commands)

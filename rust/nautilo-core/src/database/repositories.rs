@@ -126,6 +126,11 @@ impl<'a> Repositories<'a> {
     pub fn capabilities(&self) -> JsonRepository<'a> {
         JsonRepository::new(self.db, "capabilities")
     }
+    pub fn request_logs(&self) -> RequestLogRepository<'a> { RequestLogRepository { db: self.db } }
+    pub fn resource_transactions(&self) -> JsonRepository<'a> { JsonRepository::new(self.db,"resource_transactions") }
+    pub fn configuration_presets(&self) -> JsonRepository<'a> { JsonRepository::new(self.db,"configuration_presets") }
+    pub fn integration_settings(&self) -> JsonRepository<'a> { JsonRepository::new(self.db,"integration_settings") }
+    pub fn account_gateway_sessions(&self) -> JsonRepository<'a> { JsonRepository::new(self.db,"account_gateway_sessions") }
     pub fn sessions(&self) -> SessionRepository<'a> {
         SessionRepository { db: self.db }
     }
@@ -155,6 +160,29 @@ impl<'a> Repositories<'a> {
     }
     pub fn credentials(&self) -> CredentialRepository<'a> {
         CredentialRepository { db: self.db }
+    }
+}
+
+pub struct RequestLogRepository<'a> { db: &'a Connection }
+impl RequestLogRepository<'_> {
+    pub fn save(&self, value: &Value) -> CoreResult<()> {
+        JsonRepository::new(self.db, "request_logs").save(value, value["updatedAt"].as_str().unwrap_or(""))
+    }
+    pub fn get(&self, id: &str) -> CoreResult<Option<Value>> { JsonRepository::new(self.db, "request_logs").get(id) }
+    pub fn page(&self, input: &Value) -> CoreResult<Value> {
+        let limit = input["limit"].as_u64().unwrap_or(40).clamp(1, 200) as usize;
+        let cursor = input["before"].as_str().unwrap_or("");
+        let (time, id) = cursor.split_once('|').unwrap_or(("", ""));
+        let mut stmt = self.db.prepare("SELECT data FROM request_logs WHERE (?1='' OR json_extract(data,'$.sessionId')=?1) AND (?2='' OR json_extract(data,'$.providerId')=?2) AND (?3='' OR json_extract(data,'$.status')=?3) AND (?4='' OR json_extract(data,'$.createdAt') < ?4 OR (json_extract(data,'$.createdAt')=?4 AND id < ?5)) ORDER BY json_extract(data,'$.createdAt') DESC, id DESC LIMIT ?6").map_err(db_fail)?;
+        let mut items = stmt.query_map(params![input["sessionId"].as_str().unwrap_or(""), input["providerId"].as_str().unwrap_or(""), input["status"].as_str().unwrap_or(""), time, id, (limit + 1) as i64], |row| row.get::<_, String>(0)).map_err(db_fail)?.collect::<Result<Vec<_>,_>>().map_err(db_fail)?.into_iter().map(parse_row).collect::<Vec<_>>();
+        let more = items.len() > limit;
+        items.truncate(limit);
+        let next = if more { items.last().map(|row| format!("{}|{}",row["createdAt"].as_str().unwrap_or(""),row["id"].as_str().unwrap_or(""))) } else { None };
+        Ok(json!({"items":items,"nextCursor":next}))
+    }
+    pub fn interrupt_open(&self) -> CoreResult<()> {
+        self.db.execute("UPDATE request_logs SET data=json_set(data,'$.status','interrupted','$.updatedAt',?1,'$.failure',json_object('stage','daemon','code','DAEMON_RESTARTED','message','The daemon exited before this request finished.')) , updated_at=?1 WHERE json_extract(data,'$.status') IN ('queued','preparing','running')", [now_iso()]).map_err(db_fail)?;
+        Ok(())
     }
 }
 

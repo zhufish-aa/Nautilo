@@ -377,7 +377,7 @@ export type TimelinePayload =
   // Historical only: per-turn checkpoints were removed; old sessions may still
   // replay this event, so the timeline keeps a read-only rendering for it.
   | { kind: "checkpoint_reverted"; checkpointId: string; restored: string[]; removed: string[]; skipped: string[]; warning?: string }
-  | { kind: "error"; code: string; message: string; retryable: boolean }
+  | { kind: "error"; code: string; message: string; retryable: boolean; connectionId?: string }
   | { kind: "run_status"; run: RunLifecycle };
 
 export interface TimelineEvent {

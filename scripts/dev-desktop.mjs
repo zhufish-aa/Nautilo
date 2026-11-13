@@ -10,7 +10,7 @@ try {
   const core=join(runtime,process.platform==='win32'?'nautilo-core.exe':'nautilo-core');copyFileSync(binary,core);
   env.AGENTHUB_CORE_PATH=core;
   const pluginRoot=join(runtime,'plugins');mkdirSync(pluginRoot,{recursive:true});
-  for(const id of ['opencode','trae','pi','omp','commandcode','deepseek','codex-plugins']) {
+  for(const id of ['opencode','trae','pi','omp','commandcode','deepseek','codex-plugins','antigravity']) {
     const plugin=join(pluginRoot,id);mkdirSync(plugin,{recursive:true});
     const executable=`agenthub-plugin-${id}${process.platform==='win32'?'.exe':''}`;
     copyFileSync(join(workspace,'rust','plugins',id,'agenthub-plugin.json'),join(plugin,'agenthub-plugin.json'));

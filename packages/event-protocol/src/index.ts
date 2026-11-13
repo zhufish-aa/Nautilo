@@ -314,6 +314,7 @@ export interface RuntimeEventPayloadMap {
     code: string;
     message: string;
     retryable: boolean;
+    connectionId?: string;
   };
   "session.follow_up_queued": {
     messageId: string;

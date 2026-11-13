@@ -419,11 +419,13 @@ impl ProviderPlugin for DeepSeek {
         #[cfg(windows)]
         let workspace_access = self.workspace_access.clone();
         let run_id = run_id.to_string();
+        let prepared_ms = started_at.elapsed().as_millis() as u64;
         tokio::spawn(async move {
             let work = async {
                 if let Some(readiness) = readiness {
                     ready(readiness).await?;
                 }
+                let process_ready_ms = started_at.elapsed().as_millis() as u64;
                 let catalog = if provider.is_none() {
                     Some(native.call("/catalog", json!({})).await?)
                 } else {
@@ -442,7 +444,12 @@ impl ProviderPlugin for DeepSeek {
                     "model":model.clone().or_else(||default["model"].as_str().map(str::to_string)),"reasoningEffort":reasoning_effort,
                     "permissionMode":request["permissionMode"]})).await?;
                 drop(workspace_open);
-                native.emit(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"deepseek","transport":"native-web","reused":reusable,"pid":native.process.pid,"attachMs":started_at.elapsed().as_millis()}}));
+                let attach_ms = started_at.elapsed().as_millis() as u64;
+                native.emit(json!({"kind":"status","phase":"runtime_ready","raw":{
+                    "providerId":"deepseek","transport":"native-web","reused":reusable,
+                    "pid":native.process.pid,"attachMs":attach_ms,
+                    "startupTimings":{"prepareMs":prepared_ms,"bootstrapMs":process_ready_ms.saturating_sub(prepared_ms),"sessionOpenMs":attach_ms.saturating_sub(process_ready_ms),"openDetails":opened["timings"]}
+                }}));
                 if std::env::var_os("NAUTILO_DSH_TIMING").is_some() {
                     eprintln!(
                         "{}",

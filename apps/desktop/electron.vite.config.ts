@@ -35,7 +35,8 @@ export default defineConfig({
       // ws catches missing optional native accelerators and uses its JS
       // implementation. Keep real require() failures instead of Vite's empty
       // optional-peer shim, which otherwise breaks masked WebSocket frames.
-      rollupOptions: { external: ["bufferutil", "utf-8-validate"] }
+      rollupOptions: { external: ["bufferutil", "utf-8-validate"],
+        output: process.env.NAUTILO_STARTUP_TRACE ? { banner: `'use strict';\nrequire('node:fs').appendFileSync(${JSON.stringify(process.env.NAUTILO_STARTUP_TRACE)}, '[startup] Electron reached the main bundle\\n');` } : undefined }
     }
   },
   preload: {
@@ -47,8 +48,17 @@ export default defineConfig({
   },
   renderer: {
     plugins: [react(), tailwindcss(), markdownEntitiesPlugin()],
+    // Keep the public editor and its recovery service in one optimized graph.
+    // Otherwise dev mode can instantiate a second Monaco service registry.
+    optimizeDeps: { include: [
+      "monaco-editor",
+      "monaco-editor/editor/standalone/browser/standaloneServices.js",
+      "monaco-editor/editor/browser/widget/diffEditor/diffProviderFactoryService.js",
+      "monaco-editor/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js"
+    ] },
     worker: { plugins: (chain:string[]=[]) => [markdownEntitiesPlugin(),serialWorkerBuilds(chain)] },
     resolve: {
+      dedupe: ["monaco-editor"],
       alias: {
         "@": resolve(__dirname, "src/renderer/src")
       }

@@ -240,18 +240,43 @@ impl SourceControl {
         .await?;
         let mut state = parse_status(&raw)?;
         let base=if let Some(head)=state["head"].as_str(){head.to_string()}else{checked(root,&["hash-object","-t","tree","--stdin"],Some("")).await?.trim().to_string()};
-        let stats=content::numstat(&checked(root,&["diff","--no-ext-diff","--no-textconv","--numstat","-z","-M",&base,"--"],None).await?)?;
+        // These reads are independent. Keep the repository gate, but do not pay
+        // Windows process startup latency once for every field of a snapshot.
+        let (stat_raw, index_path, branches, remotes, log, git_dir, config) = tokio::try_join!(
+            async { if state["changes"].as_array().unwrap().is_empty() { Ok(String::new()) } else { checked(root,&["diff","--no-ext-diff","--no-textconv","--numstat","-z","-M",&base,"--"],None).await } },
+            checked(root, &["rev-parse", "--path-format=absolute", "--git-path", "index"], None),
+            checked(root, &["for-each-ref", "--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(worktreepath)%00%(upstream:remotename)%00%(push:remotename)%00%(push:remoteref)%00", "refs/heads/"], None),
+            checked(root, &["remote"], None),
+            async { if state["head"].is_string() { checked(root, &["log", "-20", "--format=%H%x00%s%x00%an%x00%cI%x00"], None).await } else { Ok(String::new()) } },
+            checked(root, &["rev-parse", "--absolute-git-dir"], None),
+            checked(root, &["config", "--null", "--list"], None)
+        )?;
+        let stats=content::numstat(&stat_raw)?;
         for file in state["changes"].as_array_mut().unwrap(){if let Some(stat)=file["path"].as_str().and_then(|name|stats.get(name)){for(key,value)in stat.as_object().unwrap(){file[key]=value.clone();}}}
-        let index_path = checked(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-            None,
-        )
-        .await?;
         let mut digest = Sha256::new();
         digest.update(root);
         digest.update(b"\0");
         digest.update(raw.as_bytes());
+        // Porcelain can stay identical while an already modified file is edited
+        // again. Include worktree revisions so preview caches cannot reuse it.
+        for change in state["changes"].as_array().unwrap() {
+            let name = change["path"].as_str().unwrap();
+            digest.update(b"\0worktree\0");
+            digest.update(name.as_bytes());
+            match std::fs::symlink_metadata(Path::new(root).join(name)) {
+                Ok(info) => {
+                    digest.update(info.len().to_le_bytes());
+                    for time in [info.modified(), info.created()] {
+                        if let Ok(time) = time {
+                            if let Ok(time) = time.duration_since(std::time::UNIX_EPOCH) {
+                                digest.update(time.as_nanos().to_le_bytes());
+                            }
+                        }
+                    }
+                }
+                Err(error) => digest.update(format!("{:?}", error.kind()).as_bytes()),
+            }
+        }
         match std::fs::File::open(index_path.trim()) {
             Ok(mut file) => {
                 use std::io::Read;
@@ -267,16 +292,6 @@ impl SourceControl {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         };
-        let branches = checked(
-            root,
-            &[
-                "for-each-ref",
-                "--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(worktreepath)%00%(upstream:remotename)%00%(push:remotename)%00%(push:remoteref)%00",
-                "refs/heads/",
-            ],
-            None,
-        )
-        .await?;
         state["branches"]=json!(branches.lines().filter(|s|!s.is_empty()).map(|line|{let fields=line.split('\0').collect::<Vec<_>>();json!({"name":fields[0],"current":fields.get(1)==Some(&"*"),"upstream":fields.get(2).filter(|s|!s.is_empty()),"worktree":fields.get(3).filter(|s|!s.is_empty()),"upstreamRemote":fields.get(4).filter(|s|!s.is_empty()),"pushRemote":fields.get(5).filter(|s|!s.is_empty()),"pushRef":fields.get(6).filter(|s|!s.is_empty())})}).collect::<Vec<_>>());
         let upstream_remote = state["branches"]
             .as_array()
@@ -295,22 +310,14 @@ impl SourceControl {
             .unwrap_or(Value::Null);
         state["pushRemote"] = push["pushRemote"].clone();
         state["pushRef"] = push["pushRef"].clone();
-        state["remotes"] = json!(checked(root, &["remote"], None)
-            .await?
+        state["remotes"] = json!(remotes
             .lines()
             .map(str::to_string)
             .collect::<Vec<_>>());
         state["recent"] = json!([]);
         if state["head"].is_string() {
-            let log = checked(
-                root,
-                &["log", "-20", "--format=%H%x00%s%x00%an%x00%cI%x00"],
-                None,
-            )
-            .await?;
             state["recent"]=json!(log.lines().filter(|s|!s.is_empty()).map(|line|{let f=line.split('\0').collect::<Vec<_>>();json!({"hash":f[0],"subject":f.get(1).unwrap_or(&""),"author":f.get(2).unwrap_or(&""),"committedAt":f.get(3).unwrap_or(&"")})}).collect::<Vec<_>>());
         }
-        let git_dir = checked(root, &["rev-parse", "--absolute-git-dir"], None).await?;
         for (entry, operation) in [
             ("rebase-merge", "rebase"),
             ("rebase-apply", "rebase"),
@@ -336,11 +343,7 @@ impl SourceControl {
         }
         digest.update(b"\0");
         digest.update(state["operation"].as_str().unwrap_or(""));
-        digest.update(
-            checked(root, &["config", "--null", "--list"], None)
-                .await?
-                .as_bytes(),
-        );
+        digest.update(config.as_bytes());
         state["token"] = json!(format!("{:x}", digest.finalize()));
         state["schemaVersion"] = json!(1);
         state["available"] = json!(true);
@@ -537,7 +540,7 @@ impl SourceControl {
         let _gate = self.lock(&root).await;
         let state = self.snapshot(cwd, &root).await?;
         if state["token"] != input["token"] {
-            anyhow::bail!("仓库状态已改变，请刷新后重试。");
+            anyhow::bail!(if input["action"] == "discard" { "仓库状态或文件内容已改变，请重新查看差异后再试。" } else { "仓库状态已改变，请刷新后重试。" });
         }
         let action = required(input, "action")?;
         let changes = state["changes"].as_array().unwrap();

@@ -4,8 +4,9 @@ import { Database } from "../database/index.js";
 import { CoreError } from "../errors.js";
 import { AdapterRegistry, discoverOpenAiCompatibleModels, mergeInstanceModelConfig } from "../adapters/index.js";
 import { validateModelEndpoint } from "../adapters/model-config.js";
-import { CredentialService, EnvironmentPolicyService, loginProfileDirectory } from "../runtime/security/index.js";
+import { CredentialService, EnvironmentPolicyService, loginProfileDirectory, providerEnvironmentPassthrough } from "../runtime/security/index.js";
 import { applyConnection, connectionCredentialId, connectionEnvironment, readConnection } from "../runtime/runtime-connection.js";
+import { diagnoseConnection } from "../runtime/service-probe.js";
 
 function invalid(field: string, reason: string): never { throw new CoreError("IPC_INVALID_REQUEST", { field, reason }); }
 function models(input: unknown): InstanceModelConfig[] | undefined {
@@ -47,6 +48,11 @@ function normalize(input: RuntimeConnectionInput): RuntimeConnectionInput {
     return { ...common, protocol: input.protocol, baseUrl: url.toString().replace(/\/$/, "") };
   }
   const candidate = { providerId: input.harness, baseArgs: [], providerOptions: { loginProfileDirectory: input.loginProfileDirectory } } as unknown as AgentInstance;
+  if (input.harness === "antigravity") {
+    if (input.nativeLogin !== true) return invalid("nativeLogin", "Antigravity uses its official unified Google account");
+    return { ...common, harness: input.harness, nativeLogin: true, loginProfileDirectory: input.loginProfileDirectory };
+  }
+  if (input.nativeLogin === true) return invalid("nativeLogin", "This harness requires an isolated account directory");
   const directory = loginProfileDirectory(candidate);
   if (!directory) return invalid("loginProfileDirectory", "Choose an isolated account directory");
   return { ...common, harness: input.harness, loginProfileDirectory: directory };
@@ -59,6 +65,7 @@ export class ConnectionService {
   get(id: string, revision?: number): RuntimeConnection { return readConnection(this.database, id, revision); }
   upsert(input: IpcRequestMap["connection.upsert"]["input"]): RuntimeConnection {
     const value = normalize(input.connection);
+    if (value.kind === "login" && value.harness === "antigravity" && this.database.runtimeConnections.list().some(item => item.id !== value.id && item.kind === "login" && item.harness === "antigravity")) return invalid("harness", "Antigravity shares one official Google account through the OS keyring; use the existing connection");
     if (input.clearApiKey !== undefined && typeof input.clearApiKey !== "boolean") return invalid("clearApiKey", "Use a boolean value");
     if (input.expectedRevision !== undefined && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)) return invalid("expectedRevision", "Use a positive integer revision");
     if (input.apiKey !== undefined && (typeof input.apiKey !== "string" || !input.apiKey.trim())) return invalid("apiKey", "API key cannot be blank");
@@ -98,14 +105,21 @@ export class ConnectionService {
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
   async discover(input: IpcRequestMap["connection.models"]["input"]): Promise<ProviderModelCatalog> {
+    try { return await this.discoverRaw(input); }
+    catch { return { providerId:`connection:${input.connectionId}`,models:[],source:"unavailable",fetchedAt:new Date().toISOString(),warning:"Connection model discovery failed. Check the endpoint, protocol, credentials and CLI compatibility; secrets are not included in this error." }; }
+  }
+  async diagnose(input: IpcRequestMap["connection.diagnose"]["input"]) {
+    return diagnoseConnection(this.get(input.connectionId,input.revision),()=>this.discoverRaw(input,false));
+  }
+  private async discoverRaw(input: IpcRequestMap["connection.models"]["input"], mergeConfigured = true): Promise<ProviderModelCatalog> {
     const connection = this.get(input.connectionId, input.revision);
     const unavailable = (warning: string): ProviderModelCatalog => ({ providerId: `connection:${connection.id}`, models: [], source: "unavailable", fetchedAt: new Date().toISOString(), warning });
     if (!connection.enabled) return unavailable("The selected connection is disabled");
-    try {
       if (connection.kind === "api") {
         const env = this.credentials.environment(connectionCredentialId(connection.id, connection.revision), "codex");
         const catalog = await discoverOpenAiCompatibleModels(connection.baseUrl!, env.OPENAI_API_KEY ?? env.CODEX_API_KEY, undefined, connection.protocol === "anthropic" ? "anthropic-messages" : undefined);
-        return mergeInstanceModelConfig({ ...catalog, providerId: `connection:${connection.id}` }, connection.models);
+        const result = { ...catalog, providerId: `connection:${connection.id}` };
+        return mergeConfigured ? mergeInstanceModelConfig(result, connection.models) : result;
       }
       const matching = this.database.agents.list().filter((agent) => agent.providerId === connection.harness && agent.enabled);
       const original = input.agentInstanceId ? this.database.agents.get(input.agentInstanceId)
@@ -118,7 +132,7 @@ export class ConnectionService {
         displayName: connection.harness!, executable, baseArgs: [], capabilities: [], enabled: true,
         status: "available", createdAt: now, updatedAt: now };
       const agent = applyConnection(connection, probe);
-      return this.adapters.listModels(agent, { env: connectionEnvironment(connection, agent, this.environment.build(undefined), this.credentials) }, true);
-    } catch { return unavailable("Connection model discovery failed. Check the endpoint, protocol, credentials and CLI compatibility; secrets are not included in this error."); }
+      const passthrough = providerEnvironmentPassthrough(agent, process.env, this.adapters.get(agent.providerId).descriptor);
+      return this.adapters.listModels(agent, { env: connectionEnvironment(connection, agent, this.environment.build(undefined, passthrough), this.credentials) }, true);
   }
 }

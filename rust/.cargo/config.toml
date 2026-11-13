@@ -7,4 +7,7 @@ target = "x86_64-pc-windows-gnu"
 [target.x86_64-pc-windows-gnu]
 linker = "gcc"
 ar = "ar"
-rustflags = ["-C", "link-arg=-static-libgcc", "-C", "link-arg=-static-libstdc++"]
+# Iroh also emits a cdylib with no C exports. MinGW's automatic export of all
+# dependency symbols exceeds PE's 65535 ordinal limit in debug builds.
+# Rust links the rlib directly; explicitly annotated DLL exports stay intact.
+rustflags = ["-C", "link-arg=-static-libgcc", "-C", "link-arg=-static-libstdc++", "-C", "link-arg=-Wl,--exclude-all-symbols"]

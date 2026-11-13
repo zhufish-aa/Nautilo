@@ -9,7 +9,7 @@ use crate::database::{Database, Repositories};
 use crate::database::connection::db_fail;
 use crate::errors::{invalid, not_found, now_iso, CoreResult};
 use crate::runtime::security::CredentialService;
-use crate::runtime::security::environment_policy::{build_environment, isolate_login_profile, login_profile_directory};
+use crate::runtime::security::environment_policy::{build_environment, isolate_login_profile, login_profile_directory, provider_environment_passthrough};
 
 pub fn version_key(id: &str, revision: u64) -> String { format!("{id}:{revision}") }
 pub fn credential_key(id: &str, revision: u64) -> String { format!("connection:{id}:{revision}") }
@@ -42,6 +42,9 @@ impl ConnectionService {
         let encrypted = api_key.map(|key| self.credentials.encrypt(&json!({"apiKey":key}))).transpose()?;
         let db = self.db.lock().unwrap();
         let repos = Repositories::new(&db.raw);
+        if connection["kind"]=="login" && connection["harness"]=="antigravity" && repos.runtime_connections().list_default()?.iter().any(|v|v["kind"]=="login"&&v["harness"]=="antigravity"&&v["id"]!=id) {
+            return Err(invalid("harness","Antigravity shares one official Google account through the OS keyring; use the existing Antigravity connection"));
+        }
         let current = repos.runtime_connections().get(&id)?;
         let revision = current.as_ref().and_then(|v| v["revision"].as_u64()).unwrap_or(0);
         let expected = input.get("expectedRevision").and_then(Value::as_u64);
@@ -91,12 +94,47 @@ impl ConnectionService {
         Ok(json!({"removed":true}))
     }
     pub async fn models(&self, input: &Value) -> CoreResult<Value> {
-        match self.discover_models(input).await {
+        match self.discover_models(input, true).await {
             Ok(catalog) => Ok(catalog),
             Err(_) => Ok(json!({"providerId":format!("connection:{}",input["connectionId"].as_str().unwrap_or("")),"models":[],"source":"unavailable","fetchedAt":now_iso(),"warning":"Connection model discovery failed. Check endpoint, protocol, credentials and harness compatibility."})),
         }
     }
-    async fn discover_models(&self, input: &Value) -> CoreResult<Value> {
+    pub async fn diagnose(&self, input: &Value) -> CoreResult<Value> {
+        use std::time::Instant;
+        use crate::runtime::service_probe::{report, step, finish};
+        let connection = self.get(input["connectionId"].as_str().unwrap_or(""), input["revision"].as_u64())?;
+        let started = Instant::now();
+        let version = connection["revision"].as_u64().unwrap_or(0).to_string();
+        let mut result = report(connection["id"].as_str().unwrap_or(""), &version, if connection["kind"] == "login" { "account_catalog" } else { "api_catalog" });
+        if connection["enabled"] != true {
+            step(&mut result,"configuration","warning",started,Some("DISABLED"),Some("Enable this connection before checking it."));
+            return Ok(finish(result,started));
+        }
+        step(&mut result,"configuration","passed",started,None,None);
+        if connection["kind"] == "api" && connection["hasCredential"] != true {
+            step(&mut result,"credential","warning",Instant::now(),Some("CREDENTIAL_MISSING"),Some("No API key is stored for this connection. The endpoint will be checked without borrowing another account."));
+        } else if connection["kind"] == "api" {
+            step(&mut result,"credential","passed",Instant::now(),None,None);
+        }
+        let catalog_start = Instant::now();
+        match tokio::time::timeout(std::time::Duration::from_secs(30), self.discover_models(input, false)).await {
+            Ok(Ok(catalog)) if catalog["source"] != "unavailable" && catalog["warning"].as_str().is_none() => {
+                let count = catalog["models"].as_array().map_or(0,Vec::len);
+                result["modelCount"] = json!(count);
+                step(&mut result,"catalog",if count > 0 { "passed" } else { "warning" },catalog_start,if count == 0 { Some("EMPTY_CATALOG") } else { None },None);
+            }
+            Ok(Ok(_)) => step(&mut result,"catalog","warning",catalog_start,Some("CATALOG_UNAVAILABLE"),Some("The selected account did not return a model catalog. Check its native login state.")),
+            Ok(Err(error)) => {
+                let message = error.to_string();
+                let code = if message.contains("401") || message.contains("403") { "AUTH_REQUIRED" } else if message.contains("404") { "CATALOG_NOT_SUPPORTED" } else if message.to_lowercase().contains("timed out") || message.to_lowercase().contains("timeout") { "TIMEOUT" } else { "CATALOG_UNAVAILABLE" };
+                // A relay can support inference without implementing GET /models.
+                step(&mut result,"catalog",if code == "CATALOG_NOT_SUPPORTED" { "warning" } else { "failed" },catalog_start,Some(code),Some(&message));
+            }
+            Err(_) => step(&mut result,"catalog","failed",catalog_start,Some("TIMEOUT"),Some("Model discovery did not finish within 30 seconds.")),
+        }
+        Ok(finish(result,started))
+    }
+    async fn discover_models(&self, input: &Value, merge_configured: bool) -> CoreResult<Value> {
         let id = input["connectionId"].as_str().unwrap_or("");
         let connection = self.get(id, input["revision"].as_u64())?;
         if connection["enabled"] != true { return Err(invalid("connectionId", "Connection is disabled")); }
@@ -107,7 +145,7 @@ impl ConnectionService {
             let api_type = if connection["protocol"] == "anthropic" { "anthropic-messages" } else { "openai-compatible" };
             let mut catalog = discover_openai_compatible_models(connection["baseUrl"].as_str().unwrap(), key, 10_000, Some(api_type)).await?;
             catalog["providerId"] = json!(format!("connection:{id}"));
-            return Ok(merge_instance_model_config(&catalog, connection.get("models")));
+            return Ok(if merge_configured { merge_instance_model_config(&catalog, connection.get("models")) } else { catalog });
         }
         let harness = connection["harness"].as_str().ok_or_else(|| invalid("harness", "Missing login harness"))?;
         let configured = {
@@ -130,14 +168,18 @@ impl ConnectionService {
         let probe = json!({"id":format!("connection-models:{id}"),"providerId":harness,"displayName":harness,
             "executable":executable,"baseArgs":[],"enabled":true,"capabilities":[]});
         let agent = apply_connection(&probe, &connection)?;
-        let env = isolate_login_profile(&agent, build_environment(None, HashMap::new()))?;
+        let env = connection_environment_with_descriptor(&agent, &connection, &self.credentials,
+            build_environment(None, provider_environment_passthrough(&agent, Some(&descriptor))), Some(&descriptor))?;
         self.adapters.list_models_with_refresh(&agent, Some(&json!({"env":env})), true).await
     }
 }
 fn public_connection(db: &Connection, mut value: Value) -> CoreResult<Value> {
     let id = value["id"].as_str().unwrap_or(""); let revision = value["revision"].as_u64().unwrap_or(0);
     let has = Repositories::new(db).credentials().has(&credential_key(id,revision))?;
-    value["hasCredential"] = json!(has); Ok(value)
+    value["hasCredential"] = json!(has);
+    let settings=Repositories::new(db).integration_settings().get("integration-settings")?.unwrap_or(Value::Null);
+    value["accountGateway"] = json!(value["kind"]=="login"&&settings["gateway"]["enabled"]==true&&settings["gateway"]["connectionIds"].as_array().is_some_and(|ids|ids.contains(&value["id"])));
+    Ok(value)
 }
 fn head(db: &Connection, id: &str) -> CoreResult<Value> { Repositories::new(db).runtime_connections().get(id)?.ok_or_else(|| not_found("connection",id)) }
 fn version(db: &Connection, id: &str, revision: u64) -> CoreResult<Value> { Repositories::new(db).runtime_connection_versions().get(&version_key(id,revision))?.ok_or_else(|| invalid("connectionRevision", "Pinned connection revision is missing")) }
@@ -145,7 +187,7 @@ fn version(db: &Connection, id: &str, revision: u64) -> CoreResult<Value> { Repo
 fn validate_connection(value: &Value) -> CoreResult<Value> {
     let object = value.as_object().ok_or_else(|| invalid("connection", "Expected a connection"))?;
     let mut result = serde_json::Map::new();
-    for key in ["id","name","kind","enabled","protocol","baseUrl","harness","loginProfileDirectory","models"] {
+    for key in ["id","name","kind","enabled","protocol","baseUrl","harness","loginProfileDirectory","nativeLogin","models"] {
         if let Some(v) = object.get(key).filter(|v| !v.is_null()) { result.insert(key.into(),v.clone()); }
     }
     let mut result = Value::Object(result);
@@ -196,11 +238,17 @@ fn validate_connection(value: &Value) -> CoreResult<Value> {
             if !matches!(result["protocol"].as_str(),Some("responses"|"chat"|"anthropic")) { return Err(invalid("protocol","Unsupported API protocol")); }
             result["baseUrl"] = json!(validated_model_endpoint(result["baseUrl"].as_str().unwrap_or(""))?);
             result.as_object_mut().unwrap().remove("harness"); result.as_object_mut().unwrap().remove("loginProfileDirectory");
+            result.as_object_mut().unwrap().remove("nativeLogin");
         }
         Some("login") => {
             let harness = result["harness"].as_str().unwrap_or("");
-            login_profile_directory(&json!({"providerId":harness,"baseArgs":[],"providerOptions":{"loginProfileDirectory":result["loginProfileDirectory"]}}))?
-                .ok_or_else(|| invalid("loginProfileDirectory","Select an explicit account directory"))?;
+            if harness=="antigravity" {
+                if result["nativeLogin"]!=true{return Err(invalid("nativeLogin","Antigravity uses its official unified Google account"));}
+            }else{
+                if result["nativeLogin"]==true{return Err(invalid("nativeLogin","This harness requires an isolated account directory"));}
+                login_profile_directory(&json!({"providerId":harness,"baseArgs":[],"providerOptions":{"loginProfileDirectory":result["loginProfileDirectory"]}}))?
+                    .ok_or_else(|| invalid("loginProfileDirectory","Select an explicit account directory"))?;
+            }
             result.as_object_mut().unwrap().remove("baseUrl"); result.as_object_mut().unwrap().remove("protocol");
         }
         _ => return Err(invalid("kind","Expected api or login")),
@@ -253,19 +301,32 @@ pub fn resolve_session_connection(db: &Connection, session: &Value, agent: &Valu
     let h = head(db,id)?;
     if h["enabled"] != true { return Err(invalid("connectionId","Connection is disabled")); }
     let revision = session["connectionRevision"].as_u64().ok_or_else(|| invalid("connectionRevision","Session has no pinned revision"))?;
-    let connection = version(db,id,revision)?;
+    let mut connection = version(db,id,revision)?;
+    if connection["kind"]=="login"&&connection["harness"]!=agent["providerId"] {
+        let settings=Repositories::new(db).integration_settings().get("integration-settings")?.unwrap_or(Value::Null);
+        if settings["gateway"]["enabled"]!=true||!settings["gateway"]["connectionIds"].as_array().is_some_and(|ids|ids.contains(&connection["id"])) {return Err(invalid("connectionId","Enable this account's explicit model gateway before using it in another harness"));}
+        connection["viaAccountGateway"]=json!(true);
+    }
     let resolved = apply_connection(agent,&connection)?;
     Ok((resolved,Some(connection)))
 }
 pub fn apply_connection(agent: &Value, connection: &Value) -> CoreResult<Value> {
     let mut result = agent.clone();
     let harness = agent["providerId"].as_str().unwrap_or("");
+    if harness=="antigravity" && (connection["kind"]!="login" || connection["harness"]!="antigravity" || connection["nativeLogin"]!=true) {
+        return Err(invalid("connectionId","Select an official Antigravity Google login account"));
+    }
     if !matches!(connection["kind"].as_str(),Some("api"|"login")) { return Err(invalid("kind","Invalid connection kind")); }
     let mut options = agent["providerOptions"].as_object().cloned().unwrap_or_default();
-    for key in ["baseUrl","apiType","wireApi","loginProfileDirectory","loginProfileLabel","anthropicCompat"] { options.remove(key); }
+    for key in ["baseUrl","apiType","wireApi","loginProfileDirectory","loginProfileLabel","anthropicCompat","nativeLogin"] { options.remove(key); }
     if connection["kind"] == "login" {
-        if connection["harness"] != harness { return Err(invalid("connectionId","Login account belongs to a different harness")); }
-        options.insert("loginProfileDirectory".into(),connection["loginProfileDirectory"].clone());
+        if connection["harness"] != harness {
+            if connection["viaAccountGateway"]!=true {return Err(invalid("connectionId","Login account belongs to a different harness"));}
+            if agent.get("profile").and_then(Value::as_str).is_some_and(|s|!s.is_empty())||agent["baseArgs"].as_array().is_some_and(|a|!a.is_empty()){return Err(invalid("baseArgs","Account routes require standard harness arguments"));}
+            options.insert("accountGateway".into(),json!(true));options.insert("apiType".into(),json!("openai-completions"));if harness=="codex"{options.insert("wireApi".into(),json!("chat"));}
+        }else if harness=="antigravity"&&connection["nativeLogin"]==true{
+            options.insert("nativeLogin".into(),json!(true));
+        }else{options.insert("loginProfileDirectory".into(),connection["loginProfileDirectory"].clone());}
     } else {
         let protocol = connection["protocol"].as_str().unwrap_or("");
         if !matches!(protocol,"responses"|"chat"|"anthropic") { return Err(invalid("protocol","Unsupported API protocol")); }
@@ -296,7 +357,7 @@ pub fn connection_environment_with_descriptor(agent: &Value, connection: &Value,
         if ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "TRAE_CONFIG_FILE"].contains(&key.as_str()) { return true; }
         !["OPENAI_","CODEX_","ANTHROPIC_","KIMI_","DEEPSEEK_","GEMINI_","GOOGLE_","OPENROUTER_","OPENCODE_","AGENTHUB_PI_","AGENTHUB_OMP_","OMP_AUTH_","COMMAND_CODE_","CMD_","TRAECLI_","TRAE_CLI_","CLAUDE_CODE_OAUTH","CLAUDE_CODE_API","CLAUDE_CODE_USE_","CLAUDE_CODE_SESSION_ACCESS"].iter().any(|p| key.starts_with(p)) && key != "CLAUDE_CONFIG_DIR" && !key.starts_with("AGENTHUB_API")
     });
-    if connection["kind"] == "login" { return isolate_login_profile(agent,env); }
+    if connection["kind"] == "login" {return if connection["viaAccountGateway"]==true{Ok(env)}else{isolate_login_profile(agent,env)};}
     let id = connection["id"].as_str().unwrap(); let revision = connection["revision"].as_u64().unwrap();
     let key = credentials.read(&credential_key(id,revision))?.and_then(|v| v["apiKey"].as_str().map(str::to_string)).filter(|s| !s.is_empty())
         .ok_or_else(|| invalid("connectionId","The pinned API provider has no credential; create a new revision and session"))?;
@@ -341,6 +402,24 @@ mod tests {
         (ConnectionService::new(db,credentials,AdapterRegistry::with_builtins()),dir)
     }
     fn provider(id: &str) -> Value { json!({"id":id,"name":"Provider","kind":"api","enabled":true,"protocol":"anthropic","baseUrl":"https://provider.example/v1","models":[{"id":"claude-test","reasoningEfforts":["none"],"pricing":{"input":2.0}}]}) }
+    #[test]
+    fn antigravity_binds_the_official_unified_account_without_redirecting_native_storage() {
+        let (service, dir) = fixture();
+        let account = json!({"id":"google","name":"Google","kind":"login","enabled":true,"harness":"antigravity","nativeLogin":true,
+            "loginProfileDirectory":dir.join("login-recovery").to_string_lossy(),"models":[]});
+        let saved = service.upsert(&json!({"connection":account})).unwrap();
+        let agent = json!({"providerId":"antigravity","executable":"agy","baseArgs":[],"providerOptions":{"configurationKind":"harness"}});
+        let bound = apply_connection(&agent,&saved).unwrap();
+        assert_eq!(bound["providerOptions"]["nativeLogin"],true);
+        assert!(bound["providerOptions"].get("loginProfileDirectory").is_none());
+        assert!(login_profile_directory(&bound).unwrap().is_none());
+        let mut duplicate = account.clone(); duplicate["id"] = json!("same-google-again");
+        assert!(service.upsert(&json!({"connection":duplicate})).is_err());
+        assert!(apply_connection(&agent,&provider("third-party-api")).is_err());
+        assert!(apply_connection(&json!({"providerId":"pi"}),&saved).is_err());
+        let mut unsupported = account; unsupported["nativeLogin"] = json!(false);
+        assert!(validate_connection(&unsupported).is_err());
+    }
     #[test]
     fn image_input_capability_is_preserved_and_validated() {
         let mut connection = provider("vision");

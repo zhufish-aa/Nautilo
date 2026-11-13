@@ -17,6 +17,7 @@ import { SelectField } from "../../components/ui/Select";
 import { PermissionModeSelect } from "./PermissionModeSelect";
 import { Composer } from "./Composer";
 import { HarnessModeControl } from "./HarnessModeControl";
+import { ConnectionPicker } from "./ConnectionPicker";
 import { AddProjectDialog } from "../projects/AddProjectDialog";
 import { useSurfaceEntrance } from "../../lib/ui-motion";
 
@@ -122,7 +123,7 @@ export function NewConversation({ mode = "code", onCreated, active = true }: {
           </label> : <button type="button" onClick={() => setAddProject(true)}><Folder size={14} />{zh ? "选择项目" : "Choose project"}</button>}
           <label className="starter-context-picker"><Box size={14} /><SelectField className="context-select" aria-label="Harness" value={instance?.id} placeholder="Harness" options={available.map((item) => ({ value: item.id, label: item.displayName }))} onValueChange={(id) => { setInstanceId(id); setConfiguration({}); }} /></label>
           {instance && <HarnessModeControl instanceId={instance.id} value={configuration.agentMode} onChange={agentMode => setConfiguration(current => ({ ...current, agentMode }))} />}
-          <label className="starter-context-picker"><UserRound size={14} /><SelectField className="context-select" aria-label={zh ? "供应商或账号" : "Provider or account"} value={configuration.connectionId} placeholder={zh ? "选择供应商 / 账号" : "Choose provider / account"} options={compatibleConnections.map((item) => ({ value: item.id, label: item.name }))} onValueChange={(id) => { const selected = compatibleConnections.find((item) => item.id === id); setConfiguration((current) => ({ agentMode: current.agentMode, permissionMode: current.permissionMode, connectionId: id, connectionRevision: selected?.revision })); }} /></label>
+          {instance && <label className="starter-context-picker"><UserRound size={14} /><ConnectionPicker instance={instance} className="context-select" value={configuration.connectionId} onChange={selected => { setConfiguration(current => ({ agentMode: current.agentMode, permissionMode: current.permissionMode, connectionId: selected?.id, connectionRevision: selected?.revision })); }} /></label>}
           <label className="starter-context-picker">
             <Users size={14} aria-hidden />
             <SelectField aria-label={zh ? "协作团队" : "Collaboration team"} value={teamId || "__solo"} onValueChange={(value) => setTeamId(value === "__solo" ? "" : value)} options={[{ value: "__solo", label: zh ? "独立工作" : "Solo" }, ...teams.map((team) => ({ value: team.id, label: team.name }))]} className="context-select" />

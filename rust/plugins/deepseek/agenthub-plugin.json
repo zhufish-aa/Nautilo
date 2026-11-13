@@ -23,6 +23,8 @@
       "DSH_BUNDLED_PRIMARY_RUNTIME",
       "DSH_BUNDLED_OFFICE_CLI",
       "DSH_BUNDLED_OFFICE_SKILLS",
+      "NODE_COMPILE_CACHE",
+      "NODE_DISABLE_COMPILE_CACHE",
       "DEEPSEEK_API_KEY"
     ],
     "modeDiscovery": true,

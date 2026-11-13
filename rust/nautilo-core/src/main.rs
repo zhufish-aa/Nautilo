@@ -45,6 +45,12 @@ fn default_socket_path(data_dir: &std::path::Path) -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|arg| arg == "--mcp-relay") {
+        let result = runtime::mcp_pool::run_relay().await;
+        if let Err(error) = &result { eprintln!("MCP relay disconnected: {error}"); }
+        // stdin may still be blocked in the platform reader after the peer exits.
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
     let serve = std::env::args().any(|arg| arg == "--serve");
     if !serve {
         println!("{}", health());
@@ -61,9 +67,10 @@ async fn main() -> anyhow::Result<()> {
     // Storage and services come up before the gateway accepts requests,
     // matching the TS startup order.
     let daemon = application::core_daemon::Daemon::new(data_dir).await?;
-    let router = daemon.router();
+    let router = std::sync::Arc::new(daemon.router());
+    daemon.remote.start(&router).await;
 
-    let (gateway, accept_task) = ipc_gateway::Gateway::start(socket_path, token_path, router)?;
+    let (gateway, accept_task) = ipc_gateway::Gateway::start(socket_path, token_path, (*router).clone())?;
     println!(
         "{}",
         json!({
@@ -113,9 +120,11 @@ async fn main() -> anyhow::Result<()> {
         _ = &mut shell_closed_receiver => Ok(()),
     };
     accept_task.abort();
+    daemon.remote.close().await;
     gateway.cleanup();
     daemon.terminals.close_all();
     daemon.adapters.dispose().await;
+    daemon.runs.close_mcp_pool().await;
     adapters::codex::app_server::shutdown_codex_app_server_pools().await;
     heartbeat.abort();
     let _ = daemon.audit.flush();

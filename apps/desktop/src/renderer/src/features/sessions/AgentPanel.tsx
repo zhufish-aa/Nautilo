@@ -230,6 +230,7 @@ function AgentPanelBody({
         ) : (
           <SingleAgentInfo session={session} />
         )}
+        <SessionToolsInventory sessionId={session.id}/>
       </div>
     </aside>
   );
@@ -267,3 +268,4 @@ function SingleAgentInfo({ session }: { session: UiSession }): JSX.Element {
     </section>
   );
 }
+import { SessionToolsInventory } from "./SessionToolsInventory";

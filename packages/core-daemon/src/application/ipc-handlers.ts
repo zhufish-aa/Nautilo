@@ -1,9 +1,13 @@
 import { assistantModelStep } from "./assistant-model.js";
+import { registerRemoteAccess } from "./remote-access.js";
 import { assistantRecords, saveAssistantRecord, assistantSessions, assistantExcerpts } from "../database/assistant-reads.js";
 import { TerminalService } from "../runtime/terminal-service.js";
 import { SourceControl } from "../runtime/source-control.js";
 import { sourceControlDirectory } from "./source-control.js";
 import { ConnectionService } from "./connection-service.js";
+import { ConnectionImportService } from "./connection-import/service.js";
+import { ResourceService } from "./resource-service.js";
+import { IntegrationService } from "./integration-service.js";
 import { projectPollHealIds, projectPollLastSequence, readProjectPoll } from "../database/project-poll.js";
 import { IpcGateway } from "../ipc-gateway.js";
 import { join } from "node:path";
@@ -28,6 +32,8 @@ import { InteractionService } from "./interaction-service.js";
 import type { PluginService } from "../runtime/plugins/plugin-service.js";
 import { readWorkspaceArtifact } from "./artifact-read.js";
 import { seedBuiltinCapabilities } from "./builtin-capabilities.js";
+import { diagnoseMcp } from "../runtime/service-probe.js";
+import { RedactionService } from "../runtime/security/redaction-service.js";
 
 export interface ApplicationServices {
   database: Database;
@@ -39,6 +45,9 @@ export interface ApplicationServices {
   projects: ProjectService;
   agents: AgentService;
   connections: ConnectionService;
+  connectionImports: ConnectionImportService;
+  resources: ResourceService;
+  integrations: IntegrationService;
   teams: TeamService;
   sessions: SessionService;
   orchestration: OrchestrationService;
@@ -58,6 +67,7 @@ export interface ApplicationServices {
   dataDir: string;
 }
 export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationServices): void {
+  registerRemoteAccess(gateway);
   gateway.register("scm.status", async input => services.sourceControl.status(sourceControlDirectory(services.database,input)));
   gateway.register("scm.diff", async input => services.sourceControl.diff(sourceControlDirectory(services.database,input),input));
   gateway.register("scm.commit", async input => services.sourceControl.commitDetails(sourceControlDirectory(services.database,input),input));
@@ -100,10 +110,34 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("assistant.sessions", async input => assistantSessions(services.database.connection.raw, input));
   gateway.register("assistant.excerpts", async input => assistantExcerpts(services.database.connection.raw, input));
   gateway.register("connection.list", async () => services.connections.list());
+  gateway.register("connection.scanNative", async () => services.connectionImports.scan());
+  gateway.register("connection.importNative", async input => services.connectionImports.import(input));
   gateway.register("connection.get", async ({ connectionId, revision }) => services.connections.get(connectionId, revision));
+  gateway.register("connection.gateway", async ({ connectionId, enabled }) => {
+    services.integrations.setAccountRoute(connectionId, enabled);
+    return services.connections.get(connectionId);
+  });
   gateway.register("connection.upsert", async (input) => services.connections.upsert(input));
   gateway.register("connection.remove", async ({ connectionId }) => services.connections.remove(connectionId));
   gateway.register("connection.models", async (input) => services.connections.discover(input));
+  const diagnosticRedaction = new RedactionService(() => services.credentials.secretValues());
+  gateway.register("requestLog.list", async input => services.database.requestLogs.page(input));
+  gateway.register("resource.inventory",async()=>services.resources.inventory());
+  gateway.register("integration.get",async()=>services.integrations.get());
+  gateway.register("integration.save",async input=>services.integrations.save(input));
+  gateway.register("configuration.list",async()=>services.integrations.list());
+  gateway.register("configuration.capture",async input=>services.integrations.capture(input.name));
+  gateway.register("configuration.import",async input=>services.integrations.import(input.preset));
+  gateway.register("configuration.export",async input=>services.integrations.export(input.presetId));
+  gateway.register("configuration.remove",async input=>services.integrations.remove(input.presetId));
+  gateway.register("configuration.preview",async input=>services.integrations.preview(input.presetId,input.replace));
+  gateway.register("configuration.apply",async input=>services.integrations.apply(input.planId));
+  gateway.register("resource.history",async()=>services.resources.history());
+  gateway.register("resource.preview",async input=>services.resources.preview(input));
+  gateway.register("resource.apply",async({planId})=>services.resources.apply(planId));
+  gateway.register("resource.undo",async({planId})=>services.resources.apply(planId,true));
+  gateway.register("session.tools", async ({ sessionId }) => services.runs.requestLogs.inventory(sessionId));
+  gateway.register("connection.diagnose", async input => diagnosticRedaction.value(await services.connections.diagnose(input)));
   gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0", features: {sourceControl:1,sourceControlHistory:1,sourceControlHistoryPaging:1,sourceControlEditing:1,terminalTabs:1} }));
   gateway.register("project.list", async () => services.projects.list());
   gateway.register("project.add", async (input) => services.projects.add(input));
@@ -139,6 +173,11 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   });
   gateway.register("capability.upsert", async (input) => services.capabilities.upsert(input));
   gateway.register("capability.remove", async ({ capabilityId }) => services.capabilities.remove(capabilityId));
+  gateway.register("capability.diagnose", async ({ capabilityId }) => {
+    const capability = services.capabilities.list().find(item => item.id === capabilityId);
+    if (!capability) throw new CoreError("IPC_NOT_FOUND",{entity:"capability",id:capabilityId});
+    return diagnosticRedaction.value(await diagnoseMcp(capability));
+  });
   gateway.register("capability.parseImport", async (input) => services.capabilityImports.parse(input));
   gateway.register("capability.discoverMcp", async (input) => services.capabilityImports.discoverMcp(input));
   gateway.register("capability.scanSkills", async ({ dir }) => services.capabilityImports.scanSkills({ dir }));

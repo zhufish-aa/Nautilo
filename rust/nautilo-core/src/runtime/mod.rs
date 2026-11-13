@@ -26,6 +26,14 @@ pub mod assistant_model;
 mod assistant_stream;
 pub mod subagent_detection;
 pub mod verification_engine;
+pub mod service_probe;
+pub mod request_log;
+pub mod config_document;
+pub mod account_gateway;
+pub mod codex_account;
+pub mod account_auth;
+pub mod mcp_pool;
+pub mod remote;
 
 pub use event_service::EventService;
 pub use event_subscription_service::EventSubscriptionService;

@@ -22,6 +22,7 @@ pub fn prepare(request: &Value) -> anyhow::Result<Config> {
     let root = agenthub_plugin_sdk::native_config::runtime_package(request, "deepseek")?;
     let bridge = root.join("bridge.mjs");
     std::fs::write(&bridge, include_str!("../resources/bridge.mjs"))?;
+    std::fs::write(root.join("mcp-pool.mjs"), include_str!("../resources/mcp-pool.mjs"))?;
     let mut entries = vec![
         json!({"id":"nautilo-transport", "name":reqwest::Url::from_file_path(&bridge).map_err(|_|anyhow::anyhow!("Invalid bridge path"))?.as_str(),
         "config":{"tools":request["runtimeTools"].as_array().cloned().unwrap_or_default()}}),
@@ -133,6 +134,7 @@ pub fn prepare(request: &Value) -> anyhow::Result<Config> {
     } else {
         (None, selected)
     };
+    entries.insert(0, json!({"id":"nautilo-mcp-pool","name":reqwest::Url::from_file_path(root.join("mcp-pool.mjs")).map_err(|_|anyhow::anyhow!("Invalid MCP pool extension path"))?.as_str()}));
     let mut patches = vec![json!({"insert": entries})];
     // Only the short-lived package editor uses the native no-HMR path. A change
     // is written to the selected profile, not hot-applied to this disposable process.

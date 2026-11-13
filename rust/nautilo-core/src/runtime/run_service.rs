@@ -65,9 +65,13 @@ pub struct RunContext {
     pub context_window_override: Option<i64>,
     pub queue_key: Option<String>,
     pub user_message_id: Option<String>,
+    pub request_id: Option<String>,
 }
 
 pub struct RunService {
+    mcp_pool: std::sync::OnceLock<Arc<crate::runtime::mcp_pool::McpPool>>,
+    pub request_logs: crate::runtime::request_log::RequestLogService,
+    account_gateways: crate::runtime::account_gateway::AccountGateways,
     db: Arc<Mutex<Database>>,
     adapters: AdapterRegistry,
     events: Arc<EventService>,
@@ -100,6 +104,38 @@ pub struct RunCompletionSnapshot {
 }
 
 impl RunService {
+    pub fn start_mcp_pool(&self) -> anyhow::Result<()> {
+        let pool = crate::runtime::mcp_pool::McpPool::start()?;
+        let (servers, cwd) = {
+            let db = self.db.lock().unwrap();
+            let repos = Repositories::new(&db.raw);
+            let servers = repos.capabilities().list_default()?.iter()
+                .filter(|capability| capability["enabled"] == true && capability["providerIds"].as_array().is_some_and(|ids| !ids.is_empty()))
+                .filter_map(capability_to_mcp_server).collect::<Vec<_>>();
+            let projects = repos.projects().list_default()?;
+            let cwd = projects.iter().max_by_key(|project| project["updatedAt"].as_str().unwrap_or(""))
+                .and_then(|project| project["rootPath"].as_str()).map(str::to_string);
+            (servers, cwd)
+        };
+        if let Some(cwd) = cwd {
+            for server in servers { pool.prewarm(&server, &cwd); }
+        }
+        let _ = self.mcp_pool.set(pool);
+        Ok(())
+    }
+    pub async fn close_mcp_pool(&self) {
+        if let Some(pool) = self.mcp_pool.get() { pool.close().await; }
+    }
+    fn pool_mcp_request(&self, request: &mut AdapterStartRequest) {
+        let Some(pool) = self.mcp_pool.get() else { return };
+        request.env.get_or_insert_with(HashMap::new).extend(pool.environment());
+        if let Some(servers) = &mut request.mcp_servers {
+            for server in servers {
+                pool.prewarm(server, &request.cwd);
+                *server = pool.bind(server, &request.cwd);
+            }
+        }
+    }
     pub async fn generate_session_title(&self, session_id: &str) -> CoreResult<Value> {
         crate::runtime::session_title::generate(self.db.clone(),self.credentials.clone(),session_id).await
     }
@@ -115,6 +151,9 @@ impl RunService {
         audit: Arc<AuditService>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            mcp_pool: std::sync::OnceLock::new(),
+            request_logs: crate::runtime::request_log::RequestLogService::new(db.clone(), redaction.clone()),
+            account_gateways: crate::runtime::account_gateway::AccountGateways::new(db.clone(),credentials.clone(),adapters.clone()),
             artifacts: ArtifactService::new(db.clone()),
             db,
             adapters,
@@ -173,9 +212,11 @@ impl RunService {
         let env=build_environment(Some(&policy),additions);
         let env=match connection {Some(connection)=>crate::application::connection_service::connection_environment_with_descriptor(&agent,&connection,&self.credentials,env,Some(&descriptor))?,None=>isolate_login_profile(&agent,env)?};
         let cwd = session["nativeWorkingDirectory"].as_str().unwrap_or_else(||project["rootPath"].as_str().unwrap_or(""));
-        let request=AdapterStartRequest{instance:agent.clone(),local_session_id:Some(session_id.into()),cwd:cwd.into(),
+        let mut request=AdapterStartRequest{instance:agent.clone(),local_session_id:Some(session_id.into()),cwd:cwd.into(),
             model:session["model"].as_str().map(str::to_string),reasoning_effort:session["reasoningEffort"].as_str().map(str::to_string),permission_mode:session["permissionMode"].as_str().map(str::to_string),agent_mode:session["agentMode"].as_str().map(str::to_string),
             service_tier:session["serviceTier"].as_str().map(str::to_string),env:Some(env),skills:Some(self.resolve_skills(&agent)),mcp_servers:Some(self.resolve_mcp_servers(&agent, session_id)?),..Default::default()};
+        request.env.get_or_insert_with(HashMap::new).insert("NAUTILO_MCP_SCOPE".into(),json!({"connectionId":session["connectionId"],"revision":session["connectionRevision"]}).to_string());
+        self.pool_mcp_request(&mut request);
         Ok((session,request))
     }
 
@@ -190,6 +231,7 @@ impl RunService {
         run_log::run_event(run_id, "cancel_request", json!({}));
         let active = self.active.lock().unwrap().remove(run_id);
         let existing = Repositories::new(&self.db.lock().unwrap().raw).runs().get(run_id)?;
+        if let Some(session_id)=existing.as_ref().and_then(|r|r["sessionId"].as_str()){self.account_gateways.cancel_session(session_id).await;}
         let Some(active) = active else {
             if let Some(existing) = existing {
                 let status = existing.get("status").and_then(Value::as_str).unwrap_or("");
@@ -289,7 +331,9 @@ impl RunService {
     }
 
     /// Serializes the turn per session and returns the run id once launched.
-    pub async fn start(self: &Arc<Self>, session: &Value, agent: &Value, prompt: &str, context: RunContext) -> CoreResult<String> {
+    pub async fn start(self: &Arc<Self>, session: &Value, agent: &Value, prompt: &str, mut context: RunContext) -> CoreResult<String> {
+        let request_id = self.request_logs.begin(session, agent, context.provider_command.as_deref().unwrap_or("message"), context.user_message_id.as_deref().or(context.queue_key.as_deref()));
+        context.request_id = Some(request_id.clone());
         let service = self.clone_handle();
         let session = session.clone();
         let agent = agent.clone();
@@ -305,6 +349,7 @@ impl RunService {
         let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
         self.session_queue
             .enqueue_launch(&session_id, queue_key.as_deref(), move || async move {
+                service.request_logs.mark(&request_id,"preparing");
                 let launched = service.launch_now(&session, &agent, &prompt, context).await;
                 match launched {
                     Ok((run_id, completion)) => {
@@ -312,15 +357,17 @@ impl RunService {
                         Ok((run_id, completion))
                     }
                     Err(error) => {
-                        let _ = result_sender.send(Err(error.to_string()));
-                        Err(error.to_string())
+                        service.request_logs.finish(&request_id,"failed",Some(&error.0.code),Some(&error.to_string()));
+                        let message = error.to_string();
+                        let _ = result_sender.send(Err(error));
+                        Err(message)
                     }
                 }
             })
             .await;
         match result_receiver.await {
             Ok(Ok(run_id)) => Ok(run_id),
-            Ok(Err(message)) => Err(CoreError::reason(ErrorCode::RunStartFailed, message)),
+            Ok(Err(error)) => Err(error),
             Err(_) => Err(CoreError::reason(ErrorCode::RunStartFailed, "run launch channel closed")),
         }
     }
@@ -333,7 +380,8 @@ impl RunService {
     pub fn session_busy(&self, session_id: &str) -> bool { self.session_queue.busy(session_id) }
 
     pub fn cancel_queued(&self, session_id: &str, key: &str) -> bool {
-        self.session_queue.cancel_pending(session_id, key)
+        let cancelled=self.session_queue.cancel_pending(session_id, key);
+        if cancelled{self.request_logs.cancel_queued(session_id,key);}cancelled
     }
 
     pub async fn steer_queued(&self, session_id: &str, key: &str, text: &str) -> CoreResult<bool> {
@@ -567,6 +615,7 @@ impl RunService {
         run.insert("startedAt".to_string(), json!(started_at));
         let run = Value::Object(run);
         Repositories::new(&self.db.lock().unwrap().raw).runs().save(&run)?;
+        if let Some(id)=&context.request_id{self.request_logs.attach(id,&run);}
         let mut audit_record = Map::new();
         audit_record.insert("actorType".to_string(), json!("agent"));
         audit_record.insert("actorId".to_string(), member_id.clone().map(Value::String).unwrap_or(Value::Null));
@@ -608,7 +657,7 @@ impl RunService {
         };
         let background = self.session_callbacks(session, agent, &run, &context);
         let background_handoff = background.handoff;
-        let request = AdapterStartRequest {
+        let mut request = AdapterStartRequest {
             native_terminal_live: None,
             instance: agent.clone(),
             local_session_id: session.get("id").and_then(Value::as_str).map(str::to_string),
@@ -660,6 +709,29 @@ impl RunService {
             session_interaction: Some(background.interaction),
             session_tool: Some(background.tool),
         };
+        if bound_connection.as_ref().is_some_and(|c|c["viaAccountGateway"]==true) {
+            // The model relay's per-conversation URL is not an MCP credential.
+            // Native MCP subprocesses retain the environment from before that overlay.
+            let original = request.env.as_ref();
+            let mcp_environment = json!({
+                "OPENAI_BASE_URL":original.and_then(|env| env.get("OPENAI_BASE_URL")),
+                "ANTHROPIC_BASE_URL":original.and_then(|env| env.get("ANTHROPIC_BASE_URL")),
+                "NAUTILO_CONNECTION_DIRECTORY":original.and_then(|env| env.get("NAUTILO_CONNECTION_DIRECTORY"))
+            });
+            if let Err(error) = self.account_gateways.bind(session["id"].as_str().unwrap_or(""),bound_connection.as_ref().unwrap(),&mut request).await {
+                self.fail_run(&run, session, &error, provider_command)?;
+                return Err(error);
+            }
+            request.env.get_or_insert_with(HashMap::new).insert("NAUTILO_MCP_PARENT_OVERRIDES".into(),mcp_environment.to_string());
+        } else if let Some(connection) = bound_connection.as_ref().filter(|c| c["kind"] == "login") {
+            if let Err(error) = crate::runtime::account_auth::check_native_login(connection, &request).await {
+                self.fail_run(&run, session, &error, provider_command)?;
+                return Err(error);
+            }
+        }
+        request.env.get_or_insert_with(HashMap::new).insert("NAUTILO_MCP_SCOPE".into(),json!({"connectionId":session["connectionId"],"revision":session["connectionRevision"]}).to_string());
+        self.pool_mcp_request(&mut request);
+        if let Some(id)=&context.request_id {self.request_logs.supplied(id,request.runtime_tools.as_ref(),request.mcp_servers.as_ref());}
 
         if !provider_command {
             let is_git = diff_collector::is_git_workspace(&request.cwd).await;
@@ -687,6 +759,7 @@ impl RunService {
                 .map(|capabilities| capabilities.native_resume)
                 .unwrap_or(false)
             && !must_recreate_codex_thread;
+        if let Some(id)=&context.request_id{self.request_logs.mark(id,"dispatched");}
         let adapter_run = match (native_resume, provider_session_id) {
             (true, Some(provider_session_id)) => self.adapters.resume(crate::adapters::AdapterResumeRequest {
                 start: request,
@@ -698,7 +771,7 @@ impl RunService {
             Ok(run) => run,
             Err(error) => {
                 self.workspace_baselines.lock().unwrap().remove(&run_id);
-                let failed = self.fail_run(&run, session, &error.to_string(), provider_command)?;
+                let failed = self.fail_run(&run, session, &error, provider_command)?;
                 let _ = failed;
                 return Err(error);
             }
@@ -724,10 +797,14 @@ impl RunService {
         let consume_session = current_session.clone();
         let consume_context = context.clone();
         let consume_run_id = run_id.clone();
+        let consume_request_id = context.request_id.clone();
         tokio::spawn(async move {
             let completion = consume_service
                 .consume(&consume_run, &consume_session, events, consume_context, background_handoff)
                 .await;
+            if let Some(id)=&consume_request_id {
+                consume_service.request_logs.finish(id,completion.run["status"].as_str().unwrap_or("failed"),completion.run["failureCode"].as_str(),completion.failure_detail.as_deref());
+            }
             if let Some(executor) = image_generation_cleanup { (executor.cancel)(); }
             let _ = snapshot_sender.send(completion);
             let _ = completion_sender.send(true);
@@ -900,7 +977,8 @@ impl RunService {
                 let _ = self.events.append(&latest, session, "run.failed", json!({
                     "code": latest.get("failureCode").and_then(Value::as_str).unwrap_or("RUN_START_FAILED"),
                     "message": detail,
-                    "retryable": !cancelled
+                    "connectionId": session["connectionId"],
+                    "retryable": !cancelled && latest["failureCode"] != "AGENT_NOT_AUTHENTICATED"
                 }));
             }
             self.update_session_status(
@@ -982,7 +1060,7 @@ impl RunService {
         RunCompletionSnapshot { run: completed, failure_detail: None, final_message: last_message_text(&messages) }
     }
 
-    fn fail_run(&self, run: &Value, session: &Value, error: &str, provider_command: bool) -> CoreResult<Value> {
+    fn fail_run(&self, run: &Value, session: &Value, error: &CoreError, provider_command: bool) -> CoreResult<Value> {
         let current = Repositories::new(&self.db.lock().unwrap().raw)
             .runs()
             .get(run.get("id").and_then(Value::as_str).unwrap_or(""))?
@@ -995,7 +1073,7 @@ impl RunService {
         let mut failed = current.as_object().cloned().unwrap_or_default();
         failed.insert("status".to_string(), json!("failed"));
         failed.insert("endedAt".to_string(), json!(now_iso()));
-        failed.insert("failureCode".to_string(), json!("RUN_START_FAILED"));
+        failed.insert("failureCode".to_string(), json!(error.0.code));
         let failed = Value::Object(failed);
         Repositories::new(&self.db.lock().unwrap().raw).runs().save(&failed)?;
         let mut audit_record = Map::new();
@@ -1008,9 +1086,10 @@ impl RunService {
         self.audit.record(audit_record);
         if !provider_command {
             let _ = self.events.append(&failed, session, "run.failed", json!({
-                "code": "RUN_START_FAILED",
-                "message": error,
-                "retryable": true
+                "code": error.0.code,
+                "message": error.to_string(),
+                "connectionId": session["connectionId"],
+                "retryable": error.0.retryable
             }));
         }
         self.update_session_status(
@@ -1047,6 +1126,7 @@ impl RunService {
             return None;
         }
         let background = run["backgroundEvent"] == true;
+        if !background {if let Some(id)=&context.request_id{self.request_logs.observe(id,event);}}
         let provider_command = !background && context.presentation.as_deref() == Some("provider_command");
         let run_id = run.get("id").and_then(Value::as_str).unwrap_or("");
         let buffer_run_id = if background {format!("{run_id}:background")} else {run_id.to_string()};
@@ -1442,7 +1522,11 @@ impl RunService {
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("status".to_string(), json!("failed"));
                     updated.insert("endedAt".to_string(), json!(now_iso()));
-                    updated.insert("failureCode".to_string(), json!("PROVIDER_ERROR"));
+                    let authentication = session.get("connectionId").and_then(Value::as_str)
+                        .and_then(|id| repos.runtime_connections().get(id).ok().flatten())
+                        .is_some_and(|connection| connection["kind"] == "login")
+                        && crate::runtime::account_auth::is_authentication_error(message);
+                    updated.insert("failureCode".to_string(), json!(if authentication { "AGENT_NOT_AUTHENTICATED" } else { "PROVIDER_ERROR" }));
                     let _ = repos.runs().save(&Value::Object(updated));
                 }
                 None
@@ -1671,7 +1755,7 @@ fn run_failure_detail(run: &Value) -> String {
 
 /// Resolves a stored MCP capability into an adapter server spec, expanding
 /// environment references from the daemon process environment.
-fn capability_to_mcp_server(capability: &Value) -> Option<Value> {
+pub(crate) fn capability_to_mcp_server(capability: &Value) -> Option<Value> {
     if capability.get("kind").and_then(Value::as_str) != Some("mcp") {
         return None;
     }

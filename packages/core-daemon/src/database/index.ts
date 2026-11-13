@@ -16,6 +16,9 @@ import { ApprovalRepository } from "./approval-repository.js";
 import { AuditRepository } from "./audit-repository.js";
 import { CredentialRepository } from "./credential-repository.js";
 import { CapabilityRepository } from "./capability-repository.js";
+import { RequestLogRepository } from "./request-log-repository.js";
+import { JsonRepository } from "./json-repository.js";
+import type { ConfigurationPreset, IntegrationSettings, ResourceSyncPlan } from "@agenthub/schemas";
 
 /** Composition root for persistence. It exposes repositories, not SQL. */
 export class Database {
@@ -36,6 +39,10 @@ export class Database {
   readonly audit: AuditRepository;
   readonly credentials: CredentialRepository;
   readonly capabilities: CapabilityRepository;
+  readonly requestLogs: RequestLogRepository;
+  readonly resourceTransactions: JsonRepository<ResourceSyncPlan>;
+  readonly configurationPresets: JsonRepository<ConfigurationPreset>;
+  readonly integrationSettings: JsonRepository<IntegrationSettings>;
   constructor(filePath: string) {
     this.connection = new DatabaseConnection(filePath);
     migrateDatabase(this.connection.raw);
@@ -66,6 +73,10 @@ export class Database {
     this.audit = new AuditRepository(this.connection.raw);
     this.credentials = new CredentialRepository(this.connection.raw);
     this.capabilities = new CapabilityRepository(this.connection.raw);
+    this.requestLogs = new RequestLogRepository(this.connection.raw);
+    this.resourceTransactions = new JsonRepository(this.connection.raw,"resource_transactions");
+    this.configurationPresets = new JsonRepository(this.connection.raw,"configuration_presets");
+    this.integrationSettings = new JsonRepository(this.connection.raw,"integration_settings");
   }
   close(): void { this.connection.close(); }
 }

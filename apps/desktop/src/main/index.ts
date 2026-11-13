@@ -1,7 +1,7 @@
 import { registerAccountLoginHandlers } from "./account-login";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { isAbsolute, join } from "node:path";
-import { mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { registerPanelWindows } from "./panel-windows";
 import type { PanelTarget } from "../shared/panel-window";
 import { WorkspaceAssistant } from "./assistant/workspace-assistant";
@@ -14,8 +14,13 @@ import { ARTIFACT_SCHEME, registerArtifactProtocol, registerArtifactScheme } fro
 import { importClipboardAttachment, prepareAttachmentPaths } from "./attachment-file-service";
 import { registerInteractionHandlers } from "./desktop-interactions";
 import { registerProviderUpdateHandlers } from "./provider-updates";
+import { RemoteBackground } from "./remote-background";
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
+function traceStartup(phase: string): void {
+  if (process.env.NAUTILO_STARTUP_TRACE) appendFileSync(process.env.NAUTILO_STARTUP_TRACE, `[startup] ${phase}\n`);
+}
+traceStartup("Main imports loaded");
 const configuredUserDataPath = process.env.NAUTILO_USER_DATA_DIR?.trim();
 if (configuredUserDataPath && !isAbsolute(configuredUserDataPath)) throw new Error("NAUTILO_USER_DATA_DIR must be an absolute path");
 const legacyUserDataPath = configuredUserDataPath || app.getPath("userData");
@@ -36,6 +41,19 @@ const appIcon = app.isPackaged
 const taskBrowser = new TaskBrowser();
 taskBrowser.trackRuns(true);
 const coreDaemon = new CoreDaemonClient((stepId,text)=>workspaceAssistant.receiveText(stepId,text),update=>taskBrowser.observeRun(update));
+const remoteBackground = new RemoteBackground(appIcon,
+  () => coreDaemon.request({ method: "remote.status", input: {} }) as Promise<import("@agenthub/schemas").RemoteStatus>,
+  settings => {
+    const win = workbenchWindow && !workbenchWindow.isDestroyed() ? workbenchWindow : createMainWindow();
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    if (settings) {
+      const navigate = () => { void win.webContents.executeJavaScript('window.location.hash = "/settings?section=remote"'); };
+      if (win.webContents.isLoadingMainFrame()) win.webContents.once("did-finish-load", navigate);
+      else navigate();
+    }
+  });
 const requestForAssistant: CoreRequest = (method, input) => coreDaemon.request({method,input}) as Promise<import("@agenthub/schemas").IpcRequestMap[typeof method]["output"]>;
 const workspaceAssistant = new WorkspaceAssistant(requestForAssistant, sessionId => {
   if (workbenchWindow && !workbenchWindow.isDestroyed()) workbenchWindow.webContents.send("assistant:changed",sessionId);
@@ -80,6 +98,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("core:request", async (_event, request: { requestId?: string; method: string; input?: unknown }) => {
     const result = await coreDaemon.request(request);
+    if (request.method === "remote.configure") remoteBackground.apply(result as import("@agenthub/schemas").RemoteStatus);
     if (request.method === "session.delete") {
       for (const id of (result as {sessionIds?: string[]})?.sessionIds ?? []) { closeSessionPanels?.(id); taskBrowser.release(id); }
     }
@@ -219,6 +238,7 @@ function createMainWindow(): BrowserWindow {
   });
 
   workbenchWindow = win;
+  remoteBackground.attach(win);
   win.once("closed", () => { if (workbenchWindow === win) workbenchWindow = undefined; });
   trackWindowState(win);
   taskBrowser.attachWindow(win);
@@ -246,7 +266,9 @@ function createMainWindow(): BrowserWindow {
   return win;
 }
 
+traceStartup("Requesting the single-instance lock");
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
+traceStartup(`Single-instance lock: ${gotSingleInstanceLock}`);
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
@@ -254,20 +276,27 @@ if (!gotSingleInstanceLock) {
     const win = workbenchWindow;
     if (win) {
       if (win.isMinimized()) win.restore();
+      win.show();
       win.focus();
     }
   });
 
   void app.whenReady().then(async () => {
+    traceStartup("Electron ready");
     applyContentSecurityPolicy();
     registerArtifactProtocol(registeredProjectRoots);
     const dataDir = app.getPath("userData");
     const port = await taskBrowser.start(() => readFileSync(join(dataDir, "core.token"), "utf8").trim());
+    traceStartup("Browser service ready");
     await coreDaemon.start(dataDir, port);
+    traceStartup("Rust backend ready");
+    await remoteBackground.start();
     taskBrowser.register();
     registerIpcHandlers();
     void workspaceAssistant.start().catch(error => console.error("Assistant startup:",error.message));
+    traceStartup("Creating the main window");
     createMainWindow();
+    traceStartup("Main window created");
 
     app.on("activate", () => {
       if (!workbenchWindow) createMainWindow();
@@ -280,6 +309,7 @@ if (!gotSingleInstanceLock) {
     event.preventDefault();
     if(browserShutdownPending)return;
     browserShutdownPending=true;
+    remoteBackground.close();
     workspaceAssistant.close();
     void taskBrowser.close().catch(error=>console.error("Browser shutdown:",error.message)).finally(()=>{
       browserShutdownReady=true;
@@ -287,6 +317,7 @@ if (!gotSingleInstanceLock) {
     });
   });
   app.on("window-all-closed", () => {
+    if (remoteBackground.running) return;
     if (process.platform !== "darwin") {
       void coreDaemon.stop();
       app.quit();

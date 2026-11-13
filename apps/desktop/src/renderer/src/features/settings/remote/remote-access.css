@@ -1,0 +1,540 @@
+.remote-access {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+}
+.remote-access button,
+.remote-access input,
+.remote-access select,
+.remote-access textarea {
+  font-family: inherit;
+}
+.remote-host {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--card);
+  box-shadow: 0 10px 36px #00000004;
+}
+.remote-host-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 23px 28px 0;
+}
+.remote-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+.remote-status i,
+.remote-presence i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+.remote-status[data-ready="true"] i,
+.remote-presence[data-online="true"] i {
+  background: #19816b;
+  opacity: 1;
+  box-shadow: 0 0 0 4px #19816b10;
+}
+.remote-host-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 40px;
+  padding: 34px 36px 40px;
+}
+.remote-eyebrow {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.remote-host h2 {
+  font-size: 27px;
+  line-height: 1.35;
+  letter-spacing: -0.8px;
+  margin: 8px 0 10px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.remote-host-copy p {
+  margin: 0 0 24px;
+  color: var(--ink-2);
+  font-size: 14px;
+}
+.remote-host-copy > button {
+  min-height: 38px;
+  gap: 9px;
+  padding-inline: 15px;
+}
+.remote-connection-art {
+  display: flex;
+  align-items: center;
+  flex: 0 0 245px;
+  justify-content: center;
+}
+.remote-computer {
+  position: relative;
+  padding: 18px 10px 10px;
+}
+.remote-computer > span {
+  position: absolute;
+  font-size: 8px;
+  top: 41px;
+  left: 25px;
+  letter-spacing: 0.1px;
+  font-weight: 600;
+}
+.remote-link-track {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-2);
+}
+.remote-link-track > span {
+  width: 20px;
+  height: 1px;
+  background: var(--line-strong, var(--line));
+}
+.remote-link-track[data-active="true"] > svg {
+  animation: remote-breathe 2.6s ease-in-out infinite;
+}
+.remote-phone {
+  position: relative;
+  margin-left: 10px;
+}
+.remote-phone > svg:last-child {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+}
+.remote-host-footer {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 16px 28px;
+  background: color-mix(in srgb, var(--ink) 3%, var(--card));
+}
+.remote-host-footer > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+.remote-section-title {
+  display: flex;
+  align-items: center;
+  margin: 32px 2px 14px;
+}
+.remote-section-title h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 650;
+}
+.remote-section-title h3 > span {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.remote-devices {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--card);
+}
+.remote-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 20px;
+  gap: 10px;
+  text-align: center;
+}
+.remote-empty > div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 46px;
+  gap: 3px;
+  margin-bottom: 3px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.remote-empty strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.remote-empty > span {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.remote-device {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 22px;
+}
+.remote-device + .remote-device {
+  border-top: 1px solid var(--line);
+}
+.remote-device-avatar {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.remote-device-content {
+  flex: 1;
+  min-width: 0;
+}
+.remote-device-content > strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.remote-device-content > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin: 7px 0 5px;
+  font-size: 12px;
+}
+.remote-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.remote-device-detail {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+.remote-icon-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  transition: background 0.18s ease;
+}
+.remote-icon-button:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.remote-icon-button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.remote-pending {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+.remote-pending > div {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 16px 20px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+  background: var(--card);
+}
+.remote-pending > div > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+.remote-pending strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.remote-pending span {
+  font-size: 12px;
+}
+.remote-network {
+  margin-top: 24px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+}
+.remote-network > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 22px;
+}
+.remote-network > summary > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.remote-network[open] > summary > svg {
+  transform: rotate(180deg);
+}
+.remote-network-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  padding: 4px 22px 22px;
+}
+.remote-network-body > label {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+}
+.remote-network-body input,
+.remote-network-body select,
+.remote-network-body textarea {
+  width: 100%;
+  min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--ink);
+  font-size: 13px;
+  outline: none;
+}
+.remote-network-body textarea {
+  min-height: 82px;
+  resize: vertical;
+}
+.remote-network-body :is(input, select, textarea):focus {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.remote-full-width,
+.remote-awake,
+.remote-network-note,
+.remote-endpoint,
+.remote-save {
+  grid-column: 1 / -1;
+}
+.remote-network-note {
+  font-size: 12px;
+  color: var(--ink-2);
+  margin: 0;
+  line-height: 1.7;
+}
+.remote-awake {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block: 6px;
+  font-size: 13px;
+}
+.remote-endpoint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.remote-endpoint code {
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  font-size: inherit;
+  user-select: all;
+}
+.remote-save {
+  display: flex;
+  justify-content: flex-end;
+}
+.remote-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 15px;
+  margin-bottom: 16px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+.remote-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-block: 20px;
+}
+.remote-pair-dialog {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 26px;
+  gap: 12px;
+}
+.remote-pair-dialog > span {
+  color: var(--ink-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.remote-qr {
+  width: 256px;
+  height: 256px;
+  padding: 8px;
+  position: relative;
+  background: white;
+  border-radius: 16px;
+  box-shadow: 0 0 0 1px #0000000a;
+}
+.remote-qr img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.remote-qr[data-expired="true"] img {
+  opacity: 0.12;
+  filter: blur(2px);
+}
+.remote-qr > div {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #171717;
+  font-size: 14px;
+}
+.remote-device-form {
+  padding: 24px;
+  color: var(--ink);
+  font-size: 14px;
+}
+.remote-device-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.remote-confirm-code {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 20px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  border-radius: 12px;
+}
+.remote-confirm-code span {
+  font-size: 12px;
+}
+.remote-confirm-code strong {
+  font-size: 30px;
+  letter-spacing: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.remote-access-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-block: 22px;
+}
+.remote-access-options button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 13px 9px;
+  font-size: 13px;
+}
+.remote-access-options button[aria-pressed="true"] {
+  border-color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  font-weight: 600;
+}
+.remote-device-form h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.remote-project-list {
+  display: grid;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+}
+.remote-project-list label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 2px;
+  cursor: pointer;
+}
+.remote-project-list input {
+  appearance: auto;
+  accent-color: var(--ink);
+  width: 15px;
+  height: 15px;
+}
+@keyframes remote-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .remote-link-track[data-active="true"] > svg {
+    animation: none;
+  }
+}
+[data-reduce-motion] .remote-link-track[data-active="true"] > svg {
+  animation: none;
+}
+@media (max-width: 800px) {
+  .remote-host-body {
+    padding: 26px;
+    gap: 16px;
+  }
+  .remote-connection-art {
+    flex-basis: 185px;
+    transform: scale(0.85);
+  }
+  .remote-host-footer {
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 600px) {
+  .remote-connection-art {
+    display: none;
+  }
+  .remote-network-body {
+    grid-template-columns: 1fr;
+  }
+  .remote-device {
+    gap: 10px;
+    padding: 16px;
+  }
+  .remote-device-content > div {
+    gap: 8px;
+  }
+}

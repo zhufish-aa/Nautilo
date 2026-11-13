@@ -24,6 +24,9 @@ pub use session_service::SessionService;
 pub use team_service::TeamService;
 
 pub mod connection_service;
+pub mod connection_import;
 pub use connection_service::ConnectionService;
 pub mod source_control;
 pub mod harness_plugins;
+pub mod resource_service;
+pub mod integration_service;

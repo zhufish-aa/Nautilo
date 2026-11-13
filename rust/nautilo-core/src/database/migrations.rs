@@ -12,6 +12,10 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
     db.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS assistant_records (id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS remote_settings (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS remote_devices (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS remote_commands (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS remote_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, action TEXT NOT NULL, outcome TEXT NOT NULL, timestamp TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_assistant_records_kind ON assistant_records(kind);
         CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -44,6 +48,13 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp DESC);
         CREATE TABLE IF NOT EXISTS credentials (agent_instance_id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS capabilities (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS request_logs (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS resource_transactions (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS configuration_presets (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS integration_settings (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS account_gateway_sessions (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_request_logs_session ON request_logs(json_extract(data, '$.sessionId'), updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(json_extract(data, '$.createdAt') DESC, id DESC);
         CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, created_at TEXT NOT NULL, truncated INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id, created_at);
         CREATE TABLE IF NOT EXISTS run_touched_files (run_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(run_id, path));
@@ -80,6 +91,7 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
         set_schema_version(db, 8)?;
     }
     if version < 9 { set_schema_version(db, 9)?; }
+    if version < 10 { set_schema_version(db, 10)?; }
     Ok(())
 }
 

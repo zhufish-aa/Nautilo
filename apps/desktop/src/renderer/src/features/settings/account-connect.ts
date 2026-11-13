@@ -1,6 +1,8 @@
 import type { RuntimeConnection } from "@agenthub/domain";
 import type { ConnectionDraft } from "../../stores/connections";
-export type AccountHarness = "codex" | "claude-code";
+export type AccountHarness = "codex" | "claude-code" | "antigravity";
+export const ACCOUNT_HARNESSES: AccountHarness[] = ["codex", "claude-code", "antigravity"];
+export const accountHarnessName = (harness: string): string => ({ codex: "Codex", "claude-code": "Claude Code", antigravity: "Antigravity" } as Record<string, string>)[harness] ?? harness;
 export type ConnectStage = "detecting" | "preparing" | "login" | "saving";
 export interface AccountConnectDependencies {
   detect(harness: AccountHarness): Promise<string>;
@@ -41,7 +43,7 @@ export async function connectOfficialAccount(harness: AccountHarness, name: stri
       await (deps.wait ?? wait)(signal);
     }
     finished = true; check(signal); stage("saving");
-    const saved = await deps.save({ id: profile.profileId, name, kind: "login", enabled: true, harness, loginProfileDirectory: profile.directory, models: [] });
+    const saved = await deps.save({ id: profile.profileId, name, kind: "login", enabled: true, harness, loginProfileDirectory: profile.directory, ...(harness === "antigravity" ? { nativeLogin: true } : {}), models: [] });
     // Acknowledgement only removes recovery metadata, never credentials.
     await deps.acknowledge?.(profile.profileId, harness).catch(() => undefined);
     return saved;

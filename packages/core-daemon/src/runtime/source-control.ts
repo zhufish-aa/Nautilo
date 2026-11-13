@@ -61,16 +61,26 @@ export class SourceControl {
   async status(cwd:string):Promise<SourceControlStatus>{const root=await repositoryRoot(cwd);return root?this.serial(root,()=>this.snapshot(cwd,root)):{schemaVersion:1,available:false,workingDirectory:cwd};}
   private async snapshot(cwd:string,root:string):Promise<SourceControlRepository>{
     const raw=await checked(root,["status","--porcelain=v2","-z","--branch","--untracked-files=all"]),parsed=parseSourceControlStatus(raw);
-    const comparison=parsed.head??(await checked(root,["hash-object","-t","tree","--stdin"],"")).trim(),stats=sourceNumstat(await checked(root,["diff","--no-ext-diff","--no-textconv","--numstat","-z","-M",comparison,"--"]),validPath);
+    const comparison=parsed.head??(await checked(root,["hash-object","-t","tree","--stdin"],"")).trim();
+    const [statRaw,indexFile,branchRaw,remoteRaw,logRaw,gitDirectory,config,revisions]=await Promise.all([
+      parsed.changes.length?checked(root,["diff","--no-ext-diff","--no-textconv","--numstat","-z","-M",comparison,"--"]):Promise.resolve(""),
+      checked(root,["rev-parse","--path-format=absolute","--git-path","index"]),
+      checked(root,["for-each-ref","--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(worktreepath)%00%(upstream:remotename)%00%(push:remotename)%00%(push:remoteref)%00","refs/heads/"]),
+      checked(root,["remote"]),
+      parsed.head?checked(root,["log","-20","--format=%H%x00%s%x00%an%x00%cI%x00"]):Promise.resolve(""),
+      checked(root,["rev-parse","--absolute-git-dir"]),checked(root,["config","--null","--list"]),
+      Promise.all(parsed.changes.map(async file=>{try{const info=await lstat(join(root,file.path),{bigint:true});return[file.path,String(info.size),String(info.mtimeNs),String(info.birthtimeNs)];}catch(error){return[file.path,(error as NodeJS.ErrnoException).code??"unavailable"];}}))
+    ]);
+    const stats=sourceNumstat(statRaw,validPath);
     for(const file of parsed.changes)Object.assign(file,stats.get(file.path));
-    const indexPath=(await checked(root,["rev-parse","--path-format=absolute","--git-path","index"])).trim(),digest=createHash("sha256").update(root).update("\0").update(raw);
+    const indexPath=indexFile.trim(),digest=createHash("sha256").update(root).update("\0").update(raw).update(JSON.stringify(revisions));
     try{for await(const chunk of createReadStream(indexPath))digest.update(chunk);}catch(error){if(!missing(error))throw error;}
-    const branches=(await checked(root,["for-each-ref","--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(worktreepath)%00%(upstream:remotename)%00%(push:remotename)%00%(push:remoteref)%00","refs/heads/"])).split("\n").filter(Boolean).map(line=>{const[name,current,upstream,worktree,upstreamRemote,pushRemote,pushRef]=line.replace(/\r$/u,"").split("\0");return{name,current:current==="*",upstream:upstream||undefined,worktree:worktree||undefined,upstreamRemote:upstreamRemote||undefined,pushRemote:pushRemote||undefined,pushRef:pushRef||undefined};});
-    const remotes=(await checked(root,["remote"])).split(/\r?\n/u).filter(Boolean);
-    const recent=parsed.head?(await checked(root,["log","-20","--format=%H%x00%s%x00%an%x00%cI%x00"])).split(/\r?\n/u).filter(Boolean).map(line=>{const[hash,subject,author,committedAt]=line.split("\0");return{hash,subject,author,committedAt};}):[];
-    const gitDir=(await checked(root,["rev-parse","--absolute-git-dir"])).trim();let operation:SourceControlRepository["operation"];
+    const branches=branchRaw.split("\n").filter(Boolean).map(line=>{const[name,current,upstream,worktree,upstreamRemote,pushRemote,pushRef]=line.replace(/\r$/u,"").split("\0");return{name,current:current==="*",upstream:upstream||undefined,worktree:worktree||undefined,upstreamRemote:upstreamRemote||undefined,pushRemote:pushRemote||undefined,pushRef:pushRef||undefined};});
+    const remotes=remoteRaw.split(/\r?\n/u).filter(Boolean);
+    const recent=logRaw.split(/\r?\n/u).filter(Boolean).map(line=>{const[hash,subject,author,committedAt]=line.split("\0");return{hash,subject,author,committedAt};});
+    const gitDir=gitDirectory.trim();let operation:SourceControlRepository["operation"];
     for(const[entry,kind]of [["rebase-merge","rebase"],["rebase-apply","rebase"],["MERGE_HEAD","merge"],["CHERRY_PICK_HEAD","cherry-pick"],["REVERT_HEAD","revert"]] as const)if(existsSync(join(gitDir,entry))){operation=kind;if(entry==="MERGE_HEAD"){let size=0;for await(const bytes of createReadStream(join(gitDir,entry))){size+=bytes.length;if(size>65536)throw new Error("Git 合并状态过大，请在原生终端检查。");digest.update(bytes);}}break;}
-    digest.update("\0"+(operation??"")).update(await checked(root,["config","--null","--list"]));const current=branches.find(branch=>branch.current);return{schemaVersion:1,available:true,workingDirectory:cwd,rootPath:root,token:digest.digest("hex"),...parsed,branches,upstreamRemote:current?.upstreamRemote,pushRemote:current?.pushRemote,pushRef:current?.pushRef,remotes,recent,operation};
+    digest.update("\0"+(operation??"")).update(config);const current=branches.find(branch=>branch.current);return{schemaVersion:1,available:true,workingDirectory:cwd,rootPath:root,token:digest.digest("hex"),...parsed,branches,upstreamRemote:current?.upstreamRemote,pushRemote:current?.pushRemote,pushRef:current?.pushRef,remotes,recent,operation};
   }
   async diff(cwd:string,input:{path:string;source:"worktree"|"index"}):Promise<SourceControlDiff>{
     const root=await repositoryRoot(cwd);if(!root)throw new Error("当前目录不是 Git 仓库");return this.serial(root,()=>this.readDiff(root,input));
@@ -105,7 +115,7 @@ export class SourceControl {
   async mutate(cwd:string,input:SourceControlMutation):Promise<{status:SourceControlRepository;output?:string}>{
     if(input.action==="init"){const existing=await repositoryRoot(cwd);if(existing)return{status:await this.serial(existing,()=>this.snapshot(cwd,existing))};return this.serial(await realpath(cwd),async()=>{await checked(cwd,["init"]);const root=await repositoryRoot(cwd);if(!root)throw new Error("无法初始化 Git 仓库");return{status:await this.snapshot(cwd,root)};});}
     const root=await repositoryRoot(cwd);if(!root)throw new Error("当前目录不是 Git 仓库");return this.serial(root,async()=>{
-      const state=await this.snapshot(cwd,root);if(input.token!==state.token)throw new Error("仓库状态已改变，请刷新后重试。");let output="";
+      const state=await this.snapshot(cwd,root);if(input.token!==state.token)throw new Error(input.action==="discard"?"仓库状态或文件内容已改变，请重新查看差异后再试。":"仓库状态已改变，请刷新后重试。");let output="";
       if(input.action==="stage-hunks"||input.action==="unstage-hunks"){
         if(input.paths?.length!==1)throw new Error("请选择一个文件的更改区块。");const path=input.paths[0],source=input.action==="stage-hunks"?"worktree":"index",diff=await this.readDiff(root,{path,source});
         if(!diff.patchToken||input.patchToken!==diff.patchToken)throw new Error("差异内容已改变，请刷新后重新选择。");if((input.hunkIds?.length??0)>10000||(input.lines?.length??0)>100000)throw new Error("选择的更改过多，请按区块操作。");

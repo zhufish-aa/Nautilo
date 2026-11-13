@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useId, useMemo, useState, type DragEvent } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Blocks,
   ChevronRight,
@@ -10,6 +11,8 @@ import {
   Sparkles,
   Trash2,
   Wrench,
+  ChevronDown,
+  Activity,
 } from "lucide-react";
 import type { CapabilityKind, ProviderCapability } from "@agenthub/domain";
 import { isElectron } from "../../lib/bridge";
@@ -29,6 +32,11 @@ import { Switch } from "../../components/ui/Switch";
 import { toast } from "../../stores/toast";
 import { useProviderToolsStore } from "../../stores/provider-tools";
 import { CapabilityEditorDialog } from "./CapabilityEditorDialog";
+import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
+import { DiagnosticStatus, ServiceDiagnosticPanel } from "../settings/ServiceDiagnosticPanel";
+import { useUiReducedMotion } from "../../lib/ui-motion";
+import { useServiceDiagnostics } from "../../stores/service-diagnostics";
+import { ResourceSyncDialog } from "./ResourceSyncDialog";
 import {
   CapabilityImportDialog,
   type CapabilityImportSeed,
@@ -43,6 +51,7 @@ function messageOf(error: unknown): string {
 
 export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }): JSX.Element {
   const { t, locale } = useI18n();
+  const [syncOpen, setSyncOpen] = useState(false);
   const providers = useProviderMetas();
   const tools = useProviderToolsStore((state) => state.tools);
   const loading = useProviderToolsStore((state) => state.loading);
@@ -58,6 +67,7 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   const harnessName = providerMeta(providerId).name;
   const [toggling, setToggling] = useState<string[]>([]);
   const zh = locale === "zh-CN";
+  const motionId = useId(); const reducedMotion = useUiReducedMotion();
   const [query, setQuery] = useState("");
   const [view, setView] = useState("enabled");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -191,10 +201,11 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="capability-page-heading flex flex-wrap items-center justify-between gap-3">
         <div><h2 className="text-xl font-semibold">{kind === "mcp" ? (zh ? "MCP 服务" : "MCP servers") : (zh ? "技能库" : "Skill library")}</h2>
         <p className="mt-1.5 text-[13px] text-ink-2">{zh ? `${harnessName} 已启用 ${enabledCount} 项，共 ${inventory.length} 项。` : `${enabledCount} enabled for ${harnessName} · ${inventory.length} total`}</p></div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)}>{zh ? "原生同步" : "Native sync"}</Button>
           <Button variant="outline" size="sm" onClick={() => openImport()}>
             <Import className="h-4 w-4" aria-hidden />
             {t("agents.tools.import.button")}
@@ -205,6 +216,7 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
           </Button>
         </div>
       </div>
+      <ResourceSyncDialog kind={kind} open={syncOpen} onOpenChange={setSyncOpen}/>
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative min-w-[180px] flex-1">
           <Search
@@ -219,11 +231,11 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
             aria-label={t("agents.tools.searchPlaceholder")}
           />
         </div>
-        <div className="capability-harness-select"><span>Harness</span><SelectField value={providerId} onValueChange={setProviderId} aria-label="Harness" options={providers.map((provider) => ({ value: provider.id, label: provider.name }))} /></div>
+        <div className="capability-harness-select"><ProviderAvatar providerId={providerId} size="sm"/><SelectField value={providerId} onValueChange={setProviderId} aria-label="Harness" options={providers.map((provider) => ({ value: provider.id, label: provider.name }))} /></div>
       </div>
       <div className="capability-library-filters">
         <div className="capability-view-tabs" role="group" aria-label={zh ? "启用状态" : "Enabled status"}>
-          {[{ id: "enabled", label: zh ? "已启用" : "Enabled", count: enabledCount }, { id: "all", label: zh ? "全部" : "All", count: inventory.length }, { id: "disabled", label: zh ? "未启用" : "Disabled", count: inventory.length - enabledCount }].map(tab => <button key={tab.id} type="button" aria-pressed={view === tab.id} onClick={() => setView(tab.id)}>{tab.label}<span>{tab.count}</span></button>)}
+          {[{ id: "enabled", label: zh ? "已启用" : "Enabled", count: enabledCount }, { id: "all", label: zh ? "全部" : "All", count: inventory.length }, { id: "disabled", label: zh ? "未启用" : "Disabled", count: inventory.length - enabledCount }].map(tab => <button key={tab.id} type="button" aria-pressed={view === tab.id} onClick={() => setView(tab.id)}>{view === tab.id && <motion.i className="management-selection" layoutId={`${motionId}-filter`} transition={{type:"spring",duration:reducedMotion ? 0 : 0.5,bounce:0.2}} aria-hidden/>}<span className="capability-filter-label">{tab.label}</span><span>{tab.count}</span></button>)}
         </div>
         <SelectField value={sourceFilter} onValueChange={setSourceFilter} aria-label={zh ? "筛选来源" : "Filter by source"} className="capability-source-filter" options={[{ value: "all", label: zh ? "所有来源" : "All sources" }, ...Object.entries(originNames).map(([value, label]) => ({ value, label }))]} />
       </div>
@@ -262,9 +274,10 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
                 {group.items.map(tool => {
                   const origin = capabilityOrigin(tool);
                   const description = capabilityDescription(tool);
+                  if (kind === "mcp") return <McpServiceRow key={tool.id} tool={tool} harnessName={harnessName} origin={origin.label || originNames[origin.kind]} enabled={capabilityEnabledFor(tool,daemonProviderId)} disabled={!providerId || toggling.includes(tool.id)} onToggle={checked=>handleToggle(tool,checked)} onEdit={()=>openEdit(tool)} onDelete={()=>setDeleting(tool)}/>;
                   return <article key={tool.id} className="capability-library-row">
                     <button type="button" className="capability-row-main" onClick={() => setDetail(tool)} aria-label={`${zh ? "查看详情" : "View details"} · ${tool.name}`}>
-                      <span className="capability-row-icon">{kind === "mcp" ? <Server size={18} /> : <Sparkles size={18} />}</span>
+                      <span className="capability-row-icon"><Sparkles size={18} /></span>
                       <span className="capability-row-copy"><span className="capability-row-title">{tool.name}</span>
                         {description && <span className="capability-row-description">{description}</span>}
                         <span className="capability-row-origin">{origin.label || originNames[origin.kind]}</span>
@@ -364,4 +377,36 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
       </Dialog>
     </div>
   );
+}
+
+function McpServiceRow({tool,harnessName,origin,enabled,disabled,onToggle,onEdit,onDelete}: {
+  tool:ProviderCapability; harnessName:string; origin:string; enabled:boolean; disabled:boolean;
+  onToggle:(value:boolean)=>void; onEdit:()=>void; onDelete:()=>void;
+}): JSX.Element {
+  const zh = useI18n().locale === "zh-CN", reduced = useUiReducedMotion();
+  const [expanded,setExpanded] = useState(false), regionId = useId();
+  const target = {kind:"mcp" as const,id:tool.id,version:tool.updatedAt};
+  const check = useServiceDiagnostics(state=>state.check);
+  return <article className="mcp-service-row" data-expanded={expanded}>
+    <div className="mcp-service-row-heading">
+      <button className="mcp-service-identity" type="button" onClick={()=>setExpanded(value=>!value)} aria-expanded={expanded} aria-controls={regionId}>
+        <span className="mcp-service-icon"><Server size={20}/></span>
+        <span className="mcp-service-copy"><span className="mcp-service-name">{tool.name}</span><span className="mcp-service-meta">{tool.mcp?.transport === "stdio" ? "STDIO" : "HTTP"}<span>·</span>{origin}<span>·</span>{tool.providerIds.length} {zh ? "个 Harness" : "harnesses"}</span></span>
+        <ChevronDown size={15} className="mcp-service-chevron" style={{transform:expanded ? "rotate(180deg)" : undefined}}/>
+      </button>
+      <div className="mcp-service-row-actions"><DiagnosticStatus target={target}/>
+        <button type="button" className="mcp-probe-trigger" onClick={()=>{setExpanded(true);void check(target);}} aria-label={`${zh ? "检测" : "Check"} ${tool.name}`}><Activity size={14}/><span>{zh ? "检测" : "Check"}</span></button>
+        <span className="mcp-assignment-control"><Switch checked={enabled} disabled={disabled} onCheckedChange={onToggle} aria-label={`${harnessName} · ${tool.name}`}/></span>
+      </div>
+    </div>
+    <AnimatePresence initial={false}>
+      {expanded && <motion.div id={regionId} className="mcp-service-expanded" initial={{height:0,opacity:0}} animate={{height:"auto",opacity:1}} exit={{height:0,opacity:0}} transition={{duration:reduced ? 0 : 0.26,ease:[0.23,1,0.32,1]}}>
+        <div className="mcp-service-details">
+          <div className="mcp-service-endpoint"><code>{tool.mcp && safeMcpSummary(tool.mcp)}</code><div><button type="button" onClick={onEdit}><Pencil size={13}/>{zh ? "编辑" : "Edit"}</button><button type="button" onClick={onDelete} aria-label={`${zh ? "删除" : "Remove"} ${tool.name}`}><Trash2 size={13}/></button></div></div>
+          {capabilityDescription(tool) && <p className="mcp-service-description">{capabilityDescription(tool)}</p>}
+          <ServiceDiagnosticPanel target={target} initialOpen/>
+        </div>
+      </motion.div>}
+    </AnimatePresence>
+  </article>;
 }

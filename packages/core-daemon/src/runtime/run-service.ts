@@ -2,6 +2,8 @@ import { applyConnection, boundConnection, connectionEnvironment } from "./runti
 import { imageGenerationExecutor } from "./image-generation.js";
 import { generateSessionTitle } from "./session-title.js";
 import { randomUUID } from "node:crypto";
+import { RequestLogService } from "./request-log.js";
+import { checkNativeAccountLogin, isAccountAuthenticationError } from "./account-auth.js";
 import { startApiStreamObserver } from "../adapters/api-stream-observer.js";
 import { startChatCompatProxy } from "../adapters/codex/chat-compat-proxy.js";
 import { startAnthropicCompatProxy } from "../adapters/codex/anthropic-compat-proxy.js";
@@ -29,6 +31,7 @@ import { subagentMeta } from "./subagent-detection.js";
 import { captureWorkspaceSnapshot, type WorkspaceSnapshot } from "./run-workspace-snapshot.js";
 import { RUNTIME_TOOL_SCHEMA_VERSION, type RuntimeToolProvider } from "./runtime-tool-provider.js";
 import { capabilityToMcpServer } from "../application/capability-service.js";
+import { AccountGateways } from "./account-gateway.js";
 import type { InteractionService } from "../application/interaction-service.js";
 
 export interface RunContext {
@@ -49,6 +52,7 @@ export interface RunContext {
   contextWindowOverride?: number;
   /** Key marking this turn as withdrawable while it waits in the per-session queue. */
   queueKey?: string;
+  requestId?: string;
 }
 
 export interface RunCompletion {
@@ -71,6 +75,8 @@ interface ActiveRun {
 }
 
 export class RunService {
+  readonly requestLogs: RequestLogService;
+  private readonly accountGateways?: AccountGateways;
   generateSessionTitle(sessionId: string): Promise<{ title?: string }> {
     return this.credentials ? generateSessionTitle(this.database, this.credentials, sessionId) : Promise.resolve({});
   }
@@ -118,6 +124,8 @@ export class RunService {
     private readonly audit?: AuditService
   ) {
     this.artifactService = new ArtifactService(database);
+    this.requestLogs = new RequestLogService(database, redaction);
+    if(credentials)this.accountGateways=new AccountGateways(database,adapters,credentials);
   }
 
   setRuntimeToolProvider(provider: RuntimeToolProvider): void {
@@ -131,6 +139,7 @@ export class RunService {
   async cancel(runId: string): Promise<void> {
     const active = this.active.get(runId);
     const existing = this.database.runs.get(runId);
+    if(existing)await this.accountGateways?.cancelSession(existing.sessionId);
     if (!active) {
       if (existing && !["completed", "failed", "timed_out", "crashed", "cancelled"].includes(existing.status)) {
         const cancelled = { ...existing, status: "cancelled" as const, endedAt: new Date().toISOString(), failureCode: "RUN_CANCELLED" };
@@ -203,7 +212,13 @@ export class RunService {
       session = { ...session, agentMode: submitted.agentMode, model: submitted.model, reasoningEffort: submitted.reasoningEffort, serviceTier: submitted.serviceTier };
     }
 
-    const pending = this.sessionQueue.enqueue(session.id, () => this.launchNow(session, agent, prompt, context), context.queueKey);
+    const requestId = this.requestLogs.begin(session, agent, context.providerCommand ?? "message", context.queueKey);
+    context = { ...context, requestId };
+    const pending = this.sessionQueue.enqueue(session.id, async () => {
+      this.requestLogs.mark(requestId,"preparing");
+      try { return await this.launchNow(session, agent, prompt, context); }
+      catch(error) { this.requestLogs.finish(requestId,"failed",error instanceof CoreError ? error.descriptor.code : "RUN_START_FAILED",error instanceof Error ? error.message : String(error)); throw error; }
+    }, context.queueKey);
     this.launching.add(pending);
     void pending.then(() => this.launching.delete(pending), () => this.launching.delete(pending));
     return pending;
@@ -211,7 +226,9 @@ export class RunService {
 
   /** Withdraws a queued (not yet started) turn by its queue key. */
   cancelQueued(sessionId: string, key: string): boolean {
-    return this.sessionQueue.cancelPending(sessionId, key);
+    const cancelled = this.sessionQueue.cancelPending(sessionId, key);
+    if (cancelled) this.requestLogs.cancelQueued(sessionId,key);
+    return cancelled;
   }
 
   steerQueued(sessionId: string, key: string, text: string): Promise<boolean> {
@@ -323,6 +340,7 @@ export class RunService {
       startedAt
     };
     this.database.runs.save(run);
+    this.requestLogs.attach(context.requestId,run.id);
     this.audit?.record({ actorType: "agent", actorId: context.memberId ?? session.memberId, action: "run.started", resourceType: "run", resourceId: run.id, outcome: "success", details: { agentInstanceId: agent.id, sessionId: session.id, projectRunId: context.projectRunId, taskId: context.taskId } });
     this.database.sessions.save({ ...(this.database.sessions.get(session.id) ?? session), status: "running", updatedAt: startedAt });
     if (context.presentation !== "provider_command") {
@@ -363,6 +381,21 @@ export class RunService {
     };
 
     let connectionProxy: { close(): Promise<void> } | undefined;
+    try {
+      if (selectedConnection?.kind === "login") {
+        if (selectedConnection.harness !== agent.providerId) {
+          if (!this.accountGateways) throw Error("Account credential service unavailable");
+          await this.accountGateways.bind(session.id, selectedConnection, request);
+        } else {
+          await checkNativeAccountLogin(selectedConnection, request);
+        }
+      }
+    } catch (error) {
+      this.failRun(run, session, error, context.presentation === "provider_command");
+      throw error;
+    }
+    this.requestLogs.supplied(context.requestId,request.runtimeTools,request.mcpServers);
+    this.requestLogs.mark(context.requestId,"dispatched");
     let streamObserver: Awaited<ReturnType<typeof startApiStreamObserver>>;
     try {
       const adapter = this.adapters.find(agent.providerId);
@@ -411,6 +444,9 @@ export class RunService {
         ...context,
         runtimeToolVersion: context.runtimeToolVersion ?? (context.presentation !== "provider_command" ? RUNTIME_TOOL_SCHEMA_VERSION : undefined),
         contextWindowOverride: configuredContextWindow ?? context.contextWindowOverride
+      }).then(result => {
+        this.requestLogs.finish(context.requestId,result.run.status,result.run.failureCode);
+        return result;
       });
       this.active.set(runId, { sessionId: session.id, cancel: async () => { request.imageGeneration?.cancel(); await adapterRun.cancel(); await connectionProxy?.close(); }, steer: adapterRun.steer, completion, projectRunId: context.projectRunId });
       void completion.finally(() => {
@@ -424,6 +460,7 @@ export class RunService {
       await streamObserver?.close();
       this.workspaceBaselines.delete(runId);
       const failed = this.failRun(run, session, error, context.presentation === "provider_command");
+      this.requestLogs.finish(context.requestId,failed.status,failed.failureCode,error instanceof Error ? error.message : String(error));
       return { runId, completion: Promise.resolve({ run: failed, messages: [] }) };
     }
   }
@@ -493,7 +530,8 @@ export class RunService {
           this.events.append(session, latest, "run.failed", {
             code: latest.failureCode ?? "RUN_START_FAILED",
             message: detail.slice(-4_000),
-            retryable: !cancelled
+            connectionId: session.connectionId,
+            retryable: !cancelled && latest.failureCode !== "AGENT_NOT_AUTHENTICATED"
           });
         }
         this.updateSessionStatus(session.id, context.presentation === "provider_command" || cancelled ? "idle" : "failed");
@@ -540,15 +578,16 @@ export class RunService {
       ...current,
       status: "failed",
       endedAt: new Date().toISOString(),
-      failureCode: "RUN_START_FAILED"
+      failureCode: error instanceof CoreError ? error.descriptor.code : "RUN_START_FAILED"
     };
     this.database.runs.save(failed);
     this.audit?.record({ actorType: "agent", actorId: run.memberId ?? session.memberId, action: "run.failed", resourceType: "run", resourceId: run.id, outcome: "failure", details: { failureCode: failed.failureCode, error: error instanceof Error ? error.message : String(error) } });
     if (!providerCommand) {
       this.events.append(session, failed, "run.failed", {
-        code: "RUN_START_FAILED",
+        code: failed.failureCode ?? "RUN_START_FAILED",
         message: error instanceof Error ? error.message : String(error),
-        retryable: true
+        connectionId: session.connectionId,
+        retryable: error instanceof CoreError ? error.descriptor.retryable : true
       });
     }
     this.updateSessionStatus(session.id, providerCommand ? "idle" : "failed");
@@ -566,6 +605,7 @@ export class RunService {
     event: AdapterEvent,
     context: RunContext
   ): Promise<Message | undefined> {
+    this.requestLogs.observe(context.requestId,event);
     if (event.kind === "message") {
       const messageId = event.messageId ?? "default";
       // Sub-agent messages share the run with the main agent; keep their delta
@@ -787,7 +827,8 @@ export class RunService {
     else if (event.kind === "error") {
       this.rememberOutput(run.id, event.error.message);
       const current = this.database.runs.get(run.id) ?? run;
-      if (!["cancelling", "cancelled"].includes(current.status)) this.database.runs.save({ ...current, status: "failed", endedAt: new Date().toISOString(), failureCode: "PROVIDER_ERROR" });
+      const authentication = session.connectionId && this.database.runtimeConnections.get(session.connectionId)?.kind === "login" && isAccountAuthenticationError(event.error.message);
+      if (!["cancelling", "cancelled"].includes(current.status)) this.database.runs.save({ ...current, status: "failed", endedAt: new Date().toISOString(), failureCode: authentication ? "AGENT_NOT_AUTHENTICATED" : "PROVIDER_ERROR" });
     } else if (event.kind === "raw") this.rememberOutput(run.id, event.text);
     return undefined;
   }

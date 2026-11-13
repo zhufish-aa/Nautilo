@@ -1,4 +1,6 @@
 import { useUsageStore } from "../stores/usage";
+import { latestContextUsage } from "./context-usage";
+import { recoverLegacyDeepSeekReplies } from "./deepseek-legacy-history";
 import { applyLiveProviderUi } from "./provider-ui";
 import type {
   AgentInstance,
@@ -1819,6 +1821,7 @@ function hasQueuedFollowUpForProject(projectRunId: string): boolean {
 }
 
 function buildStandaloneTimeline(messages: Message[], events: RuntimeEvent[], artifacts: Artifact[]): TimelineEvent[] {
+  ({ messages, events } = recoverLegacyDeepSeekReplies(messages, events));
   const timeline = messageTimeline(messages, undefined, artifacts);
   const changedFiles = diffArtifactsByScope(artifacts);
   appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, undefined, [], new Map(), new Map(artifacts.map((artifact) => [artifact.id, artifact])), new Map(), changedFiles));
@@ -1826,14 +1829,6 @@ function buildStandaloneTimeline(messages: Message[], events: RuntimeEvent[], ar
   return groupToolTimeline(timeline
     .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence))
     .map((event, index) => ({ ...event, sequence: index + 1 }));
-}
-
-function latestContextUsage(events: RuntimeEvent[]): Extract<RuntimeEvent, { type: "usage.updated" }>["payload"] | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event.type === "usage.updated") return event.payload;
-  }
-  return undefined;
 }
 
 function buildTimeline(
@@ -1846,6 +1841,7 @@ function buildTimeline(
   verifications: VerificationResult[],
   isMain: boolean
 ): TimelineEvent[] {
+  ({ messages, events } = recoverLegacyDeepSeekReplies(messages, events));
   const resolvedApprovals = new Map(events.filter((event) => event.type === "approval.resolved").map((event) => [event.payload.approvalId, event.payload.decision]));
   const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
   const verificationsById = new Map(verifications.map((verification) => [verification.id, verification]));
@@ -2377,7 +2373,7 @@ function runtimePayload(
   if (event.type === "git.merge_started") return { kind: "git_merge", status: "running", sourceBranch: event.payload.sourceBranch, targetBranch: event.payload.targetBranch };
   if (event.type === "git.merge_finished") return { kind: "git_merge", status: "completed", sourceBranch: event.payload.sourceBranch, targetBranch: event.payload.targetBranch, commit: event.payload.commit };
   if (event.type === "git.conflict") return { kind: "git_merge", status: "conflict", sourceBranch: event.payload.sourceBranch, targetBranch: event.payload.targetBranch, paths: event.payload.paths };
-  if (event.type === "run.failed") return { kind: "error", code: event.payload.code, message: event.payload.message, retryable: event.payload.retryable };
+  if (event.type === "run.failed") return { kind: "error", code: event.payload.code, message: event.payload.message, retryable: event.payload.retryable, connectionId: event.payload.connectionId };
   if (event.type === "run.waiting") return { kind: "run_status", run: { status: event.payload.reason === "approval" ? "waiting_approval" : "running", reason: event.payload.reason } };
   return undefined;
 }

@@ -126,6 +126,7 @@ function mcpRow(
       enabled: candidate.enabled,
       providerIds,
       mcp: candidate.mcp,
+      origin: candidate.origin ? { kind: "local", path: candidate.origin } : { kind: "custom" },
       createdAt: now,
       updatedAt: now,
     }),
@@ -155,6 +156,7 @@ function skillRow(
       tags: candidate.tags,
       enabled: candidate.enabled,
       // Frontmatter providers are already daemon ids and outrank the batch choice.
+      origin: candidate.origin ? { kind: "local", path: candidate.origin } : { kind: "custom" },
       providerIds:
         candidate.providerIds.length > 0 ? candidate.providerIds : providerIds,
       skill: {
