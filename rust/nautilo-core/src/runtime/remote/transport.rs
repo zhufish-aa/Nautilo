@@ -49,6 +49,7 @@ impl RemoteService {
             return Ok(());
         }
         let transport = QuicTransportConfig::builder()
+            .direct_streams_only(Arc::new(std::sync::atomic::AtomicBool::new(settings.relay_mode == "direct")))
             .keep_alive_interval(Duration::from_secs(15))
             .max_idle_timeout(Some(Duration::from_secs(60).try_into()?))
             .max_concurrent_bidi_streams(8u32.into())
@@ -56,15 +57,22 @@ impl RemoteService {
             .build();
         let mut builder = Endpoint::builder(presets::N0)
             .secret_key(self.identity()?)
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(if settings.relay_mode == "direct" { vec![ALPN_V2.to_vec()] } else { vec![ALPN_V2.to_vec(), ALPN.to_vec()] })
             .transport_config(transport);
-        if settings.relay_mode == "local" {
+        if settings.relay_mode == "lan" {
             builder = builder
                 .clear_address_lookup()
                 .relay_mode(RelayMode::Disabled)
                 .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
         }
         if settings.relay_mode == "custom" {
+            // Explicit relay mode must not spend time trying IP paths.
+            builder = builder.clear_ip_transports()
+                .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
+        }
+        let proxy = proxy::configured(&settings);
+        if let Some((url, _)) = &proxy { builder = builder.proxy_url(url.clone()); }
+        if matches!(settings.relay_mode.as_str(), "custom" | "direct") && !settings.relay_urls.is_empty() {
             let urls = settings
                 .relay_urls
                 .iter()
@@ -78,6 +86,7 @@ impl RemoteService {
         let generation = {
             let mut state = self.state.lock().unwrap();
             state.endpoint = Some(endpoint.clone());
+            state.http_proxy_source = proxy.map(|(_, source)| source);
             state.generation
         };
         let service = self.clone();
@@ -131,6 +140,8 @@ impl RemoteService {
                     .serve_connection(&connection, &peer, generation)
                     .await;
                 let mut state = service.state.lock().unwrap();
+                state.recent_connections.push_front(diagnostics::connection_snapshot(&connection));
+                state.recent_connections.truncate(8);
                 if state
                     .connections
                     .get(&peer)
@@ -150,6 +161,7 @@ impl RemoteService {
         let slots = Arc::new(Semaphore::new(8));
         let connected_at = std::time::Instant::now();
         let mut requests = std::collections::VecDeque::new();
+        let mut control_requests = std::collections::VecDeque::new();
         loop {
             // Unpaired peers have a bounded lifetime, even if they never send data.
             if connected_at.elapsed() > Duration::from_secs(180)
@@ -158,10 +170,21 @@ impl RemoteService {
                 connection.close(1u32.into(), b"pairing expired");
                 break;
             }
-            let stream = match timeout(Duration::from_secs(30), connection.accept_bi()).await {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(_)) => break,
-                Err(_) => continue,
+            let stream = tokio::select! {
+                result = timeout(Duration::from_secs(30), connection.accept_bi()) => match result {
+                    Ok(Ok(stream)) => stream, Ok(Err(_)) => break, Err(_) => continue,
+                },
+                result = connection.read_datagram() => {
+                    let Ok(packet) = result else { break };
+                    let now = std::time::Instant::now();
+                    while control_requests.front().is_some_and(|at| now.duration_since(*at) > Duration::from_secs(10)) { control_requests.pop_front(); }
+                    if control_requests.len() >= 24 { connection.close(3u32.into(), b"control rate exceeded"); break; }
+                    control_requests.push_back(now);
+                    if let Ok(Some(response)) = self.transport_policy_reply(&packet) {
+                        let _ = connection.send_datagram(response.into());
+                    }
+                    continue;
+                }
             };
             let now = std::time::Instant::now();
             while requests

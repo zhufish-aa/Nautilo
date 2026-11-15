@@ -86,6 +86,7 @@ impl Daemon {
         runs.set_interaction_service(interactions.clone());
         let terminals=Arc::new(crate::runtime::terminal_service::TerminalService::default());
         runs.set_terminal_service(terminals.clone());
+        crate::runtime::session_title::backfill(&db)?;
         let sessions = SessionService::new(db.clone());
         sessions.set_run_pipeline(runs.clone(), events.clone());
         let agents = AgentService::new(db.clone(), adapters.clone(), credentials.clone());
@@ -172,6 +173,7 @@ impl Daemon {
         // ballooned the database. Only failures and mutations keep a trail.
         const READ_ONLY_IPC: &[&str] = &[
             "remote.status",
+            "remote.diagnostics",
             "scm.status", "scm.diff",
             "health.get",
             "terminal.read", "terminal.list", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities",

@@ -389,17 +389,19 @@
   font-variant-numeric: tabular-nums;
 }
 .remote-qr {
-  width: 256px;
-  height: 256px;
-  padding: 8px;
+  width: fit-content;
+  max-width: min(100%, calc(86vh - 260px));
+  padding: 12px;
   position: relative;
   background: white;
   border-radius: 16px;
   box-shadow: 0 0 0 1px #0000000a;
 }
 .remote-qr img {
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  image-rendering: pixelated;
   display: block;
 }
 .remote-qr[data-expired="true"] img {

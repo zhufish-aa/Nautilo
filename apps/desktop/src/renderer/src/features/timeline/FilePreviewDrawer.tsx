@@ -32,7 +32,7 @@ const OVERSCAN = 20;
  * and each row is highlighted on demand (whole-file highlight.js on hundreds
  * of thousands of lines would block the renderer for seconds).
  */
-function VirtualizedCode({ lines, language, targetLine }: {
+export function VirtualizedCode({ lines, language, targetLine }: {
   lines: string[];
   language?: string;
   targetLine?: number;

@@ -33,4 +33,45 @@ class ConversationTimelineTest {
         val turn = conversationTimeline(messages, activities, emptyList()).single() as ConversationItem.Turn
         assertEquals(listOf("message:comment", "activity:t", "activity:c"), turn.process.map { it.key })
     }
+
+    @Test fun activeCommentaryThenToolStaysInItsChronologicalSlot() {
+        val turn = conversationTimeline(listOf(ChatMessage("comment", "agent", "先查看目录", time(2), runId = "r", sequence = 1)),
+            listOf(ActivityItem("cmd", "tool", "读取目录", running = true, time = time(3), runId = "r", sequence = 2)),
+            listOf(RunInfo("r", "running", time(1), ""))).single() as ConversationItem.Turn
+        assertFalse(turn.completed)
+        assertNull(turn.answer)
+        assertEquals(listOf("message:comment", "activity:cmd"), turn.parts.filter { it.visible(true, turn.answer) }.map { it.key })
+    }
+
+    @Test fun noticesAndFinalReplyAreCollapsedInPlaceLikeDesktop() {
+        val messages = listOf(ChatMessage("comment", "agent", "先检查", time(2), runId = "r", sequence = 1),
+            ChatMessage("final", "agent", "检查结果", time(4), runId = "r", sequence = 3))
+        val activities = listOf(ActivityItem("approval", "approval", "批准", time = time(3), runId = "r", sequence = 2),
+            ActivityItem("later-tool", "tool", "后台工具", time = time(5), runId = "r", sequence = 4),
+            ActivityItem("error", "error", "错误", time = time(6), runId = "r", sequence = 5))
+        val turn = conversationTimeline(messages, activities, listOf(RunInfo("r", "completed", time(1), time(7)))).single() as ConversationItem.Turn
+        assertEquals("final", turn.answer?.id)
+        assertEquals(listOf("activity:approval", "message:final", "activity:error"), turn.parts.filter { it.visible(false, turn.answer) }.map { it.key })
+        assertEquals(listOf("message:comment", "activity:approval", "message:final", "activity:later-tool", "activity:error"), turn.parts.filter { it.visible(true, turn.answer) }.map { it.key })
+    }
+
+    @Test fun protocolStatusAndUsageNeverCreateConversationCardsOrEmptyTurns() {
+        val hidden = listOf("provider.runtime_ready", "provider.runtime_capabilities", "provider.runtime_closed", "provider.commands_updated", "agent.status", "session.native_history_synced", "unknown.event").mapIndexed { index, type ->
+            ActivityItem("internal-$index", "status", type, time = time(1), eventType = type)
+        } + ActivityItem("usage", "usage", "用量", time = time(1), eventType = "usage.updated") +
+            ActivityItem("diff", "artifact", "diff", time = time(1), eventType = "artifact.created", payload = json("kind" to "diff"))
+        assertTrue(conversationTimeline(emptyList(), hidden, emptyList()).isEmpty())
+    }
+
+    @Test fun journalOrderWinsOverProviderClockDifferences() {
+        val turn = conversationTimeline(listOf(ChatMessage("comment", "agent", "先读文件", time(10), runId = "r", sequence = 1)),
+            listOf(ActivityItem("cmd", "tool", "read", time = time(3), runId = "r", sequence = 2)), emptyList()).single() as ConversationItem.Turn
+        assertEquals(listOf("message:comment", "activity:cmd"), turn.parts.map { it.key })
+    }
+
+    @Test fun onlyDesktopVisibleExtensionMethodsBecomeRows() {
+        fun extension(method: String, raw: org.json.JSONObject = json()) = ActivityItem(method, "provider_ui", method, time = time(1), payload = json("method" to method, "raw" to raw))
+        val timeline = conversationTimeline(emptyList(), listOf(extension("set_status"), extension("notify"), extension("open_url", json("url" to "https://example.com/auth")), extension("open_url", json("url" to "file:///private"))), emptyList())
+        assertEquals(listOf("activity:notify", "activity:open_url"), timeline.flatMap { (it as ConversationItem.Turn).parts }.map { it.key })
+    }
 }

@@ -394,6 +394,7 @@ impl SessionService {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().save_message(&message)?;
         }
+        let session = crate::runtime::session_title::seed(&self.db, session_id)?;
         let run_id = self
             .runs()?
             .start(

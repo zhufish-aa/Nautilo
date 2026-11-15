@@ -26,7 +26,7 @@ internal fun highlightCode(code: String, path: String): AnnotatedString {
         else -> SyntaxLanguage.DEFAULT
     }
     val builder = AnnotatedString.Builder(code)
-    val theme = SyntaxThemes.atom().copy(code = 0x202C38, keyword = 0x1E62AC, string = 0x26734F, literal = 0x995C21, comment = 0x657588, multilineComment = 0x657588, punctuation = 0x3C5268, mark = 0x3C5268)
+    val theme = SyntaxThemes.atom().copy(code = 0x242424, keyword = 0x81559B, string = 0x52774B, literal = 0x9A6138, comment = 0x8A8A8A, multilineComment = 0x8A8A8A, punctuation = 0x575757, mark = 0x575757)
     val tokens = Highlights.Builder().code(code).language(language).theme(theme).build().getHighlights()
     tokens.filterIsInstance<ColorHighlight>().forEach { token ->
         val start = token.location.start.coerceIn(0, code.length)

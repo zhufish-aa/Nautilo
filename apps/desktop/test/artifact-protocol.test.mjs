@@ -96,3 +96,23 @@ test("artifact protocol handles empty and missing files without leaking a handle
   assert.equal(await empty.text(), "");
   assert.equal((await readArtifactResponse(join(workspace, "missing.png"), [workspace])).status, 404);
 });
+
+test("registered protocol renders phone uploads without granting access to other app data", async (t) => {
+  const root = await fixture(t);
+  const upload = join(root, "remote-attachments", "phone", "upload", "file-照片.png");
+  await fsPromises.mkdir(join(root, "remote-attachments", "phone", "upload"), { recursive: true });
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==", "base64");
+  await fsPromises.writeFile(upload, png);
+  await fsPromises.writeFile(join(root, "core.token"), "synthetic credential");
+  let handler;
+  const { registerArtifactProtocol } = load({ electron: {
+    app: { getPath: () => root }, protocol: { handle: (_scheme, callback) => { handler = callback; } }
+  } });
+  registerArtifactProtocol();
+  const request = (path) => handler({ url: `agenthub-artifact://local/?path=${encodeURIComponent(path)}&thumb=1` });
+  const response = await request(upload);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Content-Type"), "image/png");
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), png);
+  assert.equal((await request(join(root, "core.token"))).status, 403);
+});

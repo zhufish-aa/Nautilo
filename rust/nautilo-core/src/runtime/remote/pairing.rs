@@ -41,7 +41,8 @@ impl RemoteService {
             .map_err(|_| anyhow::anyhow!("Random source unavailable"))?;
         let token = URL_SAFE_NO_PAD.encode(bytes);
         let expires_at = now_ms() + 300_000;
-        let payload = json!({"v":1,"transport":"iroh","alpn":"nautilo/remote/1","name":settings.device_name,
+        let alpn = if settings.relay_mode == "direct" { "nautilo/remote/2" } else { "nautilo/remote/1" };
+        let payload = json!({"v":1,"transport":"iroh","alpn":alpn,"name":settings.device_name,
             "endpoint":endpoint.addr(),"token":token,"expiresAt":expires_at});
         let uri = format!(
             "nautilo://pair#{}",
@@ -50,7 +51,8 @@ impl RemoteService {
         let qr = qrcode::QrCode::new(uri.as_bytes())?;
         let svg = qr
             .render::<qrcode::render::svg::Color>()
-            .min_dimensions(256, 256)
+            .module_dimensions(4, 4)
+            .quiet_zone(true)
             .build();
         let key = hmac::Key::new(hmac::HMAC_SHA256, &bytes);
         let proof = hmac::sign(&key, token.as_bytes());

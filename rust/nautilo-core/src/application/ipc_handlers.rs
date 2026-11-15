@@ -11,6 +11,7 @@ use crate::ipc_gateway::Router;
 
 pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
     reg(router, daemon, "remote.status", |d, _| d.remote.status().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
+    { let remote=daemon.remote.clone(); router.register("remote.diagnostics",move|_| { let remote=remote.clone(); async move { remote.diagnostics().await } }); }
     reg(router, daemon, "remote.invite", |d, _| d.remote.invite().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
     reg(router, daemon, "remote.cancelInvite", |d, _| d.remote.cancel_invite().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
     reg(router, daemon, "remote.approve", |d, input| d.remote.approve(input).map_err(|e|crate::errors::invalid("remote", &e.to_string())));

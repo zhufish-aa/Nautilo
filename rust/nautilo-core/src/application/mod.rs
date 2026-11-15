@@ -2,6 +2,7 @@
 
 pub mod agent_service;
 pub mod artifact_read;
+pub mod workspace_files;
 pub mod capability_import;
 pub mod capability_service;
 pub mod core_daemon;

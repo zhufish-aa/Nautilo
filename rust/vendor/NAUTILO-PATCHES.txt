@@ -1,0 +1,30 @@
+Pinned upstream sources (MIT OR Apache-2.0; licenses are retained per crate):
+  iroh 1.4.1: https://github.com/n0-computer/iroh
+  noq-proto 1.4.0: https://github.com/n0-computer/noq
+
+Nautilo changes:
+  noq-proto/src/config/transport.rs: optional per-path STREAM payload filter.
+  noq-proto/src/connection/mod.rs: gate STREAM scheduling, packet creation,
+    retransmission and receive; control/handshake/NAT/DATAGRAM frames remain live.
+  iroh/src/endpoint/quic.rs: direct_streams_only uses iroh's actual IP/mapped
+    transport classification, including fail-closed handling of mixed addresses.
+  iroh/src/net_report.rs: retain the first QAD observation for each live IPv4/
+    IPv6 discovery connection, so periodic reports reuse the known mapping
+    instead of dropping it while waiting for an address change.
+  noq-proto/src/n0_nat_traversal.rs + connection/mod.rs: read-only peer candidate
+    diagnostics on both QUIC sides (server REACH_OUT, client ADD_ADDRESS).
+  iroh/src/endpoint/connection.rs: expose those candidates under unstable-net-report.
+
+The source is patched in rust/Cargo.toml and in mobile/native/iroh-kmp/Cargo.toml.
+Keep the two dependency versions pinned together when upgrading.
+
+Protocol: Nautilo business traffic is confined to bidirectional STREAMs.
+DATAGRAM accepts only a bounded transport-policy nonce request and fixed metadata;
+it never accepts an RPC method, user message, file, or workspace content.
+
+Validation: nautilo-core runtime::remote::direct_tests covers relay-only control
+with zero transmitted/received STREAM frames, rejection of legacy relay payloads,
+relay-assisted IP candidate exchange, and blocked-path queue/recovery behavior.
+These controlled local transport tests do not claim a physical two-network NAT test.
+The QAD regression test keeps an established discovery connection alive while
+dropping new QUIC Initials, then verifies the mapping survives the 20-26s recheck.

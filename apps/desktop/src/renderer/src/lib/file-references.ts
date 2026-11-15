@@ -212,7 +212,7 @@ export function classifyLocalHref(href: string | undefined | null): LocalHrefCla
   if (value.startsWith(LOCAL_MARKDOWN_HREF)) {
     try {
       const path = decodeURIComponent(value.slice(LOCAL_MARKDOWN_HREF.length));
-      return path ? { kind: "local", path } : { kind: "none" };
+      return path ? { kind: "local", path: normalizeLocalFilePath(path) } : { kind: "none" };
     } catch {
       return { kind: "none" };
     }
@@ -237,8 +237,14 @@ export function classifyLocalHref(href: string | undefined | null): LocalHrefCla
     /* keep the raw href — artifact.read will reject undecodable junk */
   }
 
+  value = normalizeLocalFilePath(value);
   if (ABSOLUTE_OR_UNC.test(value) || value.includes("/") || value.includes("\\") || hasKnownExtension(value)) {
     return { kind: "local", path: value };
   }
   return { kind: "none" };
+}
+
+/** Markdown and URL parsers sometimes prefix Windows drive paths with '/'. */
+export function normalizeLocalFilePath(path: string): string {
+  return path.replace(/^\/(?=[A-Za-z]:[/\\])/, "");
 }
