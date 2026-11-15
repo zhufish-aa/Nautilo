@@ -4,8 +4,8 @@ resolver = "2"
 
 [patch.crates-io]
 # Keep the data-path restriction in the QUIC packet builder, including retransmits.
-iroh = { path = "vendor/iroh-1.4.1" }
-noq-proto = { path = "vendor/noq-proto-1.4.0" }
+iroh = { path = "vendor/generated/iroh-1.4.1" }
+noq-proto = { path = "vendor/generated/noq-proto-1.4.0" }
 
 [profile.release]
 lto = true

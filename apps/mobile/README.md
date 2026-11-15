@@ -51,7 +51,7 @@
 
 需要 JDK 21、Android SDK platform 35 / build-tools 35.0.0、NDK r28+，以及 Rust 的 `aarch64-linux-android`、`armv7-linux-androideabi`、`x86_64-linux-android` 三个目标。Gradle Wrapper 固定为 8.14.4，校验官方发行文件 SHA-256。`ANDROID_NDK_HOME` 可指定 NDK 路径。
 
-`prepareNativeTransport` 调用 `scripts/build-mobile-transport.mjs` 构建三个 ABI。源码固定在 `native/iroh-kmp` 和 `rust/vendor`，保留上游许可证；原 SDK AAR 校验 SHA-256，仅复用其未改动的 Kotlin 类和资源，替换全部原生库。编译产物、缓存和校验记录在 `NAUTILO_ANDROID_BUILD_DIR/transport`。缓存命中前验证源码指纹与 AAR 校验值，缺少策略符号或任一 ABI 会终止构建。
+`prepareNativeTransport` 调用 `scripts/build-mobile-transport.mjs` 构建三个 ABI。桥接源码在 `native/iroh-kmp`；上游依赖由 `scripts/prepare-rust-sources.mjs` 按固定版本下载、校验 SHA-256 并应用 `rust/patches`，生成到不入库的 `rust/vendor/generated`，保留上游许可证。原 SDK AAR 校验 SHA-256，仅复用其未改动的 Kotlin 类和资源，替换全部原生库。编译产物、缓存和校验记录在 `NAUTILO_ANDROID_BUILD_DIR/transport`。缓存命中前验证源码指纹与 AAR 校验值，缺少策略符号或任一 ABI 会终止构建。
 
 在仓库根目录运行：
 

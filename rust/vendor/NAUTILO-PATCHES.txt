@@ -15,7 +15,15 @@ Nautilo changes:
     diagnostics on both QUIC sides (server REACH_OUT, client ADD_ADDRESS).
   iroh/src/endpoint/connection.rs: expose those candidates under unstable-net-report.
 
-The source is patched in rust/Cargo.toml and in mobile/native/iroh-kmp/Cargo.toml.
+Only the patches and pinned checksums are tracked in rust/patches.
+scripts/prepare-rust-sources.mjs downloads the official crates, verifies SHA-256,
+applies the patches and verifies the complete patched source tree. Generated
+sources and archives live in rust/vendor/generated and are excluded from Git.
+Desktop development, packaging/CI and Android builds prepare them automatically.
+Before running cargo directly, run: node scripts/prepare-rust-sources.mjs
+After the first download, --offline can rebuild from the verified archive cache.
+
+The source is patched in rust/Cargo.toml and apps/mobile/native/iroh-kmp/Cargo.toml.
 Keep the two dependency versions pinned together when upgrading.
 
 Protocol: Nautilo business traffic is confined to bidirectional STREAMs.

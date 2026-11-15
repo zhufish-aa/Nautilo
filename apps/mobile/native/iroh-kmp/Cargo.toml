@@ -32,5 +32,5 @@ debug = 0
 [workspace]
 
 [patch.crates-io]
-iroh = { path = "../../../../rust/vendor/iroh-1.4.1" }
-noq-proto = { path = "../../../../rust/vendor/noq-proto-1.4.0" }
+iroh = { path = "../../../../rust/vendor/generated/iroh-1.4.1" }
+noq-proto = { path = "../../../../rust/vendor/generated/noq-proto-1.4.0" }

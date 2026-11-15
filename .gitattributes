@@ -1,0 +1,4 @@
+# Patches and their pinned companion files must hash identically on all hosts.
+rust/patches/** text eol=lf
+# Unified diff context and removed upstream lines contain intentional whitespace.
+rust/patches/*.patch -whitespace

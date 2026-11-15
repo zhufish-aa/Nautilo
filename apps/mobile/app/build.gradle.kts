@@ -14,8 +14,9 @@ val transportRoot = file("${System.getenv("NAUTILO_ANDROID_BUILD_DIR") ?: "${roo
 val nativeTransport = tasks.register<Exec>("prepareNativeTransport") {
     commandLine(System.getenv("NAUTILO_TEST_NODE") ?: "node", rootProject.file("../../scripts/build-mobile-transport.mjs").absolutePath)
     inputs.dir(rootProject.file("native/iroh-kmp"))
-    inputs.dir(rootProject.file("../../rust/vendor/iroh-1.4.1"))
-    inputs.dir(rootProject.file("../../rust/vendor/noq-proto-1.4.0"))
+    inputs.dir(rootProject.file("../../rust/patches"))
+    inputs.file(rootProject.file("../../scripts/prepare-rust-sources.mjs"))
+    inputs.file(rootProject.file("../../scripts/build-mobile-transport.mjs"))
     outputs.file(File(transportRoot, "iroh-kmp-nautilo.aar"))
     outputs.file(File(transportRoot, "build.json"))
 }

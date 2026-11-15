@@ -1,0 +1,142 @@
+--- a/src/config/transport.rs
++++ b/src/config/transport.rs
+@@ -37,6 +37,7 @@ pub struct TransportConfig {
+     pub(crate) receive_window: VarInt,
+     pub(crate) send_window: u64,
+     pub(crate) send_fairness: bool,
++    pub(crate) stream_data_path_filter: Option<Arc<dyn Fn(SocketAddr) -> bool + Send + Sync>>,
+ 
+     pub(crate) packet_threshold: u32,
+     pub(crate) time_threshold: f32,
+@@ -78,6 +79,19 @@ pub struct TransportConfig {
+ }
+ 
+ impl TransportConfig {
++    /// Restricts STREAM payloads to paths accepted by this filter.
++    ///
++    /// Handshake, acknowledgements, path validation, NAT traversal and DATAGRAM
++    /// frames remain available. This is evaluated for every packet, including
++    /// retransmissions and packets sent after a path migration. Rejected incoming
++    /// STREAM frames terminate the connection instead of reaching the application.
++    pub fn stream_data_path_filter(
++        &mut self,
++        filter: Arc<dyn Fn(SocketAddr) -> bool + Send + Sync>,
++    ) -> &mut Self {
++        self.stream_data_path_filter = Some(filter);
++        self
++    }
+     /// Maximum number of incoming bidirectional streams that may be open concurrently
+     ///
+     /// Must be nonzero for the peer to open any bidirectional streams.
+@@ -434,7 +448,7 @@ impl TransportConfig {
+     /// existing paths.
+     ///
+     /// The idle timeout will only apply to paths of a multipath-negotiated connection. Before
+-    /// multipath is negotiated, only the connection-wide max idle timeout is in effect.   
++    /// multipath is negotiated, only the connection-wide max idle timeout is in effect.
+     ///
+     /// [`Connection::set_path_max_idle_timeout`]: crate::Connection::set_path_max_idle_timeout
+     pub fn default_path_max_idle_timeout(&mut self, timeout: Option<Duration>) -> &mut Self {
+@@ -587,6 +601,7 @@ impl Default for TransportConfig {
+             receive_window: VarInt::MAX,
+             send_window: (8 * STREAM_RWND).into(),
+             send_fairness: true,
++            stream_data_path_filter: None,
+ 
+             packet_threshold: 3,
+             time_threshold: 9.0 / 8.0,
+@@ -641,6 +656,7 @@ impl fmt::Debug for TransportConfig {
+             receive_window,
+             send_window,
+             send_fairness,
++            stream_data_path_filter,
+             packet_threshold,
+             time_threshold,
+             initial_rtt,
+@@ -680,6 +696,7 @@ impl fmt::Debug for TransportConfig {
+             .field("receive_window", receive_window)
+             .field("send_window", send_window)
+             .field("send_fairness", send_fairness)
++            .field("stream_data_path_filter", &stream_data_path_filter.is_some())
+             .field("packet_threshold", packet_threshold)
+             .field("time_threshold", time_threshold)
+             .field("initial_rtt", initial_rtt)
+--- a/src/connection/mod.rs
++++ b/src/connection/mod.rs
+@@ -5016,6 +5016,9 @@ impl Connection {
+                     self.read_crypto(SpaceId::Data, &frame, payload_len)?;
+                 }
+                 Frame::Stream(frame) => {
++                    if self.config.stream_data_path_filter.as_ref().is_some_and(|allow| !allow(network_path.remote)) {
++                        return Err(TransportError::PROTOCOL_VIOLATION("STREAM payload forbidden on this transport path"));
++                    }
+                     if self.streams.received(frame, payload_len)?.should_transmit() {
+                         self.spaces[SpaceId::Data].pending.max_data = true;
+                     }
+@@ -6107,6 +6110,8 @@ impl Connection {
+         builder: &mut PacketBuilder<'a, 'b>,
+     ) {
+         let is_multipath_negotiated = self.is_multipath_negotiated();
++        let stream_data_allowed = self.config.stream_data_path_filter.as_ref()
++            .is_none_or(|allow| allow(self.path_data(path_id).network_path.remote));
+         let space_has_keys = self.crypto_state.has_keys(space_id.encryption_level());
+         let is_0rtt = space_id == SpaceId::Data && !space_has_keys;
+         let stats = &mut self.path_stats.get_mut(path_id).frame_tx;
+@@ -6584,6 +6589,7 @@ impl Connection {
+         if !scheduling_info.is_abandoned
+             && scheduling_info.may_send_data
+             && space_id == SpaceId::Data
++            && stream_data_allowed
+         {
+             self.streams
+                 .write_stream_frames(builder, self.config.send_fairness, stats);
+@@ -6986,8 +6992,9 @@ impl Connection {
+                 .is_some_and(|pns| pns.pending_path_responses.has_pending_on_path(network_path));
+ 
+         // Stream control frames are checked in PacketSpace::can_send, only check data here.
+-        let other =
+-            self.streams.can_send_stream_data() || self.datagrams.outgoing.can_send_1rtt(max_size);
++        let streams_allowed = self.config.stream_data_path_filter.as_ref().is_none_or(|allow| allow(network_path.remote));
++        let other = (streams_allowed && self.streams.can_send_stream_data())
++            || self.datagrams.outgoing.can_send_1rtt(max_size);
+ 
+         // All `false` fields are set in PacketSpace::can_send.
+         SendableFrames {
+@@ -7162,14 +7169,11 @@ impl Connection {
+         self.n0_nat_traversal.get_local_nat_traversal_addresses()
+     }
+ 
+-    /// Get the currently advertised nat traversal addresses by the server
++    /// Get the peer's NAT traversal addresses (ADD_ADDRESS or REACH_OUT).
+     pub fn get_remote_nat_traversal_addresses(
+         &self,
+     ) -> Result<Vec<SocketAddr>, n0_nat_traversal::Error> {
+-        Ok(self
+-            .n0_nat_traversal
+-            .client_side()?
+-            .get_remote_nat_traversal_addresses())
++        self.n0_nat_traversal.get_remote_nat_traversal_addresses()
+     }
+ 
+     /// Initiates a new nat traversal round
+--- a/src/n0_nat_traversal.rs
++++ b/src/n0_nat_traversal.rs
+@@ -253,6 +253,18 @@ impl State {
+         }
+     }
+ 
++    /// Returns the peer's advertised candidates on either side of a connection.
++    /// Servers learn them from REACH_OUT; clients learn them from ADD_ADDRESS.
++    pub(crate) fn get_remote_nat_traversal_addresses(&self) -> Result<Vec<SocketAddr>, Error> {
++        match self {
++            Self::NotNegotiated => Err(Error::ExtensionNotNegotiated),
++            Self::ClientSide(state) => Ok(state.get_remote_nat_traversal_addresses()),
++            Self::ServerSide(state) => Ok(state.remotes.keys()
++                .map(|&(ip, port)| SocketAddr::new(ip.to_canonical(), port))
++                .collect()),
++        }
++    }
++
+     /// Returns the next ready probe's address.
+     ///
+     /// If this is actually sent you must call [`Self::mark_probe_sent`].

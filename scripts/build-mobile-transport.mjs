@@ -4,8 +4,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, copyFi
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { prepareRustSources } from './prepare-rust-sources.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+await prepareRustSources();
 const buildRoot = process.env.NAUTILO_ANDROID_BUILD_DIR || join(root, 'apps/mobile/build');
 const cache = join(buildRoot, 'transport');
 mkdirSync(cache, { recursive: true });
@@ -36,7 +38,7 @@ function addSources(directory) {
     else if (/\.(rs|toml)$|Cargo\.lock$/.test(entry.name)) fingerprint.update(file.slice(root.length)).update(readFileSync(file));
   }
 }
-for (const dir of [source, join(root,'rust/vendor/iroh-1.4.1'), join(root,'rust/vendor/noq-proto-1.4.0')]) addSources(dir);
+for (const dir of [source, join(root,'rust/vendor/generated/iroh-1.4.1'), join(root,'rust/vendor/generated/noq-proto-1.4.0')]) addSources(dir);
 const version = spawnSync('rustc', ['--version'], { env, encoding: 'utf8', windowsHide: true });
 if (version.status !== 0) throw new Error('Rust toolchain is required to build the mobile transport');
 fingerprint.update(version.stdout);
