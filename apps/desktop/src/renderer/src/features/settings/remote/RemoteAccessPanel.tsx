@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   RemoteDevice,
   RemoteInvitation,
@@ -29,6 +29,7 @@ import { useSettingsStore } from "../../../stores/settings";
 import { useRemoteAccess } from "./useRemoteAccess";
 import { RemoteDeviceDialog } from "./RemoteDeviceDialog";
 import { RemoteNetworkSettings } from "./RemoteNetworkSettings";
+import { normalizeRelayUrls, relaySettingsError, relayConnectionFeedback } from "./remote-network-settings";
 import "./remote-access.css";
 
 export function RemoteAccessPanel() {
@@ -43,18 +44,27 @@ export function RemoteAccessPanel() {
   const [copied, setCopied] = useState(false);
   const [clock, setClock] = useState(Date.now());
   const [localError, setLocalError] = useState("");
+  const relayProgress = useRef<{ since?: number; seenReady: boolean }>({ seenReady: false });
+  const needsRelay = Boolean(status?.settings.enabled && status.settings.relayMode !== "lan");
   useEffect(() => {
-    if (invitation) {
+    if (!needsRelay) relayProgress.current = { seenReady: false };
+    else if (status?.internetReady) relayProgress.current = { seenReady: true };
+    else relayProgress.current.since ??= Date.now();
+  }, [needsRelay, status?.internetReady]);
+  useEffect(() => {
+    if (invitation || (needsRelay && !status?.internetReady)) {
       const timer = setInterval(() => setClock(Date.now()), 1000);
       return () => clearInterval(timer);
     }
-  }, [invitation]);
+  }, [invitation, needsRelay, status?.internetReady]);
+  const relayFeedback = relayConnectionFeedback({ ready: Boolean(status?.internetReady), seenReady: relayProgress.current.seenReady,
+    elapsedMs: Math.max(0, clock - (relayProgress.current.since ?? clock)), errors: status?.relays?.flatMap(r => r.error ? [r.error] : []) ?? [] }, zh);
   const settings = draft ?? status?.settings;
   const remaining = invitation
     ? Math.max(0, Math.ceil((invitation.expiresAt - clock) / 1000))
     : 0;
   const pending = status?.pending ?? [];
-  const active = status?.devices.filter((d) => d.connected).length ?? 0;
+  const active = status?.devices.filter((d) => d.connected && d.connectionState !== "punching").length ?? 0;
   const update = (values: Partial<RemoteSettings>) => {
     if (settings) setDraft({ ...settings, ...values });
   };
@@ -95,24 +105,29 @@ export function RemoteAccessPanel() {
         : "Connection error"
       : status.internetReady
         ? zh
-          ? "可远程连接"
+          ? status.settings.relayMode === "direct" ? "等待设备直连" : "可远程连接"
           : "Ready for remote connections"
+        : active > 0
+          ? (zh ? `${active} 台设备已连接` : `${active} devices connected`)
         : status.state === "starting"
           ? zh
             ? "正在启动"
             : "Starting"
-          : zh
-            ? "局域网就绪"
-            : "LAN ready";
+          : status.settings.relayMode === "lan"
+            ? (zh ? "局域网就绪" : "LAN ready")
+            : relayFeedback.label;
   const save = async (next: RemoteSettings) => {
-    if (await execute("remote.configure", next)) setDraft(undefined);
+    const value = { ...next, relayUrls: normalizeRelayUrls(next.relayUrls) };
+    const validation = relaySettingsError(value, zh);
+    setLocalError(validation);
+    if (!validation && await execute("remote.configure", value)) setDraft(undefined);
   };
   return (
     <section className="remote-access">
-      {(error || localError || status.error) && (
+      {(error || localError || status.error || (needsRelay && active === 0 && relayFeedback.detail)) && (
         <div role="alert" className="remote-error">
-          {error || localError || status.error}
-          {status.state === "error" && (
+          {error || localError || status.error || relayFeedback.detail}
+          {(status.state === "error" || relayFeedback.retryable) && (
             <Button
               size="sm"
               variant="ghost"
@@ -129,7 +144,7 @@ export function RemoteAccessPanel() {
         <div className="remote-host-top">
           <span
             className="remote-status"
-            data-ready={status.settings.enabled && status.state === "listening"}
+            data-ready={status.settings.enabled && status.state === "listening" && (status.internetReady || status.settings.relayMode === "lan" || active > 0)}
           >
             <i />
             {stateLabel}
@@ -188,24 +203,37 @@ export function RemoteAccessPanel() {
           </span>
           <span>
             <Globe2 size={14} />
-            {status.settings.relayMode === "local"
+            {status.settings.relayMode === "direct" || status.settings.relayMode === "local" ? (zh ? "仅直连 · 跨网打洞" : "Direct only · NAT traversal") : status.settings.relayMode === "lan"
               ? zh
-                ? "仅直连"
-                : "Direct only"
+                ? "仅局域网"
+                : "LAN only"
               : status.internetReady
                 ? zh
-                  ? "中继已连接"
-                  : "Relay connected"
+                  ? status.settings.relayMode === "custom" ? "中继通道就绪" : "中继备用通道就绪"
+                  : status.settings.relayMode === "custom" ? "Relay ready" : "Relay fallback ready"
                 : status.settings.enabled
                   ? zh
-                    ? "正在连接中继"
-                    : "Connecting to relay"
+                    ? relayFeedback.label
+                    : relayFeedback.label
                   : zh
-                    ? "P2P + 中继回退"
-                    : "P2P + relay fallback"}
+                    ? status.settings.relayMode === "custom" ? "中继传输" : "P2P + 中继回退"
+                    : status.settings.relayMode === "custom" ? "Relay transport" : "P2P + relay fallback"}
           </span>
         </div>
       </div>
+
+      {needsRelay && !status.internetReady && relayFeedback.retryable && !relayFeedback.detail && !status.error && !error && !localError && (
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void save(status.settings)}><RefreshCw size={14} />{zh ? "重试连接" : "Retry connection"}</Button>
+      )}
+
+      {(status.relays?.length ?? 0) > 0 && <p className="remote-network-note">
+        {status.settings.relayMode === "direct" || status.settings.relayMode === "local"
+          ? (zh ? "打洞辅助节点：" : "Rendezvous: ")
+          : (zh ? "中继节点：" : "Relay: ")}{status.relays!.map((relay) => {
+          const host = new URL(relay.url).hostname;
+          return `${host} · ${relay.connected ? (zh ? "就绪" : "ready") : (zh ? "重连中" : "reconnecting")}`;
+        }).join(" / ")}
+      </p>}
 
       {pending.length > 0 && (
         <section
@@ -282,7 +310,7 @@ export function RemoteAccessPanel() {
                   data-online={device.connected}
                 >
                   <i />
-                  {device.connected
+                  {device.connectionState === "punching" ? (zh ? "打洞中" : "Establishing direct path") : device.connected
                     ? zh
                       ? "在线"
                       : "Online"
@@ -300,7 +328,7 @@ export function RemoteAccessPanel() {
               {device.connected ? (
                 <span className="remote-device-detail">
                   <Wifi size={12} />
-                  {device.connectionType === "direct"
+                  {device.connectionState === "punching" ? (zh ? "信令已连接，等待 P2P 直连" : "Signalling connected; waiting for direct P2P") : device.connectionType === "direct"
                     ? zh
                       ? "P2P 直连"
                       : "Direct P2P"
@@ -363,7 +391,7 @@ export function RemoteAccessPanel() {
           if (!open) closeInvitation();
         }}
         title={zh ? "配对新设备" : "Pair a new device"}
-        widthClass="max-w-sm"
+        widthClass="max-w-2xl"
       >
         <div className="remote-pair-dialog">
           {invitation && (

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, ChevronDown, ChevronUp, ClipboardCheck, ExternalLink, HelpCircle, RotateCcw, Send, ShieldAlert, X, type LucideIcon } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, ChevronUp, ClipboardCheck, ExternalLink, HelpCircle, Pencil, RotateCcw, Send, ShieldAlert, X, type LucideIcon } from "lucide-react";
 import type { InteractionOption, InteractionQuestion, InteractionRequest, InteractionResponse } from "@agenthub/domain";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn, formatDateTime } from "../../lib/utils";
@@ -11,6 +11,7 @@ import { Button } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
 import { MarkdownContent } from "../timeline/MarkdownContent";
 import { PluginApprovalCard, pluginPresentation } from "./PluginApprovalCard";
+import "./interaction-question.css";
 
 const EMPTY: InteractionRequest[] = [];
 
@@ -127,15 +128,21 @@ function useInteractionRespond(): (interaction: InteractionRequest, response: In
 }
 
 function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const respondInteraction = useInteractionRespond();
-  const shell = useInteractionShell(interaction);
   const questions = interaction.questions ?? [];
   const pending = interaction.status === "pending";
 
   const [selections, setSelections] = useState<Record<string, string[]>>({});
   const [texts, setTexts] = useState<Record<string, string>>(() => Object.fromEntries(questions.map(question => [question.id, question.initialValue ?? ""])));
   const [submitting, setSubmitting] = useState(false);
+  const [clock, setClock] = useState(Date.now());
+  useEffect(() => {
+    if (!pending || !interaction.timeoutMs) return;
+    const timer = setInterval(() => setClock(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [pending, interaction.timeoutMs]);
+  const seconds = interaction.timeoutMs ? Math.max(0, Math.ceil((Date.parse(interaction.createdAt) + interaction.timeoutMs - clock) / 1000)) : undefined;
 
   const toggleOption = (question: InteractionQuestion, option: InteractionOption): void => {
     setSelections((current) => {
@@ -186,23 +193,18 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
   };
 
   return (
-    <CardShell
-      icon={HelpCircle}
-      tone={shell.tone}
-      time={shell.time}
-      title={
-        <span className="inline-flex items-center gap-2">
-          {t("sessions.interactions.question")}
-          <StatusChip tone={shell.chipTone} label={shell.chipLabel} pulse={pending} />
-        </span>
-      }
-    >
-      <div className="space-y-4 rounded-xl border border-line bg-panel px-5 py-4">
-        {interaction.title && <p className="text-sm font-medium text-ink">{interaction.title}</p>}
+    <section className="interaction-question" aria-label={t("sessions.interactions.question")}>
+      <div className="interaction-question-heading">
+        <p>{questions.length === 1 ? questions[0]!.question : interaction.title || t("sessions.interactions.question")}</p>
+        {pending && seconds !== undefined && Number.isFinite(seconds) && <span className="interaction-question-timer">{seconds}s</span>}
+        {pending && <button type="button" aria-label={t("sessions.interactions.dismiss")} disabled={submitting} onClick={() => void cancel()}><X size={16} /></button>}
+      </div>
+      <div className="interaction-question-fields">
         {questions.map((question) => (
           <QuestionField
             key={question.id}
             question={question}
+            hideHeading={questions.length === 1}
             pending={pending}
             submitting={submitting}
             selected={selections[question.id] ?? []}
@@ -213,24 +215,21 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
           />
         ))}
         {pending && (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button variant="primary" size="sm" disabled={!answersComplete || submitting} onClick={() => void submit()}>
-              <Send className="h-3.5 w-3.5" aria-hidden />
-              {submitting ? t("sessions.interactions.submitting") : t("sessions.interactions.submit")}
-            </Button>
-            <Button variant="ghost" size="sm" disabled={submitting} onClick={() => void cancel()}>
-              <X className="h-3.5 w-3.5" aria-hidden />
-              {t("sessions.interactions.dismiss")}
-            </Button>
+          <div className="interaction-question-actions">
+            <button className="interaction-question-skip" type="button" disabled={submitting} onClick={() => void cancel()}>{locale === "zh-CN" ? "跳过" : "Skip"}</button>
+            <button className="interaction-question-submit" type="button" aria-label={t("sessions.interactions.submit")} disabled={!answersComplete || submitting} onClick={() => void submit()}>
+              {submitting ? t("sessions.interactions.submitting") : <><Send size={15} />{questions.length > 1 && t("sessions.interactions.submit")}</>}
+            </button>
           </div>
         )}
       </div>
-    </CardShell>
+    </section>
   );
 }
 
 function QuestionField({
   question,
+  hideHeading = false,
   pending,
   submitting,
   selected,
@@ -240,6 +239,7 @@ function QuestionField({
   onText
 }: {
   question: InteractionQuestion;
+  hideHeading?: boolean;
   pending: boolean;
   submitting: boolean;
   selected: string[];
@@ -256,7 +256,7 @@ function QuestionField({
     const values = answered ?? [];
     return (
       <div>
-        <QuestionHeading question={question} />
+        {!hideHeading && <QuestionHeading question={question} />}
         <p className="mt-1 text-[13px] text-ink-2">
           {values.length > 0
             ? `${t("sessions.interactions.yourAnswer")}: ${question.isSecret ? "••••••" : values.join(", ")}`
@@ -268,10 +268,10 @@ function QuestionField({
 
   return (
     <fieldset disabled={submitting} className="min-w-0">
-      <QuestionHeading question={question} />
+      {!hideHeading && <QuestionHeading question={question} />}
       {options.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5" role={question.multiSelect ? "group" : "radiogroup"}>
-          {options.map((option) => {
+        <div className="interaction-question-options" role={question.multiSelect ? "group" : "radiogroup"}>
+          {options.map((option, index) => {
             const active = selected.includes(option.label);
             return (
               <button
@@ -281,14 +281,11 @@ function QuestionField({
                 aria-checked={active}
                 title={option.description}
                 onClick={() => onToggle(option)}
-                className={cn(
-                  "h-7.5 rounded-lg border px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
-                  active
-                    ? "border-accent/50 bg-accent-soft text-accent"
-                    : "border-line bg-card text-ink-2 hover:border-accent/40 hover:text-ink"
-                )}
+                className="interaction-question-option" data-active={active}
               >
-                {option.label}
+                <span className="interaction-question-number" data-first={index === 0}>{index + 1}</span>
+                <span className="interaction-question-option-copy">{option.label}{option.description && <small>{option.description}</small>}</span>
+                <ArrowRight size={17} className="interaction-question-arrow" aria-hidden />
               </button>
             );
           })}
@@ -297,16 +294,16 @@ function QuestionField({
           )}
         </div>
       )}
-      {showFreeText && (question.inputType === "multiline" ? (
-        <textarea className="mt-2 min-h-36 w-full resize-y rounded-lg border border-line bg-card px-3 py-2 text-sm leading-6 text-ink outline-none focus:border-accent"
+      {showFreeText && <div className="interaction-question-input"><Pencil size={16} aria-hidden />{question.inputType === "multiline" ? (
+        <textarea className="interaction-question-answer" rows={4}
           aria-label={question.question} value={text} placeholder={question.placeholder}
           onChange={event => onText(event.currentTarget.value)} />
       ) : (
-        <Input className="mt-2" aria-label={question.question} type={question.isSecret ? "password" : "text"}
+        <input className="interaction-question-answer" aria-label={question.question} type={question.isSecret ? "password" : "text"}
           value={text} placeholder={question.placeholder ?? t(question.isSecret ? "sessions.interactions.secretPlaceholder"
             : options.length > 0 ? "sessions.interactions.otherPlaceholder" : "sessions.interactions.freeTextPlaceholder")}
           onChange={event => onText(event.currentTarget.value)} />
-      ))}
+      )}</div>}
     </fieldset>
   );
 }

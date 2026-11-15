@@ -41,6 +41,16 @@ async function loadLibModule(name) {
 const loadPreview = () => loadLibModule("work-preview");
 const loadFileReferences = () => loadLibModule("file-references");
 
+test("Markdown /D:/ and encoded Windows file links normalize before preview", async () => {
+  const { classifyLocalHref } = await loadFileReferences();
+  for (const href of ["/D:/Nautilo/rust/attachments.rs", "?agenthub-local-path=%2FD%3A%2FNautilo%2Frust%2Fattachments.rs", "file:///D:/Nautilo/rust/attachments.rs"]) {
+    const result = classifyLocalHref(href);
+    assert.equal(result.kind, "local");
+    assert.equal(result.path, "D:/Nautilo/rust/attachments.rs");
+  }
+  assert.equal(classifyLocalHref("https://example.com/file.rs").kind, "external");
+});
+
 async function readRendererSource(relativePath) {
   return readFile(new URL(relativePath, rendererDir), "utf8");
 }

@@ -18,7 +18,8 @@ export function registerArtifactScheme(): void {
 export function registerArtifactProtocol(getWorkspaceRoots?: () => Promise<string[]>): void {
   const fixedRoots = [
     resolve(homedir(), ".codex", "generated_images"),
-    resolve(app.getPath("userData"), "attachments")
+    resolve(app.getPath("userData"), "attachments"),
+    resolve(app.getPath("userData"), "remote-attachments")
   ];
   protocol.handle(ARTIFACT_SCHEME, async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");

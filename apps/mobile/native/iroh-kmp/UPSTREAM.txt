@@ -1,0 +1,12 @@
+Source: https://github.com/Azula-App/iroh-kmp
+Tag: v0.2.1
+Commit: 4c0bc4d80828b58028e2842497347d306a5c3b29
+License: MIT OR Apache-2.0 (both license files retained)
+Original Kotlin/Android AAR SHA-256:
+96641eca55a48aeb0341ab647e3a121000a1c8c7e617b1aa48b255aae3660217
+
+The original UniFFI records and exported API signatures remain unchanged.
+Nautilo adds a private JNI policy setter, binds the shared per-packet path filter,
+and reports "direct" only when an actual selected IP path exists.
+The original AAR classes are repackaged byte-for-byte with newly compiled native
+libraries for all three app ABIs. See scripts/build-mobile-transport.mjs.

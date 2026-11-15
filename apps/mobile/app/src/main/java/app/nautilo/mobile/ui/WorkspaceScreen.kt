@@ -34,7 +34,7 @@ import kotlinx.coroutines.withContext
     Column(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 10.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
             item("summary") {
-                Surface(shape = RoundedCornerShape(22.dp), color = Color.White, border = BorderStroke(1.dp, Line.copy(alpha = .7f))) {
+                NPanel(shape = RoundedCornerShape(22.dp), color = Color.White, border = BorderStroke(1.dp, Line.copy(alpha = .7f))) {
                     Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("文件变更", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
@@ -46,16 +46,16 @@ import kotlinx.coroutines.withContext
                                 }
                             }
                         }
-                        Surface(shape = RoundedCornerShape(13.dp), color = Selection.copy(alpha = .6f)) {
+                        NPanel(shape = RoundedCornerShape(13.dp), color = Selection.copy(alpha = .6f)) {
                             ActionIcon(Icons.Outlined.Refresh, "刷新变更", !state.workspaceLoading) { model.workspace() }
                         }
                     }
                 }
             }
-            if (files.size > 5) item("search") { OutlinedTextField(query, { query = it }, modifier = Modifier.fillMaxWidth(), placeholder = { Text("查找文件", fontSize = 13.sp) }, leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(18.dp)) }, shape = RoundedCornerShape(15.dp), singleLine = true) }
-            if (state.workspaceLoading) item("loading") { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+            if (files.size > 5) item("search") { NField(query, { query = it }, modifier = Modifier.fillMaxWidth(), placeholder = { Text("查找文件", fontSize = 13.sp) }, leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(18.dp)) }, shape = RoundedCornerShape(15.dp), singleLine = true) }
+            if (state.workspaceLoading) item("loading") { NProgress(Modifier.fillMaxWidth()) }
             items(filtered, key = { it.path }) { change ->
-                Surface(onClick = { model.openDiff(change.path) }, shape = RoundedCornerShape(17.dp), color = Color.White.copy(alpha = .88f)) {
+                NPanel(onClick = { model.openDiff(change.path) }, shape = RoundedCornerShape(17.dp), color = Color.White.copy(alpha = .88f)) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         FileTypeIcon(change.path)
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -71,20 +71,20 @@ import kotlinx.coroutines.withContext
             item("agents") {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        Icon(Icons.Outlined.Workspaces, null, Modifier.size(18.dp), tint = Blue)
+                        Icon(Icons.Outlined.Workspaces, null, Modifier.size(18.dp), tint = Accent)
                         Text("工作区代理", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                         if (state.members.isNotEmpty()) Text("${state.members.size}", fontSize = 12.sp, color = Secondary)
                     }
-                    Surface(shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = .8f)) {
+                    NPanel(shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = .8f)) {
                         Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             if (state.members.isEmpty()) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Icon(Icons.Outlined.ViewInAr, null, Modifier.size(20.dp), tint = Blue)
+                                Icon(Icons.Outlined.ViewInAr, null, Modifier.size(20.dp), tint = Accent)
                                 Text(state.session?.provider?.ifBlank { "当前 Harness" } ?: "当前 Harness", fontSize = 13.sp, fontWeight = FontWeight.Medium)
                                 Spacer(Modifier.weight(1f))
                                 Text("独立工作", fontSize = 12.sp, color = Secondary)
                             }
                             state.members.forEach { member -> Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Outlined.PersonOutline, null, Modifier.size(20.dp), tint = Blue)
+                                Icon(Icons.Outlined.PersonOutline, null, Modifier.size(20.dp), tint = Accent)
                                 Column(Modifier.weight(1f).padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                     Text(member.text("name", "团队成员"), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                                     Text(member.text("model").substringAfterLast('/'), fontSize = 11.sp, color = Secondary)
@@ -95,7 +95,7 @@ import kotlinx.coroutines.withContext
                 }
             }
         }
-        TextButton(onClick = { model.navigate(Screen.Chat) }, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp).height(46.dp)) {
+        NTextButton(onClick = { model.navigate(Screen.Chat) }, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp).height(46.dp)) {
             Icon(Icons.Outlined.ChatBubbleOutline, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("返回会话", color = Ink)
         }
     }

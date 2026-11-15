@@ -113,7 +113,7 @@ export function highlightCode(code: string, filePath: string): string {
  */
 export function highlightLine(line: string, language?: string): string {
   if (!line) return " ";
-  if (!language) return escapeHtml(line);
+  if (!language || line.length > 25_000) return escapeHtml(line);
   try {
     return hljs.highlight(line, { language, ignoreIllegals: true }).value || " ";
   } catch {

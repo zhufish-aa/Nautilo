@@ -1745,6 +1745,7 @@ function needsStandalonePersistenceSync(events: RuntimeEvent[]): boolean {
   // Message/terminal syncs still load the final raw diff artifact.
   return events.some((event) => event.type === "agent.message"
     || event.type === "session.native_history_synced"
+    || event.type === "session.title_changed"
     || (event.type === "artifact.created" && event.payload.kind !== "diff")
     || event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled");
 }

@@ -1,6 +1,68 @@
 use super::*;
 
+pub(super) fn approval_resolution(params: &Value) -> Result<Value> {
+    let approval_id = params["approvalId"].as_str().filter(|id| !id.is_empty() && id.len() <= 128)
+        .ok_or_else(|| anyhow::anyhow!("INVALID_REQUEST"))?;
+    let scope = match params.get("scope") {
+        None => "once",
+        Some(value) => value.as_str().ok_or_else(|| anyhow::anyhow!("INVALID_APPROVAL_SCOPE"))?,
+    };
+    anyhow::ensure!(["once", "run", "task", "project", "global"].contains(&scope), "INVALID_APPROVAL_SCOPE");
+    Ok(json!({"approvalId":approval_id,"decision":params["decision"],"scope":scope}))
+}
+
 impl RemoteService {
+    pub(super) fn mobile_account_route(&self, input: &mut Value) -> Result<()> {
+        let options = self.repo.mobile_options()?;
+        let agent = options["agents"].as_array().and_then(|a| a.iter().find(|a| a["id"] == input["agentInstanceId"]))
+            .ok_or_else(|| anyhow::anyhow!("HARNESS_NOT_AVAILABLE"))?;
+        if let Some(connection) = options["connections"].as_array().and_then(|c| c.iter().find(|c| c["id"] == input["connectionId"])) {
+            if connection["kind"] == "login" && connection["harness"] != agent["providerId"] {
+                anyhow::ensure!(matches!(connection["harness"].as_str(), Some("codex" | "claude-code")), "CONNECTION_NOT_AVAILABLE");
+                input["_mobileAccountRoute"] = connection["id"].clone();
+            }
+        }
+        Ok(())
+    }
+    pub(super) async fn mobile_options(&self) -> Result<Value> {
+        let mut options = self.repo.mobile_options()?;
+        let providers = self.dispatch("provider.catalog", json!({})).await?;
+        options["providers"] = json!(providers.as_array().into_iter().flatten().map(|p| json!({"providerId":p["providerId"],"permissionModes":p["permissionModes"],"modeDiscovery":p["modeDiscovery"]})).collect::<Vec<_>>());
+        Ok(options)
+    }
+    pub(super) async fn mobile_modes(&self, params: &Value) -> Result<Value> {
+        let context = self.repo.mobile_mode_context(params["agentInstanceId"].as_str().ok_or_else(|| anyhow::anyhow!("INVALID_HARNESS"))?, params["projectId"].as_str())?;
+        let providers = self.dispatch("provider.catalog", json!({})).await?;
+        let provider = providers.as_array().and_then(|p|p.iter().find(|p|p["providerId"] == context["providerId"])).ok_or_else(||anyhow::anyhow!("HARNESS_NOT_AVAILABLE"))?;
+        let discovery = !provider["modeDiscovery"].is_null() && provider["modeDiscovery"] != false;
+        let mut modes = if discovery {
+            match self.dispatch("provider.modes", json!({"agentInstanceId":context["agentInstanceId"],"cwd":context["cwd"]})).await {
+                Ok(value) => value,
+                Err(_) => json!({"modes":[],"modeError":"Could not load native modes; refresh to retry"})
+            }
+        } else { json!({"modes":[]}) };
+        modes["permissionModes"] = provider["permissionModes"].as_array().map(|v|json!(v)).unwrap_or(json!([]));
+        modes["permissionMode"] = context["permissionMode"].clone();
+        modes["modeDiscovery"] = json!(discovery);
+        Ok(modes)
+    }
+    pub(super) async fn mobile_validate_modes(&self, input: &mut Value, params: &Value, session: Option<&str>) -> Result<()> {
+        if params.get("permissionMode").is_none() && params.get("agentMode").is_none() { return Ok(()) }
+        let catalog = self.mobile_modes(&json!({"agentInstanceId":input["agentInstanceId"],"projectId":input["projectId"]})).await?;
+        if let Some(value) = params.get("permissionMode") {
+            let value = value.as_str().ok_or_else(||anyhow::anyhow!("INVALID_PERMISSION_MODE"))?;
+            anyhow::ensure!(catalog["permissionModes"].as_array().is_some_and(|m|m.iter().any(|m|m["value"] == value)), "INVALID_PERMISSION_MODE");
+            input["permissionMode"] = json!(value);
+        }
+        if let Some(value) = params.get("agentMode") {
+            let value = value.as_str().ok_or_else(||anyhow::anyhow!("INVALID_HARNESS_MODE"))?;
+            anyhow::ensure!(catalog["modes"].as_array().is_some_and(|m|m.iter().any(|m|m["id"] == value && m["broken"].as_str().unwrap_or("").is_empty())), "INVALID_HARNESS_MODE");
+            let previous = input["agentMode"].as_str().or(catalog["defaultMode"].as_str());
+            if previous != Some(value) { if let Some(session) = session { anyhow::ensure!(!self.repo.session_mode_locked(session)?, "HARNESS_MODE_LOCKED"); } }
+            input["agentMode"] = json!(value);
+        }
+        Ok(())
+    }
     pub(super) async fn mobile_catalog(&self, params: &Value) -> Result<Value> {
         let options = self.repo.mobile_options()?;
         let agent = options["agents"]
@@ -39,6 +101,11 @@ impl RemoteService {
     ) -> Result<Value> {
         let mut input = self.repo.session_template(session)?;
         let changed = select_configuration_connection(&mut input, params)?;
+        if !changed && params.get("model").is_none() && params.get("reasoningEffort").is_none() {
+            self.mobile_validate_modes(&mut input, params, Some(session)).await?;
+            input["id"] = json!(session);
+            return Ok(input);
+        }
         let catalog = if changed {
             let detail = self.repo.session_details(session)?;
             self.mobile_catalog(&json!({"agentInstanceId":detail["agent"]["id"],"connectionId":input["connectionId"]})).await?
@@ -61,16 +128,8 @@ impl RemoteService {
         input["id"] = json!(session);
         input["model"] = json!(model_id);
         input["reasoningEffort"] = json!(effort);
-        if changed {
-            let options = self.repo.mobile_options()?;
-            let detail = self.repo.session_details(session)?;
-            if let Some(connection) = options["connections"].as_array().and_then(|v|v.iter().find(|c|c["id"] == input["connectionId"])) {
-                if connection["kind"] == "login" && connection["harness"] != detail["agent"]["providerId"] {
-                    anyhow::ensure!(matches!(connection["harness"].as_str(),Some("codex"|"claude-code")), "CONNECTION_NOT_AVAILABLE");
-                    input["_mobileAccountRoute"] = connection["id"].clone();
-                }
-            }
-        }
+        self.mobile_validate_modes(&mut input, params, Some(session)).await?;
+        if changed { self.mobile_account_route(&mut input)?; }
         Ok(input)
     }
 }

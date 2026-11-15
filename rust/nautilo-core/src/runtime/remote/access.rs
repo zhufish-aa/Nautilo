@@ -19,6 +19,16 @@ pub(super) fn failure(id: &str, code: &str, message: &str) -> Value {
 fn success(id: &str, value: Value) -> Value {
     json!({"v":1,"id":id,"ok":true,"data":value})
 }
+fn request_failure(id: &str, error: &anyhow::Error) -> Value {
+    if let Some(core) = error.downcast_ref::<crate::errors::CoreError>() {
+        return failure(id, &core.0.code, &core.to_string());
+    }
+    let message = error.to_string();
+    let code = if !message.is_empty() && message.bytes().all(|c| c.is_ascii_uppercase() || c == b'_') {
+        message.as_str()
+    } else { "REMOTE_REQUEST_FAILED" };
+    failure(id, code, if code == "REMOTE_REQUEST_FAILED" { "Desktop could not complete the request" } else { &message })
+}
 fn field<'a>(params: &'a Value, name: &str) -> Result<&'a str> {
     params[name]
         .as_str()
@@ -45,23 +55,7 @@ impl RemoteService {
         let outcome = self.handle(peer, request, generation).await;
         match outcome {
             Ok(value) => value,
-            Err(error) => {
-                let message = error.to_string();
-                let code = if message.bytes().all(|c| c.is_ascii_uppercase() || c == b'_') {
-                    message.as_str()
-                } else {
-                    "REMOTE_REQUEST_FAILED"
-                };
-                failure(
-                    &id,
-                    code,
-                    if code == "REMOTE_REQUEST_FAILED" {
-                        "Desktop could not complete the request"
-                    } else {
-                        &message
-                    },
-                )
-            }
+            Err(error) => request_failure(&id, &error),
         }
     }
     pub(super) async fn dispatch(&self, method: &str, input: Value) -> Result<Value> {
@@ -79,13 +73,8 @@ impl RemoteService {
             })
             .await;
         if !response.ok {
-            bail!(
-                "{}",
-                response
-                    .error
-                    .map(|e| e.code)
-                    .unwrap_or_else(|| "DESKTOP_ERROR".into())
-            );
+            return Err(crate::errors::CoreError(response.error.unwrap_or_else(||
+                crate::errors::AgentHubError::simple(crate::errors::ErrorCode::IpcInternalError))).into());
         }
         Ok(response.data.unwrap_or(Value::Null))
     }
@@ -135,12 +124,22 @@ impl RemoteService {
         let device = self.authorize(peer, generation)?;
         let method = request.method.as_str();
         let params = &request.params;
+        if ["project.files", "file.preview"].contains(&method) {
+            field(params, "projectId")?;
+            let repo = self.repo.clone(); let input = params.clone(); let listing = method == "project.files";
+            let result = tokio::task::spawn_blocking(move || if listing { repo.project_files(&input) } else { repo.file_preview(&input) }).await??;
+            return Ok(success(&request.id, result));
+        }
+        if method == "attachment.upload" {
+            return Ok(success(&request.id, self.attachments.upload(peer, params)?));
+        }
         if method == "hello" {
             return Ok(success(
                 &request.id,
                 json!({"protocol":1,"epoch":self.repo.epoch()?,"device":device,"name":self.settings()?.device_name,
                 "system":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION"),
-                "capabilities":["projects.list","project.browse","project.create","session.options","session.catalog","sessions.list","session.history","session.create","session.details","session.models","session.configure","session.workspace","events.wait","session.send","session.followUp","run.list","run.cancel","interaction.list","interaction.respond","approval.list","approval.resolve"]}),
+                "endpoint":self.state.lock().unwrap().endpoint.as_ref().map(Endpoint::addr),
+                "capabilities":["projects.list","project.browse","project.create","project.files","file.preview","session.options","session.catalog","session.modes","sessions.list","session.history","session.create","session.details","session.snapshot","session.models","session.configure","session.workspace","events.wait","session.send","session.followUp","attachment.upload","attachment.read","run.list","run.cancel","interaction.list","interaction.respond","approval.list","approval.resolve","approval.scopes"]}),
             ));
         }
         if method == "projects.list" {
@@ -173,6 +172,7 @@ impl RemoteService {
             "project.create",
             "session.options",
             "session.catalog",
+            "session.modes",
         ]
         .contains(&method)
             || (method == "session.create" && params["sessionId"].as_str().is_none())
@@ -185,6 +185,11 @@ impl RemoteService {
         };
         if !session.is_empty() {
             self.repo.session_project(&session)?;
+        }
+        if method == "attachment.read" {
+            let repo = self.repo.clone(); let input = params.clone();
+            let result = tokio::task::spawn_blocking(move || repo.attachment_read(&session, &input)).await??;
+            return Ok(success(&request.id, result));
         }
         let key = format!("{peer}:{}", request.id);
         let fingerprint = format!(
@@ -203,12 +208,23 @@ impl RemoteService {
                 return Ok(success(&request.id, mobile::browse_directories(params)?))
             }
             "project.create" => mobile::project_input(params)?,
-            "session.options" => return Ok(success(&request.id, self.repo.mobile_options()?)),
+            "session.options" => return Ok(success(&request.id, self.mobile_options().await?)),
+            "session.modes" => return Ok(success(&request.id, self.mobile_modes(params).await?)),
             "session.catalog" => {
                 return Ok(success(&request.id, self.mobile_catalog(params).await?))
             }
             "session.details" => {
                 return Ok(success(&request.id, self.repo.session_details(&session)?))
+            }
+            "session.snapshot" => {
+                let details = self.repo.session_details(&session)?;
+                let (runs, interactions, approvals) = tokio::try_join!(
+                    self.dispatch("run.list", json!({"sessionId":session})),
+                    self.dispatch("interaction.list", json!({"sessionId":session,"status":"pending"})),
+                    self.dispatch("approval.list", json!({"status":"pending"}))
+                )?;
+                let approvals = approvals.as_array().into_iter().flatten().filter(|a| a["sessionId"] == session || a["runId"].as_str().and_then(|id|self.repo.run_session(id).ok()).as_deref() == Some(session.as_str())).cloned().collect::<Vec<_>>();
+                return Ok(success(&request.id, json!({"details":details,"runs":runs,"interactions":interactions,"approvals":approvals})));
             }
             "session.models" => {
                 return Ok(success(&request.id, self.mobile_models(&session).await?))
@@ -223,6 +239,8 @@ impl RemoteService {
                 } else {
                     self.repo.session_template(&session)?
                 };
+                self.mobile_validate_modes(&mut template, params, None).await?;
+                self.mobile_account_route(&mut template)?;
                 let title = params["title"].as_str().unwrap_or("New session");
                 if title.len() > 256 {
                     bail!("INVALID_TITLE");
@@ -266,14 +284,18 @@ impl RemoteService {
                 return Ok(success(&request.id, page));
             }
             "session.send" | "session.followUp" => {
+                let attachments = self.attachments.resolve(peer, params.get("attachmentIds"))?;
+                if method == "session.followUp" && !attachments.is_empty() { bail!("ATTACHMENTS_REQUIRE_IDLE"); }
                 let text = params["text"]
                     .as_str()
-                    .filter(|s| !s.trim().is_empty() && s.len() <= 100_000)
+                    .filter(|s| (!s.trim().is_empty() || !attachments.is_empty()) && s.len() <= 100_000)
                     .ok_or_else(|| anyhow::anyhow!("INVALID_MESSAGE"))?;
+                let text = if text.trim().is_empty() { "请查看附件。" } else { text };
                 let digest = Sha256::digest(format!("nautilo-remote:{peer}:{}", request.id));
                 let message_id =
                     uuid::Uuid::from_bytes(digest[..16].try_into().unwrap()).to_string();
                 let mut input = json!({"sessionId":session,"text":text,"messageId":message_id});
+                if !attachments.is_empty() { input["attachments"] = json!(attachments); }
                 if method == "session.followUp" {
                     let mode = params["mode"].as_str().unwrap_or("queue");
                     if !["steer", "queue"].contains(&mode) {
@@ -332,7 +354,7 @@ impl RemoteService {
                 if !["approved", "rejected"].contains(&params["decision"].as_str().unwrap_or("")) {
                     bail!("INVALID_DECISION");
                 }
-                json!({"approvalId":id,"decision":params["decision"],"scope":"once"})
+                mobile::approval_resolution(params)?
             }
             _ => bail!("METHOD_NOT_ALLOWED"),
         };
@@ -381,11 +403,7 @@ impl RemoteService {
                 }
                 success(&request.id, value)
             }
-            Err(error) => {
-                let message = error.to_string();
-                let code = if message.bytes().all(|c| c.is_ascii_uppercase() || c == b'_') { &message } else { "DESKTOP_COMMAND_FAILED" };
-                failure(&request.id, code, &message)
-            },
+            Err(error) => request_failure(&request.id, &error),
         };
         self.repo.complete(&key, &response)?;
         self.repo.audit(

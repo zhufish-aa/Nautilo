@@ -93,6 +93,7 @@ pub struct RunService {
     completion_waiters: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Receiver<RunCompletionSnapshot>>>>,
     native_origins: Mutex<HashMap<(String,String,String),session_events::NativeOrigin>>,
     session_event_gates: Mutex<HashMap<String, std::sync::Weak<session_events::SessionEventGate>>>,
+    title_gates: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
 
 /// Serializable view of a finished run (orchestration consumes it later).
@@ -137,7 +138,22 @@ impl RunService {
         }
     }
     pub async fn generate_session_title(&self, session_id: &str) -> CoreResult<Value> {
-        crate::runtime::session_title::generate(self.db.clone(),self.credentials.clone(),session_id).await
+        let gate = {
+            let mut gates = self.title_gates.lock().unwrap();
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            let gate = gates.get(session_id).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+            gates.insert(session_id.into(), Arc::downgrade(&gate));
+            gate
+        };
+        let _guard = gate.lock().await;
+        let result = crate::runtime::session_title::generate(self.db.clone(),self.credentials.clone(),session_id).await?;
+        if result["changed"] == true {
+            let session = Repositories::new(&self.db.lock().unwrap().raw).sessions().get(session_id)?;
+            if let Some(session) = session {
+                self.events.append_for_session(&session, &json!({}), "session.title_changed", json!({"title":result["title"]}))?;
+            }
+        }
+        Ok(result)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -175,6 +191,7 @@ impl RunService {
             completion_waiters: Arc::new(Mutex::new(HashMap::new())),
             native_origins: Mutex::new(HashMap::new()),
             session_event_gates: Mutex::new(HashMap::new()),
+            title_gates: Mutex::new(HashMap::new()),
         })
     }
 
@@ -814,6 +831,10 @@ impl RunService {
             if let Some(interactions) = interactions {
                 interactions.cancel_for_run(&consume_run_id);
             }
+            // Title generation belongs to the backend lifecycle, including
+            // turns started on a phone while the PC conversation is closed.
+            let title_session = consume_session["id"].as_str().unwrap_or("").to_string();
+            tokio::spawn(async move { let _ = service.generate_session_title(&title_session).await; });
         });
         self.active.lock().unwrap().insert(
             run_id.clone(),

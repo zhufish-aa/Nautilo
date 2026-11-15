@@ -2,7 +2,7 @@
 //! The path must resolve inside the owning project's workspace root.
 
 use std::fs::{File, Metadata};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -40,6 +40,10 @@ fn mime_by_ext(extension: &str) -> &'static str {
 }
 
 pub fn read_workspace_artifact(db: &Arc<Mutex<Database>>, input: &Value) -> CoreResult<Value> {
+    read_workspace_range(db, input, 0, MAX_BYTES)
+}
+
+pub fn read_workspace_range(db: &Arc<Mutex<Database>>, input: &Value, offset: u64, length: u64) -> CoreResult<Value> {
     let project_id = input.get("projectId").and_then(Value::as_str).unwrap_or("");
     let project = Repositories::new(&db.lock().unwrap().raw)
         .projects()
@@ -47,14 +51,25 @@ pub fn read_workspace_artifact(db: &Arc<Mutex<Database>>, input: &Value) -> Core
         .ok_or_else(|| not_found("project", project_id))?;
     let root_path = project.get("rootPath").and_then(Value::as_str).unwrap_or("");
     let raw = input.get("path").and_then(Value::as_str).unwrap_or("");
-    let (buffer, info, candidate) = read_confined_file(Path::new(root_path), raw)?;
+    read_range_response(Path::new(root_path), raw, offset, length)
+}
+
+/// Only called after resolving a message's persisted attachment reference.
+/// The caller never accepts a phone-supplied filesystem path.
+pub(crate) fn read_attachment_range(path: &Path, offset: u64, length: u64) -> CoreResult<Value> {
+    let root = path.parent().ok_or_else(escaped)?;
+    read_range_response(root, &path.to_string_lossy(), offset, length)
+}
+
+fn read_range_response(root: &Path, raw: &str, offset: u64, length: u64) -> CoreResult<Value> {
+    let (buffer, info, candidate) = read_confined_range(root, raw, offset, length)?;
     let modified = info
         .modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| {
             chrono::DateTime::from_timestamp_millis(duration.as_millis() as i64)
-                .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
                 .unwrap_or_default()
         })
         .unwrap_or_default();
@@ -65,8 +80,9 @@ pub fn read_workspace_artifact(db: &Arc<Mutex<Database>>, input: &Value) -> Core
     Ok(json!({
         "base64": BASE64.encode(&buffer),
         "mimeType": mime_by_ext(&extension),
-        "size": buffer.len(),
-        "modifiedAt": modified
+        "size": info.len(), "chunkBytes": buffer.len(), "offset": offset,
+        "nextOffset": if offset + (buffer.len() as u64) < info.len() { Some(offset + buffer.len() as u64) } else { None },
+        "path": candidate.to_string_lossy(), "modifiedAt": modified
     }))
 }
 
@@ -80,6 +96,13 @@ fn too_large() -> crate::errors::CoreError {
 
 fn inside(root: &Path, candidate: &Path) -> bool {
     candidate != root && candidate.starts_with(root)
+}
+
+fn lexically_inside(root: &Path, candidate: &Path) -> bool {
+    #[cfg(windows)]
+    { inside(&PathBuf::from(root.to_string_lossy().to_lowercase()), &PathBuf::from(candidate.to_string_lossy().to_lowercase())) }
+    #[cfg(not(windows))]
+    { inside(root, candidate) }
 }
 
 fn normalize_lexical(path: &Path) -> CoreResult<PathBuf> {
@@ -112,9 +135,19 @@ fn same_file(left: &Metadata, right: &Metadata) -> bool {
 }
 
 fn read_confined_file(root_path: &Path, raw: &str) -> CoreResult<(Vec<u8>, Metadata, PathBuf)> {
+    read_confined_range(root_path, raw, 0, MAX_BYTES)
+}
+
+fn read_confined_range(root_path: &Path, raw: &str, offset: u64, length: u64) -> CoreResult<(Vec<u8>, Metadata, PathBuf)> {
+    #[cfg(windows)]
+    let raw = if raw.as_bytes().first() == Some(&b'/') && raw.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic)
+        && raw.as_bytes().get(2) == Some(&b':') && matches!(raw.as_bytes().get(3), Some(b'/' | b'\\')) { &raw[1..] } else { raw };
     let root = crate::paths::canonicalize_plain(root_path).map_err(|_| not_found("artifact", raw))?;
     let input = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { root.join(raw) };
     let candidate = normalize_lexical(&crate::paths::strip_verbatim_prefix(input))?;
+    // Reject unrelated absolute/UNC locations before resolving them. The
+    // canonical, case-exact check below still validates the final file.
+    if !lexically_inside(&root, &candidate) && !lexically_inside(root_path, &candidate) { return Err(escaped()); }
     let actual = crate::paths::canonicalize_plain(&candidate).map_err(|_| {
         if inside(&root, &candidate) || inside(root_path, &candidate) { not_found("artifact", raw) } else { escaped() }
     })?;
@@ -122,7 +155,7 @@ fn read_confined_file(root_path: &Path, raw: &str) -> CoreResult<(Vec<u8>, Metad
     // Refuse special files before open (opening a FIFO can otherwise block).
     let candidate_info = std::fs::metadata(&actual).map_err(|_| not_found("artifact", raw))?;
     if !candidate_info.is_file() { return Err(not_found("artifact", raw)); }
-    let file = File::open(&actual).map_err(|_| not_found("artifact", raw))?;
+    let mut file = File::open(&actual).map_err(|_| not_found("artifact", raw))?;
     let info = file.metadata().map_err(|_| not_found("artifact", raw))?;
     if !info.is_file() { return Err(not_found("artifact", raw)); }
     let validate_opened_path = || -> CoreResult<()> {
@@ -134,10 +167,12 @@ fn read_confined_file(root_path: &Path, raw: &str) -> CoreResult<(Vec<u8>, Metad
     };
     validate_opened_path()?;
     if info.len() > MAX_BYTES { return Err(too_large()); }
+    if offset > info.len() { return Err(invalid("offset", "Offset exceeds the file length; refresh the preview.")); }
+    file.seek(SeekFrom::Start(offset)).map_err(|_| escaped())?;
     // The same handle supplies both metadata and bytes. Cap reads even when
     // an agent grows the file concurrently, instead of reading it all first.
     let mut buffer = Vec::new();
-    file.take(MAX_BYTES + 1).read_to_end(&mut buffer)
+    file.take(length.min(MAX_BYTES)).read_to_end(&mut buffer)
         .map_err(|e| crate::errors::CoreError::reason(crate::errors::ErrorCode::IpcInternalError, e.to_string()))?;
     if buffer.len() as u64 > MAX_BYTES { return Err(too_large()); }
     validate_opened_path()?;
@@ -183,6 +218,22 @@ mod tests {
         let root = fixture.0.join("workspace");
         File::create(root.join("large.txt")).unwrap().set_len(MAX_BYTES + 1).unwrap();
         assert!(read_confined_file(&root, "large.txt").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn markdown_drive_url_and_bounded_chunks_keep_the_project_boundary() {
+        let fixture = Fixture::new(); let root = fixture.0.join("workspace");
+        let path = root.join("sub/中文.rs"); let body = "fn main() { /* 中文 */ }".as_bytes();
+        std::fs::write(&path, body).unwrap();
+        let href = format!("/{}", path.to_string_lossy().replace('\\', "/"));
+        assert_eq!(read_confined_file(&root, &href).unwrap().0, body);
+        let first = read_confined_range(&root, &href, 0, 7).unwrap().0;
+        let rest = read_confined_range(&root, &href, 7, MAX_BYTES).unwrap().0;
+        assert_eq!([first, rest].concat(), body);
+        assert!(read_confined_range(&root, &href, body.len() as u64 + 1, 8).is_err());
+        let outside = fixture.0.join("outside.txt"); std::fs::write(&outside, b"outside").unwrap();
+        assert!(read_confined_file(&root, &format!("/{}", outside.to_string_lossy().replace('\\', "/"))).is_err());
     }
 
     #[cfg(unix)]

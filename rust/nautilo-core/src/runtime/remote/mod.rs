@@ -1,9 +1,15 @@
 mod access;
 mod pairing;
 mod mobile;
+mod attachments;
 #[cfg(test)]
 mod tests;
 mod transport;
+mod control;
+mod diagnostics;
+mod proxy;
+#[cfg(test)]
+mod direct_tests;
 
 use crate::{
     database::{remote::RemoteRepository, Database},
@@ -21,6 +27,7 @@ use std::{
 use tokio::sync::Mutex as AsyncMutex;
 
 pub const ALPN: &[u8] = b"nautilo/remote/1";
+pub const ALPN_V2: &[u8] = b"nautilo/remote/2";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -50,6 +57,7 @@ pub struct RemoteService {
     router: Mutex<Weak<Router>>,
     lifecycle: AsyncMutex<()>,
     state: Mutex<State>,
+    attachments: attachments::RemoteAttachments,
 }
 struct State {
     endpoint: Option<Endpoint>,
@@ -60,6 +68,8 @@ struct State {
     invitation: Option<pairing::Invitation>,
     pending: HashMap<String, pairing::Pending>,
     connections: HashMap<String, Connection>,
+    recent_connections: std::collections::VecDeque<Value>,
+    http_proxy_source: Option<&'static str>,
 }
 impl RemoteService {
     pub fn new(
@@ -67,11 +77,13 @@ impl RemoteService {
         credentials: Arc<CredentialService>,
         events: Arc<EventService>,
     ) -> Arc<Self> {
+        let attachment_root = db.lock().unwrap().path().parent().expect("database directory").join("remote-attachments");
         Arc::new(Self {
             repo: RemoteRepository::new(db),
             credentials,
             events,
             router: Mutex::new(Weak::new()),
+            attachments: attachments::RemoteAttachments::new(attachment_root),
             lifecycle: AsyncMutex::new(()),
             state: Mutex::new(State {
                 endpoint: None,
@@ -82,6 +94,8 @@ impl RemoteService {
                 invitation: None,
                 pending: HashMap::new(),
                 connections: HashMap::new(),
+                recent_connections: std::collections::VecDeque::new(),
+                http_proxy_source: None,
             }),
         })
     }
@@ -112,22 +126,30 @@ impl RemoteService {
             return Ok(Settings::default());
         };
         value.as_object_mut().unwrap().remove("id");
+        // The old UI called this "direct only". Preserve that user intent by
+        // upgrading it to NAT-capable direct, rather than retaining LAN limits.
+        if value["relayMode"] == "local" { value["relayMode"] = json!("direct"); }
         Ok(serde_json::from_value(value)?)
     }
     pub async fn configure(self: &Arc<Self>, input: Value) -> Result<Value> {
-        let settings: Settings = serde_json::from_value(input)?;
+        let mut settings: Settings = serde_json::from_value(input)?;
+        if settings.relay_mode == "local" { settings.relay_mode = "direct".into(); }
         if settings.device_name.trim().is_empty() || settings.device_name.len() > 120 {
             bail!("INVALID_DEVICE_NAME");
         }
-        if !["automatic", "custom", "local"].contains(&settings.relay_mode.as_str()) {
+        if !["automatic", "custom", "direct", "lan"].contains(&settings.relay_mode.as_str()) {
             bail!("INVALID_RELAY_MODE");
         }
-        if settings.relay_urls.len() > 4
-            || (settings.relay_mode == "custom" && settings.relay_urls.is_empty())
-        {
-            bail!("INVALID_RELAY_URL");
-        }
-        for url in &settings.relay_urls {
+        settings.relay_urls = settings.relay_urls.iter().map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty()).fold(Vec::new(), |mut urls, url| {
+                if !urls.contains(&url) { urls.push(url); }
+                urls
+            });
+        // Public relay mode needs no user-supplied server. Dormant custom
+        // fields must not prevent switching back to automatic or offline LAN.
+        let uses_relay_urls = matches!(settings.relay_mode.as_str(), "custom" | "direct");
+        if uses_relay_urls && settings.relay_urls.len() > 4 { bail!("INVALID_RELAY_URL"); }
+        for url in settings.relay_urls.iter().filter(|_| uses_relay_urls) {
             let parsed: reqwest::Url = url.parse()?;
             if parsed.scheme() != "https"
                 || parsed.host_str().is_none()
@@ -151,6 +173,13 @@ impl RemoteService {
                 let mut state = self.state.lock().unwrap();
                 state.starting = false;
                 state.error = Some(error.to_string());
+            }
+        } else if settings.enabled && settings.relay_mode != "lan" {
+            let endpoint = self.state.lock().unwrap().endpoint.clone();
+            if let Some(endpoint) = endpoint.filter(|e| !e.home_relay_status().get().iter().any(|r| r.is_connected())) {
+                // An explicit retry must actually wake the transport, even
+                // when the saved settings have not changed. Keep peer streams.
+                endpoint.network_change().await;
             }
         }
         self.status()
@@ -194,6 +223,11 @@ impl RemoteService {
             if let Some(connection) = connection {
                 device["latencyMs"] = json!(transport::latency(connection));
                 device["connectionType"] = json!(transport::connection_type(connection));
+                device["connectionState"] = json!(if settings.relay_mode == "direct" && transport::connection_type(connection) != "direct" { "punching" } else { "ready" });
+                device["paths"] = json!(connection.paths().iter().map(|p| json!({
+                    "type":if p.is_relay(){"relay"}else{"direct"},"selected":p.is_selected(),
+                    "latencyMs":p.rtt().as_millis() as u64
+                })).collect::<Vec<_>>());
             }
         }
         let phase = if !settings.enabled {
@@ -210,6 +244,8 @@ impl RemoteService {
         Ok(
             json!({"supported":true,"settings":settings,"state":phase,"error":state.error,
             "endpointId":endpoint.map(Endpoint::id),"internetReady":endpoint.is_some_and(|e|e.home_relay_status().get().iter().any(|s|s.is_connected())),
+            "network":endpoint.and_then(control::network_diagnostics),
+            "relays":endpoint.map(|e| e.home_relay_status().get().iter().map(|s|json!({"url":s.url().to_string(),"connected":s.is_connected(),"error":s.last_error().map(ToString::to_string)})).collect::<Vec<_>>()).unwrap_or_default(),
             "devices":devices,"pending":state.pending.values().collect::<Vec<_>>()}),
         )
     }
@@ -224,6 +260,7 @@ impl RemoteService {
             state.generation += 1;
             state.invitation = None;
             state.pending.clear();
+            state.http_proxy_source = None;
             for (_, c) in state.connections.drain() {
                 c.close(0u32.into(), b"remote disabled");
             }

@@ -151,6 +151,7 @@ export interface SourceControlMutation extends SourceControlScope {
 }
 export interface IpcRequestMap {
   "remote.status": { input: Record<string, never>; output: RemoteStatus };
+  "remote.diagnostics": { input: Record<string, never>; output: Record<string, unknown> };
   "remote.configure": { input: RemoteSettings; output: RemoteStatus };
   "remote.invite": { input: Record<string, never>; output: RemoteInvitation };
   "remote.cancelInvite": { input: Record<string, never>; output: { ok: true } };

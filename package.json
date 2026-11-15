@@ -13,7 +13,8 @@
     "package:win": "pnpm build:desktop && node scripts/package-win-portable.mjs",
     "package": "pnpm build:desktop && node scripts/prepare-packaged-resources.mjs build/packaged && electron-builder",
     "typecheck": "tsc -b tsconfig.json --pretty false && pnpm --filter @agenthub/desktop typecheck",
-    "test": "pnpm -r --if-present test && node tests/contract/contracts.test.mjs",
+    "test": "pnpm -r --if-present test && node tests/contract/contracts.test.mjs && pnpm test:rust-sources",
+    "test:rust-sources": "node --test scripts/test/prepare-rust-sources.test.mjs",
     "check": "pnpm typecheck && pnpm test",
     "dev": "pnpm --filter @agenthub/core-daemon dev",
     "dev:daemon": "pnpm --filter @agenthub/core-daemon serve",
@@ -21,6 +22,7 @@
     "mobile:apk": "node scripts/build-mobile.mjs",
 
     "rust:build": "node scripts/rust-build.mjs",
+    "rust:prepare": "node scripts/prepare-rust-sources.mjs",
     "rust:release": "node scripts/rust-build.mjs --release",
     "tauri:renderer": "pnpm --filter @agenthub/desktop exec vite build --config vite.tauri.config.mts",
     "tauri:build": "pnpm tauri:renderer && set \"PATH=%CD%\\.toolchains\\mingw64\\bin;%PATH%\" && cd apps\\desktop\\src-tauri && cargo build --release",

@@ -6,6 +6,22 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 const row = (id, text = id, sessionId = 's') => ({ id, sessionId, sender: 'user', text, createdAt: '2026-11-03T00:00:00Z' });
 const snapshot = (h, text = 'old', epoch = 'fixture') => ({ session: clone(h.session), reset: true, cursor: { epoch, scope: 'messages:session:s', revision: 1 }, items: [{ value: row('m', text), order: { createdAt: h.session.createdAt, ordinal: 1 } }] });
 
+test('backend title changes refresh the sidebar without creating a timeline card', async () => {
+  const h = createHarness(); h.replies['run.list'] = [];
+  let title = '新会话';
+  h.replies['session.get'] = () => ({ session: { ...h.session, title }, messages: [] });
+  const waits = []; h.replies['event.wait'] = () => new Promise(resolve => waits.push(resolve));
+  const unregister = h.runtime.registerStandaloneSessionView('s');
+  const hydrate = h.runtime.ensureStandaloneSessionHydrated('s'); await h.advance(400); await hydrate;
+  assert.equal(h.state.sessions.find(s => s.id === 's').title, '新会话');
+  title = '今天的英雄联盟比赛';
+  waits.shift()({events:[{schemaVersion:1,eventId:'title',sequence:1,sessionId:'s',projectId:'p',timestamp:'2026-11-15T00:00:00Z',type:'session.title_changed',payload:{title}}],lastSequence:1});
+  await h.advance(400);
+  assert.equal(h.state.sessions.find(s => s.id === 's').title, title);
+  assert.equal(h.state.events.s.length, 0);
+  unregister(); waits.shift()?.({events:[],lastSequence:1}); await h.advance(100);
+});
+
 test('native history sync refreshes persisted rows even without a foreground run', async()=>{
   const h=createHarness();h.replies['run.list']=[];
   const waits=[];h.replies['event.wait']=()=>new Promise(resolve=>waits.push(resolve));

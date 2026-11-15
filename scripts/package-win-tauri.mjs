@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, 
 import { rcedit } from "rcedit";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareRustSources } from "./prepare-rust-sources.mjs";
 
 /**
  * Packages the Tauri build as a portable ZIP. Unlike the Electron flow this
@@ -70,6 +71,7 @@ function run(command, args, cwd) {
 }
 
 if (process.argv.includes("--build")) {
+  await prepareRustSources();
   // Renderer -> src-tauri/dist, then the Tauri shell and the Rust workspace.
   run("npx.cmd", ["vite", "build", "--config", "vite.tauri.config.mts"], join(repositoryRoot, "apps", "desktop"));
   run("cargo", ["build", "--release"], join(repositoryRoot, "apps", "desktop", "src-tauri"));

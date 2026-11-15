@@ -15,6 +15,7 @@ import { cn } from "../../lib/utils";
 import { Button } from "../../components/ui/Button";
 import { requestCore } from "../../lib/bridge";
 import { requestedWorkspaceFile } from "../../lib/workspace-state";
+import { TextFilePreview } from "./preview/TextFilePreview";
 import { collectChangedFiles } from "../../lib/changed-files";
 import {
   base64ToBytes,
@@ -449,13 +450,7 @@ function ReadyBody({ preview, path }: { preview: PaneState; path: string }): JSX
       );
     case "csv":
     case "text":
-      return (
-        <div className="h-full overflow-y-auto">
-          <pre className="min-h-full whitespace-pre-wrap break-words bg-card/40 px-5 py-4 font-mono text-[12px] leading-5 text-ink-2">
-            {preview.text}
-          </pre>
-        </div>
-      );
+      return <TextFilePreview text={preview.text ?? ""} path={path} />;
     case "image":
       return (
         <div className="flex h-full items-center justify-center overflow-auto p-4">

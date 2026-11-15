@@ -17,6 +17,34 @@ pub enum CommandReservation {
 }
 
 impl RemoteRepository {
+    pub fn project_files(&self, input: &Value) -> Result<Value> {
+        Ok(crate::application::workspace_files::list(&self.db, input)?)
+    }
+    pub fn file_preview(&self, input: &Value) -> Result<Value> {
+        Ok(crate::application::workspace_files::preview(&self.db, input)?)
+    }
+    pub fn attachment_read(&self, session: &str, input: &Value) -> Result<Value> {
+        let id = input["attachmentId"].as_str().filter(|id| !id.is_empty() && id.len() <= 128)
+            .ok_or_else(|| anyhow::anyhow!("INVALID_ATTACHMENT"))?;
+        let artifact: String = self.db.lock().unwrap().raw.query_row(
+            "SELECT a.data FROM artifacts a WHERE a.id=?1 AND a.session_id=?2
+             AND EXISTS (SELECT 1 FROM messages m, json_each(m.data,'$.attachmentIds') ids
+                         WHERE m.session_id=?2 AND ids.value=a.id)",
+            params![id, session], |row| row.get(0)).optional()?
+            .ok_or_else(|| anyhow::anyhow!("ATTACHMENT_NOT_AVAILABLE"))?;
+        let artifact: Value = serde_json::from_str(&artifact)?;
+        if artifact["metadata"]["source"] != "user_attachment" { bail!("ATTACHMENT_NOT_AVAILABLE"); }
+        let path = artifact["path"].as_str().ok_or_else(|| anyhow::anyhow!("ATTACHMENT_NOT_AVAILABLE"))?;
+        let offset = input["offset"].as_u64().unwrap_or(0);
+        let length = input["length"].as_u64().unwrap_or(512 * 1024).clamp(1, 512 * 1024);
+        let mut result = crate::application::artifact_read::read_attachment_range(std::path::Path::new(path), offset, length)?;
+        result.as_object_mut().unwrap().remove("path");
+        result["attachmentId"] = json!(id);
+        if let Some(mime) = artifact["metadata"]["mimeType"].as_str().filter(|mime| !mime.is_empty()) {
+            result["mimeType"] = json!(mime);
+        }
+        Ok(result)
+    }
     pub fn new(db: Arc<Mutex<Database>>) -> Self {
         Self { db }
     }
@@ -92,7 +120,7 @@ impl RemoteRepository {
         let db = self.db.lock().unwrap();
         let repos = Repositories::new(&db.raw);
         let agents = repos.agents().list_default()?.into_iter().filter(|v| v["enabled"] != false)
-            .map(|v| json!({"id":v["id"],"name":v["displayName"],"providerId":v["providerId"],"model":v["model"],"reasoningEffort":v["reasoningEffort"]})).collect::<Vec<_>>();
+            .map(|v| json!({"id":v["id"],"name":v["displayName"],"providerId":v["providerId"],"model":v["model"],"reasoningEffort":v["reasoningEffort"],"permissionMode":v["permissionMode"],"agentMode":v["agentMode"]})).collect::<Vec<_>>();
         let connections = repos
             .runtime_connections()
             .list_default()?
@@ -120,7 +148,7 @@ impl RemoteRepository {
             .filter(|v| v["enabled"] != false)
             .ok_or_else(|| anyhow::anyhow!("HARNESS_NOT_AVAILABLE"))?;
         let mut input = json!({"projectId":project,"agentInstanceId":id,"memberId":id});
-        for key in ["model", "reasoningEffort"] {
+        for key in ["model", "reasoningEffort", "permissionMode", "agentMode"] {
             if let Some(value) = params
                 .get(key)
                 .or_else(|| agent.get(key))
@@ -140,6 +168,18 @@ impl RemoteRepository {
         }
         Ok(input)
     }
+    pub fn mobile_mode_context(&self, agent_id: &str, project_id: Option<&str>) -> Result<Value> {
+        let db = self.db.lock().unwrap();
+        let repos = Repositories::new(&db.raw);
+        let agent = repos.agents().get(agent_id)?.filter(|a| a["enabled"] != false).ok_or_else(|| anyhow::anyhow!("HARNESS_NOT_AVAILABLE"))?;
+        let project = project_id.map(|id| repos.projects().get(id)).transpose()?.flatten();
+        if project_id.is_some() && project.is_none() { bail!("PROJECT_NOT_FOUND"); }
+        Ok(json!({"agentInstanceId":agent_id,"providerId":agent["providerId"],"permissionMode":agent["permissionMode"],"agentMode":agent["agentMode"],"cwd":project.as_ref().and_then(|p| p["rootPath"].as_str())}))
+    }
+    pub fn session_mode_locked(&self, session: &str) -> Result<bool> {
+        let db = self.db.lock().unwrap();
+        Ok(db.raw.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?1 AND json_extract(data,'$.sender')='user')", [session], |r| r.get(0))?)
+    }
     pub fn run_session(&self, id: &str) -> Result<String> {
         let db = self.db.lock().unwrap();
         let run = Repositories::new(&db.raw)
@@ -158,6 +198,7 @@ impl RemoteRepository {
         let agent_id = crate::application::session_service::effective_agent_id(&db.raw, &session)?;
         let agent = repos.agents().get(&agent_id)?.unwrap_or(json!({}));
         let mut config = json!({"id":id});
+        config["modeLocked"] = json!(db.raw.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?1 AND json_extract(data,'$.sender')='user')", [id], |r| r.get::<_,bool>(0))?);
         for field in [
             "title",
             "status",
@@ -371,12 +412,35 @@ impl RemoteRepository {
         // Mobile associates each reply with its own native run, including older
         // history pages. Do not infer a duration from the latest session run.
         let message_ids = items.iter().map(|item| item["value"]["id"].clone()).collect::<Vec<_>>();
-        let mut run_query = snapshot.prepare("SELECT json_extract(data,'$.payload.messageId'),run_id FROM runtime_events WHERE session_id=?1 AND json_extract(data,'$.type')='agent.message' AND json_extract(data,'$.payload.messageId') IN (SELECT value FROM json_each(?2)) ORDER BY sequence")?;
-        let message_runs = run_query.query_map(params![session, serde_json::to_string(&message_ids)?], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
+        let mut run_query = snapshot.prepare("SELECT json_extract(f.data,'$.payload.messageId'),f.run_id,f.sequence,
+            (SELECT json_object('sequence',d.sequence,'timestamp',d.timestamp) FROM runtime_events d
+             WHERE d.session_id=f.session_id AND d.run_id=f.run_id AND d.sequence<=f.sequence
+             AND json_extract(d.data,'$.type')='agent.message_delta'
+             AND json_extract(d.data,'$.payload.messageId')=COALESCE(NULLIF(json_extract(f.data,'$.payload.providerMessageId'),''),json_extract(f.data,'$.payload.messageId'))
+             ORDER BY d.sequence LIMIT 1)
+            FROM runtime_events f WHERE f.session_id=?1 AND json_extract(f.data,'$.type')='agent.message'
+            AND json_extract(f.data,'$.payload.messageId') IN (SELECT value FROM json_each(?2)) ORDER BY f.sequence")?;
+        let message_runs = run_query.query_map(params![session, serde_json::to_string(&message_ids)?], |r|
+            Ok((r.get::<_, String>(0)?, (r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<String>>(3)?))))?
             .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
         for item in &mut items {
-            if let Some(Some(run)) = item["value"]["id"].as_str().and_then(|id| message_runs.get(id)) {
-                item["value"]["runId"] = json!(run);
+            if let Some(ids) = item["value"]["attachmentIds"].as_array().filter(|ids| !ids.is_empty()) {
+                let mut query = snapshot.prepare("SELECT a.data FROM json_each(?1) ids JOIN artifacts a ON a.id=ids.value WHERE a.session_id=?2 ORDER BY CAST(ids.key AS INTEGER)")?;
+                let attachments = query.query_map(params![serde_json::to_string(ids)?, session], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?.iter().map(|raw| {
+                        let a: Value = serde_json::from_str(raw)?;
+                        Ok(json!({"id":a["id"],"name":a["name"],"kind":a["kind"],
+                            "mimeType":a["metadata"]["mimeType"],"sizeBytes":a["metadata"]["sizeBytes"],
+                            "uploadId":a["metadata"]["remoteUploadId"]}))
+                    }).collect::<Result<Vec<Value>, serde_json::Error>>()?;
+                item["value"]["attachmentNames"] = json!(attachments.iter().map(|a| a["name"].clone()).collect::<Vec<_>>());
+                item["value"]["attachments"] = json!(attachments);
+            }
+            if let Some((run, sequence, first)) = item["value"]["id"].as_str().and_then(|id| message_runs.get(id)) {
+                if let Some(run) = run { item["value"]["runId"] = json!(run); }
+                let first = first.as_deref().map(serde_json::from_str::<Value>).transpose()?;
+                item["value"]["sequence"] = first.as_ref().map(|v|v["sequence"].clone()).unwrap_or(json!(sequence));
+                if let Some(first) = first { item["value"]["timelineStartedAt"] = first["timestamp"].clone(); }
             }
         }
         let sequence: i64 = snapshot.query_row(
@@ -389,7 +453,7 @@ impl RemoteRepository {
             [],
             |r| r.get(0),
         )?;
-        let mut activity_query = snapshot.prepare("SELECT data FROM runtime_events WHERE session_id=?1 AND sequence<=?2 AND json_extract(data,'$.type') IN ('agent.message','agent.message_delta','agent.thinking_delta','agent.thinking_summary','tool.started','tool.updated','tool.finished','command.started','command.updated','command.finished','run.started','run.waiting','run.completed','run.cancelled','run.failed') ORDER BY sequence DESC LIMIT 200")?;
+        let mut activity_query = snapshot.prepare("SELECT data FROM runtime_events WHERE session_id=?1 AND sequence<=?2 ORDER BY sequence DESC LIMIT 200")?;
         let activity_rows = activity_query
             .query_map(params![session, sequence], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;

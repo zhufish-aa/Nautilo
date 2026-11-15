@@ -2,6 +2,11 @@
 members = ["nautilo-core", "plugin-sdk", "plugins/pi", "plugins/trae", "plugins/opencode", "plugins/omp", "plugins/commandcode", "plugins/deepseek", "plugins/codex-plugins", "plugins/antigravity"]
 resolver = "2"
 
+[patch.crates-io]
+# Keep the data-path restriction in the QUIC packet builder, including retransmits.
+iroh = { path = "vendor/generated/iroh-1.4.1" }
+noq-proto = { path = "vendor/generated/noq-proto-1.4.0" }
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -17,6 +17,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -30,40 +31,45 @@ import app.nautilo.mobile.data.*
     var newFolder by rememberSaveable { mutableStateOf(false) }
     var folderName by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(Unit) { model.browse() }
-    ModalBottomSheet(onDismissRequest = close, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Color(0xFFFCFDFE)) {
-        Column(Modifier.heightIn(max = 700.dp).verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 24.dp).imePadding(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("新建项目", style = MaterialTheme.typography.titleLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = !newFolder, onClick = { newFolder = false }, label = { Text("已有目录") })
-                FilterChip(selected = newFolder, onClick = { newFolder = true }, label = { Text("新建文件夹") })
+    NSheet(onDismissRequest = close, containerColor = Color(0xFFFFFFFF)) {
+        Column(Modifier.fillMaxWidth().heightIn(max = 700.dp).padding(horizontal = 22.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("新建项目", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                ActionIcon(Icons.Outlined.Close, "关闭", click = close)
             }
-            OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("项目名称") }, singleLine = true, shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth())
-            if (newFolder) OutlinedTextField(value = folderName, onValueChange = { folderName = it }, label = { Text("文件夹名称") }, singleLine = true, shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = path, onValueChange = { path = it }, label = { Text(if (newFolder) "创建到电脑上的目录" else "电脑上的工作目录") }, shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth(),
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                NChip(selected = !newFolder, onClick = { newFolder = false }, label = { Text("已有目录") })
+                NChip(selected = newFolder, onClick = { newFolder = true }, label = { Text("新建文件夹") })
+            }
+            NField(value = name, onValueChange = { name = it }, label = { Text("项目名称") }, singleLine = true, shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth())
+            if (newFolder) NField(value = folderName, onValueChange = { folderName = it }, label = { Text("文件夹名称") }, singleLine = true, shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth())
+            NField(value = path, onValueChange = { path = it }, label = { Text(if (newFolder) "创建到电脑上的目录" else "电脑上的工作目录") }, shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth(),
                 trailingIcon = { ActionIcon(Icons.Outlined.ArrowForward, "打开目录", !state.directoryLoading) { model.browse(path) } })
-            if (state.directoryLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
-            Surface(shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, Line)) {
+            if (state.directoryLoading) NProgress(Modifier.fillMaxWidth())
+            NPanel(shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, Line)) {
                 LazyColumn(Modifier.heightIn(min = 120.dp, max = 260.dp)) {
                     if (state.directory.text("path").isNotEmpty()) item("parent") {
                         Row(Modifier.fillMaxWidth().clickable { path = state.directory.text("parent"); model.browse(path) }.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.DriveFolderUpload, null, Modifier.size(20.dp), tint = Blue)
+                            Icon(Icons.Outlined.DriveFolderUpload, null, Modifier.size(20.dp), tint = Accent)
                             Text("上一级", Modifier.padding(start = 12.dp), fontSize = 13.sp)
                         }
                     }
                     items(state.directory.objects("directories"), key = { it.text("path") }) { folder ->
                         Row(Modifier.fillMaxWidth().clickable { path = folder.text("path"); model.browse(path) }.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.FolderOpen, null, Modifier.size(20.dp), tint = Blue)
+                            Icon(Icons.Outlined.FolderOpen, null, Modifier.size(20.dp), tint = Accent)
                             Text(folder.text("name"), Modifier.weight(1f).padding(horizontal = 12.dp), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp), tint = Secondary)
                         }
                     }
-                    if (!state.directory.isNull("nextOffset")) item("more") { TextButton(onClick = { model.browse(state.directory.text("path"), state.directory.optInt("nextOffset")) }) { Text("加载更多目录") } }
+                    if (!state.directory.isNull("nextOffset")) item("more") { NTextButton(onClick = { model.browse(state.directory.text("path"), state.directory.optInt("nextOffset")) }) { Text("加载更多目录") } }
                 }
             }
             if (state.error.isNotBlank()) Text(state.error, color = Danger, fontSize = 13.sp)
-            Button(enabled = path.isNotBlank() && (!newFolder || folderName.isNotBlank()) && state.connected && !state.changing,
-                onClick = { model.createProject(name, path, if (newFolder) folderName else "", created) }, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp)) {
-                if (state.changing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White) else Text(if (newFolder) "创建项目" else "添加为项目", color = Color.White)
+            }
+            NButton(enabled = path.isNotBlank() && (!newFolder || folderName.isNotBlank()) && state.connected && !state.changing,
+                onClick = { model.createProject(name, path, if (newFolder) folderName else "", created) }, modifier = Modifier.fillMaxWidth().height(48.dp).testTag("project-create-submit"), shape = RoundedCornerShape(14.dp)) {
+                if (state.changing) NSpinner(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White) else Text(if (newFolder) "创建项目" else "添加为项目", color = Color.White)
             }
         }
     }

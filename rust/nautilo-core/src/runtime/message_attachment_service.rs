@@ -58,6 +58,9 @@ impl MessageAttachmentService {
             if let Some(mime) = input.get("mimeType").and_then(Value::as_str) {
                 metadata.insert("mimeType".to_string(), json!(mime));
             }
+            if let Some(id) = input.get("remoteUploadId").and_then(Value::as_str).filter(|id| uuid::Uuid::parse_str(id).is_ok()) {
+                metadata.insert("remoteUploadId".to_string(), json!(id));
+            }
             let mut artifact_input = Map::new();
             artifact_input.insert("kind".to_string(), input.get("kind").cloned().unwrap_or_else(|| json!("file")));
             artifact_input.insert("name".to_string(), input.get("name").cloned().unwrap_or(Value::Null));

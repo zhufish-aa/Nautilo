@@ -1,0 +1,52 @@
+import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { toolActivityKind, toolActivityLabel, codeExecutionInput, toolInputFileDiff } from "../../desktop/src/renderer/src/lib/tool-display.ts";
+import { reasoningPreview, toolOutput, toolCallTree } from "../../desktop/src/renderer/src/lib/process-display.ts";
+import { conversationRows } from "../../desktop/src/renderer/src/lib/conversation-timeline.ts";
+
+const tools = [
+  ["read_file", "done", { file_path: "src/main.rs" }], ["Read", "running", { path: "README.md" }],
+  ["Write", "failed", { filePath: "空格 目录/test.ts", content: "const a = 1;\n" }],
+  ["edit_file", "done", { path: "main.kt", old_string: "old", new_string: "new" }],
+  ["Grep", "running", { pattern: "useEffect", path: "src" }], ["Glob", "done", { pattern: "**/*.tsx" }],
+  ["Read", "done", { path: "D:\\skills\\SKILL.md" }], ["pwsh", "running", { command: "Get-Content ./SKILL.md" }],
+  ["mcp__nautilo__browser_run", "done", { steps: [] }], ["request_user_input", "running", {}],
+  ["run_code", "done", { description: "检查目录", code: "console.log(await tools.read({path:'main.rs'}));" }],
+  ["web_search", "failed", { query: "Nautilo" }], ["view_image", "done", { path: "preview.png" }],
+  ["tools.exec_command", "running", { cmd: "git status" }], ["unknownTool", "failed", {}],
+  ["Write", "done", '{"path":"sample.txt","content":"hello\\nworld'],
+].map(([name, status, input]) => {
+  input = typeof input === "string" ? input : JSON.stringify(input);
+  return { name, status, input, kind: toolActivityKind(name, input), label: toolActivityLabel(name, status, input, "zh-CN"), diff: toolInputFileDiff(name, input) };
+});
+const programs = [JSON.stringify({ description: "检查文件", code: "const r = await read();\nconsole.log(r);" }),
+  '{"description":"部分代码","code":"console.log(\\"hello\\");\\nconst n = ', "console.log('raw code');"]
+  .map(input => ({ input, expected: codeExecutionInput(input) }));
+const previews = [["## 检查文件\n\n后面的段落还在输出", true], ["**完整的想法** [链接](https://example.com)\n\n下一段", false], ["读取文件\n\n正在读取…\n\n", true]]
+  .map(([text, streaming]) => ({ text, streaming, expected: reasoningPreview(text, streaming) }));
+const outputs = ["plain output", "requested cancellation of job task-42", JSON.stringify({ kind: "promoted", jobId: "job-1", cwd: "D:\\Nautilo", timeoutMs: 15000, output: "started" }),
+  JSON.stringify({ status: "running", jobId: "job-2", output: "more output" }), JSON.stringify({ exitCode: 0, output: "done" })]
+  .map(input => ({ input, expected: toolOutput(input, true) }));
+const trees = [[{callId:"root",name:"run_code"},{callId:"child",parentCallId:"root",name:"read"},{callId:"other",name:"pwsh"}],
+  [{callId:"a",parentCallId:"b",name:"one"},{callId:"b",parentCallId:"a",name:"two"},{callId:"orphan",parentCallId:"missing",name:"read"}]]
+  .map(calls => ({ calls, expected: toolCallTree(calls) }));
+const msg = (id, text = id) => ({ id, data:{ kind:"message", sender:"agent", text } });
+const tool = id => ({ id, data:{ kind:"tool_activity", toolName:"read_file", status:"done" } });
+const scenarios = [
+  ["active-commentary-then-tool", true, [msg("comment"), tool("tool")]],
+  ["active-final-text", true, [tool("tool"), msg("final")]],
+  ["completed-reply-keeps-slot", false, [msg("comment"), {id:"approval",data:{kind:"approval",approval:{status:"approved"}}}, msg("final"), tool("tool"), {id:"error",data:{kind:"error",message:"failed"}}]],
+  ["internal-status-hidden", false, [{id:"usage",data:{kind:"usage"}}, {id:"ready",data:{kind:"activity",phase:"starting"}}, msg("final"), {id:"status",data:{kind:"activity",phase:"completed"}}]],
+].map(([name, active, records]) => {
+  const events = records.map((record, index) => ({...record, sessionId:"fixture", runId:"r", sequence:index+1, timestamp:`2026-11-14T00:00:${String(index+1).padStart(2,"0")}Z`}));
+  const turn = conversationRows(events, active).find(row => row.kind === "turn")?.turn;
+  const always = event => event.data.kind === "error" || event.data.kind === "approval" || event.data.kind === "activity" && event.data.phase === "stopped" || event.data.kind === "task_update" || event.data.kind === "tool_activity" && event.data.subagent;
+  return {name, active, events, expected:{ order:turn?.events.map(event=>event.id) ?? [], result:turn?.result?.id ?? null, completed:turn?.completed ?? true,
+    collapsed:turn?.events.filter(event=>event === turn.result || always(event)).map(event=>event.id) ?? [] }};
+});
+const hashes = {};
+for (const path of ["tool-display.ts", "process-display.ts", "conversation-timeline.ts"]) hashes[path] = createHash("sha256").update(await readFile(new URL(`../../desktop/src/renderer/src/lib/${path}`, import.meta.url))).digest("hex");
+const target = new URL("../app/src/test/resources/desktop-process-fixtures.json", import.meta.url);
+await mkdir(new URL(".", target), { recursive:true });
+await writeFile(target, JSON.stringify({ source:"Generated by executing the PC implementation", hashes, tools, programs, previews, outputs, trees, scenarios }, null, 2) + "\n");
+console.log(`Generated ${tools.length + programs.length + previews.length + outputs.length + trees.length + scenarios.length} PC reference cases.`);

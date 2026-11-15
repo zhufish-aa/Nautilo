@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, rmSync, chmodSync } from "node:fs"
 import { dirname, join, relative, resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nativePackaging } from "./native-packaging.mjs";
+import { prepareRustSources } from "./prepare-rust-sources.mjs";
 
 /**
  * Prepares the platform-specific resources that electron-builder places under
@@ -39,6 +40,7 @@ function run(command, args, cwd) {
 }
 
 // Daemon + first-party provider plugins, all release executables.
+await prepareRustSources();
 run("cargo", ["build", "--release", "--locked", "--workspace", "--target", target], join(repositoryRoot, "rust"));
 
 const profileDirectory = join(targetDirectory, target, "release");

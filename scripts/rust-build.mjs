@@ -3,6 +3,7 @@ import { join, delimiter, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { developmentEnvironment } from './dev-storage.mjs';
+import { prepareRustSources } from './prepare-rust-sources.mjs';
 
 export const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export function rustEnvironment() {
@@ -26,6 +27,7 @@ export function run(command,args,options={}) {
   });
 }
 export async function buildRust(release=false) {
+  await prepareRustSources();
   const env=rustEnvironment();
   console.log(`Rust toolchain: ${env.RUSTUP_TOOLCHAIN}`);
   await run('cargo',['build','--workspace',...(release?['--release']:[])],{cwd:join(workspace,'rust'),env});

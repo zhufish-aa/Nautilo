@@ -1,0 +1,36 @@
+[package]
+name = "iroh-kmp"
+version = "0.2.1"
+edition = "2021"
+publish = false
+description = "Minimal UniFFI wrapper around iroh for Kotlin Multiplatform (Gobley/JNI bindings)."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "iroh_kmp"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+uniffi = { version = "0.29.4", features = ["tokio"] }
+iroh = "1.4.1"
+iroh-tickets = "1.0.0"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-context = "0.1"
+jni = "0.21"
+
+[profile.release]
+lto = false
+codegen-units = 16
+strip = true
+debug = 0
+
+# This crate is built independently from the desktop workspace for Android/JVM.
+[workspace]
+
+[patch.crates-io]
+iroh = { path = "../../../../rust/vendor/generated/iroh-1.4.1" }
+noq-proto = { path = "../../../../rust/vendor/generated/noq-proto-1.4.0" }

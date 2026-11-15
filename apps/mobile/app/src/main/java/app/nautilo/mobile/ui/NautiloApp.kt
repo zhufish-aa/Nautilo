@@ -13,6 +13,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
@@ -27,17 +29,32 @@ import com.journeyapps.barcodescanner.ScanOptions
     var pairSheet by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var link by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(state.host?.id) {
+        if (state.host != null && android.os.Build.VERSION.SDK_INT >= 33) {
+            val prefs = context.getSharedPreferences("connection_notifications", android.content.Context.MODE_PRIVATE)
+            if (!prefs.getBoolean("requested", false) && context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                prefs.edit().putBoolean("requested", true).apply()
+                notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
     val scan = rememberLauncherForActivityResult(ScanContract()) { result -> result.contents?.let(model::pair) }
     LaunchedEffect(invitation) { invitation?.let { model.pair(it); consumed() } }
-    val backTarget = when (state.screen) { Screen.FileDiff -> Screen.Workspace; Screen.Workspace -> Screen.Chat; else -> Screen.Projects }
-    BackHandler(state.screen != Screen.Projects) { model.navigate(backTarget) }
+    val backTarget = when (state.screen) { Screen.FilePreview -> state.previewBack; Screen.ProjectFiles -> state.filesBack; Screen.FileDiff -> Screen.Workspace; Screen.Workspace -> Screen.Chat; else -> Screen.Projects }
+    val goBack = { if (state.screen == Screen.FilePreview) model.closeFilePreview() else model.navigate(backTarget) }
+    BackHandler(state.screen != Screen.Projects) { goBack() }
     NautiloTheme {
-        Column(Modifier.fillMaxSize().background(if (state.screen == Screen.NewConversation) WelcomeBackdrop else Backdrop).statusBarsPadding().navigationBarsPadding()) {
+        val motion = LocalNautiloMotion.current
+        val imageLoader: AttachmentImageLoader = remember(model, state.host?.id) { { attachment, session -> model.attachmentImage(attachment, session) } }
+      CompositionLocalProvider(LocalFileOpener provides { reference -> model.previewFile(reference) }, LocalAttachmentImageLoader provides imageLoader) {
+        Column(Modifier.fillMaxSize().background(if (state.screen == Screen.NewConversation || state.screen == Screen.Chat) androidx.compose.ui.graphics.Brush.verticalGradient(listOf(ChatBackground, ChatBackground)) else Backdrop).statusBarsPadding().navigationBarsPadding()) {
             if (state.screen != Screen.NewConversation) {
-            Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 ActionIcon(if (state.screen == Screen.Projects) Icons.Outlined.Menu else Icons.Outlined.ArrowBack, "返回") {
                     if (state.screen == Screen.Projects) model.navigate(Screen.Computers)
-                    else model.navigate(backTarget)
+                    else goBack()
                 }
                 Column(Modifier.weight(1f).padding(start = 4.dp)) {
                     Text(when (state.screen) {
@@ -47,26 +64,24 @@ import com.journeyapps.barcodescanner.ScanOptions
                         Screen.FileDiff -> "文件变更"
                         Screen.Computers -> "电脑连接"
                         Screen.NewConversation -> "新会话"
-                    }, fontSize = if (state.screen == Screen.Projects) 23.sp else 17.sp, fontWeight = if (state.screen == Screen.Projects) FontWeight.Medium else FontWeight.SemiBold,
+                        Screen.ProjectFiles -> state.fileProject?.name ?: "项目文件"
+                        Screen.FilePreview -> state.filePreview.path.replace('\\','/').substringAfterLast('/')
+                    }, fontSize = if (state.screen == Screen.Projects) 23.sp else 18.sp, fontWeight = FontWeight.Medium,
                         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    if (state.screen == Screen.Chat || state.screen == Screen.Workspace) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Dot(state.connected)
-                        Text((state.projects.find { it.id == state.session?.projectId }?.name ?: "") + " · " + if (state.connected) "已连接电脑" else "正在重连", fontSize = 11.sp, color = Secondary)
-                    }
                 }
                 when (state.screen) {
                     Screen.Projects -> {
                         ActionIcon(Icons.Outlined.Search, "搜索会话") { menu = true }
-                        ActionIcon(Icons.Outlined.Add, "新建会话") { if (state.host == null) pairSheet = true else model.beginConversation() }
+                        ActionIcon(Icons.Outlined.Edit, "新建会话") { if (state.host == null) pairSheet = true else model.beginConversation() }
                     }
                     Screen.Chat -> ActionIcon(Icons.Outlined.Workspaces, "工作区") { model.workspace() }
                     else -> {}
                 }
                 if (state.screen != Screen.Projects) Box {
                     ActionIcon(Icons.Outlined.MoreHoriz, "更多") { menu = true }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("电脑连接") }, onClick = { menu = false; model.navigate(Screen.Computers) }, leadingIcon = { Icon(Icons.Outlined.Computer, null) })
-                        DropdownMenuItem(text = { Text("重新连接") }, onClick = { menu = false; model.retry() }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) })
+                    NMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        NMenuItem(text = { Text("电脑连接") }, onClick = { menu = false; model.navigate(Screen.Computers) }, leadingIcon = { Icon(Icons.Outlined.Computer, null) })
+                        NMenuItem(text = { Text("重新连接") }, onClick = { menu = false; model.retry() }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) })
                     }
                 }
             }
@@ -79,7 +94,7 @@ import com.journeyapps.barcodescanner.ScanOptions
                 }
             }
             AnimatedContent(state.screen, modifier = Modifier.weight(1f), transitionSpec = {
-                (fadeIn(tween(220)) + slideInHorizontally(tween(260)) { it / 12 }).togetherWith(fadeOut(tween(120)))
+                fadeIn(tween(if (motion) 180 else 0)).togetherWith(fadeOut(tween(if (motion) 100 else 0)))
             }, label = "page") { screen ->
                 when (screen) {
                     Screen.Projects -> ProjectsScreen(state, model, menu, { menu = false }, { pairSheet = true })
@@ -88,19 +103,22 @@ import com.journeyapps.barcodescanner.ScanOptions
                     Screen.Workspace -> WorkspaceScreen(state, model)
                     Screen.FileDiff -> FileDiffScreen(state, model)
                     Screen.Computers -> ComputersScreen(state, model) { pairSheet = true }
+                    Screen.ProjectFiles -> ProjectFilesScreen(state, model)
+                    Screen.FilePreview -> FilePreviewScreen(state, model)
                 }
             }
         }
-        if (pairSheet) ModalBottomSheet(onDismissRequest = { pairSheet = false }, containerColor = androidx.compose.ui.graphics.Color.White) {
+        if (pairSheet) NSheet(onDismissRequest = { pairSheet = false }, containerColor = androidx.compose.ui.graphics.Color.White) {
             Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 Text("连接电脑", style = MaterialTheme.typography.titleLarge)
                 Text("在电脑 Nautilo 的远程连接设置中生成配对码", color = Secondary, fontSize = 14.sp)
-                Button(onClick = { pairSheet = false; scan.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("扫描电脑上的 Nautilo 配对码").setBeepEnabled(false).setOrientationLocked(false)) }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                NButton(onClick = { pairSheet = false; scan.launch(ScanOptions().setCaptureActivity(PairingCaptureActivity::class.java).setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("对准电脑上的完整配对码，保持四周白边").setBeepEnabled(false).setOrientationLocked(false)) }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
                     Icon(Icons.Outlined.QrCodeScanner, null); Spacer(Modifier.width(10.dp)); Text("扫描二维码")
                 }
-                OutlinedTextField(value = link, onValueChange = { link = it }, label = { Text("或粘贴配对链接") }, modifier = Modifier.fillMaxWidth(), maxLines = 3)
-                TextButton(onClick = { pairSheet = false; model.pair(link) }, enabled = link.isNotBlank(), modifier = Modifier.align(Alignment.End)) { Text("使用链接连接") }
+                NField(value = link, onValueChange = { link = it }, label = { Text("或粘贴配对链接") }, modifier = Modifier.fillMaxWidth(), maxLines = 3)
+                NTextButton(onClick = { pairSheet = false; model.pair(link) }, enabled = link.isNotBlank(), modifier = Modifier.align(Alignment.End)) { Text("使用链接连接") }
             }
         }
+      }
     }
 }

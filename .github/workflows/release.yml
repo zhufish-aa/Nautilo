@@ -64,6 +64,8 @@ jobs:
       - name: Set up Linux packaging
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y rpm fakeroot xvfb
+      - name: Prepare patched Rust sources
+        run: node scripts/prepare-rust-sources.mjs
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target

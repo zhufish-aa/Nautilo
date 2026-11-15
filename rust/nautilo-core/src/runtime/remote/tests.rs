@@ -1,4 +1,17 @@
 use super::*;
+
+#[test]
+fn mobile_approval_keeps_the_user_selected_desktop_scope() {
+    for scope in ["once", "run", "task", "project", "global"] {
+        let input = mobile::approval_resolution(&json!({"approvalId":"a","decision":"approved","scope":scope})).unwrap();
+        assert_eq!(input["scope"], scope);
+        assert_eq!(input["approvalId"], "a");
+    }
+    assert_eq!(mobile::approval_resolution(&json!({"approvalId":"a","decision":"rejected"})).unwrap()["scope"], "once");
+    for scope in [json!("everything"), json!(null), json!(true)] {
+        assert_eq!(mobile::approval_resolution(&json!({"approvalId":"a","decision":"approved","scope":scope})).unwrap_err().to_string(), "INVALID_APPROVAL_SCOPE");
+    }
+}
 use crate::{database::Repositories, runtime::security::RedactionService};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use iroh::endpoint::presets;
@@ -30,6 +43,76 @@ struct Fixture {
     _router: Arc<Router>,
     directory: PathBuf,
     calls: Arc<AtomicUsize>,
+    inputs: Arc<Mutex<Vec<Value>>>,
+}
+
+#[tokio::test]
+async fn public_relay_needs_no_url_and_disables_direct_ip_transport() {
+    let fixture = Fixture::new().await;
+    let previous_id = fixture.addr().id;
+    let status = fixture.service.configure(json!({"enabled":true,"deviceName":"Test host",
+        "relayMode":"custom","relayUrls":[" ","\r\n"],"keepAwake":false})).await.unwrap();
+    assert_eq!(status["settings"]["relayUrls"], json!([]));
+    assert_eq!(status["settings"]["relayMode"], "custom");
+    assert_eq!(status["state"], "listening", "{status}");
+    assert_eq!(fixture.addr().id, previous_id, "Switching transport must preserve pairing identity");
+    let diagnostics = fixture.service.diagnostics().await.unwrap();
+    assert_eq!(diagnostics["boundSockets"], json!([]), "Relay mode must not create UDP paths");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_urls_are_optional_normalized_and_only_validate_when_active() {
+    let fixture = Fixture::new().await;
+    let mut settings = json!({"enabled":false,"deviceName":"Test host","relayMode":"custom",
+        "relayUrls":["  https://relay.example.com  ","", "https://relay.example.com", "\r"],"keepAwake":false});
+    let status = fixture.service.configure(settings.clone()).await.unwrap();
+    assert_eq!(status["settings"]["relayUrls"], json!(["https://relay.example.com"]));
+    for invalid in [json!(["invalid"]), json!(["http://relay.example.com"]),
+        json!(["https://user:pass@relay.example.com"]),
+        json!(["https://a.example.com","https://b.example.com","https://c.example.com","https://d.example.com","https://e.example.com"])] {
+        settings["relayUrls"] = invalid;
+        assert!(fixture.service.configure(settings.clone()).await.is_err());
+        assert_eq!(fixture.service.settings().unwrap().relay_urls, vec!["https://relay.example.com"]);
+    }
+    settings["relayUrls"] = json!(["unfinished custom node"]);
+    for mode in ["automatic", "lan"] {
+        settings["relayMode"] = json!(mode);
+        assert_eq!(fixture.service.configure(settings.clone()).await.unwrap()["settings"]["relayMode"], mode);
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_direct_setting_migrates_to_cross_network_direct_and_control_has_no_workspace_data() {
+    let fixture = Fixture::new().await;
+    let invitation = fixture.invitation();
+    let client = Endpoint::bind(presets::Minimal).await.unwrap();
+    let connection = client.connect(fixture.addr(), ALPN_V2).await.unwrap();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let mut request = control::POLICY_PREFIX.to_vec(); request.extend_from_slice(nonce.as_bytes());
+    connection.send_datagram(request.into()).unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), connection.read_datagram()).await.unwrap().unwrap();
+    let value: Value = serde_json::from_slice(&reply).unwrap();
+    assert_eq!(value["nonce"], nonce);
+    assert_eq!(value["relayMode"], "lan");
+    assert_eq!(value["directOnly"], false);
+    assert!(reply.len() <= 1100);
+    assert!(!String::from_utf8_lossy(&reply).contains(invitation["token"].as_str().unwrap()));
+    let diagnostics = fixture.service.diagnostics().await.unwrap();
+    assert!(diagnostics["boundSockets"].is_array());
+    assert!(!diagnostics.to_string().contains(invitation["token"].as_str().unwrap()));
+    assert!(fixture.service.transport_policy_reply(b"session.send secrets").unwrap().is_none());
+    client.close().await;
+    // Invitation metadata must describe the protocol required by strict mode.
+    let mut settings = fixture.service.settings().unwrap();
+    settings.relay_mode = "direct".into();
+    fixture.service.repo.save_settings(&serde_json::to_value(settings).unwrap()).unwrap();
+    assert_eq!(fixture.invitation()["alpn"], "nautilo/remote/2");
+    let status = fixture.service.configure(json!({"enabled":false,"deviceName":"Test","relayMode":"local","relayUrls":[],"keepAwake":false})).await.unwrap();
+    assert_eq!(status["settings"]["relayMode"], "direct");
+    assert_eq!(fixture.service.settings().unwrap().relay_mode, "direct");
+    fixture.shutdown().await;
 }
 impl Fixture {
     async fn new() -> Self {
@@ -50,8 +133,9 @@ impl Fixture {
                 .projects()
                 .save(&json!({"id":"private","name":"Private"}), "2026-01-01")
                 .unwrap();
+            repos.agents().save(&json!({"id":"test-agent","providerId":"test-harness","displayName":"Test Harness","enabled":false,"permissionMode":"workspace-write"}), "2026-01-01").unwrap();
             db.raw.execute("INSERT INTO sessions(id,project_id,member_id,data,updated_at) VALUES('session','project','main',?1,'2026-01-01')",
-                [json!({"id":"session","projectId":"project"}).to_string()]).unwrap();
+                [json!({"id":"session","projectId":"project","agentInstanceId":"test-agent"}).to_string()]).unwrap();
         }
         let credentials = Arc::new(CredentialService::new(db.clone(), &directory));
         let events = Arc::new(EventService::new(
@@ -60,26 +144,36 @@ impl Fixture {
         ));
         let service = RemoteService::new(db, credentials, events);
         let calls = Arc::new(AtomicUsize::new(0));
+        let inputs = Arc::new(Mutex::new(Vec::new()));
         let mut router = Router::default();
         let count = calls.clone();
-        router.register("session.send", move |_| {
+        let received = inputs.clone();
+        router.register("session.send", move |input| {
             let count = count.clone();
+            let received = received.clone();
             async move {
+                received.lock().unwrap().push(input);
                 count.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(30)).await;
                 Ok(json!({"accepted":true,"runId":"run"}))
             }
         });
         router.register("project.list",|_|async { Ok(json!([{"id":"project","name":"Project","secret":"hidden"},{"id":"private","name":"Private"}])) });
+        router.register("provider.catalog", |_| async { Ok(json!([{"providerId":"test-harness","modeDiscovery":true,"permissionModes":[{"value":"workspace-write"},{"value":"read-only"}]}])) });
+        router.register("provider.modes", |_| async { Ok(json!({"defaultMode":"standard","modes":[{"id":"standard","name":"Standard"},{"id":"custom-plugin-mode","name":"Custom plugin mode"},{"id":"broken-mode","broken":"not installed"}]})) });
+        router.register("run.list", |_| async { Ok(json!([])) });
+        router.register("interaction.list", |_| async { Ok(json!([])) });
+        router.register("approval.list", |_| async { Ok(json!([{"id":"ours","sessionId":"session"},{"id":"other","sessionId":"another-session"}])) });
         let router = Arc::new(router);
         service.start(&router).await;
-        service.configure(json!({"enabled":true,"deviceName":"Test host","relayMode":"local","relayUrls":[],"keepAwake":false})).await.unwrap();
+        service.configure(json!({"enabled":true,"deviceName":"Test host","relayMode":"lan","relayUrls":[],"keepAwake":false})).await.unwrap();
         assert_eq!(service.status().unwrap()["state"], "listening");
         Self {
             service,
             _router: router,
             directory,
             calls,
+            inputs,
         }
     }
     fn addr(&self) -> iroh::EndpointAddr {
@@ -108,6 +202,74 @@ impl Fixture {
         drop(self);
         std::fs::remove_dir_all(path).unwrap();
     }
+}
+
+#[tokio::test]
+async fn snapshot_and_modes_are_authenticated_and_keep_provider_options() {
+    let fixture = Fixture::new().await;
+    {
+        let db = Database::open(&fixture.directory.join("test.sqlite")).unwrap();
+        Repositories::new(&db.raw).agents().save(&json!({"id":"test-agent","providerId":"test-harness","displayName":"Test Harness","enabled":true,"permissionMode":"workspace-write"}), "2026-01-01").unwrap();
+    }
+    let invitation = fixture.invitation();
+    let client = Endpoint::bind(presets::Minimal).await.unwrap();
+    let connection = client.connect(fixture.addr(), ALPN).await.unwrap();
+    assert_eq!(rpc(&connection, "session.snapshot", json!({"sessionId":"session"})).await["error"]["code"], "DEVICE_NOT_AUTHORIZED");
+    rpc(&connection, "pair", json!({"name":"Phone","token":invitation["token"]})).await;
+    fixture.service.approve(json!({"deviceId":client.id().to_string()})).unwrap();
+    let hello = rpc(&connection, "hello", json!({})).await;
+    assert_eq!(hello["data"]["endpoint"]["id"], fixture.addr().id.to_string());
+    assert!(hello["data"]["capabilities"].as_array().unwrap().contains(&json!("session.snapshot")));
+    let snapshot = rpc(&connection, "session.snapshot", json!({"sessionId":"session"})).await;
+    assert_eq!(snapshot["ok"], true, "{snapshot}");
+    assert_eq!(snapshot["data"]["approvals"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["data"]["approvals"][0]["id"], "ours");
+    let modes = rpc(&connection, "session.modes", json!({"agentInstanceId":"test-agent","projectId":"project"})).await;
+    assert_eq!(modes["data"]["modes"][1]["id"], "custom-plugin-mode");
+    let changed = fixture.service.mobile_configuration("session", &json!({"permissionMode":"read-only","agentMode":"custom-plugin-mode"})).await.unwrap();
+    assert_eq!(changed["agentMode"], "custom-plugin-mode");
+    assert_eq!(changed["permissionMode"], "read-only");
+    assert!(fixture.service.mobile_configuration("session", &json!({"agentMode":"broken-mode"})).await.is_err());
+    assert!(fixture.service.mobile_configuration("session", &json!({"permissionMode":"made-up-mode"})).await.is_err());
+    {
+        let db = Database::open(&fixture.directory.join("test.sqlite")).unwrap();
+        db.raw.execute("INSERT INTO messages(id,session_id,data,created_at) VALUES('user-message','session',?1,'2026-01-01')", [json!({"id":"user-message","sender":"user","text":"hello"}).to_string()]).unwrap();
+    }
+    assert_eq!(fixture.service.mobile_configuration("session", &json!({"agentMode":"custom-plugin-mode"})).await.unwrap_err().to_string(), "HARNESS_MODE_LOCKED");
+    assert!(fixture.service.mobile_configuration("session", &json!({"permissionMode":"read-only"})).await.is_ok());
+    client.close().await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn phone_uploads_travel_over_authenticated_rpc_into_native_message_attachments() {
+    use base64::engine::general_purpose::STANDARD;
+    let fixture = Fixture::new().await;
+    let invitation = fixture.invitation();
+    let upload_id = uuid::Uuid::new_v4().to_string();
+    let mut chunk = json!({"uploadId":upload_id,"name":"设计说明.txt","mimeType":"text/plain","sizeBytes":6,"offset":0,"data":STANDARD.encode(b"abc")});
+    let unpaired = Endpoint::bind(presets::Minimal).await.unwrap();
+    let rejected = unpaired.connect(fixture.addr(), ALPN).await.unwrap();
+    assert_eq!(rpc(&rejected, "attachment.upload", chunk.clone()).await["error"]["code"], "DEVICE_NOT_AUTHORIZED");
+    unpaired.close().await;
+    let client = Endpoint::bind(presets::Minimal).await.unwrap();
+    let connection = client.connect(fixture.addr(), ALPN).await.unwrap();
+    rpc(&connection, "pair", json!({"name":"Phone","token":invitation["token"]})).await;
+    fixture.service.approve(json!({"deviceId":client.id().to_string()})).unwrap();
+    assert_eq!(rpc(&connection, "attachment.upload", chunk.clone()).await["data"]["receivedBytes"], 3);
+    let message = json!({"sessionId":"session","text":"","attachmentIds":[upload_id]});
+    assert_eq!(rpc(&connection, "session.send", message.clone()).await["error"]["code"], "ATTACHMENT_INCOMPLETE");
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    chunk["offset"] = json!(3); chunk["data"] = json!(STANDARD.encode(b"def"));
+    assert_eq!(rpc(&connection, "attachment.upload", chunk).await["data"]["complete"], true);
+    assert_eq!(rpc(&connection, "session.send", message).await["ok"], true);
+    let input = fixture.inputs.lock().unwrap()[0].clone();
+    assert_eq!(input["text"], "请查看附件。");
+    assert_eq!(input["attachments"][0]["name"], "设计说明.txt");
+    assert_eq!(std::fs::read(input["attachments"][0]["path"].as_str().unwrap()).unwrap(), b"abcdef");
+    assert!(input.get("_attachments").is_none());
+    client.close().await;
+    fixture.shutdown().await;
 }
 async fn call(connection: &Connection, id: &str, method: &str, params: Value) -> Value {
     let (mut send, mut recv) = connection.open_bi().await.unwrap();
@@ -172,7 +334,7 @@ async fn encrypted_pairing_owner_access_dedupe_and_revoke() {
         rpc(&connection, "pair.status", json!({})).await["data"]["state"],
         "paired"
     );
-    fixture.service.configure(json!({"enabled":true,"deviceName":"Renamed host","relayMode":"local","relayUrls":[],"keepAwake":true})).await.unwrap();
+    fixture.service.configure(json!({"enabled":true,"deviceName":"Renamed host","relayMode":"lan","relayUrls":[],"keepAwake":true})).await.unwrap();
     assert_eq!(
         rpc(&connection, "hello", json!({})).await["data"]["name"],
         "Renamed host"
@@ -284,7 +446,7 @@ async fn invitation_expiry_identity_persistence_and_cursor_replay() {
         .repo
         .events("session", i64::MAX, 100)
         .is_err());
-    fixture.service.configure(json!({"enabled":false,"deviceName":"Test host","relayMode":"local","relayUrls":[],"keepAwake":false})).await.unwrap();
+    fixture.service.configure(json!({"enabled":false,"deviceName":"Test host","relayMode":"lan","relayUrls":[],"keepAwake":false})).await.unwrap();
     assert_eq!(fixture.service.status().unwrap()["state"], "disabled");
     assert_eq!(fixture.service.identity().unwrap().public(), identity);
     fixture.shutdown().await;
@@ -358,6 +520,32 @@ async fn history_pages_preserve_desktop_chronology_with_backfilled_messages() {
 }
 
 #[tokio::test]
+async fn mobile_history_preserves_stream_position_beyond_the_activity_window() {
+    let fixture = Fixture::new().await;
+    {
+        let database = Database::open(&fixture.directory.join("test.sqlite")).unwrap();
+        database.raw.execute("INSERT INTO messages(id,session_id,data,created_at) VALUES('comment','session',?1,'2026-11-14T01:00:10Z')",
+            [json!({"id":"comment","sender":"agent","text":"检查文件","createdAt":"2026-11-14T01:00:10Z"}).to_string()]).unwrap();
+        for sequence in 1..=205 {
+            let (kind, payload) = match sequence {
+                1 => ("agent.message_delta", json!({"messageId":"native","text":"检查"})),
+                3 => ("agent.message", json!({"messageId":"comment","providerMessageId":"native","text":"检查文件"})),
+                _ => ("usage.updated", json!({"inputTokens":sequence})),
+            };
+            database.raw.execute("INSERT INTO runtime_events(event_id,sequence,session_id,run_id,data,timestamp) VALUES(?1,?2,'session','run',?3,'2026-11-14T01:00:01Z')",
+                rusqlite::params![format!("position-{sequence}"), sequence, json!({"eventId":format!("position-{sequence}"),"sequence":sequence,"runId":"run","type":kind,"payload":payload}).to_string()]).unwrap();
+        }
+    }
+    let history = fixture.service.repo.history("session", None, 10).unwrap();
+    assert_eq!(history["items"][0]["value"]["runId"], "run");
+    assert_eq!(history["items"][0]["value"]["sequence"], 1);
+    assert_eq!(history["items"][0]["value"]["timelineStartedAt"], "2026-11-14T01:00:01Z");
+    assert_eq!(history["items"][0]["value"]["createdAt"], "2026-11-14T01:00:10Z");
+    assert!(history["activity"].as_array().unwrap().iter().all(|v|v["sequence"].as_i64().unwrap() > 1));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn mobile_creation_uses_available_harnesses_and_pins_connection_revision() {
     let fixture = Fixture::new().await;
     {
@@ -404,4 +592,163 @@ async fn mobile_project_creation_browses_unicode_directories_and_rejects_existin
         assert!(mobile::project_input(&json!({"rootPath":fixture.directory,"folderName":name})).is_err());
     }
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mobile_creation_enables_the_selected_cross_harness_account_before_sending() {
+    let fixture = Fixture::new().await;
+    {
+        let db = Database::open(&fixture.directory.join("test.sqlite")).unwrap();
+        let repos = Repositories::new(&db.raw);
+        for provider in ["deepseek", "opencode", "codex"] {
+            repos.agents().save(&json!({"id":provider,"providerId":provider,"displayName":provider,"enabled":true}), "2026-01-01").unwrap();
+        }
+        repos.runtime_connections().save(&json!({"id":"selected-account","name":"Account","kind":"login","harness":"codex","enabled":true,"revision":7}), "2026-01-01").unwrap();
+    }
+    let order = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut router = (*fixture._router).clone();
+    let created = order.clone();
+    router.register("session.create", move |input| {
+        let created = created.clone();
+        async move {
+            assert!(input.get("_mobileAccountRoute").is_none());
+            assert_eq!(input["connectionRevision"], 7);
+            created.lock().unwrap().push(format!("create:{}", input["agentInstanceId"].as_str().unwrap()));
+            Ok(input)
+        }
+    });
+    let routed = order.clone();
+    router.register("connection.gateway", move |input| {
+        let routed = routed.clone();
+        async move {
+            assert_eq!(input, json!({"connectionId":"selected-account","enabled":true}));
+            routed.lock().unwrap().push("gateway:selected-account".into());
+            Ok(json!({}))
+        }
+    });
+    let router = Arc::new(router);
+    *fixture.service.router.lock().unwrap() = Arc::downgrade(&router);
+    let invitation = fixture.invitation();
+    let client = Endpoint::bind(presets::Minimal).await.unwrap();
+    let connection = client.connect(fixture.addr(), ALPN).await.unwrap();
+    rpc(&connection, "pair", json!({"name":"Phone","token":invitation["token"]})).await;
+    fixture.service.approve(json!({"deviceId":client.id().to_string()})).unwrap();
+    for provider in ["deepseek", "opencode", "codex"] {
+        let response = rpc(&connection, "session.create", json!({"projectId":"project","agentInstanceId":provider,"connectionId":"selected-account"})).await;
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["data"]["agentInstanceId"], provider);
+    }
+    assert_eq!(*order.lock().unwrap(), vec!["create:deepseek", "gateway:selected-account", "create:opencode", "gateway:selected-account", "create:codex"]);
+    connection.close(0u32.into(), b"done");
+    client.close().await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mobile_harness_errors_preserve_the_reason_and_leave_the_connection_usable() {
+    let fixture = Fixture::new().await;
+    let mut router = (*fixture._router).clone();
+    router.register("session.send", |_| async {
+        Err(crate::errors::invalid("connectionId", "Enable the selected account gateway").into())
+    });
+    let router = Arc::new(router);
+    *fixture.service.router.lock().unwrap() = Arc::downgrade(&router);
+    let invitation = fixture.invitation();
+    let client = Endpoint::bind(presets::Minimal).await.unwrap();
+    let connection = client.connect(fixture.addr(), ALPN).await.unwrap();
+    rpc(&connection, "pair", json!({"name":"Phone","token":invitation["token"]})).await;
+    fixture.service.approve(json!({"deviceId":client.id().to_string()})).unwrap();
+    let response = rpc(&connection, "session.send", json!({"sessionId":"session","text":"probe"})).await;
+    assert_eq!(response["error"]["code"], "IPC_INVALID_REQUEST");
+    assert!(response["error"]["message"].as_str().unwrap().contains("Enable the selected account gateway"));
+    assert_eq!(rpc(&connection, "hello", json!({})).await["ok"], true);
+    connection.close(0u32.into(), b"done");
+    client.close().await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mobile_files_are_authenticated_confined_and_preserve_chunk_continuity() {
+    let fixture = Fixture::new().await;
+    let root = fixture.directory.join("workspace");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(root.join("src/示例.rs"), "fn main() { println!(\"中文\"); }".as_bytes()).unwrap();
+    std::fs::write(root.join("src/same.rs"), b"one").unwrap();
+    std::fs::write(root.join("tests/same.rs"), b"two").unwrap();
+    std::fs::write(fixture.directory.join("outside.txt"), b"outside").unwrap();
+    {
+        let db = Database::open(&fixture.directory.join("test.sqlite")).unwrap();
+        Repositories::new(&db.raw).projects().save(&json!({"id":"project","name":"Project","rootPath":root}), "2026-01-01").unwrap();
+    }
+    let invitation = fixture.invitation();
+    let client = Endpoint::bind(presets::Minimal).await.unwrap();
+    let connection = client.connect(fixture.addr(), ALPN).await.unwrap();
+    let input = json!({"projectId":"project","path":"src/示例.rs","length":8});
+    assert_eq!(rpc(&connection, "file.preview", input.clone()).await["error"]["code"], "DEVICE_NOT_AUTHORIZED");
+    rpc(&connection, "pair", json!({"name":"Phone","token":invitation["token"]})).await;
+    fixture.service.approve(json!({"deviceId":client.id().to_string()})).unwrap();
+    let files = rpc(&connection, "project.files", json!({"projectId":"project","path":"src"})).await;
+    assert_eq!(files["ok"], true, "{files}");
+    assert!(files["data"]["entries"].as_array().unwrap().iter().any(|e|e["name"]=="示例.rs"));
+    let first = rpc(&connection, "file.preview", input).await;
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["data"]["nextOffset"], 8);
+    let second = rpc(&connection, "file.preview", json!({"projectId":"project","path":"src/示例.rs","offset":8})).await;
+    let mut bytes = base64::engine::general_purpose::STANDARD.decode(first["data"]["base64"].as_str().unwrap()).unwrap();
+    bytes.extend(base64::engine::general_purpose::STANDARD.decode(second["data"]["base64"].as_str().unwrap()).unwrap());
+    assert_eq!(bytes, std::fs::read(root.join("src/示例.rs")).unwrap());
+    assert!(second["data"]["nextOffset"].is_null());
+    let candidates = rpc(&connection, "file.preview", json!({"projectId":"project","path":"same.rs"})).await;
+    assert_eq!(candidates["data"]["candidates"], json!(["src/same.rs","tests/same.rs"]));
+    for method in ["file.preview", "project.files"] {
+        assert_eq!(rpc(&connection, method, json!({"projectId":"project","path":"../outside.txt"})).await["ok"], false);
+        assert_eq!(rpc(&connection, method, json!({"projectId":"unknown","path":"src/示例.rs"})).await["ok"], false);
+    }
+    connection.close(0u32.into(), b"done"); client.close().await; fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn message_images_sync_metadata_and_bytes_without_exposing_desktop_paths() {
+    let fixture = Fixture::new().await;
+    let database = Arc::new(Mutex::new(Database::open(&fixture.directory.join("test.sqlite")).unwrap()));
+    let path = fixture.directory.join("phone-photo.png");
+    let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==").unwrap();
+    std::fs::write(&path, &png).unwrap();
+    let saved = crate::runtime::message_attachment_service::MessageAttachmentService::new(database.clone())
+        .save(&json!({"id":"session"}), &[json!({"path":path,"kind":"image","name":"照片.png","mimeType":"image/png","remoteUploadId":"a55ad99e-3883-4efb-887c-dc14c6fe096a"})]).unwrap();
+    let id = saved[0]["id"].clone();
+    {
+        let db = database.lock().unwrap();
+        db.raw.execute("INSERT INTO messages(id,session_id,data,created_at) VALUES('image-message','session',?1,'2026-11-15')", [json!({"id":"image-message","sender":"user","text":"查看图片","attachmentIds":[id]}).to_string()]).unwrap();
+    }
+    let input = json!({"sessionId":"session","attachmentId":id,"length":16});
+    let invitation = fixture.invitation();
+    let unpaired = Endpoint::bind(presets::Minimal).await.unwrap();
+    let rejected = unpaired.connect(fixture.addr(), ALPN).await.unwrap();
+    assert_eq!(rpc(&rejected, "attachment.read", input.clone()).await["error"]["code"], "DEVICE_NOT_AUTHORIZED");
+    unpaired.close().await;
+    let client = Endpoint::bind(presets::Minimal).await.unwrap();
+    let connection = client.connect(fixture.addr(), ALPN).await.unwrap();
+    rpc(&connection, "pair", json!({"name":"Phone","token":invitation["token"]})).await;
+    fixture.service.approve(json!({"deviceId":client.id().to_string()})).unwrap();
+    let history = rpc(&connection, "session.history", json!({"sessionId":"session"})).await;
+    let attachment = &history["data"]["items"][0]["value"]["attachments"][0];
+    assert_eq!(attachment["kind"], "image"); assert_eq!(attachment["mimeType"], "image/png");
+    assert_eq!(attachment["sizeBytes"], png.len());
+    assert_eq!(attachment["uploadId"], "a55ad99e-3883-4efb-887c-dc14c6fe096a");
+    assert!(attachment.get("path").is_none());
+    let first = rpc(&connection, "attachment.read", input).await;
+    assert_eq!(first["data"]["nextOffset"], 16);
+    assert!(first["data"].get("path").is_none());
+    let second = rpc(&connection, "attachment.read", json!({"sessionId":"session","attachmentId":id,"offset":16})).await;
+    let mut joined = base64::engine::general_purpose::STANDARD.decode(first["data"]["base64"].as_str().unwrap()).unwrap();
+    joined.extend(base64::engine::general_purpose::STANDARD.decode(second["data"]["base64"].as_str().unwrap()).unwrap());
+    assert_eq!(joined, png);
+    assert_eq!(rpc(&connection, "attachment.read", json!({"sessionId":"private-session","attachmentId":id})).await["ok"], false);
+    assert_eq!(rpc(&connection, "attachment.read", json!({"sessionId":"session","attachmentId":"unknown","path":path})).await["error"]["code"], "ATTACHMENT_NOT_AVAILABLE");
+    // A stored artifact without a message reference is not a message attachment.
+    database.lock().unwrap().raw.execute("DELETE FROM messages WHERE id='image-message'", []).unwrap();
+    assert_eq!(rpc(&connection, "attachment.read", json!({"sessionId":"session","attachmentId":id})).await["error"]["code"], "ATTACHMENT_NOT_AVAILABLE");
+    connection.close(0u32.into(), b"done"); client.close().await; drop(database); fixture.shutdown().await;
 }

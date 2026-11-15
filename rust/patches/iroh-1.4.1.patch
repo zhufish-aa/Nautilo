@@ -1,0 +1,69 @@
+--- a/src/endpoint/connection.rs
++++ b/src/endpoint/connection.rs
+@@ -1063,6 +1063,13 @@ impl<T: ConnectionState> Connection<T> {
+         self.inner.stats()
+     }
+ 
++    /// Returns peer IP candidates received through QUIC NAT traversal control.
++    /// This is diagnostic metadata, not a list of verified working paths.
++    #[cfg(feature = "unstable-net-report")]
++    pub fn remote_nat_candidates(&self) -> Option<Vec<std::net::SocketAddr>> {
++        self.inner.get_remote_nat_traversal_addresses().ok()
++    }
++
+     /// Current state of the congestion control algorithm, for debugging purposes.
+     #[inline]
+     pub fn congestion_state(&self, path_id: PathId) -> Option<Box<dyn Controller>> {
+--- a/src/endpoint/quic.rs
++++ b/src/endpoint/quic.rs
+@@ -150,6 +150,26 @@ impl QuicTransportConfig {
+ }
+ 
+ impl QuicTransportConfigBuilder {
++    /// Restricts application STREAM payloads to IP paths while enabled.
++    ///
++    /// Relay handshakes and NAT traversal control frames remain enabled. DATAGRAM
++    /// messages are reserved by Nautilo for its small transport-policy handshake.
++    /// The flag is rechecked by the packet builder for retransmissions and after
++    /// path changes, so losing a direct path cannot silently relay stream data.
++    pub fn direct_streams_only(mut self, enabled: Arc<std::sync::atomic::AtomicBool>) -> Self {
++        self.0.stream_data_path_filter(Arc::new(move |remote| {
++            !enabled.load(std::sync::atomic::Ordering::Acquire)
++                || matches!(crate::socket::mapped_addrs::MultipathMappedAddr::from(remote), crate::socket::mapped_addrs::MultipathMappedAddr::Ip(_))
++        }));
++        self
++    }
++
++    /// Installs a STREAM path filter, also enforced on receive and retransmission.
++    /// Control frames and DATAGRAM frames are unaffected.
++    pub fn stream_data_path_filter(mut self, filter: Arc<dyn Fn(std::net::SocketAddr) -> bool + Send + Sync>) -> Self {
++        self.0.stream_data_path_filter(filter);
++        self
++    }
+     /// Creates a default [`QuicTransportConfigBuilder`].
+     fn new() -> Self {
+         let mut cfg = noq::TransportConfig::default();
+--- a/src/net_report.rs
++++ b/src/net_report.rs
+@@ -855,7 +855,10 @@ async fn run_probe_v4(
+         latency: conn.rtt(PathId::ZERO).unwrap_or_default(),
+     };
+ 
+-    let observer = Watchable::new(None);
++    // Retain the observation already received above. QAD only sends another
++    // observation after a change; starting empty discards a live mapping on the
++    // next periodic report and unnecessarily starts fresh handshakes.
++    let observer = Watchable::new(Some(report.clone()));
+     let endpoint = relay.url.clone();
+     let handle = task::spawn(shutdown_token.run_until_cancelled_owned({
+         let conn = conn.clone();
+@@ -921,7 +924,8 @@ async fn run_probe_v6(
+         latency: conn.rtt(PathId::ZERO).unwrap_or_default(),
+     };
+ 
+-    let observer = Watchable::new(None);
++    // Keep the first observation available between address changes (see IPv4).
++    let observer = Watchable::new(Some(report.clone()));
+     let endpoint = relay.url.clone();
+     let handle = task::spawn(shutdown_token.run_until_cancelled_owned({
+         let observer = observer.clone();

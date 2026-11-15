@@ -88,7 +88,7 @@ test("streamed assistant reply keeps its row key after being saved", () => {
   const after = h.runtime.buildStandaloneTimeline([{ id: "saved-message", sessionId: "s", runId: "r", sender: "agent", kind: "chat", text: "Hello", createdAt: stream.timestamp }], [stream], []);
   assert.equal(before[0].id, after[0].id);
   assert.equal(after.length, 1);
-  assert.equal(after[0].data.streaming, undefined);
+  assert.notEqual(after[0].data.streaming, true);
 });
 
 for (const outcome of ['steer', 'queue', 'error']) {

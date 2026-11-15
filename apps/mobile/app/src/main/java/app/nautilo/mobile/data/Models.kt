@@ -35,7 +35,7 @@ data class PairingInvitation(val host: Host, val token: String, val expiresAt: L
         fun parse(uri: String, now: Long = System.currentTimeMillis()): PairingInvitation {
             require(uri.length <= 16_384 && uri.startsWith("nautilo://pair#")) { "请扫描 Nautilo 电脑端的配对二维码" }
             val value = JSONObject(String(Base64.getUrlDecoder().decode(uri.substringAfter('#')), Charsets.UTF_8))
-            require(value.getInt("v") == 1 && value.getString("transport") == "iroh" && value.getString("alpn") == "nautilo/remote/1") { "配对协议版本不受支持" }
+            require(value.getInt("v") == 1 && value.getString("transport") == "iroh" && value.getString("alpn") in setOf("nautilo/remote/1", "nautilo/remote/2")) { "配对协议版本不受支持" }
             val endpoint = value.getJSONObject("endpoint")
             val id = endpoint.getString("id")
             require(id.matches(Regex("[0-9a-f]{64}"))) { "设备身份无效" }
@@ -51,14 +51,15 @@ data class PairingInvitation(val host: Host, val token: String, val expiresAt: L
 data class Project(val id: String, val name: String, val root: String = "")
 data class Conversation(
     val id: String, val projectId: String, val title: String, val status: String,
-    val updatedAt: String, val model: String = "", val effort: String = "", val provider: String = "", val agentId: String = "", val connectionId: String = ""
+    val updatedAt: String, val model: String = "", val effort: String = "", val provider: String = "", val agentId: String = "", val connectionId: String = "",
+    val permissionMode: String = "", val agentMode: String = "", val modeLocked: Boolean = false
 ) {
     companion object {
         fun decode(v: JSONObject) = Conversation(v.getString("id"), v.text("projectId"), v.text("title", "新会话"), v.text("status"),
-            v.text("lastMessageAt", v.text("createdAt")), v.text("model"), v.text("reasoningEffort"), v.text("providerName"), v.text("agentInstanceId"), v.text("connectionId"))
+            v.text("lastMessageAt", v.text("createdAt")), v.text("model"), v.text("reasoningEffort"), v.text("providerName"), v.text("agentInstanceId"), v.text("connectionId"), v.text("permissionMode"), v.text("agentMode"), v.optBoolean("modeLocked"))
     }
 }
-data class ChatMessage(val id: String, val sender: String, val text: String, val time: String, val delivery: String = "sent", val runId: String = "", val sequence: Long = 0)
+data class ChatMessage(val id: String, val sender: String, val text: String, val time: String, val delivery: String = "sent", val runId: String = "", val sequence: Long = 0, val attachmentNames: List<String> = emptyList(), val viewId: String = id, val attachments: List<ChatAttachment> = emptyList())
 fun running(status: String) = status.isNotBlank() && status !in listOf("completed", "failed", "cancelled", "crashed", "timed_out", "idle")
 data class RunInfo(val id: String, val status: String, val startedAt: String, val endedAt: String) {
     companion object {
@@ -69,7 +70,8 @@ data class RunInfo(val id: String, val status: String, val startedAt: String, va
         java.time.Duration.between(java.time.Instant.parse(startedAt), end).seconds.coerceAtLeast(0)
     }.getOrDefault(0)
 }
-data class ActivityItem(val id: String, val kind: String, val title: String, val detail: String = "", val running: Boolean = false, val time: String = "", val runId: String = "", val sequence: Long = 0)
+data class ActivityItem(val id: String, val kind: String, val title: String, val detail: String = "", val running: Boolean = false, val time: String = "", val runId: String = "", val sequence: Long = 0,
+    val eventType: String = "", val payload: JSONObject = JSONObject())
 data class PendingCommand(val id: String, val hostId: String, val sessionId: String, val method: String, val params: JSONObject, val createdAt: String) {
     fun encode() = json("id" to id, "hostId" to hostId, "sessionId" to sessionId, "method" to method, "params" to params, "createdAt" to createdAt)
     companion object {
@@ -83,7 +85,13 @@ data class PendingCommand(val id: String, val hostId: String, val sessionId: Str
 }
 
 class RemoteFailure(val code: String, message: String) : Exception(message)
+fun RemoteFailure.isTransportFailure() = code in setOf("DIRECT_CONNECTION_UNAVAILABLE", "DIRECT_PATH_LOST", "PEER_CONNECTION_TIMEOUT", "TRANSPORT_POLICY_TIMEOUT", "TRANSPORT_START_TIMEOUT", "REMOTE_RESPONSE_TIMEOUT", "DESKTOP_TRANSPORT_UPDATE_REQUIRED", "MOBILE_TRANSPORT_UPDATE_REQUIRED")
+fun Throwable.isConnectionFailure() = this !is RemoteFailure || (isTransportFailure() && code != "REMOTE_RESPONSE_TIMEOUT") || code in setOf("DEVICE_NOT_AUTHORIZED", "REMOTE_DISABLED")
 fun readableError(error: Throwable): String = when ((error as? RemoteFailure)?.code) {
+    "DIRECT_CONNECTION_UNAVAILABLE", "DIRECT_PATH_LOST" -> error.message.orEmpty()
+    "DESKTOP_TRANSPORT_UPDATE_REQUIRED" -> "请更新电脑端以启用跨网直连协议"
+    "MOBILE_TRANSPORT_UPDATE_REQUIRED" -> "请安装支持跨网直连的新版手机端"
+    "PEER_CONNECTION_TIMEOUT", "TRANSPORT_POLICY_TIMEOUT", "TRANSPORT_START_TIMEOUT", "REMOTE_RESPONSE_TIMEOUT" -> error.message.orEmpty()
     "DEVICE_NOT_AUTHORIZED" -> "这台手机的授权已失效，请重新配对"
     "INVITATION_EXPIRED", "PAIRING_EXPIRED" -> "配对已过期，请重新扫码"
     "REMOTE_DISABLED" -> "电脑端已关闭远程连接"
@@ -98,6 +106,14 @@ fun readableError(error: Throwable): String = when ((error as? RemoteFailure)?.c
     "CONNECTION_CHANGE_REQUIRES_CONFIRMATION" -> "请确认更换连接对当前会话上下文的影响"
     "MODEL_NOT_AVAILABLE" -> "此连接中没有所选模型，请刷新模型列表后重选"
     "INVALID_REASONING_EFFORT" -> "所选模型不支持这个推理强度，请重新选择"
-    "DESKTOP_COMMAND_FAILED" -> "电脑未能完成此操作，请查看会话状态后再试"
-    else -> error.message?.takeIf { it.any { c -> c.code > 127 } } ?: "连接暂时中断，正在尝试重新连接"
+    "HARNESS_MODE_LOCKED" -> "原生会话已开始，切换 Harness 模式请新建会话"
+    "INVALID_HARNESS_MODE", "INVALID_PERMISSION_MODE" -> "此 Harness 不支持这个模式，请刷新后重选"
+    "INVALID_APPROVAL_SCOPE" -> "请选择有效的授权范围"
+    "ATTACHMENT_TOO_LARGE", "ATTACHMENT_CHUNK_TOO_LARGE" -> "附件过大，每个文件最多 20 MB"
+    "ATTACHMENT_STORAGE_FULL" -> "电脑端附件存储空间不足，请清理后重试"
+    "ATTACHMENTS_REQUIRE_IDLE" -> "请在当前轮结束后发送附件"
+    "ATTACHMENT_NOT_AVAILABLE", "ATTACHMENT_INCOMPLETE" -> "附件尚未上传完成，请重试这条消息"
+    "DESKTOP_COMMAND_FAILED", "IPC_INVALID_REQUEST", "IPC_INTERNAL_ERROR", "RUN_START_FAILED" -> error.message?.takeIf(String::isNotBlank) ?: "电脑未能完成此操作，请查看会话状态后再试"
+    else -> if (error is RemoteFailure) "操作未完成（${error.code}）：${error.message.orEmpty().take(500)}"
+        else error.message?.takeIf { it.any { c -> c.code > 127 } } ?: "连接暂时中断，正在尝试重新连接"
 }

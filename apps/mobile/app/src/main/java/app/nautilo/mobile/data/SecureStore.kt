@@ -46,6 +46,13 @@ class SecureStore(context: Context) {
         value.put("selectedHost", host.id)
         save()
     }
+    /** Authenticated address refresh must not change the selected computer. */
+    @Synchronized fun refreshHost(host: Host) {
+        val all = hosts()
+        if (all.none { it.id == host.id }) return
+        value.put("hosts", JSONArray(all.map { if (it.id == host.id) host.encode() else it.encode() }))
+        save()
+    }
     @Synchronized fun removeHost(id: String) {
         value.put("hosts", JSONArray(hosts().filterNot { it.id == id }.map { it.encode() }))
         value.put("outbox", JSONArray(commands().filterNot { it.hostId == id }.map { it.encode() }))
@@ -66,11 +73,31 @@ class SecureStore(context: Context) {
         value.put("outbox", JSONArray((commands().filterNot { it.id == command.id } + command).map { it.encode() }))
         save()
     }
+    /** Transfer draft ownership to the durable outbox in one encrypted write. */
+    @Synchronized fun enqueueMessage(command: PendingCommand, draftKeys: List<String>) {
+        val previous = value
+        value = JSONObject(value.toString())
+        try {
+            value.put("outbox", JSONArray((commands().filterNot { it.id == command.id } + command).map { it.encode() }))
+            val drafts = value.optJSONObject("drafts") ?: JSONObject()
+            val files = value.optJSONObject("attachmentDrafts") ?: JSONObject()
+            for (key in draftKeys) { drafts.put(key, ""); files.put(key, JSONArray()) }
+            value.put("drafts", drafts).put("attachmentDrafts", files)
+            save()
+        } catch (error: Exception) { value = previous; throw error }
+    }
     @Synchronized fun finishCommand(id: String) {
         value.put("outbox", JSONArray(commands().filterNot { it.id == id }.map { it.encode() }))
         save()
     }
     @Synchronized fun draft(key: String): String = value.optJSONObject("drafts")?.text(key).orEmpty()
+    @Synchronized fun attachments(key: String): List<DraftAttachment> = value.optJSONObject("attachmentDrafts")?.objects(key)?.map(DraftAttachment::decode).orEmpty()
+    @Synchronized fun attachments(key: String, files: List<DraftAttachment>) {
+        val drafts = value.optJSONObject("attachmentDrafts") ?: JSONObject()
+        drafts.put(key, JSONArray(files.map { it.encode() }))
+        value.put("attachmentDrafts", drafts)
+        save()
+    }
     @Synchronized fun draft(key: String, text: String) {
         val drafts = value.optJSONObject("drafts") ?: JSONObject()
         drafts.put(key, text)

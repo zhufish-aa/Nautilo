@@ -70,6 +70,7 @@ apps/desktop/out/
 # Toolchains & Rust build artifacts
 .toolchains/
 rust/target/
+rust/vendor/generated/
 
 # Tauri renderer build output
 apps/desktop/src-tauri/dist/
