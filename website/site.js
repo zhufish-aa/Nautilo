@@ -1,0 +1,141 @@
+const root = document.documentElement;
+const languageButton = document.getElementById("language");
+const themeButton = document.getElementById("theme");
+const releaseVersion = document.getElementById("release-version");
+const primaryDownload = document.getElementById("primary-download");
+const primaryLabel = document.getElementById("primary-label");
+const platform = navigator.userAgentData?.platform || navigator.userAgent;
+const primaryAsset = /Android|iPhone|iPad/i.test(navigator.userAgent) ? null
+  : /Win/i.test(platform) ? "windows"
+  : /Linux/i.test(platform) ? "linux"
+  : null;
+
+const translations = Array.from(document.querySelectorAll("[data-en]"), element => [element, element.textContent]);
+const accessibleLabels = Array.from(document.querySelectorAll("[data-aria-en]"), element => [element, element.getAttribute("aria-label")]);
+const workflowNodes = Array.from(document.querySelectorAll(".flow-node"));
+const workflowStatus = document.getElementById("workflow-status");
+const playButton = document.getElementById("play-workflow");
+const playLabel = playButton.querySelector("[data-en]");
+const runMessages = [
+  ["等待播放", "Ready to preview"],
+  ["主 Agent 派发任务", "Lead agent assigns work"],
+  ["两个 Agent 并行执行", "Two agents are working in parallel"],
+  ["汇合两路结果", "Joining both results"],
+  ["将结果交回主会话", "Returning results to the conversation"],
+  ["执行完成 · 结果已回到主会话", "Run complete · Results returned to the conversation"],
+];
+
+let releaseTag = "";
+let runStep = -1;
+let runTimer;
+
+function render() {
+  const english = root.lang === "en";
+  for (const [element, chinese] of translations) element.textContent = english ? element.dataset.en : chinese;
+  for (const [element, chinese] of accessibleLabels) element.setAttribute("aria-label", english ? element.dataset.ariaEn : chinese);
+
+  document.title = english ? "Nautilo · Local multi-agent coding workspace" : "Nautilo · 多 Agent 编程工作台";
+  languageButton.textContent = english ? "中文" : "EN";
+  languageButton.lang = english ? "zh-CN" : "en";
+  languageButton.setAttribute("aria-label", english ? "切换简体中文" : "Switch to English");
+  const dark = root.dataset.theme === "dark";
+  themeButton.setAttribute("aria-label", english
+    ? (dark ? "Switch to light mode" : "Switch to dark mode")
+    : (dark ? "切换浅色模式" : "切换深色模式"));
+
+  if (releaseTag) releaseVersion.textContent = releaseTag;
+  if (primaryAsset && primaryDownload.getAttribute("href") !== "#download") {
+    const name = primaryAsset === "windows" ? "Windows" : "Linux";
+    primaryLabel.textContent = english ? `Download for ${name}` : `下载 ${name} 版`;
+  }
+  renderRun();
+}
+
+function renderRun() {
+  const english = root.lang === "en";
+  workflowStatus.textContent = runMessages[runStep + 1][english ? 1 : 0];
+  if (runStep >= 0) playLabel.textContent = english ? "Replay run" : "重新播放";
+}
+
+const preference = new URLSearchParams(location.search).get("lang") || localStorage.getItem("nautilo-site-language");
+root.lang = preference === "en" ? "en" : "zh-CN";
+root.dataset.theme = localStorage.getItem("nautilo-site-theme") === "light" ? "light" : "dark";
+render();
+
+languageButton.addEventListener("click", () => {
+  root.lang = root.lang === "en" ? "zh-CN" : "en";
+  localStorage.setItem("nautilo-site-language", root.lang);
+  const url = new URL(location.href);
+  if (url.searchParams.has("lang") && location.protocol !== "file:") {
+    url.searchParams.set("lang", root.lang);
+    history.replaceState(null, "", url);
+  }
+  render();
+});
+
+themeButton.addEventListener("click", () => {
+  root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+  localStorage.setItem("nautilo-site-theme", root.dataset.theme);
+  render();
+});
+
+const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+function selectTab(tab) {
+  for (const item of tabs) {
+    const active = item === tab;
+    item.setAttribute("aria-selected", String(active));
+    item.tabIndex = active ? 0 : -1;
+    document.getElementById(item.getAttribute("aria-controls")).hidden = !active;
+  }
+}
+for (const [index, tab] of tabs.entries()) {
+  tab.addEventListener("click", () => selectTab(tab));
+  tab.addEventListener("keydown", event => {
+    const next = { ArrowRight: (index + 1) % tabs.length, ArrowLeft: (index - 1 + tabs.length) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    selectTab(tabs[next]);
+    tabs[next].focus();
+  });
+}
+
+function paintRun(step) {
+  runStep = step;
+  for (const node of workflowNodes) {
+    const index = Number(node.dataset.step);
+    node.dataset.run = index < step ? "done" : index === step ? "active" : "idle";
+  }
+  renderRun();
+  if (step < 4) runTimer = setTimeout(() => paintRun(step + 1), 850);
+}
+playButton.addEventListener("click", () => {
+  clearTimeout(runTimer);
+  paintRun(0);
+});
+
+const installers = {
+  windows: /-win-x64\.exe$/i,
+  "mac-arm": /-mac-arm64\.dmg$/i,
+  "mac-intel": /-mac-x64\.dmg$/i,
+  linux: /-linux-x86_64\.AppImage$/i,
+};
+
+async function loadRelease() {
+  try {
+    const response = await fetch("https://api.github.com/repos/zhufish-aa/Nautilo/releases/latest");
+    if (!response.ok) return;
+    const release = await response.json();
+    releaseTag = release.tag_name;
+    for (const link of document.querySelectorAll("[data-asset]")) {
+      const kind = link.dataset.asset;
+      const asset = release.assets.find(item => installers[kind].test(item.name));
+      if (!asset) continue;
+      link.href = asset.browser_download_url;
+      if (kind === primaryAsset) primaryDownload.href = asset.browser_download_url;
+    }
+    render();
+  } catch {
+    // Keep the GitHub Releases links when its API is unavailable.
+  }
+}
+loadRelease();
