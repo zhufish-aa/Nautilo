@@ -60,17 +60,17 @@
   border: 1px solid var(--line);
   border-radius: 12px;
 }
-.resource-sync-resources > label {
+.resource-sync-resources section > label {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 13px 15px;
   cursor: pointer;
 }
-.resource-sync-resources > label + label {
+.resource-sync-resources section > label + label {
   border-top: 1px solid var(--line);
 }
-.resource-sync-resources > label:hover {
+.resource-sync-resources section > label:hover {
   background: var(--panel);
 }
 .resource-sync-resources input {
@@ -212,3 +212,8 @@
   font-size: 13px;
   font-weight: 500;
 }
+
+.resource-sync-source > h3 { position: sticky; top: 0; padding: 8px 15px; font-size: 12px; font-weight: 600; color: var(--ink-2); background: var(--panel); z-index: 1; }
+.resource-sync-identical { margin: 12px 0; color: var(--ink-2); font-size: 13px; }
+.resource-sync-identical summary { cursor: pointer; font-weight: 500; }
+.resource-sync-identical p { padding: 5px 0 0 18px; }

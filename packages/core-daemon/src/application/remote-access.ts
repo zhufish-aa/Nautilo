@@ -29,6 +29,7 @@ export function registerRemoteAccess(gateway: IpcGateway): void {
   };
   gateway.register("remote.configure", unsupported);
   gateway.register("remote.diagnostics", unsupported);
+  gateway.register("remote.relays", unsupported);
   gateway.register("remote.invite", unsupported);
   gateway.register("remote.cancelInvite", unsupported);
   gateway.register("remote.approve", unsupported);

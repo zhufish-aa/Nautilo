@@ -2,6 +2,8 @@ import { useSessionsStore } from "../stores/sessions";
 import { useInteractionsStore } from "../stores/interactions";
 import { useSettingsStore } from "../stores/settings";
 import { pendingCountsBySession, shouldNotify, terminalTransition } from "./notification-policy";
+import { requestCore } from "./bridge";
+import type { IpcRequestMap } from "@agenthub/schemas";
 
 /**
  * "跑完了叫我": watches the session/interaction stores and raises a system
@@ -64,7 +66,7 @@ function chime(): void {
   } catch { /* audio is best-effort */ }
 }
 
-function notify(sessionId: string, title: string, body: string, withSound: boolean): void {
+function notify(sessionId: string, title: string, body: string, withSound: boolean, path?: string): void {
   const settings = useSettingsStore.getState();
   if (!settings.notificationsEnabled) return;
   if (typeof Notification === "undefined" || Notification.permission === "denied") return;
@@ -73,16 +75,49 @@ function notify(sessionId: string, title: string, body: string, withSound: boole
   notification.onclick = () => {
     window.focus();
     useSessionsStore.getState().setActiveSession(sessionId);
-    if (!window.location.hash.startsWith("#/sessions")) window.location.hash = "#/sessions";
+    if (path) window.location.hash = path;
+    else if (!window.location.hash.startsWith("#/sessions")) window.location.hash = "#/sessions";
   };
 }
 
 let started = false;
+let seenWorkflowAttention: Set<string> | undefined;
+let checkingWorkflows = false;
+
+async function checkWorkflowAttention(): Promise<void> {
+  const settings = useSettingsStore.getState();
+  if (!settings.notificationsEnabled) { seenWorkflowAttention = undefined; return; }
+  if (checkingWorkflows) return;
+  checkingWorkflows = true;
+  try {
+    const health = await requestCore<IpcRequestMap["health.get"]["output"]>("health.get");
+    if (health.features?.workflows !== 1) return;
+    const runs = await requestCore<IpcRequestMap["workflow.list"]["output"]>("workflow.list", { attentionOnly: true });
+    const previous = seenWorkflowAttention;
+    seenWorkflowAttention = new Set(runs.flatMap(run => (run.attention || []).map(item => item.id)));
+    if (!previous) return;
+    for (const run of runs) {
+      const item = run.attention?.find(item => !previous.has(item.id));
+      if (!item) continue;
+      const query = new URLSearchParams({ run: run.id });
+      if (item.instanceId) query.set("instance", item.instanceId);
+      if (!document.hidden && window.location.hash.startsWith("#/workflows") && new URLSearchParams(window.location.hash.split("?")[1]).get("run") === run.id) continue;
+      const chinese = settings.locale === "zh-CN";
+      const reason = chinese
+        ? ({ delegate: "等待批准派发", merge: "等待你审阅合并", verification: "等待批准验收命令", recovery: "需要核对执行结果", decision: "需要决定如何继续" })[item.kind as "delegate"]
+        : ({ delegate: "Delegation needs approval", merge: "Merge is ready for review", verification: "Verification needs approval", recovery: "Execution needs reconciliation", decision: "A decision is needed" })[item.kind as "delegate"];
+      notify(run.sessionId, item.title, reason || strings().waiting, true, "#/workflows?" + query);
+    }
+  } catch { /* Reconnect on the next check. */ }
+  finally { checkingWorkflows = false; }
+}
 
 /** Idempotent: safe to call from every bootstrap path. */
 export function startNotificationWatcher(): void {
   if (started || typeof window === "undefined") return;
   started = true;
+  void checkWorkflowAttention();
+  window.setInterval(() => void checkWorkflowAttention(), 8000);
 
   useSessionsStore.subscribe((state, previous) => {
     for (const [sessionId, next] of Object.entries(state.foreground)) {

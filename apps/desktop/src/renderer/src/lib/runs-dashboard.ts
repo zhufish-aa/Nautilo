@@ -9,6 +9,7 @@ export interface DashboardSessionLike {
   unreadCount: number;
   updatedAt: string;
   lastMessageAt?: string;
+  status?: string;
 }
 
 export interface DashboardLifecycleLike {
@@ -24,7 +25,16 @@ export interface DashboardGroups<TSession extends DashboardSessionLike = Dashboa
   unread: TSession[];
 }
 
-const ACTIVE = new Set(["running", "waiting_approval"]);
+const ACTIVE = new Set(["running", "waiting_approval", "waiting_input"]);
+
+/** One precedence rule for the sidebar and cockpit. A finished
+ * foreground turn cannot hide a still-running background team task. */
+export function sessionActivityStatus(persisted: string, foreground?: DashboardLifecycleLike, background?: DashboardLifecycleLike, pending = 0): string {
+  if (pending > 0) return "waiting_approval";
+  if (foreground && ACTIVE.has(foreground.status)) return foreground.status;
+  if (background && ACTIVE.has(background.status)) return background.status;
+  return foreground?.status ?? background?.status ?? persisted;
+}
 
 export function groupSessionsForDashboard<TSession extends DashboardSessionLike>(input: {
   sessions: TSession[];
@@ -37,12 +47,12 @@ export function groupSessionsForDashboard<TSession extends DashboardSessionLike>
   const running: TSession[] = [];
   const unread: TSession[] = [];
   for (const session of input.sessions) {
-    const active = ACTIVE.has(input.foreground[session.id]?.status ?? "") || ACTIVE.has(input.running[session.id]?.status ?? "");
-    if ((input.pending[session.id] ?? 0) > 0) {
+    const status = sessionActivityStatus(session.status ?? "idle", input.foreground[session.id], input.running[session.id], input.pending[session.id]);
+    if (status === "waiting_approval" || status === "waiting_input") {
       waiting.push(session);
       continue;
     }
-    if (active) {
+    if (status === "running") {
       running.push(session);
       continue;
     }

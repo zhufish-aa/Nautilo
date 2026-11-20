@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { RuntimeConnection } from "@agenthub/domain";
-import { Dialog } from "../../components/ui/Dialog";
 import { SelectField } from "../../components/ui/Select";
-import { Button } from "../../components/ui/Button";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { useTeamsStore } from "../../stores/teams";
 import { connectionModelKey, useConnectionsStore } from "../../stores/connections";
-import { connectionSupportsAgent } from "../../lib/session-connections";
+import { connectionCanBeSelected, connectionSupportsAgent } from "../../lib/session-connections";
 import { connectionModelCatalog, type ConnectionModelSelection } from "../../lib/connection-models";
 import { ArrowUpRight, Box, Check, ChevronDown, Search, Server, SlidersHorizontal } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
@@ -27,7 +25,7 @@ function ModelMark({ name }: { name: string }): JSX.Element {
 }
 
 /** Conversation identity is fixed. Only supported model/effort choices belong here. */
-export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?: string; disabled?: boolean; draft?: Draft }): JSX.Element | null {
+export function SessionModelControl({ sessionId, disabled, running, draft, inline }: { sessionId?: string; disabled?: boolean; running?: boolean; draft?: Draft; inline?: boolean }): JSX.Element | null {
   const { locale } = useI18n();
   const zh = locale === "zh-CN";
   const [menu, setMenu] = useState(false);
@@ -38,7 +36,6 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
   const [loadError, setLoadError] = useState(false);
   const [boundConnection, setBoundConnection] = useState<RuntimeConnection>();
   const [connectionError, setConnectionError] = useState(false);
-  const [pendingConnection, setPendingConnection] = useState<{ id?: string; revision?: number; name: string; destination?: string; sourceSessionId: string; sourceConnectionId?: string; sourceRevision?: number }>();
   const connectionCatalogs = useConnectionsStore((state) => state.modelCatalogs);
   const connectionModelsLoading = useConnectionsStore((state) => state.loadingModels);
   const loadConnectionModels = useConnectionsStore((state) => state.loadModels);
@@ -48,6 +45,8 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
   const teams = useTeamsStore(state => state.teams);
   const root = useRef<HTMLDivElement>(null);
   const session = useSessionsStore(state => state.sessions.find(item => item.id === sessionId));
+  const nextTurnModel = useSessionsStore(state => sessionId ? state.nextTurnModels[sessionId] : undefined);
+  const setNextTurnModel = useSessionsStore(state => state.setNextTurnModel);
   const instances = useAgentsStore(state => state.instances);
   const catalogs = useAgentsStore(state => state.modelCatalogs);
   const loading = useAgentsStore(state => state.loadingModels);
@@ -57,20 +56,21 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
   const instanceId = target?.type === "agent" ? target.instanceId : member?.agentInstanceId ?? draft?.instanceId;
   const instance = instances.find(item => item.id === instanceId);
   const catalog = instance ? catalogs[instance.id] : undefined;
-  const configuration = session ?? draft?.configuration;
+  const configuration = session ? nextTurnModel ?? session : draft?.configuration;
   const connectionId = configuration?.connectionId;
   const currentHead = connections.find(item => item.id === connectionId);
   const connectionRevision = sessionId ? configuration?.connectionRevision : currentHead?.revision ?? configuration?.connectionRevision;
-  const activeApprovalContext = useRef({ sessionId, instanceId, connectionId, connectionRevision });
-  activeApprovalContext.current = { sessionId, instanceId, connectionId, connectionRevision };
-  const selectedConnection = sessionId ? (boundConnection && boundConnection.id === connectionId && (connectionRevision === undefined || boundConnection.revision === connectionRevision) ? boundConnection : undefined) : connections.find(item => item.id === connectionId);
+  const selectedConnection = [currentHead, boundConnection].find(item => item && item.id === connectionId && (connectionRevision === undefined || item.revision === connectionRevision));
   const connectionKey = connectionId && (connectionRevision ?? selectedConnection?.revision) ? connectionModelKey(connectionId, (connectionRevision ?? selectedConnection?.revision)!) : undefined;
   const connectionCatalog = selectedConnection ? connectionModelCatalog(selectedConnection, connectionKey ? connectionCatalogs[connectionKey] : undefined) : undefined;
-  const compatible = !!selectedConnection && !!instance && connectionSupportsAgent(selectedConnection, instance);
-  const models = connectionId ? compatible ? connectionCatalog?.models ?? [] : [] : instance?.configurationKind === "harness" ? [] : catalog?.models ?? [];
-  const modelId = configuration?.model || (!connectionId ? member?.model : undefined) || (connectionId ? connectionCatalog?.defaultModel ?? models[0]?.id : catalog?.defaultModel);
+  const compatible = !!selectedConnection && !!instance && (nextTurnModel
+    ? connectionCanBeSelected(selectedConnection, instance)
+    : connectionSupportsAgent(selectedConnection, instance));
+  const models = connectionId ? compatible ? connectionCatalog?.models ?? [] : [] : catalog?.models ?? [];
+  const modelId = configuration?.model || (!connectionId && !nextTurnModel ? member?.model : undefined)
+    || (connectionId ? connectionCatalog?.defaultModel ?? models.find(item => item.isDefault)?.id ?? models[0]?.id : catalog?.defaultModel);
   const model = models.find(item => item.id === modelId);
-  const effort = configuration?.reasoningEffort || (!connectionId ? member?.reasoningEffort : undefined) || model?.defaultReasoningEffort || model?.reasoningEfforts[0];
+  const effort = configuration?.reasoningEffort || (!connectionId && !nextTurnModel ? member?.reasoningEffort : undefined) || model?.defaultReasoningEffort || model?.reasoningEfforts[0];
   const locked = disabled || saving;
   useEffect(() => { void hydrateConnections(); }, [hydrateConnections]);
   useEffect(() => {
@@ -82,9 +82,9 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
   useEffect(() => {
     let current = true;
     setLoadError(false);
-    if (instanceId && !connectionId && instance?.configurationKind !== "harness") void loadModels(instanceId).catch(() => { if (current) setLoadError(true); });
+    if (instanceId && !connectionId) void loadModels(instanceId).catch(() => { if (current) setLoadError(true); });
     return () => { current = false; };
-  }, [instanceId, connectionId, instance?.configurationKind, loadModels]);
+  }, [instanceId, connectionId, loadModels]);
   useEffect(() => {
     let current = true;
     if (connectionId && compatible && selectedConnection) void loadConnectionModels(connectionId, connectionRevision ?? selectedConnection.revision)
@@ -92,7 +92,6 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
     return () => { current = false; };
   }, [connectionId, connectionRevision, selectedConnection?.revision, compatible, loadConnectionModels]);
   useEffect(() => { setMenu(false); }, [sessionId, instanceId, disabled]);
-  useEffect(() => { setPendingConnection(undefined); }, [sessionId, instanceId, connectionId, connectionRevision]);
   useEffect(() => {
     if (!menu) return;
     const frame = requestAnimationFrame(() => searchRef.current?.focus());
@@ -102,20 +101,27 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
     return () => { cancelAnimationFrame(frame); document.removeEventListener("mousedown", outside); document.removeEventListener("keydown", escape); };
   }, [menu]);
   if (!configuration || !instance) return null;
-  const configure = async (patch: Omit<ComposerConfiguration, "connectionId"> & { connectionId?: string | null; confirmConnectionChange?: boolean }) => {
+  const configureModel = async (patch: Pick<ComposerConfiguration, "model" | "reasoningEffort" | "serviceTier">) => {
     if (locked) return false;
+    if (session && (running || nextTurnModel)) {
+      setNextTurnModel(session.id, {
+        sourceConnectionId: session.connectionId,
+        sourceConnectionRevision: session.connectionRevision,
+        connectionId,
+        connectionRevision,
+        model: configuration.model,
+        reasoningEffort: configuration.reasoningEffort,
+        serviceTier: configuration.serviceTier,
+        ...nextTurnModel,
+        ...patch,
+      });
+      setMenu(false);
+      return true;
+    }
     setSaving(true);
     try {
       if (sessionId) await configureWorkbenchSession(sessionId, patch);
-      else {
-        const { confirmConnectionChange: _confirmed, connectionId: nextConnectionId, ...next } = patch;
-        // Model/effort edits are partial updates. An omitted connection ID
-        // preserves the binding; only an explicit null clears it.
-        draft?.onChange({
-          ...next,
-          ...("connectionId" in patch ? { connectionId: nextConnectionId ?? undefined } : {}),
-        });
-      }
+      else draft?.onChange(patch);
       setMenu(false);
       return true;
     }
@@ -123,42 +129,43 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
     finally { setSaving(false); }
   };
   const unavailable = !connectionId && instance.configurationKind === "harness"
-    ? (zh ? "请先选择供应商或账号" : "Choose a provider or account first")
+    ? (zh ? "使用 Harness 原生默认模型" : "Use harness native default model")
     : selectedConnection && !compatible
       ? (zh ? "当前连接与 Harness 不兼容" : "This connection is incompatible with the harness")
       : (zh ? "请在供应商设置中启用模型" : "Enable a model in provider settings");
   const efforts = model?.reasoningEfforts ?? [];
   const label = model?.displayName || modelId || (loading[instance.id] ? (zh ? "读取模型…" : "Loading models…") : unavailable);
   const modelDescription = effort ? label + " · " + effortLabel(effort) : label;
-  const hint = disabled ? (zh ? "运行中不可更改" : "Cannot change during a run") : (zh ? "下一次发送时生效" : "Applies to the next message");
-  const changeConnection = (candidate: { id?: string; revision?: number; name: string; destination?: string }) => {
-    if (locked || (candidate.id === connectionId && candidate.revision === connectionRevision)) return;
-    if (sessionId) { setMenu(false); setPendingConnection({ ...candidate, sourceSessionId: sessionId, sourceConnectionId: connectionId, sourceRevision: connectionRevision }); }
-    else void configure({ connectionId: candidate.id ?? null, connectionRevision: candidate.revision, model: "", reasoningEffort: "", serviceTier: "" });
-  };
-  const confirmConnection = () => {
-    const approved = pendingConnection;
-    const current = useSessionsStore.getState().sessions.find(item => item.id === approved?.sourceSessionId);
-    if (!approved || approved.sourceSessionId !== activeApprovalContext.current.sessionId || instanceId !== activeApprovalContext.current.instanceId || !current || current.connectionId !== approved.sourceConnectionId || current.connectionRevision !== approved.sourceRevision) {
-      setPendingConnection(undefined);
-      return;
+  const hint = zh ? "下一次发送时生效" : "Applies to the next message";
+  const nextMessageDescription = nextTurnModel
+    ? `${zh ? "下一条" : "Next message"}: ${selectedConnection?.name ?? instance.displayName} · ${modelDescription}`
+    : modelDescription;
+  const triggerLabel = modelId === "default" ? `${instance.displayName} / ${zh ? "默认" : "Default"}` : label;
+  const nextAccount = nextTurnModel && nextTurnModel.connectionId !== session?.connectionId ? selectedConnection?.name : undefined;
+  const chooseConnection = (selected?: RuntimeConnection) => {
+    if (locked || (selected?.id === connectionId && selected?.revision === connectionRevision)) return;
+    const selection = {
+      connectionId: selected?.id,
+      connectionRevision: selected?.revision,
+      model: selected?.models?.find(item => item.enabled !== false)?.id ?? "",
+      reasoningEffort: "",
+      serviceTier: "",
+    };
+    if (session) {
+      const usesCurrent = selected?.id === session.connectionId && selected?.revision === session.connectionRevision;
+      setNextTurnModel(session.id, usesCurrent ? undefined : {
+        ...selection,
+        sourceConnectionId: session.connectionId,
+        sourceConnectionRevision: session.connectionRevision,
+        enableAccountRoute: !!selected && !connectionSupportsAgent(selected, instance),
+      });
+    } else {
+      draft?.onChange(selection);
     }
-    void configure({ connectionId: approved.id ?? null, connectionRevision: approved.revision, confirmConnectionChange: true, model: "", reasoningEffort: "", serviceTier: "" }).then(success => { if (success) setPendingConnection(undefined); });
+    setMenu(false);
   };
   const visibleModels = models.filter((item) => `${item.displayName} ${item.id}`.toLowerCase().includes(query.trim().toLowerCase()));
-  const chooseConnection = (id: string): void => {
-    const item = connections.find((connection) => connection.id === id);
-    changeConnection(item ? {
-      id: item.id, revision: item.revision, name: item.name,
-      destination: item.kind === "api" ? item.baseUrl : `${item.harness} · ${zh ? "所选登录账号" : "Selected login account"}`
-    } : {
-      name: zh ? "Agent 原有配置" : "Existing agent configuration",
-      destination: instance.baseUrl || `${instance.providerId} · ${zh ? "接收地址由本机 CLI 配置决定，Nautilo 未验证" : "Destination comes from local CLI configuration and is not verified by Nautilo"}`
-    });
-  };
-  return <div ref={root} className="composer-model-control">
-    <Dialog open={!!pendingConnection && pendingConnection.sourceSessionId === sessionId} onOpenChange={open => { if (!open && !saving) setPendingConnection(undefined); }} title={zh ? "切换下一轮的账号 / 供应商？" : "Switch account / provider for the next message?"} description={zh ? "下一条消息会向下方账号/端点发送本会话已保存的聊天文本和最近 8 个产物的名称/路径，其中可能包含此前发给其他供应商的信息。原生推理、缓存、工具事件与旧图片不迁移，图片请重新附加。聊天记录保留，但不是无损上下文迁移；文本超限时会拒绝发送，不会静默截断。" : "The next message will share saved conversation text and names/paths of the latest 8 artifacts with the account/endpoint below. This may include information previously sent to other providers. Native reasoning, cache, tool events and previous images do not transfer; reattach images. History is retained, but this is not lossless context transfer. Oversized text is rejected rather than silently truncated."} footer={<><Button variant="ghost" disabled={saving} onClick={() => setPendingConnection(undefined)}>{zh ? "取消" : "Cancel"}</Button><Button disabled={locked} onClick={confirmConnection}>{zh ? "切换下一轮" : "Switch next message"}</Button></>}><p className="text-sm font-medium text-ink">{pendingConnection?.name}</p><p className="mt-1 break-all text-xs text-muted">{pendingConnection?.destination}</p></Dialog>
-    {menu && <div role="dialog" aria-label={zh ? "模型设置" : "Model settings"} className="composer-model-menu model-picker-surface" data-design-frame="o7KjQn-82u">
+  const panel = menu && <div role="dialog" aria-label={zh ? "模型设置" : "Model settings"} className="composer-model-menu model-picker-surface" data-design-frame="o7KjQn-82u">
       <div className="model-menu-heading" title={hint}><span>{zh ? "选择模型" : "Choose model"}</span><Link to="/settings?section=accounts" aria-label={zh ? "管理模型" : "Manage models"} onClick={() => setMenu(false)}><SlidersHorizontal size={16}/></Link></div>
       {draft?.onInstanceChange && <div className="model-menu-agent">
         <span>Agent</span>
@@ -167,23 +174,33 @@ export function SessionModelControl({ sessionId, disabled, draft }: { sessionId?
       <div className="model-menu-search"><Search size={15} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={zh ? "搜索模型" : "Search models"} aria-label={zh ? "搜索模型" : "Search models"} /></div>
       <section className="model-picker-connection" aria-label={zh ? "账号与供应商" : "Account & provider"}>
         <Server size={16} aria-hidden/>
-        <ConnectionPicker instance={instance} value={connectionId ?? (instance.configurationKind === "harness" ? undefined : "__instance")} disabled={locked} fallback={instance.configurationKind === "harness" ? undefined : { value: "__instance", label: zh ? "旧会话原有连接" : "Legacy connection" }} onChange={item => chooseConnection(item?.id ?? "__instance")}/>
+        <ConnectionPicker instance={instance} value={connectionId} disabled={locked} nextMessage={!!session} fallback={instance.configurationKind === "harness" ? undefined : { value: "__instance", label: zh ? "旧会话原有连接" : "Legacy connection" }} onChange={chooseConnection}/>
         {selectedConnection && <span className="model-picker-protocol">{selectedConnection.kind === "login" ? (zh ? "账号" : "Account") : selectedConnection.protocol === "responses" ? "Responses" : selectedConnection.protocol === "chat" ? "Chat" : "Anthropic"}</span>}
       </section>
       <div className="model-menu-list">
-        {visibleModels.map((item) => <button type="button" key={item.id} title={item.id} disabled={locked} className="model-menu-option" aria-pressed={item.id === modelId} onClick={() => void configure({ model: item.id, reasoningEffort: item.defaultReasoningEffort ?? item.reasoningEfforts[0] ?? "", serviceTier: item.defaultServiceTier ?? "" }).then((saved) => { if (saved) triggerRef.current?.focus(); })}>
+        {visibleModels.map((item) => <button type="button" key={item.id} title={item.id} disabled={locked} className="model-menu-option" aria-pressed={item.id === modelId} onClick={() => void configureModel({ model: item.id, reasoningEffort: item.defaultReasoningEffort ?? item.reasoningEfforts[0] ?? "", serviceTier: item.defaultServiceTier ?? "" }).then((saved) => { if (saved) triggerRef.current?.focus(); })}>
           <ModelMark name={`${item.id} ${item.displayName}`}/><span><strong>{item.displayName}</strong></span>{item.id === modelId && <Check size={15} />}
         </button>)}
         {!visibleModels.length && <p className="model-menu-empty">{connectionKey && connectionModelsLoading[connectionKey] ? (zh ? "正在获取账号模型…" : "Discovering models…") : loadError ? (zh ? "模型读取失败，请在供应商设置中刷新。" : "Models could not be loaded. Refresh in provider settings.") : query ? (zh ? "没有匹配的模型" : "No matching models") : unavailable}</p>}
       </div>
-      {efforts.length > 0 && <div className="model-menu-efforts"><span>{zh ? "推理强度" : "Reasoning effort"}</span><div>{efforts.map((item) => <button type="button" key={item} disabled={locked} aria-pressed={item === effort} onClick={() => void configure({ reasoningEffort: item })}>{effortLabel(item)}</button>)}</div></div>}
-      {sessionId && currentHead && currentHead.revision !== connectionRevision && connectionSupportsAgent(currentHead, instance) && <button type="button" className="model-picker-revision" disabled={locked} onClick={() => chooseConnection(currentHead.id)}>{zh ? `更新到 v${currentHead.revision}` : `Update to v${currentHead.revision}`}</button>}
+      {efforts.length > 0 && <div className="model-menu-efforts"><span>{zh ? "推理强度" : "Reasoning effort"}</span><div>{efforts.map((item) => <button type="button" key={item} disabled={locked} aria-pressed={item === effort} onClick={() => void configureModel({ reasoningEffort: item })}>{effortLabel(item)}</button>)}</div></div>}
+      {sessionId && currentHead && currentHead.revision !== connectionRevision && connectionCanBeSelected(currentHead, instance) && <button type="button" className="model-picker-revision" disabled={locked} onClick={() => chooseConnection(currentHead)}>{zh ? `更新到 v${currentHead.revision}` : `Update to v${currentHead.revision}`}</button>}
       {connectionCatalog?.warning && <p className="model-menu-empty">{connectionCatalog.warning}</p>}
       {connectionError && <p role="alert" className="model-menu-empty text-danger">{zh ? "绑定连接读取失败，请重试。" : "Unable to load the bound connection. Please retry."}</p>}
-      <footer className="model-picker-footer"><span>{models.length} {zh ? "个可用模型" : "available models"}</span><Link to="/settings?section=accounts" onClick={() => setMenu(false)}><SlidersHorizontal size={13}/>{zh ? "管理模型" : "Manage models"}<ArrowUpRight size={12}/></Link></footer>
-    </div>}
-    <button ref={triggerRef} type="button" disabled={locked} className="composer-model-trigger" aria-label={zh ? "选择模型" : "Choose model"} aria-expanded={menu} aria-description={modelDescription} title={modelDescription} onClick={() => { setMenu(!menu); setQuery(""); }}>
-      <Box size={16} aria-hidden /><span>{modelId === "default" ? `${instance.displayName} / ${zh ? "默认" : "Default"}` : label}</span>{effort && <span className="composer-effort-label" aria-label={`${zh ? "推理强度" : "Reasoning effort"} ${effortLabel(effort)}`}>· {effortLabel(effort)}</span>}<ChevronDown size={12} aria-hidden />
+      <footer className="model-picker-footer">
+        {session && nextTurnModel
+          ? <button type="button" className="hover:text-ink" disabled={locked} onClick={() => { setNextTurnModel(session.id, undefined); setMenu(false); triggerRef.current?.focus(); }}>
+              {zh ? "恢复当前设置" : "Keep current settings"}
+            </button>
+          : <span>{models.length} {zh ? "个可用模型" : "available models"}</span>}
+        <Link to="/settings?section=accounts" onClick={() => setMenu(false)}><SlidersHorizontal size={13}/>{zh ? "管理模型" : "Manage models"}<ArrowUpRight size={12}/></Link>
+      </footer>
+    </div>;
+  return <div ref={root} className="composer-model-control" data-inline={inline || undefined}>
+    {!inline && panel}
+    <button ref={triggerRef} type="button" disabled={locked} className="composer-model-trigger" aria-label={zh ? "选择模型" : "Choose model"} aria-expanded={menu} aria-description={nextMessageDescription} title={nextMessageDescription} onClick={() => { setMenu(!menu); setQuery(""); }}>
+      <Box size={16} aria-hidden /><span>{nextAccount ? `${nextAccount} · ${triggerLabel}` : triggerLabel}</span>{effort && <span className="composer-effort-label" aria-label={`${zh ? "推理强度" : "Reasoning effort"} ${effortLabel(effort)}`}>· {effortLabel(effort)}</span>}<ChevronDown size={12} aria-hidden />
     </button>
+    {inline && panel}
   </div>;
 }

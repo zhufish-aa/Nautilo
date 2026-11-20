@@ -124,11 +124,13 @@ fn normalize(session: &str, entries: &Value, settled: bool) -> anyhow::Result<Va
                 for event in parse_opencode_part(part, part, None)
                     .into_iter()
                     .filter(|event| {
-                        ["thinking", "tool", "command", "usage"]
+                        ["thinking", "tool", "command", "usage", "file"]
                             .contains(&event["kind"].as_str().unwrap_or(""))
                     })
                 {
-                    activities.push(json!({"id":part_id,"messageId":id,"nativeTurnId":turn,"timestampMs":timestamp,"completed":info["error"].is_null() && info.pointer("/time/completed").is_some(),"event":event}));
+                    let activity_id = if event["kind"] == "file" { format!("{part_id}:file") } else { part_id.to_string() };
+                    let time = part.pointer("/state/time/end").or_else(|| part.pointer("/state/time/start")).unwrap_or(&timestamp);
+                    activities.push(json!({"id":activity_id,"messageId":id,"nativeTurnId":turn,"timestampMs":time,"completed":info["error"].is_null() && info.pointer("/time/completed").is_some(),"event":event}));
                 }
             }
         }
@@ -173,6 +175,21 @@ fn normalize(session: &str, entries: &Value, settled: bool) -> anyhow::Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completed_writes_have_distinct_tool_and_file_history_identities() {
+        let source=json!([{"info":{"id":"assistant","sessionID":"s","role":"assistant","parentID":"u","time":{"created":20,"completed":40}},
+            "parts":[{"id":"write-part","messageID":"assistant","sessionID":"s","type":"tool","tool":"write","callID":"call",
+                "state":{"status":"completed","time":{"start":25,"end":35},"input":{"filePath":"D:/项目/图.svg","content":"<svg/>"},"metadata":{"exists":false}}}]}]);
+        let first=normalize("s",&source,true).unwrap();
+        assert_eq!(first["activities"].as_array().unwrap().len(),2);
+        assert_eq!(first["activities"][0]["id"],"write-part");
+        assert_eq!(first["activities"][1]["id"],"write-part:file");
+        assert_eq!(first["activities"][1]["timestampMs"],35);
+        assert_eq!(first,normalize("s",&source,true).unwrap());
+        let child=super::super::with_subagent_dispatch(vec![first["activities"][1]["event"].clone(),json!({"kind":"session","providerSessionId":"child"})],"dispatch");
+        assert_eq!(child.len(),1);
+        assert_eq!(child[0]["kind"],"file");
+    }
     #[test]
     fn a_native_error_never_becomes_a_successful_completion_marker() {
         let snapshot=normalize("s",&json!([{"info":{"id":"a","sessionID":"s","parentID":"u","role":"assistant","error":{"name":"ProviderError"},"time":{"completed":10}},"parts":[{"id":"p","messageID":"a","sessionID":"s","type":"text","text":"partial","time":{"end":10}}]}]),true).unwrap();

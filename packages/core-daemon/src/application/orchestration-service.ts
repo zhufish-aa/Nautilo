@@ -129,6 +129,7 @@ export class OrchestrationService {
   }
 
   resolveDelegation(projectRunId: string, approved: boolean, scope: ApprovalScope = "run"): ProjectRun {
+    this.requireLegacyExecution(projectRunId);
     const projectRun = this.requireProjectRun(projectRunId);
     if (projectRun.status !== "waiting_user" || !projectRun.pendingApprovalId || !projectRun.plannerDecision || projectRun.plannerDecision.mode === "direct") {
       throw new CoreError("PLAN_APPROVAL_NOT_FOUND", { projectRunId });
@@ -160,6 +161,7 @@ export class OrchestrationService {
   }
 
   async resolveMerge(projectRunId: string, approved: boolean, scope: ApprovalScope = "project"): Promise<ProjectRun> {
+    this.requireLegacyExecution(projectRunId);
     const projectRun = this.requireProjectRun(projectRunId);
     if (projectRun.status !== "merge_ready" || !projectRun.mergeApprovalId || !this.gitWorkflows) {
       throw new CoreError("PLAN_APPROVAL_NOT_FOUND", { projectRunId, category: "merge" });
@@ -179,20 +181,23 @@ export class OrchestrationService {
   }
 
   async cancel(projectRunId: string): Promise<ProjectRun> {
+    this.requireLegacyExecution(projectRunId);
     const projectRun = this.requireProjectRun(projectRunId);
+    const mainSession = this.requireMainSession(projectRun);
+    for (const task of this.database.tasks.list(projectRunId)) {
+      if (task.workflowRunId) continue;
+      if (!["completed", "failed", "cancelled"].includes(task.status)) this.updateTask(mainSession, task, "cancelled");
+    }
     await this.runs.cancelProjectRun(projectRunId);
     // Stopping an already terminal run is a no-op (lingering active runs above
     // are still cancelled): clients must be able to "stop" a stale UI without
     // tripping the invalid-transition guard.
     if (["completed", "failed", "cancelled"].includes(projectRun.status)) return projectRun;
-    const mainSession = this.requireMainSession(projectRun);
-    for (const task of this.database.tasks.list(projectRunId)) {
-      if (!["completed", "cancelled"].includes(task.status)) this.updateTask(mainSession, task, "cancelled");
-    }
     return this.saveProjectRun({ ...this.requireProjectRun(projectRunId), status: "cancelled" });
   }
 
   recover(projectRunId: string, memberId: string, mode: "resume" | "replace"): ProjectRun {
+    this.requireLegacyExecution(projectRunId);
     const projectRun = this.requireProjectRun(projectRunId);
     if (!["paused", "failed"].includes(projectRun.status)) throw new CoreError("RECOVERY_NOT_AVAILABLE", { projectRunId, status: projectRun.status });
     const team = this.requireTeam(String(projectRun.teamId));
@@ -205,6 +210,7 @@ export class OrchestrationService {
       : this.sessionRouter.replacementMain(projectRun, team, memberId, previousSession);
     this.database.sessions.save(mainSession);
     for (const task of this.database.tasks.list(projectRunId)) {
+      if (task.workflowRunId) continue;
       if (!["completed", "cancelled"].includes(task.status)) {
         const cancelled = { ...task, status: "cancelled" as const, updatedAt: new Date().toISOString() };
         this.database.tasks.save(cancelled);
@@ -236,6 +242,27 @@ export class OrchestrationService {
     await this.active.get(projectRunId);
   }
 
+  retryTask(projectRunId: string, taskId: string): Task {
+    this.requireLegacyExecution(projectRunId);
+    const project = this.requireProjectRun(projectRunId), team = this.requireTeam(String(project.teamId)), main = this.requireMainSession(project);
+    const tasks = this.database.tasks.list(projectRunId), task = tasks.find(item => item.id === taskId);
+    if (task?.workflowRunId) throw new CoreError("RECOVERY_NOT_AVAILABLE", { taskId, reason: "This task requires the Rust workflow engine." });
+    if (!task || !["failed", "cancelled"].includes(task.status)) throw new CoreError("RECOVERY_NOT_AVAILABLE", { taskId, reason: "task_not_retryable" });
+    if (!task.dependencies.every(id => tasks.some(item => item.id === id && item.status === "completed"))) throw new CoreError("RECOVERY_NOT_AVAILABLE", { taskId, reason: "dependencies_not_completed" });
+    this.members.resolve(team, String(task.assignedMemberId), task.taskType);
+    const ready = task.status === "cancelled" ? this.updateTask(main, task, "ready") : task;
+    const selected = this.updateTask(main, ready, "queued", { attempt: task.attempt + 1 });
+    void this.executeTask(project, team, main, selected).catch(error => {
+      const current = this.database.tasks.get(selected.id);
+      if (!current) return;
+      if (!["completed", "failed", "cancelled"].includes(current.status)) {
+        this.updateTask(main, current, ["queued", "ready", "blocked_dependency"].includes(current.status) ? "cancelled" : "failed");
+      }
+      this.returnResult(project, main, current, error instanceof Error ? error.message : String(error));
+    });
+    return selected;
+  }
+
   /** Invoked by provider-native runtime tools; it never asks for a routing decision first. */
   async invokeRuntimeTool(sessionId: string, toolName: string, input: unknown): Promise<RuntimeToolResult> {
     try {
@@ -244,6 +271,7 @@ export class OrchestrationService {
         throw new CoreError("PLAN_DELEGATION_NOT_ALLOWED", { sessionId, reason: "not_main_team_session" });
       }
       const projectRun = this.requireProjectRun(mainSession.projectRunId);
+      this.requireLegacyExecution(projectRun.id);
       if (projectRun.mainSessionId !== mainSession.id || projectRun.teamId !== mainSession.teamId) {
         throw new CoreError("PLAN_DELEGATION_NOT_ALLOWED", { sessionId, reason: "session_scope_mismatch" });
       }
@@ -565,8 +593,10 @@ export class OrchestrationService {
     task: Task,
     onDispatched?: (receipt: DelegationReceipt) => void
   ): Promise<void> {
+    if (this.database.tasks.get(task.id)?.status === "cancelled") return;
     if (this.gitWorkflows && !task.workspacePath) {
       task = await this.gitWorkflows.initializeTask(projectRun, task);
+      if (this.database.tasks.get(task.id)?.status === "cancelled") return;
       this.database.tasks.save(task);
     }
     const assigned = this.members.resolve(team, String(task.assignedMemberId), task.taskType);
@@ -604,6 +634,7 @@ export class OrchestrationService {
       runId: handle.runId
     });
     const completion = await handle.completion;
+    if (this.database.tasks.get(task.id)?.status === "cancelled") return;
 
     if (completion.run.status === "completed") {
       if (this.gitWorkflows) {
@@ -755,6 +786,12 @@ export class OrchestrationService {
     const projectRun = this.database.projectRuns.get(projectRunId);
     if (!projectRun) throw new CoreError("IPC_NOT_FOUND", { resource: "projectRun", id: projectRunId });
     return projectRun;
+  }
+
+  private requireLegacyExecution(projectRunId: string): void {
+    if (this.database.projectRuns.hasActiveWorkflow(projectRunId)) {
+      throw new CoreError("RECOVERY_NOT_AVAILABLE", { projectRunId, reason: "This project run is managed by the Rust workflow engine." });
+    }
   }
 
   private requireTeam(teamId: string): TeamDefinition {

@@ -30,6 +30,13 @@ export interface AdapterFileDiff {
   after: string;
 }
 
+/** Complete file sides supplied by the provider, not replacement snippets. */
+export interface AdapterFileSnapshot {
+  before?: string;
+  after?: string;
+  truncated?: boolean;
+}
+
 /**
  * `subagentDispatchId` marks activity produced inside a provider-native
  * sub-agent: it is the callId of the dispatching tool call (Claude's
@@ -42,7 +49,7 @@ export type AdapterEvent =
   | { kind: "tool"; callId?: string; name: string; phase?: "started" | "updated" | "completed"; input?: unknown; output?: unknown; success?: boolean; fileDiff?: AdapterFileDiff; subagentDispatchId?: string; raw?: unknown }
   | { kind: "command"; callId?: string; command: string; phase?: "started" | "updated" | "completed"; exitCode?: number; output?: string; subagentDispatchId?: string; raw?: unknown }
   | { kind: "turn_diff"; diff: string; threadId: string; turnId: string; raw?: unknown }
-  | { kind: "file"; path: string; changeType?: string; additions?: number; deletions?: number; diff?: string; raw?: unknown }
+  | { kind: "file"; path: string; changeType?: string; additions?: number; deletions?: number; diff?: string; snapshot?: AdapterFileSnapshot; raw?: unknown }
   | { kind: "session"; providerSessionId: string; raw?: unknown }
   | { kind: "status"; phase: "turn_started" | "turn_completed" | "turn_failed" | "runtime_ready" | "runtime_capabilities"; raw?: unknown }
   /** Usage is a replacement snapshot for (usageScope, usageKey), never a delta.
@@ -161,7 +168,7 @@ export interface NativeHistorySnapshot {
     files?: Array<{ id: string; url: string; mime?: string; filename?: string }>;
   }>;
   activities: Array<NativeHistoryEntry & {
-    event: Extract<AdapterEvent, { kind: "thinking" | "tool" | "command" | "usage" }>;
+    event: Extract<AdapterEvent, { kind: "thinking" | "tool" | "command" | "usage" | "file" }>;
   }>;
 }
 

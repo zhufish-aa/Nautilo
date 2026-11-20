@@ -31,11 +31,11 @@ export class RecoveryService {
       this.database.sessions.save({ ...session, status: "waiting_input", updatedAt: now });
       sessions += 1;
     }
-    for (const run of this.database.projectRuns.listAll()) if (INTERRUPTED_PROJECT.has(run.status)) {
+    for (const run of this.database.projectRuns.listAll()) if (INTERRUPTED_PROJECT.has(run.status) && !this.database.projectRuns.hasActiveWorkflow(run.id)) {
       this.database.projectRuns.save({ ...run, status: "paused", recoveryReason: "daemon_restarted", updatedAt: now });
       projectRuns += 1;
     }
-    for (const task of this.database.tasks.listAll()) if (["queued", "running", "verifying"].includes(task.status)) {
+    for (const task of this.database.tasks.listAll()) if (!task.workflowRunId && ["queued", "running", "verifying"].includes(task.status)) {
       this.database.tasks.save({ ...task, status: "waiting_user", updatedAt: now });
       tasks += 1;
     }

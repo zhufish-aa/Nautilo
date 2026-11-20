@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { motion, useIsPresent } from "framer-motion";
 import "./workspace-panels.css";
 import "./browser-workspace.css";
 import { Maximize2, Minimize2, X, ExternalLink, PanelRightClose } from "lucide-react";
@@ -8,9 +9,10 @@ import { toast } from "../../stores/toast";
 import type { PanelTarget } from "../../../../shared/panel-window";
 import {ResizeHandle,useRememberedWidth} from "../../components/ui/ResizeHandle";
 import { WindowControls } from "../../components/layout/TitleBar";
+import { useUiReducedMotion } from "../../lib/ui-motion";
 
 /** Contextual, non-modal workspace panel: chat and its controls stay available. */
-export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defaultWidth = 580, minWidth = 420, adjacentMinWidth = 0, placement = "right", headerContent, headerActions, resizable = false, defaultHeight = 320, defaultMaximized = false, storageKey, keepMounted = false, className = "", nativePanel, moveDisabled = false, beforeMove, windowChrome = false, hideHeader = false }: {
+export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defaultWidth = 580, minWidth = 420, adjacentMinWidth = 0, placement = "right", headerContent, headerActions, resizable = false, defaultHeight = 320, defaultMaximized = false, storageKey, keepMounted = false, className = "", nativePanel, moveDisabled = false, beforeMove, windowChrome = false, hideHeader = false, animateReview = false }: {
   open: boolean; onClose: () => void; title: string; subtitle?: string; children: ReactNode;
   defaultWidth?: number; minWidth?: number; adjacentMinWidth?: number; placement?: "right" | "bottom";
   headerContent?: ReactNode; headerActions?: ReactNode; resizable?: boolean; defaultHeight?: number; storageKey?: string;
@@ -23,9 +25,13 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
   windowChrome?: boolean;
   /** A custom workbench can own its toolbar and close action. */
   hideHeader?: boolean;
+  animateReview?: boolean;
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const panel = useRef<HTMLElement>(null);
+  const present = useIsPresent();
+  const reducedMotion = useUiReducedMotion();
+  const interactive = open && (!animateReview || present);
   const close = useRef(onClose);
   close.current = onClose;
   const [height, setHeight] = useState(() => {
@@ -74,7 +80,7 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
     drag.current = undefined;
   };
   useEffect(() => {
-    if (!open) return;
+    if (!interactive) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     panel.current?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent): void => {
@@ -82,7 +88,10 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
     };
     document.addEventListener("keydown", onKey);
     return () => { document.removeEventListener("keydown", onKey); finishDrag(); if (previous?.isConnected) previous.focus({ preventScroll: true }); };
-  }, [open]);
+  }, [interactive]);
+  useLayoutEffect(() => {
+    if (animateReview && panel.current) panel.current.inert = !interactive;
+  }, [animateReview, interactive]);
   useEffect(() => {
     if (!open || !adjustable) return;
     const parent = panel.current?.parentElement;
@@ -100,8 +109,15 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
     const observer=new ResizeObserver(measure);observer.observe(parent);return()=>observer.disconnect();
   },[open,resizable,placement]);
   if (!open && !keepMounted) return null;
-  return <aside ref={panel} tabIndex={-1} role="region" aria-label={title}
-    aria-hidden={!open || undefined} hidden={!open}
+  const Panel = animateReview ? motion.aside : "aside";
+  const reviewMotion = animateReview ? {
+    initial: reducedMotion ? false as const : { opacity: 0, transform: "translateY(6px)" },
+    animate: { opacity: 1, transform: "translateY(0px)" },
+    exit: { opacity: 0, transform: reducedMotion ? "translateY(0px)" : "translateY(6px)" },
+    transition: { duration: reducedMotion ? 0 : .22, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] },
+  } : undefined;
+  return <Panel ref={panel} tabIndex={-1} role="region" aria-label={title} {...reviewMotion}
+    aria-hidden={!interactive || undefined} hidden={!open} data-review-closing={animateReview && !present || undefined}
     style={{...(placement === "right" ? { width: (detached||maximized)?"100%":resizable?remembered.width:`min(${defaultWidth}px, 100%)` } : adjustable && !maximized ? { height: renderedHeight } : {}),...(!open ? {display:"none"} : {})}}
     className={placement === "right" ? `workspace-panel-right ${resizable?"is-resizable":""} ${maximized?"is-maximized":""} z-30 flex max-w-full shrink-0 flex-col border-l border-line bg-panel outline-none ${className}` : `workspace-panel-bottom ${maximized ? "is-maximized" : ""} ${adjustable ? "is-resizable" : ""} relative z-20 flex shrink-0 flex-col border-t border-line bg-panel outline-none ${className}`}>
     {resizable&&!detached&&placement==="right"&&!maximized&&<ResizeHandle label={locale==="zh-CN"?`调整${title}宽度`:`Resize ${title}`} edge="left" value={remembered.width} min={Math.min(minWidth,availableWidth)} max={maxWidth} onChange={remembered.resize} onCommit={remembered.save} reset={defaultWidth}/>}
@@ -126,5 +142,5 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
       </div>
     </header>}
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
-  </aside>;
+  </Panel>;
 }

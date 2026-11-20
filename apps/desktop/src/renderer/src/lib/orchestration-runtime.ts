@@ -1,5 +1,6 @@
 import { useUsageStore } from "../stores/usage";
 import { latestContextUsage } from "./context-usage";
+import { hasRunningDelegatedTask, lifecycleWithDelegates } from "./session-lifecycle";
 import { recoverLegacyDeepSeekReplies } from "./deepseek-legacy-history";
 import { applyLiveProviderUi } from "./provider-ui";
 import type {
@@ -13,7 +14,8 @@ import type {
   Session as DomainSession,
   Task,
   TeamDefinition,
-  VerificationResult
+  VerificationResult,
+  WorkflowMention
 } from "@agenthub/domain";
 import type { RuntimeEvent } from "@agenthub/event-protocol";
 import type { HistoryCursor, HistoryItem, HistoryProjection, SessionHistory, ProjectEventCursor, ProjectPollInput, ProjectPollSnapshot, ProjectPollResult, SessionUpsertInput } from "@agenthub/schemas";
@@ -30,9 +32,10 @@ import { collectSubagentActivities, subagentDispatchIdOf } from "./subagent-acti
 import { mergeCodeExecution } from "./process-display";
 import { markOutgoingMessage } from "./ui-motion";
 import { useAgentsStore } from "../stores/agents";
+import { useConnectionsStore } from "../stores/connections";
 import { ingestInteractionEvents, useInteractionsStore } from "../stores/interactions";
 import { useProjectsStore } from "../stores/projects";
-import { useSessionsStore } from "../stores/sessions";
+import { useSessionsStore, type NextTurnModel } from "../stores/sessions";
 import { useTeamsStore } from "../stores/teams";
 
 // Deletion/eviction fences all asynchronous consumers, not just the projection
@@ -103,10 +106,11 @@ function followUpDelivered(sessionId: string, messageId: string): void {
 // An older/in-flight history snapshot must never remove a just-sent message.
 const pendingMessages = new Map<string, Map<string, TimelineEvent>>();
 
-function appendPendingMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = []): string {
-  const messageId = newId("msg");
+function appendPendingMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], messageId = newId("msg"), workflowRef?: WorkflowMention): string {
+  const existing = useSessionsStore.getState().events[sessionId]?.find(event => event.data.kind === "message" && event.data.messageId === messageId);
+  if (existing) return messageId;
   markOutgoingMessage(sessionId, messageId);
-  const event = useSessionsStore.getState()._append(sessionId, { kind: "message", sender: "user", text, messageId, attachments: attachments.map((item) => ({ ...item })) });
+  const event = useSessionsStore.getState()._append(sessionId, { kind: "message", sender: "user", text, messageId, workflowRef, attachments: attachments.map((item) => ({ ...item })) });
   const pending = pendingMessages.get(sessionId) ?? new Map<string, TimelineEvent>();
   pending.set(messageId, event);
   pendingMessages.set(sessionId, pending);
@@ -314,7 +318,7 @@ export async function refreshAssistantTarget(sessionId: string): Promise<void> {
   }
 }
 
-export async function sendWorkbenchMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], editMessageId?: string): Promise<void> {
+export async function sendWorkbenchMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], editMessageId?: string, submissionMessageId?: string, workflowRef?: WorkflowMention): Promise<void> {
   const state = useSessionsStore.getState();
   const initialSession = state.sessions.find((item) => item.id === sessionId);
   if (!initialSession) throw new Error(`Session ${sessionId} is missing`);
@@ -323,19 +327,29 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
     state._append(sessionId, { kind: "error", code: "CORE_UNAVAILABLE", message: "Core Daemon 仅在 Electron 桌面端可用。", retryable: false });
     throw new Error("Core Daemon is unavailable");
   }
+  const nextTurnModel = state.nextTurnModels[sessionId];
+  const configurationWrite = sessionConfigWrites.get(sessionId);
+  if (nextTurnModel) {
+    const { connectionId, connectionRevision, model, reasoningEffort, serviceTier } = nextTurnModel;
+    const changed = connectionId !== nextTurnModel.sourceConnectionId || connectionRevision !== nextTurnModel.sourceConnectionRevision;
+    session = await configureWorkbenchSession(sessionId, {
+      model, reasoningEffort, serviceTier,
+      ...(changed ? { connectionId: connectionId ?? null, connectionRevision, confirmConnectionChange: true } : {}),
+    }, nextTurnModel);
+  } else if (configurationWrite) {
+    session = await configurationWrite;
+  }
   const attachmentViews = attachments.map((attachment) => ({ ...attachment }));
-  if (editMessageId) state._patchEvent(sessionId, `message-${editMessageId}`, { text, attachments: attachmentViews, editedAt: new Date().toISOString() });
-  const messageId = editMessageId ?? appendPendingMessage(sessionId, text, attachments);
+  if (editMessageId) state._patchEvent(sessionId, `message-${editMessageId}`, { text, workflowRef, attachments: attachmentViews, editedAt: new Date().toISOString() });
+  const messageId = editMessageId ?? appendPendingMessage(sessionId, text, attachments, submissionMessageId, workflowRef);
   state._append(sessionId, { kind: "activity", phase: "queued" });
   state._setForeground(sessionId, { status: "running", startedAt: new Date().toISOString() });
 
   let acceptedRunId: string | undefined;
   let acceptedProjectRunId: string | undefined;
   try {
-    await sessionConfigWrites.get(sessionId);
-    session = useSessionsStore.getState().sessions.find((item) => item.id === sessionId) ?? session;
     await syncProjectAndAgents(session);
-    if (session.target.type === "agent" && session.target.teamId) {
+    if (!workflowRef && session.target.type === "agent" && session.target.teamId) {
       const activeProjectRunId = useProjectsStore.getState().projects
         .find((project) => project.id === session.projectId)?.activeRun?.id;
       if (session.projectRunId && activeProjectRunId === session.projectRunId) {
@@ -371,12 +385,25 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
     }
 
     const domainSession = toDomainSession(session);
+    if (workflowRef && session.target.teamId) {
+      const team = requireUiTeam(session.target.teamId);
+      await requestCore<TeamDefinition>("team.upsert", toDomainTeam(team));
+    }
     await requestCore<DomainSession>("session.upsert", domainSession);
-    const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text, messageId, attachments, editMessageId });
+    const result = await requestCore<{ accepted: true; runId: string }>("session.send", {
+      sessionId, text, messageId, attachments, editMessageId,
+      ...(workflowRef ? { workflowRef: { id: workflowRef.id, revision: workflowRef.revision } } : {})
+    });
     acceptedRunId = result.runId;
     state._setActiveAgentRun(sessionId, result.runId);
-    await hydrateStandaloneSession(session, result.runId);
-    scheduleStandalonePoll(sessionId, result.runId);
+    if (workflowRef && session.projectRunId) {
+      acceptedProjectRunId = session.projectRunId;
+      await hydrateProjectRun(session.projectRunId);
+      schedulePoll(session.projectRunId);
+    } else {
+      await hydrateStandaloneSession(session, result.runId);
+      scheduleStandalonePoll(sessionId, result.runId);
+    }
   } catch (error) {
     // Acceptance and view synchronization are different outcomes. A failed
     // hydrate must not invite the composer to resend an already accepted turn.
@@ -393,15 +420,16 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
 }
 
 /** Sends immediate steering or queues a follow-up without stopping the active turn. Returns the mode actually applied. */
-export async function sendWorkbenchFollowUp(sessionId: string, text: string, mode: "steer" | "queue"): Promise<"steer" | "queue" | undefined> {
+export async function sendWorkbenchFollowUp(sessionId: string, text: string, mode: "steer" | "queue", submissionMessageId?: string): Promise<"steer" | "queue" | undefined> {
   const store = useSessionsStore.getState();
   const session = store.sessions.find((item) => item.id === sessionId);
   if (!session || !text.trim()) return undefined;
+  if (store.nextTurnModels[sessionId]) throw new Error("Use the selected connection after the current request and its queued messages finish");
   if (!getBridge()) throw new Error("Core Daemon is only available in the desktop shell");
 
   // The daemon may downgrade "steer" to "queue" when the provider lacks a
   // mid-turn injection channel; honor the mode it actually applied.
-  const messageId = appendPendingMessage(sessionId, text);
+  const messageId = appendPendingMessage(sessionId, text, [], submissionMessageId);
   if (mode === "queue") store._addQueuedFollowUp(sessionId, { messageId, text, queuedAt: new Date().toISOString() });
   const { mode: appliedMode } = await requestCore<{ accepted: true; mode: "steer" | "queue" }>("session.followUp", { sessionId, text, messageId, mode }).catch((error) => {
     store._removeQueuedFollowUp(sessionId, messageId);
@@ -573,12 +601,13 @@ export async function deleteWorkbenchSession(sessionId: string): Promise<void> {
   store.removeSessions([...deleted]);
 }
 
-const sessionConfigWrites = new Map<string, Promise<void>>();
+const sessionConfigWrites = new Map<string, Promise<UiSession>>();
 
 export async function configureWorkbenchSession(
   sessionId: string,
-  patch: { agentMode?: string; model?: string; reasoningEffort?: string; serviceTier?: string; permissionMode?: string; connectionId?: string | null; connectionRevision?: number; confirmConnectionChange?: boolean }
-): Promise<void> {
+  patch: { agentMode?: string; model?: string; reasoningEffort?: string; serviceTier?: string; permissionMode?: string; connectionId?: string | null; connectionRevision?: number; confirmConnectionChange?: boolean },
+  nextTurnModel?: NextTurnModel,
+): Promise<UiSession> {
   const previous = sessionConfigWrites.get(sessionId) ?? Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
     const state = useSessionsStore.getState();
@@ -587,20 +616,36 @@ export async function configureWorkbenchSession(
     if (!getBridge()) throw new Error("Core Daemon is unavailable");
     if ([state.running[sessionId]?.status, state.foreground[sessionId]?.status].some(status => status === "running" || status === "waiting_approval") || (state.queuedFollowUps[sessionId]?.length ?? 0) > 0) throw new Error("Wait for the current request and queued messages to finish before changing configuration");
     try {
+      if (nextTurnModel) {
+        if (state.nextTurnModels[sessionId] !== nextTurnModel || session.connectionId !== nextTurnModel.sourceConnectionId
+          || session.connectionRevision !== nextTurnModel.sourceConnectionRevision) {
+          throw new Error("Connection changed before sending; select the destination for the next message again");
+        }
+        const connections = useConnectionsStore.getState();
+        if (nextTurnModel.enableAccountRoute && nextTurnModel.connectionId
+            && !connections.connections.find(item => item.id === nextTurnModel.connectionId)?.accountGateway) {
+          await connections.setAccountRoute(nextTurnModel.connectionId, true);
+        }
+      }
       // Serialize edits and only publish a configuration the daemon saved.
       // Failed permission changes leave the previous visible value intact.
       const { confirmConnectionChange, connectionId, ...configuration } = patch;
       const hasConnection = Object.prototype.hasOwnProperty.call(patch, "connectionId");
       const input = toDomainSession({ ...session, ...configuration, ...(hasConnection ? { connectionId: connectionId ?? undefined } : {}) });
       const saved = await requestCore<DomainSession>("session.upsert", { ...input, ...(hasConnection ? { connectionId: connectionId ?? null } : {}), ...(confirmConnectionChange ? { confirmConnectionChange: true } : {}) });
-      state._configureSession(sessionId, { ...configuration, ...(hasConnection ? { connectionId: saved.connectionId, connectionRevision: saved.connectionRevision } : {}) });
+      const updated = state._configureSession(sessionId, { ...configuration, ...(hasConnection ? { connectionId: saved.connectionId, connectionRevision: saved.connectionRevision } : {}) });
+      if (!updated) throw new Error(`Session ${sessionId} is missing`);
+      if (nextTurnModel && useSessionsStore.getState().nextTurnModels[sessionId] === nextTurnModel) {
+        state.setNextTurnModel(sessionId, undefined);
+      }
+      return updated;
     } catch (error) {
       state._append(sessionId, { kind: "error", code: "SESSION_CONFIG_FAILED", message: error instanceof Error ? error.message : String(error), retryable: true });
       throw error;
     }
   });
   sessionConfigWrites.set(sessionId, write);
-  try { await write; }
+  try { return await write; }
   finally { if (sessionConfigWrites.get(sessionId) === write) sessionConfigWrites.delete(sessionId); }
 }
 
@@ -951,6 +996,25 @@ async function readSessionHistory(sessionId: string, fetchProjection?: (cursor?:
     }, (response) => ({ session: response.session }), fetchProjection
   );
   return { ...result.extra, messages: result.values, changed: result.changed };
+}
+
+/** Workflow nodes can create a session after the renderer's index was loaded. */
+export async function loadLinkedSession(sessionId: string): Promise<DomainSession | undefined> {
+  if (!getBridge()) return undefined;
+  const generation = sessionGeneration(sessionId);
+  const detail = await readSessionHistory(sessionId).catch((error: unknown) => {
+    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    if (code === "IPC_NOT_FOUND" || /IPC_NOT_FOUND|请求的资源不存在/i.test(message)) return undefined;
+    throw error;
+  });
+  if (!detail || !currentSessionGeneration(sessionId, generation)) return undefined;
+  if (detail.session.id !== sessionId) throw new Error("Invalid session history response");
+  const store = useSessionsStore.getState();
+  if (!store.sessions.some((session) => session.id === sessionId)) {
+    store._upsertExternalSession(toStandaloneUiSession(detail.session));
+  }
+  return detail.session;
 }
 
 /** Coalesce a project's visible histories into bounded IPC reads. Per-session
@@ -1556,7 +1620,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
   projectRunActiveRuns.set(projectRunId, activeRunCount);
   projectRunAwaitingOutput.set(projectRunId, awaitingOutput);
   if (root && isCurrent(root)) {
-    const nextRunning = projectLifecycle(projectRun);
+    const nextRunning = lifecycleWithDelegates(projectLifecycle(projectRun), tasks);
     if (!sameLifecycle(store.running[root], nextRunning)) {
       changed = true;
       store._setRunning(root, nextRunning);
@@ -1744,6 +1808,7 @@ function needsStandalonePersistenceSync(events: RuntimeEvent[]): boolean {
   // messages/artifacts for each snapshot defeats structural render batching.
   // Message/terminal syncs still load the final raw diff artifact.
   return events.some((event) => event.type === "agent.message"
+    || event.type === "workflow.message"
     || event.type === "session.native_history_synced"
     || event.type === "session.title_changed"
     || (event.type === "artifact.created" && event.payload.kind !== "diff")
@@ -1913,6 +1978,8 @@ function appendRuntimeEvents(
   const tools = new Map<string, number>();
   const commands = new Map<string, number>();
   const approvalRows = new Map<string, number>();
+  const workflowPlanRows = new Map<string, number>();
+  const workflowPlanRuns = new Map<string, number>();
   const pendingCommandApprovals = new Map<string, number>();
   const retryableCommands = new Map<string, number>();
   const latestTool = new Map<string, string>();
@@ -1955,6 +2022,30 @@ function appendRuntimeEvents(
 
   for (const event of events) {
     const runId = String(event.runId ?? "session");
+    if (event.type === "workflow.plan") {
+      const { plan } = event.payload;
+      const data: TimelinePayload = { kind: "workflow_plan", plan };
+      const index = workflowPlanRows.get(plan.id);
+      if (index === undefined) {
+        const inserted = push(event, data);
+        workflowPlanRows.set(plan.id, inserted);
+        if (plan.runId) workflowPlanRuns.set(plan.runId, inserted);
+      } else {
+        timeline[index] = { ...timeline[index], data };
+        if (plan.runId) workflowPlanRuns.set(plan.runId, index);
+      }
+      continue;
+    }
+    if (event.type === "workflow.updated") {
+      const index = workflowPlanRuns.get(event.payload.workflowRunId);
+      if (index !== undefined) {
+        const row = timeline[index];
+        if (row.data.kind === "workflow_plan") {
+          timeline[index] = { ...row, data: { ...row.data, runStatus: event.payload.status } };
+        }
+      }
+      continue;
+    }
     if (event.type === "approval.requested") {
       if (approvalRows.has(event.payload.approvalId)) continue;
       const key = JSON.stringify([event.sessionId, event.projectRunId, event.taskId, event.payload.operation ?? event.payload.summary]);
@@ -2207,6 +2298,7 @@ function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact
         text: message.text,
         messageId: message.id,
         editedAt: message.editedAt,
+        workflowRef: message.workflowRef,
         streaming: message.sender === "agent" && message.nativeIdentity?.turnStatus === "running" && !message.nativeIdentity.completed,
         attachments: [...(message.attachmentIds?.flatMap((id) => {
           const artifact = artifactsById.get(id);
@@ -2435,7 +2527,8 @@ function shouldPollProjectRun(projectRun: ProjectRun): boolean {
     : undefined;
   // The daemon may finalize the project run while delegated child sessions are
   // still working; keep polling while any session of the run is active.
-  return Boolean(activeAgentRunId) || (projectRunActiveRuns.get(projectRun.id) ?? 0) > 0 || shouldPoll(projectRun);
+  const tasks = mainSessionId ? useSessionsStore.getState().tasks[mainSessionId] ?? [] : [];
+  return Boolean(activeAgentRunId) || hasRunningDelegatedTask(tasks) || (projectRunActiveRuns.get(projectRun.id) ?? 0) > 0 || shouldPoll(projectRun);
 }
 
 function shouldPollAgentRun(run: AgentRun): boolean {

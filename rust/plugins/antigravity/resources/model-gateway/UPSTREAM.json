@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/magpie-community/plugins",
+  "commit": "34edf938da4007b4e2990c7449963a4f5be317dc",
+  "path": "packages/agy-cli",
+  "version": "0.1.90",
+  "license": "MIT",
+  "sourceFiles": "upstream/ is copied without model/session/protocol modifications"
+}

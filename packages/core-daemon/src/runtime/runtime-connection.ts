@@ -17,7 +17,7 @@ export function assertConnectionCompatible(connection: RuntimeConnection, agent:
   if (agent.baseArgs.length || agent.profile) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "Independent connections require standard CLI arguments and no CLI profile" });
   if (agent.providerId === "antigravity" && (connection.kind !== "login" || connection.harness !== "antigravity" || !connection.nativeLogin)) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "Select an official Antigravity Google login account" });
   const supported = connection.kind === "login"
-    ? connection.accountGateway===true || connection.harness === agent.providerId && ["codex", "claude-code", "antigravity"].includes(agent.providerId)
+    ? connection.accountGateway===true || connection.harness === agent.providerId && ["codex", "claude-code", "antigravity", "opencode"].includes(agent.providerId)
     : ["responses", "chat", "anthropic"].includes(connection.protocol ?? "");
   if (!supported) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "This harness does not support the selected connection protocol or login identity" });
 }
@@ -28,7 +28,10 @@ export function applyConnection(connection: RuntimeConnection, agent: AgentInsta
   for (const key of ["baseUrl", "apiType", "wireApi", "loginProfileDirectory", "loginProfileLabel", "nativeLogin"]) delete options[key];
   if (connection.kind === "login") {
     if(connection.harness!==agent.providerId){options.accountGateway=true;options.apiType="openai-completions";if(agent.providerId==="codex")options.wireApi="chat";}
-    else if (connection.harness === "antigravity" && connection.nativeLogin) options.nativeLogin = true;
+    else if (["antigravity", "opencode"].includes(connection.harness ?? "") && connection.nativeLogin) {
+      options.nativeLogin = true;
+      if (connection.harness === "opencode" && connection.loginProfileDirectory) options.loginProfileDirectory = connection.loginProfileDirectory;
+    }
     else{options.loginProfileDirectory = connection.loginProfileDirectory!;options.loginProfileLabel = connection.name;}
   } else {
     options.baseUrl = connection.baseUrl!;
@@ -60,6 +63,7 @@ export function bindNewSession(database: Database, session: Session, agent: Agen
 }
 export function connectionEnvironment(connection: RuntimeConnection, agent: AgentInstance, environment: Record<string, string>, credentials?: CredentialService, descriptor?: ProviderDescriptor): Record<string, string> {
   const result = { ...environment };
+  if (connection.kind === "login" && connection.harness === "opencode" && connection.nativeLogin && agent.providerId === "opencode") return isolateLoginProfile(agent, result);
   for (const name of Object.keys(result)) {
     if (["CODEX_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "TRAE_CONFIG_FILE"].includes(name.toUpperCase())) continue;
     if (/^(OPENAI_|CODEX_|ANTHROPIC_|KIMI_|DEEPSEEK_|GEMINI_|GOOGLE_|OPENROUTER_|OPENCODE_|AGENTHUB_PI_|AGENTHUB_OMP_|OMP_AUTH_|COMMAND_CODE_|CMD_|TRAECLI_|TRAE_CLI_|CLAUDE_CODE_(OAUTH|API|USE_|SESSION_ACCESS)|CLAUDE_CONFIG_DIR$|AGENTHUB_API_KEY$)/i.test(name)) delete result[name];

@@ -22,9 +22,9 @@ pub(super) fn connection_snapshot(connection: &Connection) -> Value {
 
 impl RemoteService {
     pub async fn diagnostics(&self) -> Result<Value> {
-        let (endpoint, connections, recent, proxy_source) = {
+        let (endpoint, connections, recent, proxy_source, discovery) = {
             let state = self.state.lock().unwrap();
-            (state.endpoint.clone(),state.connections.values().map(connection_snapshot).collect::<Vec<_>>(),state.recent_connections.clone(),state.http_proxy_source)
+            (state.endpoint.clone(),state.connections.values().map(connection_snapshot).collect::<Vec<_>>(),state.recent_connections.clone(),state.http_proxy_source, state.direct_discovery.clone())
         };
         let mut peers = Vec::new();
         if let Some(endpoint) = endpoint.as_ref() {
@@ -39,7 +39,8 @@ impl RemoteService {
         Ok(json!({"at":crate::errors::now_iso(),"relayMode":self.settings()?.relay_mode,
             "httpProxySource":proxy_source,
             "endpoint":endpoint.as_ref().map(Endpoint::addr),"boundSockets":endpoint.as_ref().map(Endpoint::bound_sockets),
-            "network":endpoint.as_ref().and_then(control::network_diagnostics),
+            "network":endpoint.as_ref().and_then(|endpoint|control::network_diagnostics(endpoint, &discovery)),
+            "directDiscovery":discovery,
             "connections":connections,"recentConnections":recent,"peers":peers}))
     }
 }

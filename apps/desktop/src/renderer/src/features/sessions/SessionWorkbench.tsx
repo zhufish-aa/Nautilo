@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ClipboardList, Users, ListChecks, GitFork, GitBranch, FileDiff, Package, SquareTerminal, Globe } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AnimatePresence } from "framer-motion";
+import { conversationLocations, type ConversationLocation } from "../../lib/conversation-navigation";
+import { ClipboardList } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { TimelineEventView, type TimelineRow, TimelineViewport } from "../timeline/Timeline";
-import { ConversationTurnView } from "../timeline/ConversationTurnView";
+import { ConversationTurnView, isTurnTraceStep, turnEventAlwaysVisible } from "../timeline/ConversationTurnView";
+import { workflowTool } from "../timeline/WorkflowToolActivity";
 import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Composer } from "./Composer";
@@ -13,6 +16,8 @@ import { RunActivityIndicator } from "./RunActivityIndicator";
 import { sessionTargetName } from "./SessionListPanel";
 import { useSessionsStore, SESSION_EMPTY } from "../../stores/sessions";
 import { InteractionCards } from "./InteractionCards";
+import { useInteractionsStore } from "../../stores/interactions";
+import type { InteractionRequest, WorkflowMention } from "@agenthub/domain";
 import { useFilePreviewStore } from "../../stores/file-preview";
 import { useProjectsStore } from "../../stores/projects";
 import { useTeamsStore } from "../../stores/teams";
@@ -29,20 +34,32 @@ import { cachedChangedFileCount } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
 import { TodoGoalCard } from "./TodoGoalCard";
+import { SessionWorkspaceMenu } from "./SessionWorkspaceMenu";
 import { BrowserDrawer } from "./BrowserDrawer";
 import { getBridge, requestCore } from "../../lib/bridge";
 import { SourceControlDrawer } from "./SourceControlDrawer";
+import { WorkflowExecutionDrawer } from "./WorkflowExecutionDrawer";
+import { WorkflowDispatchCard } from "../workflows/WorkflowDispatchCard";
+import { WorkflowDispatchContext, useWorkflowDispatches } from "../workflows/workflow-dispatch";
 import { useCoreFeatures } from "../../lib/use-core-features";
 import { toast } from "../../stores/toast";
 
 const pendingTitles = new Map<string, Promise<{ title?: string }>>();
 
-export type DrawerKind = "terminal" | "artifacts" | "dag" | "source-control" | "browser" | null;
+export type DrawerKind = "terminal" | "artifacts" | "dag" | "source-control" | "browser" | "workflow" | null;
 
 // Stable fallbacks: `?? []` inside a selector would return a fresh array on
 // every store update and re-render subscribers of empty sessions each token.
 const NO_EVENTS: TimelineEvent[] = [];
+const NO_INTERACTIONS: InteractionRequest[] = [];
 const NO_TASKS: never[] = [];
+
+function estimateShortMessageHeight(event: TimelineEvent): number | undefined {
+  const { data } = event;
+  if (data.kind !== "message" || data.sender === "system" || data.attachments?.length || data.workflowRef
+    || data.text.length > 36 || /[\r\n]/.test(data.text)) return undefined;
+  return data.sender === "user" ? 71 : 50;
+}
 
 function DelegatedTaskCard({ task }: { task: SessionTask }): JSX.Element {
   const { t } = useI18n();
@@ -93,7 +110,8 @@ export function SessionWorkbench({
   headerActions,
   onOpenLocalFile,
   onToggleAgents,
-  agentsOpen = false
+  agentsOpen = false,
+  focusKey
 }: {
   sessionId: string;
   /** False while the page is kept alive but hidden; gates side effects. */
@@ -110,10 +128,18 @@ export function SessionWorkbench({
   onOpenLocalFile?: (path: string) => void;
   onToggleAgents?: () => void;
   agentsOpen?: boolean;
+  focusKey?: string;
 }): JSX.Element {
   const { t, locale } = useI18n();
+  const navigationLocations = useRef<ConversationLocation[]>([]);
+  const [turnExpansions, setTurnExpansions] = useState<Record<string, { completed: boolean; open: boolean }>>({});
   const coreFeatures = useCoreFeatures();
+  const interactions = useInteractionsStore(state => state.bySession[sessionId] ?? NO_INTERACTIONS);
+  const loadInteractions = useInteractionsStore(state => state.loadPending);
+  useEffect(() => { if (active) void loadInteractions(sessionId); }, [sessionId, active, loadInteractions]);
   const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
+  const activeAgentRunId = useSessionsStore(state => state.activeAgentRunIds[sessionId]);
+  const workflowDispatches = useWorkflowDispatches(sessionId, active && Boolean(session?.parentSessionId), activeAgentRunId, session?.status);
   const events = useSessionsStore((state) => state.events[sessionId] ?? NO_EVENTS);
   const extensionUi = useMemo(() => providerUiState(events), [events]);
   const nativeTerminal = useNativeTerminalState(sessionId, active);
@@ -192,9 +218,11 @@ export function SessionWorkbench({
 
   // File the artifacts drawer should focus when opened via a "view diff" entry.
   const [diffFocusPath, setDiffFocusPath] = useState<string | null>(null);
+  const [workflowInspection, setWorkflowInspection] = useState<{ sessionId: string; runId: string }>();
   // Dispatch card currently opened in the sub-agent detail drawer.
   const [subagentEventId, setSubagentEventId] = useState<string>();
   const [showTodos, setShowTodos] = useState(false);
+  const workspaceTrigger = useRef<HTMLButtonElement>(null);
   useEffect(() => { setShowTodos(false); setSubagentEventId(undefined); }, [sessionId]);
 
   // Only the numeric badge is subscribed. Streaming text in another session
@@ -212,7 +240,7 @@ export function SessionWorkbench({
   // virtual rows instead of swallowing intermediate assistant messages.
 
   const handleEditMessage = useCallback(
-    (messageId: string, text: string): void => startEditingMessage(sessionId, messageId, text),
+    (messageId: string, text: string, workflowRef?: WorkflowMention): void => startEditingMessage(sessionId, messageId, text, workflowRef),
     [sessionId, startEditingMessage]
   );
   const handleOpenSubagent = useCallback((eventId: string): void => {
@@ -224,6 +252,14 @@ export function SessionWorkbench({
     (path?: string): void => { setDiffFocusPath(path ?? null); onOpenDrawer("artifacts"); },
     [onOpenDrawer]
   );
+  const handleOpenWorkflow = useCallback((runId: string): void => {
+    setWorkflowInspection({ sessionId, runId });
+    onOpenDrawer("workflow");
+  }, [sessionId, onOpenDrawer]);
+  const openWorkflowConversation = useCallback((id: string): void => {
+    onCloseDrawer();
+    if (id !== sessionId) onOpenSession(id);
+  }, [onCloseDrawer, onOpenSession, sessionId]);
 
   if (!session) return <div className="flex-1" />;
 
@@ -248,29 +284,75 @@ export function SessionWorkbench({
   const visibleStatus = visibleSessionStatus(session.status, orchestrationLifecycle);
   const project = projects.find((item) => item.id === session.projectId);
   const targetName = sessionTargetName(session, teams, instances);
-  const hasPlan = tasks.length > 0;
+  const bridge = getBridge();
+  const toggleDrawer = (view: Exclude<DrawerKind, null>): void => onOpenDrawer(drawer === view ? null : view);
+  const browserWindows = drawer !== "browser" ? bridge?.panels : undefined;
+  const browserAction = browserWindows
+    ? { external: true, run: () => { void browserWindows.open({ kind: "browser", sessionId }).catch(error => toast.error(String(error))); } }
+    : { checked: drawer === "browser", run: () => toggleDrawer("browser") };
   // Event IDs are stable across streaming patches. Only the changed row
   // updates; completed Markdown and closed tool details stay untouched.
-  const shell = (key: string, node: ReactNode): TimelineRow => ({
-    key,
-    render: () => (
-      <div className="conversation-message-row mx-auto w-full max-w-3xl px-5 py-2 sm:px-8">
-        {node}
+  type StepLinks = { turnId: string; before: boolean; after: boolean };
+  type WorkbenchRow = TimelineRow & { step?: StepLinks };
+  const shell = (key: string, node: ReactNode, { process = false, result = false, stepTurn, estimatedHeight }: {
+    process?: boolean; result?: boolean; stepTurn?: string; estimatedHeight?: number;
+  } = {}): WorkbenchRow => {
+    const step = stepTurn === undefined ? undefined : { turnId: stepTurn, before: false, after: false };
+    return { key, result, step, estimatedHeight: estimatedHeight ?? (step ? 30 : undefined), render: () => (
+      <div className={`conversation-message-row mx-auto w-full max-w-3xl px-5 ${process ? "py-0.5" : "py-2"} sm:px-8`}
+        data-trace-step={step ? true : undefined}>
+        {step ? <div className="conversation-process-row" data-turn-id={step.turnId} data-trace-step
+          data-trace-prev={step.before || undefined} data-trace-next={step.after || undefined}>{node}</div> : node}
       </div>
-    )
-  });
-  const timelineRows: TimelineRow[] = [];
+    ) };
+  };
+  const timelineRows: WorkbenchRow[] = [];
+  const requests = interactions.filter(item => item.kind === "question" || item.status === "pending").sort((a,b) => a.createdAt.localeCompare(b.createdAt));
+  let nextRequest = 0;
+  const addInteractions = (before: string): void => {
+    while (nextRequest < requests.length && requests[nextRequest].createdAt <= before) {
+      const request = requests[nextRequest++];
+      timelineRows.push(shell(`interaction:${request.id}`, <InteractionCards sessionId={sessionId} interactionId={request.id}/>));
+    }
+  };
   if (delegatedTask) timelineRows.push(shell("delegated", <DelegatedTaskCard task={delegatedTask} />));
-  const timelineActions = { onEditMessage: handleEditMessage, onViewDiff: handleViewDiff, onOpenSession, onOpenSubagent: handleOpenSubagent, onOpenLocalFile };
+  const timelineActions = { onEditMessage: handleEditMessage, onViewDiff: handleViewDiff, onOpenSession, onOpenSubagent: handleOpenSubagent, onOpenWorkflow: handleOpenWorkflow, onOpenLocalFile };
   conversationRows(visibleEvents, workbenchRunning).forEach((row) => {
-    timelineRows.push(row.kind === "event"
-      ? shell(row.event.id, <TimelineEventView event={row.event} {...timelineActions} />)
-      : shell(row.turn.id, <ConversationTurnView turn={row.turn} {...timelineActions} />));
+    if (row.kind === "event") {
+      addInteractions(row.event.timestamp);
+      timelineRows.push(shell(row.event.id, <TimelineEventView event={row.event} {...timelineActions} />, {
+        result: row.event.data.kind === "message" && row.event.data.sender === "agent" && !row.event.data.streaming,
+        estimatedHeight: estimateShortMessageHeight(row.event),
+      }));
+      return;
+    }
+    const turn = row.turn;
+    const key = `${sessionId}:${turn.id}`;
+    const choice = turnExpansions[key];
+    const expanded = choice?.completed === turn.completed ? choice.open : !turn.completed;
+    timelineRows.push(shell(turn.id, <ConversationTurnView turn={turn} {...timelineActions} summaryOnly expanded={expanded}
+      onToggle={() => setTurnExpansions(previous => Object.fromEntries([
+        ...Object.entries(previous).filter(([id]) => id !== key), [key, { completed: turn.completed, open: !expanded }]
+      ].slice(-500)))} />, { estimatedHeight: 65 }));
+    // A single turn may contain hundreds of activities. Each visible activity
+    // participates in the viewport's one virtualizer, rather than one huge row.
+    for (const event of turn.events) {
+      addInteractions(event.timestamp);
+      if (!expanded && !turnEventAlwaysVisible(turn, event)) continue;
+      const content = <TimelineEventView event={event} {...timelineActions} showAuthor={false} />;
+      const result = event === turn.result;
+      if (isTurnTraceStep(event)) timelineRows.push(shell(event.id, content, {
+        process: true, stepTurn: turn.id, estimatedHeight: event.data.kind === "tool_activity" && workflowTool(event.data.toolName) ? 38 : undefined,
+      }));
+      else timelineRows.push(shell(event.id, <div className={result ? "conversation-result" : "conversation-process-row"} data-turn-id={turn.id}>{content}</div>, {
+        process: !result, result, estimatedHeight: estimateShortMessageHeight(event),
+      }));
+    }
   });
   if (workbenchRunning) timelineRows.push(shell("live-activity", (
     <RunActivityIndicator lifecycle={visibleLifecycle} events={visibleEvents} waitingForDelegates={waitingForDelegates} />
   )));
-  timelineRows.push(shell("interactions", <InteractionCards sessionId={sessionId} />));
+  addInteractions("\uffff");
   if (events.length === 0 && !workbenchRunning) {
     timelineRows.push(shell("empty", (
       <p className="py-16 text-center text-xl font-medium tracking-tight text-ink">
@@ -278,11 +360,21 @@ export function SessionWorkbench({
       </p>
     )));
   }
+  // Connect neighbors after inserting interaction cards, so a rail never crosses a separate card or a turn boundary.
+  let previousStep: StepLinks | undefined;
+  for (const { step } of timelineRows) {
+    if (step && previousStep?.turnId === step.turnId) {
+      previousStep.after = true;
+      step.before = true;
+    }
+    previousStep = step;
+  }
+  navigationLocations.current = conversationLocations(visibleEvents, timelineRows, navigationLocations.current);
 
   return (
     <div className="conversation-workspace relative flex h-full min-h-0 min-w-0 flex-1">
       <div className="session-chat-column relative flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="workspace-conversation-header relative flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-3 sm:px-7">
+      <header className="workspace-conversation-header relative flex min-h-14 shrink-0 items-center justify-between gap-x-3 px-5 py-3 sm:px-7">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <h1 title={`${project?.name ?? ""} · ${targetName}`} className="truncate text-[15px] font-medium text-ink">{session.title || t("sessions.header.untitled")}</h1>
@@ -295,56 +387,55 @@ export function SessionWorkbench({
           </div>
 
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {todoGoal && (
-            <Button variant="ghost" size="icon" aria-label={t("sessions.todo.goal")} title={t("sessions.todo.goal")} aria-pressed={showTodos} onClick={() => setShowTodos((open) => !open)}>
-              <ListChecks className="h-4 w-4" aria-hidden />
-            </Button>
-          )}
-          {hasPlan && (
-            <Button variant="ghost" size="icon" title={t("sessions.header.dag")} aria-label={t("sessions.header.dag")} onClick={() => onOpenDrawer("dag")}>
-              <GitFork className="h-4 w-4" aria-hidden />
-            </Button>
-          )}
-          {changedFileCount > 0 && (
-            <Button variant="ghost" size="sm" onClick={() => { setDiffFocusPath(null); onOpenDrawer("artifacts"); }}>
-              <FileDiff className="h-4 w-4" aria-hidden />
-              {t("sessions.header.changes")}
-              <span className="ml-0.5 rounded-full bg-card-hover px-1.5 py-px text-[11px] font-medium text-ink-2">{changedFileCount}</span>
-            </Button>
-          )}
-          {(
-            <Button variant="ghost" size="icon" title={t("sessions.header.artifacts")} aria-label={t("sessions.header.artifacts")} onClick={() => onOpenDrawer("artifacts")}>
-              <Package className="h-4 w-4" aria-hidden />
-            </Button>
-          )}
-          {(
-            <Button variant="ghost" size="icon" title={t("sessions.header.terminal")} aria-label={t("sessions.header.terminal")} onClick={() => onOpenDrawer("terminal")}>
-              <SquareTerminal className="h-4 w-4" aria-hidden />
-            </Button>
-          )}
-          {coreFeatures.sourceControl === 1 && <Button variant="ghost" size="sm" title={locale === "zh-CN" ? "源码管理" : "Source control"} aria-label={locale === "zh-CN" ? "源码管理" : "Source control"} onClick={() => onOpenDrawer("source-control")}><GitBranch className="h-4 w-4" aria-hidden /><span>Git</span></Button>}
-          {getBridge()?.browser && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "浏览器" : "Browser"} aria-label={locale === "zh-CN" ? "浏览器" : "Browser"} onClick={() => {
-            const panels = getBridge()?.panels;
-            if (panels) void panels.open({kind:"browser",sessionId}).then(() => onCloseDrawer()).catch(error => toast.error(String(error)));
-            else onOpenDrawer("browser");
-          }}><Globe className="h-4 w-4" aria-hidden /></Button>}
+        <div className="flex shrink-0 items-center gap-2">
           {headerActions}
-          {onToggleAgents && <Button variant="ghost" size="icon" title={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} aria-label={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} aria-pressed={agentsOpen} aria-expanded={agentsOpen} aria-controls={agentsOpen ? "session-agent-inspector" : undefined} onClick={onToggleAgents}>
-            <Users className="h-4 w-4" aria-hidden />
-          </Button>}
+          {active && <SessionWorkspaceMenu key={sessionId} trigger={workspaceTrigger} project={project}
+            openFolder={bridge?.shell && project?.rootPath ? () => {
+              void bridge.shell.openPath(project.rootPath).then(error => { if (error) toast.error(error); }).catch(error => toast.error(String(error)));
+            } : undefined}
+            actions={{
+              terminal: { checked: drawer === "terminal", run: () => toggleDrawer("terminal") },
+              browser: bridge?.browser ? browserAction : undefined,
+              "source-control": coreFeatures.sourceControl === 1 ? { checked: drawer === "source-control", run: () => toggleDrawer("source-control") } : undefined,
+              artifacts: {
+                checked: drawer === "artifacts", detail: changedFileCount > 0 ? String(changedFileCount) : undefined,
+                run: () => { setDiffFocusPath(null); toggleDrawer("artifacts"); }
+              },
+              goals: todoGoal ? {
+                checked: showTodos, detail: `${todoGoal.filter(item => item.status === "done").length}/${todoGoal.length}`,
+                run: () => {
+                  if (agentsOpen && !session.target.teamId) onToggleAgents?.();
+                  setShowTodos(open => !open);
+                }
+              } : undefined,
+              dag: tasks.length > 0 ? { checked: drawer === "dag", detail: String(tasks.length), run: () => toggleDrawer("dag") } : undefined,
+              workflows: coreFeatures.workflows === 1 && !session.parentSessionId ? { run: () => {
+                const query = new URLSearchParams({ session: sessionId });
+                void requestCore<Array<{ id: string }>>("workflow.list", { sessionId }).then(runs => {
+                  if (runs[0]) query.set("run", runs[0].id);
+                  window.location.hash = "#/workflows?" + query;
+                }).catch(error => toast.error(String(error)));
+              } } : undefined,
+              agents: onToggleAgents ? { checked: agentsOpen, run: onToggleAgents } : undefined
+            }} />}
         </div>
       </header>
 
+      {workflowDispatches.dispatches.length > 0 && <WorkflowDispatchCard key={sessionId} dispatches={workflowDispatches.dispatches} zh={locale === "zh-CN"} />}
       <div className="relative min-h-0 flex-1" data-run-state={waitingForApproval ? "waiting" : workbenchRunning ? "running" : session.status === "failed" ? "failed" : "idle"}>
-      <TimelineViewport
+      <WorkflowDispatchContext.Provider value={workflowDispatches}><TimelineViewport
+        focusKey={focusKey}
         rows={timelineRows}
         sessionKey={sessionId}
         contentKey={visibleEvents}
         forceFollowKey={lastUserMessageId}
+        locations={navigationLocations.current}
         active={active}
-      />
-      {todoGoal && showTodos && <TodoGoalCard todos={todoGoal} />}
+      /></WorkflowDispatchContext.Provider>
+      {todoGoal && showTodos && <TodoGoalCard todos={todoGoal} onClose={() => {
+        setShowTodos(false);
+        workspaceTrigger.current?.focus({ preventScroll: true });
+      }} />}
       </div>
 
       {(extensionUi.title || extensionUi.widgets.length > 0 || extensionUi.statuses.length > 0) && <div className="mx-auto w-full max-w-[1000px] shrink-0 px-5 pb-2 text-[13px] leading-5 text-ink-2" aria-label={extensionUi.title || "Extension status"} aria-live="polite">
@@ -365,6 +456,10 @@ export function SessionWorkbench({
       {<ArtifactsDrawer open={drawer === "artifacts" && active} onClose={onCloseDrawer} sessionId={sessionId} focusPath={diffFocusPath} />}
       {drawer === "browser" && active && getBridge()?.browser && <BrowserDrawer key={sessionId} sessionId={sessionId} onClose={onCloseDrawer} />}
       <SourceControlDrawer open={drawer === "source-control" && active && coreFeatures.sourceControl === 1} onClose={onCloseDrawer} sessionId={sessionId} projectId={project?.id} />
+      <AnimatePresence initial={false}>
+        {drawer === "workflow" && active && workflowInspection?.sessionId === sessionId && <WorkflowExecutionDrawer
+          key={workflowInspection.runId} runId={workflowInspection.runId} onClose={onCloseDrawer} onOpenSession={openWorkflowConversation} />}
+      </AnimatePresence>
       <DagDrawer open={drawer === "dag"} onClose={onCloseDrawer} tasks={tasks} />
       <SubagentDrawer open={!!subagentEventId} onClose={() => setSubagentEventId(undefined)} sessionId={sessionId} eventId={subagentEventId} />
     </div>

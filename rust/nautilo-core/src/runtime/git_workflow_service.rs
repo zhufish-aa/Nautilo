@@ -17,6 +17,10 @@ use crate::runtime::event_service::EventService;
 use crate::runtime::git::{change_collector, merge_queue, path_policy, repository_service, worktree_service::WorktreeService};
 use crate::runtime::verification_engine::{VerificationContext, VerificationEngine};
 
+#[path = "git_workflow_service/workflow.rs"]
+mod workflow;
+pub use workflow::WorkflowCheck;
+
 pub struct GitWorkflowService {
     db: Arc<Mutex<Database>>,
     events: Arc<EventService>,
@@ -424,7 +428,9 @@ impl GitWorkflowService {
                     task_id: task_owned,
                     session_id: session.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
                     scope: scope.to_string(),
-                    template_ids,
+                    template_ids: template_ids.filter(|ids|!ids.is_empty()),
+                    cancelled: None,
+                    workflow: None,
                     on_started: Some(Box::new(move |template, verification_id| {
                         let _ = events.append_for_session(
                             &session,

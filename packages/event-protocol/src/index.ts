@@ -5,7 +5,8 @@ import type {
   ProjectId,
   ProjectRunId,
   SessionId,
-  TaskId
+  TaskId,
+  WorkflowPlan
 } from "@agenthub/domain";
 
 export interface CodeExecution {
@@ -16,6 +17,9 @@ export interface CodeExecution {
 }
 
 export type RuntimeEventType =
+  | "workflow.updated"
+  | "workflow.plan"
+  | "workflow.message"
   | "run.started"
   | "run.diff_updated"
   | "agent.status"
@@ -86,6 +90,9 @@ export interface SubagentDispatch {
 }
 
 export interface RuntimeEventPayloadMap {
+  "workflow.updated": { workflowRunId: string; status: string };
+  "workflow.plan": { plan: WorkflowPlan };
+  "workflow.message": { workflowRunId: string; message: unknown };
   "session.title_changed": { title: string };
   "session.native_history_synced": { providerSessionId: string; messageIds: string[]; messageCount: number };
   "provider.runtime_closed": { providerId: string; exitCode?: number | null; signal?: string | null };
@@ -213,6 +220,8 @@ export interface RuntimeEventPayloadMap {
     additions?: number;
     deletions?: number;
     diff?: string;
+    fileSnapshot?: { before?: string; after?: string; truncated?: boolean };
+    callId?: string;
   };
   "approval.requested": {
     approvalId: string;

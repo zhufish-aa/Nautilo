@@ -3,6 +3,10 @@ use crate::errors::now_iso;
 use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
+mod usage;
+mod teams;
+mod team_tasks;
+mod workspace;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -100,6 +104,7 @@ impl RemoteRepository {
         let mut input = json!({});
         for field in [
             "projectId",
+            "teamId",
             "memberId",
             "agentInstanceId",
             "connectionId",
@@ -128,7 +133,8 @@ impl RemoteRepository {
             .filter(|v| v["enabled"] == true)
             .map(|v| json!({"id":v["id"],"name":v["name"],"kind":v["kind"],"harness":v["harness"]}))
             .collect::<Vec<_>>();
-        Ok(json!({"agents":agents,"connections":connections}))
+        drop(db);
+        Ok(json!({"agents":agents,"connections":connections,"teams":self.mobile_teams()?}))
     }
     pub fn mobile_session_input(&self, params: &Value) -> Result<Value> {
         let db = self.db.lock().unwrap();
@@ -166,6 +172,8 @@ impl RemoteRepository {
             input["connectionId"] = json!(connection);
             input["connectionRevision"] = value["revision"].clone();
         }
+        drop(db);
+        self.mobile_select_team(&mut input, params)?;
         Ok(input)
     }
     pub fn mobile_mode_context(&self, agent_id: &str, project_id: Option<&str>) -> Result<Value> {
@@ -198,6 +206,7 @@ impl RemoteRepository {
         let agent_id = crate::application::session_service::effective_agent_id(&db.raw, &session)?;
         let agent = repos.agents().get(&agent_id)?.unwrap_or(json!({}));
         let mut config = json!({"id":id});
+        config["hasNativeSession"] = json!(session["providerSessionId"].as_str().is_some_and(|id| !id.is_empty()));
         config["modeLocked"] = json!(db.raw.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?1 AND json_extract(data,'$.sender')='user')", [id], |r| r.get::<_,bool>(0))?);
         for field in [
             "title",
@@ -209,6 +218,9 @@ impl RemoteRepository {
             "projectId",
             "connectionId",
             "connectionRevision",
+            "teamId",
+            "parentSessionId",
+            "projectRunId",
         ] {
             if let Some(value) = session.get(field) {
                 config[field] = value.clone();
@@ -228,77 +240,12 @@ impl RemoteRepository {
             .map(|m| json!({"id":m["id"],"name":m["displayName"],"model":m["model"]}))
             .collect::<Vec<_>>();
         Ok(
-            json!({"session":config,"agent":{"id":agent_id,"name":agent["displayName"],"providerId":agent["providerId"]},"members":members}),
+            json!({"session":config,"team":team.as_ref().map(|team| json!({"id":team["id"],"name":team["name"],"delegationPolicy":team["delegationPolicy"]})),"agent":{"id":agent_id,"name":agent["displayName"],"providerId":agent["providerId"]},"members":members}),
         )
     }
-    /// Bounded native event projection. It exposes only observed file changes.
+    /// Bounded projection of observed native file changes.
     pub fn workspace_changes(&self, session: &str) -> Result<Value> {
-        let db = self.db.lock().unwrap();
-        let mut statement = db.raw.prepare("SELECT data FROM runtime_events WHERE session_id=?1 AND json_extract(data,'$.type') IN ('file.changed','tool.started','tool.finished','run.diff_updated','git.diff_collected') ORDER BY sequence DESC LIMIT 2000")?;
-        let values = statement
-            .query_map([session], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut files = std::collections::BTreeMap::<String, Value>::new();
-        for raw in values.iter().rev() {
-            let event: Value = serde_json::from_str(raw)?;
-            let payload = &event["payload"];
-            if let Some(diff) = payload
-                .get("fileDiff")
-                .filter(|d| ["edit", "write"].contains(&d["operation"].as_str().unwrap_or("")))
-            {
-                if let Some(path) = diff["path"].as_str() {
-                    let entry = files
-                        .entry(path.into())
-                        .or_insert_with(|| json!({"path":path,"before":diff["before"]}));
-                    entry["after"] = diff["after"].clone();
-                    entry["truncated"] = diff["truncated"].clone();
-                }
-            }
-            if event["type"] == "file.changed" {
-                if let Some(path) = payload["path"].as_str() {
-                    files.insert(path.into(), json!({"path":path,"patch":payload["diff"],"changeType":payload["changeType"]}));
-                }
-            }
-            if let Some(patch) = payload["diff"]
-                .as_str()
-                .filter(|_| event["type"] == "run.diff_updated")
-            {
-                let mut path = String::new();
-                let mut section = String::new();
-                for line in patch.lines() {
-                    if line.starts_with("diff --git ") {
-                        if !path.is_empty() {
-                            files.insert(path.clone(), json!({"path":path,"patch":section}));
-                        }
-                        path.clear();
-                        section.clear();
-                    }
-                    if let Some(next) = line.strip_prefix("+++ b/") {
-                        path = next.into();
-                    }
-                    if path.is_empty() {
-                        if let Some(previous) = line.strip_prefix("--- a/") {
-                            path = previous.into();
-                        }
-                    }
-                    section.push_str(line);
-                    section.push('\n');
-                }
-                if !path.is_empty() {
-                    files.insert(path.clone(), json!({"path":path,"patch":section}));
-                }
-            }
-        }
-        let mut used = 0usize;
-        let changes = files
-            .into_values()
-            .take(100)
-            .take_while(|v| {
-                used += v.to_string().len();
-                used < 2_000_000
-            })
-            .collect::<Vec<_>>();
-        Ok(json!({"files":changes}))
+        workspace::read(&self.db.lock().unwrap().raw, session)
     }
     /// A durable reservation prevents repeating a mutation after a lost reply or restart.
     /// Pending reservations are deliberately retained when the outcome is uncertain.
@@ -467,12 +414,13 @@ impl RemoteRepository {
             activity.push(serde_json::from_str::<Value>(&raw)?);
         }
         activity.reverse();
+        let usage = usage::read(&snapshot, session, sequence)?;
         drop(activity_query);
         drop(run_query);
         drop(query);
         snapshot.commit()?;
         Ok(
-            json!({"items":items,"before":next,"sequence":sequence,"epoch":epoch,"activity":activity}),
+            json!({"items":items,"before":next,"sequence":sequence,"epoch":epoch,"activity":activity,"usage":usage}),
         )
     }
     pub fn events(&self, session: &str, after: i64, limit: usize) -> Result<Value> {

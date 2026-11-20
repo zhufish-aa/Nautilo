@@ -79,7 +79,7 @@ async fn open(mut request: AdapterStartRequest, resume: Option<&str>) -> anyhow:
         "claude-code",
         tools,
         Some(execute),
-        Some(permission),
+        if request.instance["providerOptions"]["accountModelRelay"]==true {None} else {Some(permission)},
     )?);
     let mut args = match resume {
         Some(id) => {
@@ -155,19 +155,20 @@ pub fn launch(request: AdapterStartRequest, resume: Option<String>) -> CoreResul
             resume,
             sender.clone(),
             process_slot,
-            cancel_flag,
+            cancel_flag.clone(),
             outstanding,
         )
         .await;
-        if let Err(error) = &result {
-            let _ = sender.send(AdapterEvent::Error {
-                message: error.to_string(),
-            });
+        let was_cancelled = cancel_flag.load(Ordering::Acquire);
+        if !was_cancelled {
+            if let Err(error) = &result {
+                let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
+            }
         }
         done.send_replace(true);
         let _ = sender.send(AdapterEvent::Exit {
-            exit_code: Some(if result.is_ok() { 0 } else { 1 }),
-            signal: None,
+            exit_code: Some(if was_cancelled { 130 } else if result.is_ok() { 0 } else { 1 }),
+            signal: was_cancelled.then(|| "cancelled".into()),
         });
     });
     let cancel_slot = slot.clone();
@@ -195,9 +196,12 @@ pub fn launch(request: AdapterStartRequest, resume: Option<String>) -> CoreResul
 }
 
 fn user_frame(request: &AdapterStartRequest) -> anyhow::Result<String> {
+    let content=if request.instance["providerOptions"]["accountModelRelay"]==true {
+        request.instance["providerOptions"]["accountRelayContentBlocks"].clone()
+    } else {serde_json::json!(crate::adapters::images::prompt_blocks(request,true)?)};
     Ok(format!(
         "{}\n",
-        json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),"message":{"role":"user","content":crate::adapters::images::prompt_blocks(request,true)?}})
+        json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),"message":{"role":"user","content":content}})
     ))
 }
 
@@ -211,7 +215,12 @@ async fn run(
 ) -> anyhow::Result<()> {
     let attached = std::time::Instant::now();
     let mut reused = false;
-    let wire = crate::adapters::start_request_to_json(&request);
+    let mut reason = "first_use";
+    let mut wire = crate::adapters::start_request_to_json(&request);
+    // Per-turn content is input, never part of the resident configuration key.
+    if request.instance["providerOptions"]["accountModelRelay"]==true {
+        if let Some(options)=wire["instance"]["providerOptions"].as_object_mut(){options.remove("accountRelayContentBlocks");}
+    }
     let identity = agenthub_plugin_sdk::session_pool::identity(&wire);
     let key = request
         .local_session_id
@@ -228,8 +237,11 @@ async fn run(
                 .is_some_and(|process| process.handle.is_alive())
         {
             reused = true;
+            reason = "resident";
             native
         } else {
+            reason = if old != identity { "configuration_changed" }
+                else if native.session_id != resume { "session_changed" } else { "process_exited" };
             native.close().await;
             open(request.clone(), resume.as_deref()).await?
         }
@@ -240,7 +252,7 @@ async fn run(
     native.process.as_ref().unwrap().events.pause().await;
     let handle = native.process.as_ref().unwrap().handle.clone();
     *slot.lock().unwrap() = Some(handle.clone());
-    let _=sender.send(AdapterEvent::Status{phase:"runtime_ready".into(),raw:Some(json!({"providerId":"claude-code","transport":"stream-json","reused":reused,"pid":handle.pid,"attachMs":attached.elapsed().as_millis()}))});
+    let _=sender.send(AdapterEvent::Status{phase:"runtime_ready".into(),raw:Some(json!({"providerId":"claude-code","transport":"stream-json","reused":reused,"reason":reason,"pid":handle.pid,"attachMs":attached.elapsed().as_millis()}))});
     if cancelled.load(Ordering::Acquire) {
         native.close().await;
         anyhow::bail!("Claude startup was cancelled");

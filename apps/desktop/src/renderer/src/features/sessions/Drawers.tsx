@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
+import { AnimatePresence } from "framer-motion";
 import { Bot, FileText, Loader2, SquareTerminal, TerminalSquare } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { collectChangedFiles, type ChangedFileEntry } from "../../lib/changed-files";
@@ -389,8 +390,6 @@ export function ArtifactsDrawer({
     if (file) { setSelectedId(file.id); focusedRequest.current = request; }
   }, [open, focusPath, sessionId, reviewFiles]);
 
-  if (!open) return <></>;
-
   const comparisonArtifacts = [
     ...artifacts,
     ...sessions.filter((item) => item.parentSessionId === sessionId)
@@ -407,8 +406,8 @@ export function ArtifactsDrawer({
     ...sessions.filter(item => item.parentSessionId === sessionId).flatMap(item => allArtifacts[item.id] ?? [])
   ];
 
-  return (
-    <Drawer open={open} onClose={onClose} title={locale === "zh-CN" ? "文件更改" : "File changes"} defaultWidth={1200} defaultMaximized hideHeader className="change-review-drawer">
+  return <AnimatePresence initial={false}>
+    {open && <Drawer key={sessionId ?? "current"} open={open} onClose={onClose} title={locale === "zh-CN" ? "文件更改" : "File changes"} defaultWidth={1200} defaultMaximized hideHeader animateReview className="change-review-drawer">
       <ChangeReview key={sessionId ?? "current"} groups={changeGroups} projectRoot={projectRoot} sessionId={sessionId}
         selectedIndex={selectedFile} onSelect={index => setSelectedId(reviewFiles[index]?.id)} onClose={onClose}
         editor={editor} onEditorChange={value => setEditor(current => current ? { ...current, value } : current)}
@@ -423,8 +422,8 @@ export function ArtifactsDrawer({
         </>}
 
       />
-    </Drawer>
-  );
+    </Drawer>}
+  </AnimatePresence>;
 }
 
 /* ---------------------------------------------------------------------------

@@ -367,7 +367,7 @@ class ConfigurationWindowTest {
         compose.setContent {
             val view = LocalView.current
             SideEffect { nativeRoot = view.rootView }
-            NautiloTheme { AssistantTurn(current.value) }
+            NautiloTheme { AssistantTurn(current.value) { InteractionCard(it, true, model) } }
         }
         fun findMarkdown(view: View): MarkdownView? {
             if (view is MarkdownView) return view
@@ -447,7 +447,7 @@ class ConfigurationWindowTest {
     @Test fun newSessionOverviewHasWorkingFooterInTheRealWindow() {
         var done = false
         compose.setContent { NautiloTheme { NSheet({}) {
-            NewConversationSettingsContent("DeepSeek Harness", "原生配置", "DeepSeek V4", "最高", true, {}, { done = true }, {})
+            NewConversationSettingsContent("DeepSeek Harness", "原生配置", "DeepSeek V4", "最高", true, cancel = {}, done = { done = true }, choose = {})
         } } }
         assertButtonWithinActualWindow("new-config-cancel")
         assertButtonWithinActualWindow("new-config-apply")

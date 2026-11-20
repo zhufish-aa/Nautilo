@@ -1,5 +1,6 @@
 import { RuntimeConnectionRepository } from "./runtime-connection-repository.js";
 import { DatabaseConnection } from "./connection.js";
+import { ComposerDraftRepository } from "./composer-draft-repository.js";
 import { migrateDatabase } from "./migrations.js";
 import { AgentRepository } from "./agent-repository.js";
 import { EventRepository } from "./event-repository.js";
@@ -23,6 +24,7 @@ import type { ConfigurationPreset, IntegrationSettings, ResourceSyncPlan } from 
 /** Composition root for persistence. It exposes repositories, not SQL. */
 export class Database {
   readonly connection: DatabaseConnection;
+  readonly composerDrafts: ComposerDraftRepository;
   readonly projects: ProjectRepository;
   readonly agents: AgentRepository;
   readonly runtimeConnections: RuntimeConnectionRepository;
@@ -46,6 +48,7 @@ export class Database {
   constructor(filePath: string) {
     this.connection = new DatabaseConnection(filePath);
     migrateDatabase(this.connection.raw);
+    this.composerDrafts = new ComposerDraftRepository(this.connection.raw);
     // One-time compaction: drop verbatim message deltas journaled by older
     // builds (writes are coalesced now, and message text also lives in the
     // final agent.message event). Thinking deltas are NOT purged here — they

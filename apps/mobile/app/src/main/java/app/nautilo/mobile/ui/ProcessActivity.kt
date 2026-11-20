@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -38,7 +39,7 @@ import org.json.JSONObject
     val output = p.text("outputSummary")
     val status = activityStatus(item)
     when {
-        item.kind == "thought" -> ProcessDisclosure(item.id, "思考", reasoningPreview(item.detail, item.running), Icons.Outlined.Psychology, item.running) { Markdown(item.detail, fontSize = 14f, lineHeight = 23f, color = Secondary) }
+        item.kind == "thought" -> ProcessDisclosure(item.id, "思考", reasoningPreview(item.detail), Icons.Outlined.Psychology, item.running, followPreviewTail = true) { Markdown(item.detail, fontSize = 14f, lineHeight = 23f, color = Secondary) }
         p.optJSONObject("subagent") != null || item.kind == "team" -> DelegationActivity(item)
         p.optJSONObject("codeExecution") != null || item.title == "run_code" -> CodeExecutionActivity(item, input, output)
         else -> {
@@ -69,9 +70,13 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
 }
 
 @Composable private fun ProcessDisclosure(id: String, label: String, preview: String, icon: ImageVector,
-    running: Boolean = false, failed: Boolean = false, retainPreview: Boolean = false, enabled: Boolean = true,
+    running: Boolean = false, failed: Boolean = false, retainPreview: Boolean = false, enabled: Boolean = true, followPreviewTail: Boolean = false,
     content: @Composable () -> Unit) {
     var open by rememberSaveable(id) { mutableStateOf(false) }
+    val previewScroll = rememberScrollState()
+    LaunchedEffect(preview, previewScroll.maxValue, open) {
+        if (followPreviewTail && !open) previewScroll.scrollTo(previewScroll.maxValue)
+    }
     val angle by animateFloatAsState(if (open) 90f else 0f,
         tween(if (LocalNautiloMotion.current) 180 else 0, easing = MotionEase), label = "tool-chevron")
     val tone = if (failed) Danger else Secondary
@@ -83,7 +88,8 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
             else {
                 Text(label, fontSize = 14.sp, color = tone, maxLines = 1)
                 Text("·", color = tone, fontSize = 14.sp)
-                Text(preview, Modifier.weight(1f), fontSize = 14.sp, color = tone, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(preview, Modifier.weight(1f).then(if (followPreviewTail) Modifier.horizontalScroll(previewScroll, enabled = false).testTag("process-preview:$id") else Modifier),
+                    fontSize = 14.sp, color = tone, maxLines = 1, softWrap = false, overflow = if (followPreviewTail) TextOverflow.Clip else TextOverflow.Ellipsis)
             }
             if (enabled) Icon(Icons.Outlined.ChevronRight, null, Modifier.size(13.dp).graphicsLayer { rotationZ = angle }, tint = tone)
         }

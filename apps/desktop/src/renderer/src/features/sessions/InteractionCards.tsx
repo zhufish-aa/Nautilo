@@ -36,16 +36,16 @@ function isDangerOption(option: InteractionOption): boolean {
  * the chat timeline. Pending cards are interactive; resolved/cancelled
  * questions stay as a read-only record, while approvals disappear once answered.
  */
-export function InteractionCards({ sessionId }: { sessionId: string }): JSX.Element | null {
+export function InteractionCards({ sessionId, interactionId }: { sessionId: string; interactionId?: string }): JSX.Element | null {
   const interactions = useInteractionsStore((state) => state.bySession[sessionId] ?? EMPTY);
   const loadPending = useInteractionsStore((state) => state.loadPending);
   const respondInteraction = useInteractionRespond();
 
   useEffect(() => {
-    void loadPending(sessionId);
-  }, [sessionId, loadPending]);
+    if (!interactionId) void loadPending(sessionId);
+  }, [sessionId, loadPending, interactionId]);
 
-  const visible = interactions.filter((interaction) => interaction.kind === "question" || interaction.status === "pending");
+  const visible = interactions.filter((interaction) => (!interactionId || interaction.id === interactionId) && (interaction.kind === "question" || interaction.status === "pending"));
   if (visible.length === 0) return null;
   return (
     <>

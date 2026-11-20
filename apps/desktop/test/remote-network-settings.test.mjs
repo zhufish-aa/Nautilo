@@ -42,6 +42,7 @@ test("switching from direct to public relay saves immediately without entering a
     "lucide-react": { ChevronDown: () => null, Globe2: () => null },
     "../../../components/ui/Button": { Button: () => null },
     "../../../components/ui/Switch": { Switch: () => null },
+    "./RelayNodeSelect": { RelayNodeSelect: () => null },
   });
   const saved = [];
   const updated = [];
@@ -57,4 +58,14 @@ test("switching from direct to public relay saves immediately without entering a
   assert.equal(saved.length, 1);
   assert.equal(saved[0].relayMode, "custom");
   assert.equal(saved[0].relayUrls.length, 0);
+});
+
+const relayCatalog = load("../src/renderer/src/features/settings/remote/relay-catalog.ts");
+const publicNode = { id: "asia-pacific", url: "https://aps1-1.relay.n0.iroh.link/", region: "asia-pacific", source: "public" };
+test("relay selection survives SDK trailing-dot addresses and keeps custom lists intact", () => {
+  assert.equal(relayCatalog.relaySelection([], [publicNode]), "public-auto");
+  assert.equal(relayCatalog.relaySelection([" https://aps1-1.relay.n0.iroh.link./ "], [publicNode]), "asia-pacific");
+  assert.equal(relayCatalog.relaySelection(["https://203.0.113.20"], [publicNode]), "custom");
+  assert.equal(relayCatalog.relaySelection([publicNode.url, "https://private.example.com"], [publicNode]), "custom");
+  assert.equal(relayCatalog.relayRegion(publicNode, true), "亚太 · 新加坡");
 });

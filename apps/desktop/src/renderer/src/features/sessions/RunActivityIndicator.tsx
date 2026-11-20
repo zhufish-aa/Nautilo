@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Activity } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import type { RunLifecycle, TimelineEvent } from "../../lib/types";
 
@@ -18,9 +18,11 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
     () => latestProgressEvent(events, lifecycle?.startedAt),
     [events, lifecycle?.startedAt]
   );
+  // Only show a separate waiting row when the timeline lacks live progress.
+  const visible = active && (waitingForDelegates || lifecycle?.reason === "cancelling" || !latest || !hasVisibleProgress(latest));
 
   useEffect(() => {
-    if (!active) {
+    if (!visible) {
       setElapsedSeconds(0);
       return;
     }
@@ -29,12 +31,13 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
     update();
     const timer = window.setInterval(update, 1_000);
     return () => window.clearInterval(timer);
-  }, [active, latest?.id, latest?.timestamp]);
+  }, [visible, latest?.id, latest?.timestamp]);
 
   // A CLI need not expose reasoning text to show that its turn is in flight.
   // Only suppress this line when a dedicated row is displaying live progress;
   // a completed tool/reasoning row must not hide the next model wait.
-  if (!active || (!waitingForDelegates && lifecycle?.reason !== "cancelling" && latest && hasVisibleProgress(latest))) return null;
+  if (!visible) return null;
+  const working = lifecycle?.status === "running";
   const zh = locale === "zh-CN";
   const label = lifecycle?.reason === "cancelling"
     ? (zh ? "正在停止…" : "Stopping…")
@@ -45,8 +48,10 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
     : progressLabel(latest, zh);
 
   return (
-    <div role="status" className="flex items-center gap-2 py-1 text-sm text-ink-3">
-      <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden />
+    <div role="status" className="conversation-run-wait flex items-center py-1 text-[13px] text-ink-3">
+      <span className={`conversation-step-icon${working ? " conversation-activity-pulse" : ""}`} aria-hidden>
+        {!working && <Activity size={14} />}
+      </span>
       <span className="min-w-0 truncate">{label}</span>
       <span aria-hidden="true" className="ml-auto shrink-0 text-xs tabular-nums">{formatElapsed(elapsedSeconds)}</span>
     </div>

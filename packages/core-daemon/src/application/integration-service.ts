@@ -78,10 +78,10 @@ export class IntegrationService {
       if (
         !c?.enabled ||
         c.kind !== "login" ||
-        !["codex", "claude-code"].includes(c.harness ?? "")
+        !["codex", "claude-code", "opencode", "antigravity"].includes(c.harness ?? "")
       )
         throw Error(
-          "Account gateway requires an enabled Codex or Claude Code account",
+          "Account gateway requires an enabled Codex, Claude Code, OpenCode or Antigravity account",
         );
     }
     const value: IntegrationSettings = {

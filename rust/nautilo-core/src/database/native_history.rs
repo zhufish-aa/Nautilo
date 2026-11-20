@@ -68,6 +68,41 @@ impl<'a> NativeHistoryRepository<'a> {
     pub fn activity_run(&self, session: &str, call: &str) -> CoreResult<Option<String>> {
         self.db.query_row("SELECT run_id FROM runtime_events WHERE session_id=?1 AND (json_extract(data,'$.payload.callId')=?2 OR json_extract(data,'$.payload.messageId')=?2) AND json_extract(data,'$.payload.subagentDispatchId') IS NULL AND run_id IS NOT NULL ORDER BY sequence DESC LIMIT 1",params![session,call],|row|row.get(0)).optional().map_err(db_fail)
     }
+
+    /// Append only missing, successful native file receipts. The event and
+    /// identity binding commit together, so retries cannot duplicate a write.
+    pub fn commit_file_activities(&self, session: &Value, entries: &[Value]) -> CoreResult<Vec<Value>> {
+        let sid = session["id"].as_str().unwrap_or("");
+        let native = session["providerSessionId"].as_str().unwrap_or("");
+        self.db.execute_batch("BEGIN IMMEDIATE").map_err(db_fail)?;
+        let result = (|| {
+            let repos = Repositories::new(self.db);
+            let mut events = Vec::new();
+            for entry in entries {
+                let payload = &entry["payload"];
+                let Some(call) = payload["callId"].as_str() else { continue };
+                let Some(path) = payload["path"].as_str().filter(|path|!path.is_empty()) else { continue };
+                let Some(run) = self.activity_run(sid, call)? else { continue };
+                let existing = self.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE session_id=?1
+                    AND json_extract(data,'$.type')='file.changed' AND json_extract(data,'$.payload.callId')=?2
+                    AND json_extract(data,'$.payload.path')=?3)", params![sid,call,path], |row|row.get::<_,bool>(0)).map_err(db_fail)?;
+                if existing { continue; }
+                let event = json!({"schemaVersion":1,"eventId":uuid::Uuid::new_v4().to_string(),
+                    "sequence":repos.events().next_sequence(Some(sid),None)?,"sessionId":sid,
+                    "projectId":session["projectId"],"runId":run,"type":"file.changed",
+                    "timestamp":entry.get("timestamp").filter(|time|time.is_string()).cloned().unwrap_or_else(||json!(now_iso())),
+                    "payload":payload});
+                repos.events().append(&event)?;
+                self.bind(sid,native,"fileChanges",entry["nativeId"].as_str().unwrap_or(call),Some(&run),"")?;
+                events.push(event);
+            }
+            Ok(events)
+        })();
+        match result {
+            Ok(events) => { self.db.execute_batch("COMMIT").map_err(db_fail)?; Ok(events) }
+            Err(error) => { let _=self.db.execute_batch("ROLLBACK"); Err(error) }
+        }
+    }
     pub fn commit(
         &self,
         session: &Value,

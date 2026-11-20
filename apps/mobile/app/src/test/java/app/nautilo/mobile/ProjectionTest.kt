@@ -8,6 +8,13 @@ import org.junit.Test
 import java.util.Base64
 
 class ProjectionTest {
+    @Test fun historyPreservesRoutingTypeAndTaskIdentityForPresentation() {
+        val projection = SessionProjection()
+        projection.history(json("items" to JSONArray().put(json("value" to json("id" to "route", "sender" to "system", "kind" to "delegation", "taskId" to "task", "text" to "Delegated task", "createdAt" to "2026-11-14T00:00:00Z")))))
+        val message = projection.messageList().single()
+        assertEquals("delegation", message.kind)
+        assertEquals("task", message.taskId)
+    }
     @Test fun titleUpdatesDoNotBecomeConversationActivityCards() {
         val projection = SessionProjection()
         projection.apply(json("sequence" to 1, "eventId" to "title", "type" to "session.title_changed", "payload" to json("title" to "图片显示修复")))
@@ -16,6 +23,38 @@ class ProjectionTest {
     }
     private fun event(seq: Long, type: String, text: String, id: String = "answer") = json("sequence" to seq, "eventId" to "e$seq", "type" to type,
         "runId" to "run", "timestamp" to "2026-11-14T01:00:01Z", "payload" to json("messageId" to id, "text" to text))
+
+    @Test fun runsRejectedBeforeAnyOutputStayVisibleInTheLiveChatAndAfterReopen() {
+        fun time(second: Int) = "2026-11-18T01:00:0${second}Z"
+        val items = JSONArray()
+            .put(json("value" to json("id" to "first", "sender" to "user", "text" to "Hello", "createdAt" to time(0))))
+            .put(json("value" to json("id" to "second", "sender" to "user", "text" to "Another request", "createdAt" to time(4))))
+        val events = listOf(
+            event(1, "run.started", "").put("timestamp", time(1)),
+            event(2, "run.failed", "").put("timestamp", time(2)).put("payload", json("code" to "PROVIDER_ERROR",
+                "message" to """429: {"code":"NATIVE_ACCOUNT_ERROR","message":"OpenCode model request returned HTTP 429: Free usage limit reached."}""")),
+            event(3, "run.started", "").put("runId", "next").put("timestamp", time(5)),
+            event(4, "run.failed", "").put("runId", "next").put("timestamp", time(6))
+                .put("payload", json("error" to json("message" to "Provider temporarily unavailable")))
+        )
+        val live = SessionProjection().apply {
+            history(json("items" to items))
+            events.forEach { apply(it) }
+            apply(events.last())
+        }
+        val reopened = SessionProjection().apply {
+            history(json("items" to items, "epoch" to "epoch", "sequence" to 4, "activity" to JSONArray(events)), initialize = true)
+        }
+        val runs = listOf(RunInfo("run", "failed", time(1), time(2)), RunInfo("next", "failed", time(5), time(6)))
+        for (projection in listOf(live, reopened)) {
+            val timeline = conversationTimeline(projection.messageList(), projection.activityList(), runs)
+            assertEquals(listOf("message:first", "turn:run:after:first", "message:second", "turn:next:after:second"), timeline.map { it.key })
+            val turns = timeline.filterIsInstance<ConversationItem.Turn>()
+            assertTrue(turns.all { it.completed && it.answer == null && it.parts.single().visible(false, null) })
+            assertEquals(listOf("OpenCode 拒绝了这次免费模型请求（HTTP 429）。", "Provider temporarily unavailable"),
+                turns.map { it.parts.single().activity?.detail })
+        }
+    }
 
     @Test fun streamedMessagesReplayOnceAndFinalTextRemainsVisible() {
         val p = SessionProjection()
@@ -117,5 +156,29 @@ class ProjectionTest {
         val turn = conversationTimeline(emptyList(), p.activityList(), emptyList()).single() as ConversationItem.Turn
         assertEquals(listOf("先检查", "", "读取后整理"), turn.parts.map { it.activity?.detail })
         assertFalse(turn.parts.first().activity!!.running)
+    }
+    @Test fun historyRefreshKeepsTheFirstChunkBeforeTheNextSteeringMessage() {
+        val p = SessionProjection()
+        p.apply(event(1, "agent.message_delta", "第一条引导的回答", "native"))
+        val receipt = event(2, "agent.message", "第一条引导的回答", "saved")
+        receipt.getJSONObject("payload").put("providerMessageId", "native")
+        receipt.put("timestamp", "2026-11-14T01:00:03Z")
+        p.apply(receipt)
+        val page = json("items" to JSONArray()
+            .put(json("value" to json("id" to "steer", "sender" to "user", "text" to "第二条引导", "createdAt" to "2026-11-14T01:00:02Z")))
+            .put(json("value" to json("id" to "saved", "sender" to "agent", "text" to "第一条引导的回答", "createdAt" to "2026-11-14T01:00:03Z"))))
+        p.history(page)
+        assertEquals(listOf("saved", "steer"), p.messageList().map { it.id })
+        assertEquals("run", p.messageList().first().runId)
+        assertEquals(1L, p.messageList().first().sequence)
+
+        // Reopening replays the same first chunk and final receipt. It must
+        // produce the same chronological segments as an already-open screen.
+        val reopened = SessionProjection()
+        reopened.history(page.put("epoch", "epoch").put("sequence", 2)
+            .put("activity", JSONArray().put(event(1, "agent.message_delta", "第一条引导的回答", "native")).put(receipt)), initialize = true)
+        val live = conversationTimeline(p.messageList(), p.activityList(), emptyList())
+        val history = conversationTimeline(reopened.messageList(), reopened.activityList(), emptyList())
+        assertEquals(live, history)
     }
 }

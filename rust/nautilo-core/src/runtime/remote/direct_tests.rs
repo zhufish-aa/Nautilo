@@ -6,6 +6,40 @@ use tokio::time::timeout;
 const TEST_ALPN: &[u8] = b"nautilo/direct-policy-test";
 
 #[tokio::test]
+async fn stun_uses_the_quic_socket_and_ignores_unmatched_responses() {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = server.local_addr().unwrap();
+    let endpoint = Endpoint::builder(presets::Minimal).bind_addr("127.0.0.1:0").unwrap().bind().await.unwrap();
+    let local = endpoint.bound_sockets().into_iter().find(|address|address.is_ipv4()).unwrap();
+    let mock = tokio::spawn(async move {
+        let mut buffer = [0u8; 100];
+        let (length, peer) = server.recv_from(&mut buffer).await.unwrap();
+        assert_eq!(length, 20);
+        assert_eq!(peer, local, "STUN must share the QUIC socket, not borrow another UDP port");
+        let mut reply = [0u8; 32];
+        reply[..20].copy_from_slice(&buffer[..20]);
+        reply[..4].copy_from_slice(&[1,1,0,12]);
+        reply[20..24].copy_from_slice(&[0,32,0,8]);
+        reply[25] = 1;
+        reply[26..28].copy_from_slice(&(peer.port() ^ 0x2112).to_be_bytes());
+        for (index, byte) in [203,0,113,9].into_iter().enumerate() { reply[28+index] = byte ^ buffer[4+index]; }
+        reply[8] ^= 1;
+        server.send_to(&reply, peer).await.unwrap(); // wrong transaction
+        reply[8] ^= 1;
+        let wrong_source = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        wrong_source.send_to(&reply, peer).await.unwrap(); // correct ID, wrong port
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        server.send_to(&reply, peer).await.unwrap();
+    });
+    let started = std::time::Instant::now();
+    let mapping = endpoint.probe_stun(server_addr, Duration::from_secs(1)).await;
+    assert!(started.elapsed() >= Duration::from_millis(50), "accepted a forged response");
+    assert_eq!(mapping, vec![(local, std::net::SocketAddr::new("203.0.113.9".parse().unwrap(), local.port()))]);
+    mock.await.unwrap();
+    endpoint.close().await;
+}
+
+#[tokio::test]
 async fn live_qad_mapping_survives_recheck_without_a_new_handshake() {
     // Keep the first QUIC address-discovery connection alive but drop later
     // handshakes. A periodic report must reuse its known, still-valid mapping.

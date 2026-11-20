@@ -3,6 +3,7 @@ import "@fontsource-variable/jetbrains-mono";
 import "../../lib/monaco-workers";
 import * as monaco from "monaco-editor";
 import { bindDiffRecovery } from "../../lib/monaco-diff-provider";
+import { EditorModelCache } from "../../lib/editor-model-cache";
 
 const SHARED_COLORS = {
   "editor.background": "#00000000",
@@ -182,11 +183,12 @@ const EDITOR_OPTIONS: monaco.editor.IStandaloneEditorConstructionOptions = {
  * out of the main chunk. When `before` is undefined the pre-change content
  * could not be reconstructed and a plain editor is shown instead.
  */
-export default function DiffCodeEditor({ before, value, onChange, filePath, readOnly = false, sideBySide = true, hideUnchanged = false, appearance = "default", navigationRef, onReviewPosition }: {
+export default function DiffCodeEditor({ before, value, onChange, filePath, modelKey, readOnly = false, sideBySide = true, hideUnchanged = false, appearance = "default", navigationRef, onReviewPosition }: {
   before?: string;
   value: string;
   onChange?: (value: string) => void;
   filePath?: string;
+  modelKey?: string;
   readOnly?: boolean;
   sideBySide?: boolean;
   hideUnchanged?: boolean;
@@ -206,6 +208,11 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
   onChangeRef.current = onChange;
   const positionCallback = useRef(onReviewPosition);
   positionCallback.current = onReviewPosition;
+  const modelCache = useRef(new EditorModelCache());
+  const activeModelKey = useRef("");
+  const modelSubscription = useRef<monaco.IDisposable>();
+  const recoverySubscription = useRef<monaco.IDisposable>();
+  const identity = modelKey ?? filePath ?? "anonymous";
 
   const hasOriginal = before !== undefined;
   // Preserve models for controlled edits. Recreate only when switching file,
@@ -264,7 +271,7 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
     const modifiedModel = monaco.editor.createModel(value, language);
     models.push(modifiedModel);
     modifiedModelRef.current = modifiedModel;
-    modifiedModel.onDidChangeContent(() => {
+    modelSubscription.current = modifiedModel.onDidChangeContent(() => {
       if (!suppressChangeRef.current) onChangeRef.current?.(modifiedModel.getValue());
     });
 
@@ -272,7 +279,7 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
       const originalModel = monaco.editor.createModel(before, language);
       originalModelRef.current = originalModel;
       models.push(originalModel);
-      subscriptions.push(bindDiffRecovery(originalModel, error => { if (!disposed) setDiffError(error); }));
+      recoverySubscription.current = bindDiffRecovery(originalModel, error => { if (!disposed && originalModelRef.current === originalModel) setDiffError(error); });
       const diffEditor = monaco.editor.createDiffEditor(container, {
         ...options,
         theme: theme(),
@@ -292,7 +299,7 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
         if (disposed) return;
         const view = diffEditor.saveViewState();
         diffEditor.setModel(null);
-        diffEditor.setModel({original: originalModel, modified: modifiedModel});
+        if (originalModelRef.current && modifiedModelRef.current) diffEditor.setModel({original: originalModelRef.current, modified: modifiedModelRef.current});
         if (view) diffEditor.restoreViewState(view);
       };
       // Reveal the first change once the (async) diff computation lands.
@@ -371,6 +378,8 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
       positionCallback.current?.({ index: 0, count: 0 });
     }
     editorRef.current = editor;
+    activeModelKey.current = identity;
+    modelCache.current.set(identity, { modified: modifiedModel, original: originalModelRef.current ?? undefined });
 
     if (review) void document.fonts.load('500 15px "JetBrains Mono Variable"').then(() => {
       if (!disposed) { monaco.editor.remeasureFonts(); editor.layout(); }
@@ -384,17 +393,54 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, read
       retryDiffRef.current = null;
       cancelAnimationFrame(connectorFrame);
       for (const subscription of subscriptions) subscription.dispose();
+      modelSubscription.current?.dispose(); recoverySubscription.current?.dispose();
       if (navigationRef) navigationRef.current = null;
       editor.setModel(null);
       editor.dispose();
-      for (const model of models) model.dispose();
+      modelCache.current.clear();
       modifiedModelRef.current = null;
       originalModelRef.current = null;
       editorRef.current = undefined;
       if (review) monaco.editor.setTheme(currentTheme());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, hasOriginal, appearance]);
+  }, [hasOriginal, appearance]);
+
+  // Switch the models atomically while retaining the editor, its DOM, workers
+  // and layout. A delayed result for a detached model is ignored by ownership.
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || activeModelKey.current === identity) return;
+    const previous = modelCache.current.get(activeModelKey.current);
+    if (previous) previous.view = editor.saveViewState();
+    editor.setModel(null);
+    modelSubscription.current?.dispose(); recoverySubscription.current?.dispose();
+    let models = modelCache.current.get(identity);
+    if (!models) {
+      models = { modified: monaco.editor.createModel(value, languageForFile(filePath ?? "")),
+        original: before !== undefined ? monaco.editor.createModel(before, languageForFile(filePath ?? "")) : undefined };
+      modelCache.current.set(identity, models);
+    }
+    suppressChangeRef.current = true;
+    if (models.modified.getValue() !== value) models.modified.setValue(value);
+    if (models.original && before !== undefined && models.original.getValue() !== before) models.original.setValue(before);
+    suppressChangeRef.current = false;
+    modifiedModelRef.current = models.modified; originalModelRef.current = models.original ?? null;
+    const modified = models.modified;
+    modelSubscription.current = modified.onDidChangeContent(() => { if (!suppressChangeRef.current) onChangeRef.current?.(modified.getValue()); });
+    if (models.original) {
+      const original = models.original;
+      recoverySubscription.current = bindDiffRecovery(original, error => { if (originalModelRef.current === original) setDiffError(error); });
+    }
+    if ("getOriginalEditor" in editor && models.original) {
+      editor.setModel({ original: models.original, modified });
+      if (models.view) editor.restoreViewState(models.view as monaco.editor.IDiffEditorViewState);
+    } else if (!("getOriginalEditor" in editor)) {
+      editor.setModel(modified);
+      if (models.view) editor.restoreViewState(models.view as monaco.editor.ICodeEditorViewState);
+    }
+    activeModelKey.current = identity; setDiffError("");
+  }, [identity, filePath, hasOriginal, appearance]);
 
   // Controlled-value sync (parent resets are the only external writes; typing
   // round-trips are no-ops because the model already holds the same text).

@@ -20,21 +20,25 @@ import androidx.compose.ui.unit.sp
 import app.nautilo.mobile.MobileState
 import app.nautilo.mobile.data.*
 
-enum class CreationPicker { Project, Harness, Connection, Model, Effort }
+enum class CreationPicker { Project, Harness, Connection, Model, Effort, Team }
 
 @Composable fun CreationChoiceSheet(
     field: CreationPicker, state: MobileState, project: String, agent: String, connection: String, model: String, effort: String,
-    refresh: () -> Unit, newProject: () -> Unit, dismiss: () -> Unit, select: (String) -> Unit
+    refresh: () -> Unit, newProject: () -> Unit, dismiss: () -> Unit, team: String = "", select: (String) -> Unit
 ) {
     NSheet(onDismissRequest = dismiss, containerColor = Color.White) {
-        CreationChoiceContent(field, state, project, agent, connection, model, effort, refresh, newProject, dismiss, select)
+        CreationChoiceContent(field, state, project, agent, connection, model, effort, refresh, newProject, dismiss, team, select)
     }
 }
 
 @Composable internal fun CreationChoiceContent(
     field: CreationPicker, state: MobileState, project: String, agent: String, connection: String, model: String, effort: String,
-    refresh: () -> Unit, newProject: () -> Unit, dismiss: () -> Unit, select: (String) -> Unit
+    refresh: () -> Unit, newProject: () -> Unit, dismiss: () -> Unit, team: String = "", select: (String) -> Unit
 ) {
+    if (field == CreationPicker.Team) {
+        TeamChoiceContent(state, team, refresh, dismiss, select)
+        return
+    }
     var query by remember { mutableStateOf("") }
     val choices = when (field) {
         CreationPicker.Project -> state.projects.map { it.id to it.name }
@@ -42,12 +46,13 @@ enum class CreationPicker { Project, Harness, Connection, Model, Effort }
         CreationPicker.Connection -> listOf("" to "使用 Harness 原生配置") + state.setup.objects("connections").map { it.text("id") to it.text("name") }
         CreationPicker.Model -> state.newModels.map { it.text("id") to it.text("displayName", it.text("id")) }
         CreationPicker.Effort -> state.newModels.find { it.text("id") == model }?.strings("reasoningEfforts").orEmpty().map { it to effortName(it) }
+        CreationPicker.Team -> emptyList()
     }
-    val selected = when(field) { CreationPicker.Project -> project; CreationPicker.Harness -> agent; CreationPicker.Connection -> connection; CreationPicker.Model -> model; CreationPicker.Effort -> effort }
-    val icon = when(field) { CreationPicker.Project -> Icons.Outlined.FolderOpen; CreationPicker.Harness -> Icons.Outlined.ViewInAr; CreationPicker.Connection -> Icons.Outlined.PersonOutline; CreationPicker.Model -> Icons.Outlined.Layers; CreationPicker.Effort -> Icons.Outlined.Psychology }
+    val selected = when(field) { CreationPicker.Project -> project; CreationPicker.Harness -> agent; CreationPicker.Connection -> connection; CreationPicker.Model -> model; CreationPicker.Effort -> effort; CreationPicker.Team -> team }
+    val icon = when(field) { CreationPicker.Project -> Icons.Outlined.FolderOpen; CreationPicker.Harness -> Icons.Outlined.ViewInAr; CreationPicker.Connection -> Icons.Outlined.PersonOutline; CreationPicker.Model -> Icons.Outlined.Layers; CreationPicker.Effort -> Icons.Outlined.Psychology; CreationPicker.Team -> Icons.Outlined.Groups }
         Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).padding(horizontal = 20.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(when(field) { CreationPicker.Project -> "选择项目"; CreationPicker.Harness -> "选择 Harness"; CreationPicker.Connection -> "账号与供应商"; CreationPicker.Model -> "选择模型"; CreationPicker.Effort -> "推理强度" }, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Text(when(field) { CreationPicker.Project -> "选择项目"; CreationPicker.Harness -> "选择 Harness"; CreationPicker.Connection -> "账号与供应商"; CreationPicker.Model -> "选择模型"; CreationPicker.Effort -> "推理强度"; CreationPicker.Team -> "协作团队" }, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                 if (field == CreationPicker.Model) ActionIcon(Icons.Outlined.Refresh, "刷新模型", !state.catalogLoading, refresh)
                 if (field == CreationPicker.Project) NTextButton(onClick = newProject) { Icon(Icons.Outlined.Add, null, Modifier.size(17.dp)); Text("新建项目", fontSize = 13.sp) }
                 ActionIcon(Icons.Outlined.Close, "关闭选择", click = dismiss)

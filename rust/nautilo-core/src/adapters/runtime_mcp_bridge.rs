@@ -54,7 +54,7 @@ impl Drop for RuntimeMcpBridge {
 
 /// Starts the bridge on 127.0.0.1 with a random port and token path.
 /// `tools` are RuntimeToolSpec JSON values ({name, description, inputSchema});
-/// `execute` receives {providerId, name, arguments} and yields
+/// `execute` receives {providerId, callId, name, arguments} and yields
 /// {success, content}. `on_permission_prompt` receives (tool_name, input) and
 /// yields the {behavior, ...} verdict JSON.
 ///
@@ -269,6 +269,7 @@ fn handle_rpc(
                 (Some(tool), Some(execute)) => {
                     let call = json!({
                         "providerId": provider_id,
+                        "callId": format!("mcp:{session_id}:{id}"),
                         "name": tool.get("name").cloned().unwrap_or(Value::Null),
                         "arguments": arguments,
                     });

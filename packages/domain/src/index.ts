@@ -177,7 +177,7 @@ export interface RuntimeConnection {
   baseUrl?: string;
   harness?: string;
   loginProfileDirectory?: string;
-  /** Official unified keyring login, without claiming directory-based account isolation. */
+  /** Use native login/configuration; OpenCode isolates credentials/history when loginProfileDirectory is set. */
   nativeLogin?: boolean;
   models?: InstanceModelConfig[];
   createdAt: string;
@@ -476,6 +476,8 @@ export interface PlannedTask {
 export interface Task {
   id: TaskId;
   projectRunId: ProjectRunId;
+  /** Present when the Rust workflow engine owns this task's execution. */
+  workflowRunId?: string;
   parentTaskId?: TaskId;
   title: string;
   objective: string;
@@ -534,6 +536,7 @@ export interface Message {
   toMemberId?: string;
   correlationId?: string;
   attachmentIds?: ArtifactId[];
+  workflowRef?: import("./workflows.js").WorkflowMention;
   nativeIdentity?: { providerId?: string; providerSessionId: string; id: string; messageId?: string; source: "native-terminal" | "native-stream"; completed: boolean; turnStatus?: "running" | "completed" | "failed" | "cancelled" };
   nativeFiles?: Array<{ id: string; name: string; url?: string; unavailable: true }>;
   editedAt?: string;
@@ -624,3 +627,4 @@ export type RecoveryDecision =
 
 export * from "./state.js";
 export * from "./errors.js";
+export * from "./workflows.js";

@@ -35,6 +35,40 @@ pub async fn collect_commit_diff(worktree_path: &str, base_commit: &str, head_co
     Ok(run_git(worktree_path, &["diff", "--no-ext-diff", "--binary", base_commit, head_commit], false).await?.stdout)
 }
 
+/// A workflow must also inspect commits created by its native Agent. Looking
+/// only at `git status` would omit those changes from both path checks and merge.
+/// This helper is used only in an isolated worktree owned by the workflow.
+pub async fn collect_since(worktree_path: &str, base_commit: &str) -> anyhow::Result<Vec<Value>> {
+    let top=run_git(worktree_path,&["rev-parse","--show-toplevel"],false).await?.stdout;
+    let top=std::fs::canonicalize(top.trim())?;
+    let cwd=std::fs::canonicalize(worktree_path)?;
+    let prefix=cwd.strip_prefix(&top)?;
+    let depth=prefix.components().count();
+    let prefix=prefix.to_string_lossy().replace('\\',"/");
+    let repository=top.to_string_lossy().into_owned();
+    let untracked=run_git(&repository,&["ls-files","--others","--exclude-standard","-z"],false).await?;
+    let paths:Vec<_>=untracked.stdout.split('\0').filter(|path|!path.is_empty()).collect();
+    for paths in paths.chunks(100) {
+        let mut args=vec!["add","-N","--"];args.extend(paths.iter().copied());
+        run_git(&repository,&args,false).await?;
+    }
+    let status=run_git(&repository,&["diff","--no-renames","--name-status","-z",base_commit,"--"],false).await?;
+    let fields:Vec<_>=status.stdout.split('\0').filter(|part|!part.is_empty()).collect();
+    if fields.len()%2 != 0 { anyhow::bail!("Git returned an incomplete workflow change list"); }
+    let mut files=vec![];
+    for entry in fields.chunks(2) {
+        let path=entry[1];
+        let diff=run_git(&repository,&["diff","--no-ext-diff","--binary",base_commit,"--",path],false).await?;
+        let stats=run_git(&repository,&["diff","--numstat",base_commit,"--",path],false).await?;
+        let mut stats=stats.stdout.split_whitespace();
+        let additions=stats.next().and_then(|value|value.parse::<i64>().ok()).unwrap_or(0);
+        let deletions=stats.next().and_then(|value|value.parse::<i64>().ok()).unwrap_or(0);
+        let relative=if prefix.is_empty(){path.to_owned()}else{path.strip_prefix(&format!("{prefix}/")).map(str::to_owned).unwrap_or_else(||format!("{}{path}","../".repeat(depth)))};
+        files.push(json!({"path":relative,"changeType":change_type(entry[0]),"additions":additions,"deletions":deletions,"diff":diff.stdout}));
+    }
+    Ok(files)
+}
+
 fn parse_status(line: &str) -> (String, String) {
     let code = line[..2.min(line.len())].to_string();
     let raw = &line[3.min(line.len())..];

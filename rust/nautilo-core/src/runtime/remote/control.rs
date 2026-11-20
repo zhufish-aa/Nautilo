@@ -2,11 +2,14 @@
 use super::*;
 pub(super) const POLICY_PREFIX: &[u8] = b"nautilo/transport/v1:";
 
-pub(super) fn network_diagnostics(endpoint: &Endpoint) -> Option<Value> {
-    endpoint.net_report().get().map(|report| json!({
-        "udpV4":report.udp_v4,"udpV6":report.udp_v6,
-        "mappingVariesV4":report.mapping_varies_by_dest_ipv4,
-        "mappingVariesV6":report.mapping_varies_by_dest_ipv6
+pub(super) fn network_diagnostics(endpoint: &Endpoint, discovery: &direct_network::Discovery) -> Option<Value> {
+    let report = endpoint.net_report().get();
+    if report.is_none() && discovery.updated_at.is_none() { return None; }
+    Some(json!({
+        "udpV4":report.as_ref().is_some_and(|r|r.udp_v4) || discovery.mappings.iter().any(|address|address.is_ipv4()),
+        "udpV6":report.as_ref().is_some_and(|r|r.udp_v6) || discovery.mappings.iter().any(|address|address.is_ipv6()),
+        "mappingVariesV4":report.as_ref().and_then(|r|r.mapping_varies_by_dest_ipv4),
+        "mappingVariesV6":report.as_ref().and_then(|r|r.mapping_varies_by_dest_ipv6)
     }))
 }
 
@@ -24,7 +27,7 @@ impl RemoteService {
         let mut response = json!({
             "type":"nautilo.transport","v":1,"nonce":std::str::from_utf8(nonce)?,
             "relayMode":settings.relay_mode,"directOnly":settings.relay_mode == "direct",
-            "endpoint":address,"network":network_diagnostics(endpoint)
+            "endpoint":address,"network":network_diagnostics(endpoint, &state.direct_discovery)
         });
         // Long custom URLs or many adapters must not break policy negotiation.
         // Full addressing is refreshed over the RPC channel after it is ready.

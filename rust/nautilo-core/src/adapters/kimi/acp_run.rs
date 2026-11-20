@@ -177,13 +177,14 @@ pub fn start_kimi_acp(request: AdapterStartRequest, resume_session: Option<Strin
             let identity = agenthub_plugin_sdk::session_pool::identity(&wire);
             let key = request.local_session_id.clone().or(resume_session.clone()).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
             let result: anyhow::Result<()> = async {
+                let mut reason = "first_use";
                 let mut native = if let Some((old,native))=pool().take(&key) {
-                    if resume_session.is_some() && native.session.as_ref().and_then(|session|session["sessionId"].as_str())==resume_session.as_deref() && old==identity && native.rpc.process_handle().is_alive() {native}
-                    else {native.close().await; open(&request)?}
+                    if resume_session.is_some() && native.session.as_ref().and_then(|session|session["sessionId"].as_str())==resume_session.as_deref() && old==identity && native.rpc.process_handle().is_alive() {reason="resident";native}
+                    else {reason=if old!=identity {"configuration_changed"} else if !native.rpc.process_handle().is_alive() {"process_exited"} else {"session_changed"};native.close().await; open(&request)?}
                 } else {open(&request)?};
                 background::resume(&mut native).await?;
                 *rpc_slot.lock().unwrap()=Some(native.rpc.clone());
-                let _=sender.send(AdapterEvent::Status{phase:"runtime_ready".into(),raw:Some(json!({"providerId":"kimi-code","transport":"acp","reused":native.session.is_some(),"pid":native.rpc.process_handle().pid,"attachMs":attached.elapsed().as_millis()}))});
+                let _=sender.send(AdapterEvent::Status{phase:"runtime_ready".into(),raw:Some(json!({"providerId":"kimi-code","transport":"acp","reused":native.session.is_some(),"reason":reason,"pid":native.rpc.process_handle().pid,"attachMs":attached.elapsed().as_millis()}))});
                 *native.callbacks.lock().unwrap()=request.clone();
                 if cancelled.load(Ordering::Acquire){native.close().await; anyhow::bail!("Kimi startup was cancelled");}
                 let turn=run_acp(&mut native,request.clone(),resume_session,session_slot,sender.clone());
@@ -199,10 +200,14 @@ pub fn start_kimi_acp(request: AdapterStartRequest, resume_session: Option<Strin
                 else {native.close().await;}
                 result
             }.await;
-            if let Err(error) = &result {
-                let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
+            if cancelled.load(Ordering::Acquire) {
+                let _ = sender.send(AdapterEvent::Exit { exit_code: Some(130), signal: Some("cancelled".into()) });
+            } else {
+                if let Err(error) = &result {
+                    let _ = sender.send(AdapterEvent::Error { message: error.to_string() });
+                }
+                let _ = sender.send(AdapterEvent::Exit { exit_code: Some(if result.is_ok() { 0 } else { 1 }), signal: None });
             }
-            let _=sender.send(AdapterEvent::Exit{exit_code:Some(if result.is_ok(){0}else{1}),signal:None});
         }
     };
     tokio::spawn(pump);

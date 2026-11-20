@@ -13,6 +13,10 @@
 .delegation-card-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; min-width: 0; margin-top: 10px; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
 .delegation-card-open { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; padding: 5px 8px; border-radius: 7px; background: var(--surface-soft, var(--panel)); color: var(--ink); font-size: 12px; font-weight: 500; }
 .delegation-card-open:hover { background: var(--card-hover); }
+.delegation-card-open:disabled { opacity: .55; }
+.delegation-card-activity { margin-top: 12px; color: var(--ink-2); font-size: 13px; line-height: 1.65; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.delegation-card-activity[data-result="true"] { color: var(--ink); -webkit-line-clamp: 3; }
+.delegation-card-retry-error { margin-top: 10px; font-size: 12px; color: var(--danger); }
 .delegation-card-open:focus-visible, .delegation-card-details-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .delegation-card-details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .delegation-card-details-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 5px 0; border-radius: 4px; color: var(--ink-2); font-size: 12px; cursor: pointer; }

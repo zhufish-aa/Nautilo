@@ -6,6 +6,21 @@ export interface RemoteSettings {
   relayUrls: string[];
   keepAwake: boolean;
 }
+export interface RemoteRelayNode {
+  id: string;
+  url: string;
+  region: "asia-pacific" | "north-america-east" | "north-america-west" | "europe" | "custom";
+  source: "public" | "custom";
+  /** PC-to-relay HTTPS /ping time, not the phone-to-PC QUIC RTT. */
+  latencyMs?: number;
+  measuredAt?: string;
+  error?: string;
+  viaProxy?: boolean;
+}
+export interface RemoteRelayCatalog {
+  nodes: RemoteRelayNode[];
+  measurement: "https";
+}
 export interface RemoteGrant {
   /** Kept optional for old local clients. Pairing grants the owner's full workspace. */
   access?: "control";
@@ -64,6 +79,10 @@ export type RemoteMethod =
   | "session.models"
   | "session.configure"
   | "session.workspace"
+  | "session.compact"
+  | "session.team"
+  | "session.team.cancel"
+  | "session.team.retry"
   | "events.wait"
   | "session.send"
   | "session.followUp"

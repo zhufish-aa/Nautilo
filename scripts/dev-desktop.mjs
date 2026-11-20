@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { buildRust, run, workspace } from './rust-build.mjs';
+import { copyAccountNotices } from './copy-account-notices.mjs';
 try {
   const env=await buildRust();
   const target=env.CARGO_TARGET_DIR?resolve(workspace,env.CARGO_TARGET_DIR):join(workspace,'rust','target');
@@ -8,6 +9,7 @@ try {
   if(!existsSync(binary))throw new Error(`Rust backend not found: ${binary}`);
   const runtime=join(target,'nautilo-preview',String(Date.now()));mkdirSync(runtime,{recursive:true});
   const core=join(runtime,process.platform==='win32'?'nautilo-core.exe':'nautilo-core');copyFileSync(binary,core);
+  copyAccountNotices(runtime);
   env.AGENTHUB_CORE_PATH=core;
   const pluginRoot=join(runtime,'plugins');mkdirSync(pluginRoot,{recursive:true});
   for(const id of ['opencode','trae','pi','omp','commandcode','deepseek','codex-plugins','antigravity']) {

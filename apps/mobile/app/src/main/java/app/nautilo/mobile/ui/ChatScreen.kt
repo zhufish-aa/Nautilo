@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
@@ -42,16 +44,16 @@ import kotlinx.coroutines.launch
 
 
 @Composable fun ChatScreen(state: MobileState, model: MobileViewModel) {
-    val list = rememberLazyListState()
+    val list = rememberSaveable(state.host?.id, state.session?.id, saver = LazyListState.Saver) { LazyListState() }
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val dragged by list.interactionSource.collectIsDraggedAsState()
-    var follow by remember(state.session?.id) { mutableStateOf(true) }
+    var follow by rememberSaveable(state.host?.id, state.session?.id) { mutableStateOf(true) }
     var showModels by remember { mutableStateOf(false) }
     var showModes by remember { mutableStateOf(false) }
-    val entries = remember(state.messages, state.activities, state.runs) {
-        conversationTimeline(state.messages, state.activities, state.runs)
+    val entries = remember(state.messages, state.activities, state.runs, state.interactions) {
+        conversationTimeline(state.messages, state.activities, state.runs, state.interactions)
     }
     val atBottom by remember { derivedStateOf { list.layoutInfo.visibleItemsInfo.lastOrNull()?.index.let { it == null || it >= list.layoutInfo.totalItemsCount - 2 } } }
     LaunchedEffect(dragged) {
@@ -59,7 +61,10 @@ import kotlinx.coroutines.launch
         else if (atBottom) follow = true
     }
     LaunchedEffect(entries.lastOrNull()?.key, state.messages.lastOrNull()?.text?.length, state.activities.lastOrNull()?.detail?.length, state.interactions.size, state.approvals.size, state.busy) {
-        if (follow && list.layoutInfo.totalItemsCount > 0) list.animateScrollToItem(list.layoutInfo.totalItemsCount - 1)
+        // One layout-frame pin, not a new smooth-scroll animation for every token.
+        // Explicit "back to latest" below still animates; dragging always wins.
+        withFrameNanos { }
+        if (follow && !dragged && list.layoutInfo.totalItemsCount > 0) list.scrollToItem(list.layoutInfo.totalItemsCount - 1)
     }
     Column(Modifier.fillMaxSize().imePadding()) {
         Box(Modifier.weight(1f)) {
@@ -69,11 +74,12 @@ import kotlinx.coroutines.launch
                     Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = spring(stiffness = Spring.StiffnessMedium, dampingRatio = Spring.DampingRatioNoBouncy))) {
                         when (entry) {
                             is ConversationItem.Message -> MessageRow(entry.value, state.session?.id.orEmpty(), model::retryMessages)
-                            is ConversationItem.Turn -> AssistantTurn(entry, if (entry.id == state.runId) state.runError else "")
+                            is ConversationItem.Turn -> AssistantTurn(entry) { request ->
+                                InteractionCard(request, state.readOnly || !state.connected, model)
+                            }
                         }
                     }
                 }
-                items(state.interactions.filter { it.text("kind") == "question" || it.text("status") == "pending" }, key = { "question:${it.text("id")}" }) { InteractionCard(it, state.readOnly || !state.connected, model) }
                 items(state.approvals.filter { it.text("status") == "pending" }, key = { "approval:${it.text("id")}" }) { approval ->
                     ApprovalCard(approval, state.readOnly || !state.connected, model, scopeSelection = "approval.scopes" in state.capabilities)
                 }

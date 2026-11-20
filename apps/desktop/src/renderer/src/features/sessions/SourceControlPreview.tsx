@@ -16,14 +16,14 @@ export function SourceControlSplit({sidebar,children,zh,history=false}:{sidebar:
 }
 type PreviewProps={
   diff?:SourceControlDiff;loading?:boolean;error?:string;zh:boolean;locale:string;disabled?:boolean;
-  path?:string;headerActions?:ReactNode;
+  path?:string;pendingPath?:string;headerActions?:ReactNode;
   onApply?:(selection:{hunkIds?:string[];lines?:number[]})=>void;
 };
 export function SourceControlPreview(props:PreviewProps):JSX.Element{
   useEffect(()=>{void loadCodeDiff().catch(()=>{/* Suspense retains the load error for the code view. */});},[]);
   return <PreviewBody {...props}/>;
 }
-function PreviewBody({diff,loading,error,zh,locale,disabled,onApply,path,headerActions}:PreviewProps):JSX.Element{
+function PreviewBody({diff,loading,error,zh,locale,disabled,onApply,path,pendingPath,headerActions}:PreviewProps):JSX.Element{
   const [view,setView]=useState<"code"|"lines">("code");
   const [context,setContext]=useState(()=>localStorage.getItem("nautilo.scm.diff.context")==="full");
   const navigation=useRef<DiffReviewNavigation|null>(null),[position,setPosition]=useState<DiffReviewPosition>({index:0,count:0});
@@ -40,7 +40,7 @@ function PreviewBody({diff,loading,error,zh,locale,disabled,onApply,path,headerA
   const toolbar=<div className="scm-preview-toolbar"><div className="scm-preview-file"><SourceControlFileIcon path={path??diff?.path??""}/><span title={`${path??diff?.path??""}\n${sourceLabel}`}>{(path??diff?.path)?.split("/").at(-1)}</span>{loading&&<Loader2 size={12} className="animate-spin"/>}</div>
       <div className="scm-preview-actions">{textReady&&view==="code"&&<div className="scm-segment" aria-label={zh?"差异显示方式":"Diff layout"}><button type="button" aria-pressed={sideBySide} onClick={()=>chooseLayout("split")}>{zh?"并排":"Split"}</button><button type="button" aria-pressed={!sideBySide} onClick={()=>chooseLayout("unified")}>{zh?"统一":"Unified"}</button></div>}
         {partial&&<button type="button" className="scm-text-action" aria-pressed={view==="lines"} onClick={()=>setView(value=>value==="code"?"lines":"code")}>{view==="lines"?(zh?"返回代码":"Back to code"):(zh?"按行选择":"Select lines")}</button>}
-        {headerActions}
+        {pendingPath&&<span role="status" className="scm-pending-file" title={pendingPath}>{zh?"正在打开":"Opening"} {pendingPath.split("/").at(-1)}</span>}{headerActions}
       </div>
     </div>;
   if(error&&!diff)return <>{path&&toolbar}<div role="alert" className="scm-error">{error}</div></>;
@@ -53,7 +53,7 @@ function PreviewBody({diff,loading,error,zh,locale,disabled,onApply,path,headerA
       reason==="large"?<div className="scm-empty"><p>{zh?"文件较大，已停止加载完整代码":"File is too large for a full code preview"}</p><span>{zh?"文件仍可选择提交，完整内容保留在本地。":"The local file is unchanged and can still be selected for commit."}</span></div>:
       textReady&&view==="code"?<div ref={codeSurface} className="scm-code-preview" aria-label={zh?"代码差异":"Code diff"}>
         {sideBySide&&<div className="scm-code-labels"><span>{diff.source==="commit"?(zh?"提交前":"Before commit"):diff.source==="index"?(zh?"上次提交":"Last commit"):(zh?"已选版本":"Selected version")}</span><span>{diff.source==="commit"?(zh?"此次提交":"This commit"):diff.source==="index"?(zh?"此次提交":"This commit"):(zh?"工作目录":"Working copy")}</span></div>}
-        <Suspense fallback={<div className="scm-empty" role="status"><Loader2 size={18} className="animate-spin"/>{zh?"正在加载代码视图":"Loading code view"}</div>}><CodeDiff key={identity} before={diff.before} value={diff.after!} filePath={diff.path} readOnly sideBySide={sideBySide} hideUnchanged={!context} appearance="source-control" navigationRef={navigation} onReviewPosition={setPosition}/></Suspense>
+        <Suspense fallback={<div className="scm-empty" role="status"><Loader2 size={18} className="animate-spin"/>{zh?"正在加载代码视图":"Loading code view"}</div>}><CodeDiff modelKey={identity} before={diff.before} value={diff.after!} filePath={diff.path} readOnly sideBySide={sideBySide} hideUnchanged={!context} appearance="source-control" navigationRef={navigation} onReviewPosition={setPosition}/></Suspense>
         <div className="scm-preview-footer"><div className="scm-change-navigation"><button type="button" disabled={!position.count} title={zh?"上一处更改":"Previous change"} aria-label={zh?"上一处更改":"Previous change"} onClick={()=>navigation.current?.move(-1)}><ArrowUp size={14}/></button><span>{position.count?`${position.index} / ${position.count}`:(zh?"无文本差异":"No text changes")}</span><button type="button" disabled={!position.count} title={zh?"下一处更改":"Next change"} aria-label={zh?"下一处更改":"Next change"} onClick={()=>navigation.current?.move(1)}><ArrowDown size={14}/></button></div><button type="button" aria-pressed={context} onClick={()=>setContext(previous=>{try{localStorage.setItem("nautilo.scm.diff.context",previous?"changes":"full");}catch{/* Keep the current preference. */}return !previous;})}>{context?(zh?"折叠未修改代码":"Collapse unchanged"):(zh?"展开完整文件":"Show full file")}</button></div>
       </div>:<>{diff.truncated&&<div className="scm-operation">{zh?"差异较大，仅显示前一部分。":"Large diff. Only the first part is shown."}</div>}<SourceControlDiffView patch={diff.patch|| (zh?"没有文本差异（文件模式或子模块状态已改变）":"No textual diff (file mode or submodule state changed)")} scope={identity} hunks={view==="lines"?diff.hunks:[]} patchToken={view==="lines"?diff.patchToken:undefined} source={diff.source==="index"?"index":"worktree"} disabled={disabled||loading} locale={locale} onApply={onApply}/></>}
   </>;

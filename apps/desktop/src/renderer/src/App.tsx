@@ -22,6 +22,7 @@ const ProjectsPage = lazy(() => import("./features/projects/ProjectsPage").then(
 const RunsPage = lazy(() => import("./features/runs/RunsPage").then((module) => ({ default: module.RunsPage })));
 const SettingsPage = lazy(() => import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const TasksPage = lazy(() => import("./features/tasks/TasksPage").then((module) => ({ default: module.TasksPage })));
+const WorkflowsPage = lazy(() => import("./features/workflows/WorkflowsPage").then(module => ({ default: module.WorkflowsPage })));
 const TeamEditorPage = lazy(() => import("./features/teams/TeamEditorPage").then((module) => ({ default: module.TeamEditorPage })));
 const TeamsPage = lazy(() => import("./features/teams/TeamsPage").then((module) => ({ default: module.TeamsPage })));
 
@@ -120,6 +121,7 @@ export default function App(): JSX.Element {
               <Route path="/teams" element={<TeamsPage />} />
               <Route path="/teams/:teamId" element={<TeamEditorPage />} />
               <Route path="/tasks" element={<TasksPage />} />
+              <Route path="/workflows" element={<WorkflowsPage />} />
               <Route path="/runs" element={<RunsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/sessions" replace />} />

@@ -27,15 +27,19 @@ export class CredentialService {
 
   set(agentInstanceId: string, credential: StoredCredential): void {
     if (!credential.apiKey.trim()) throw new CoreError("IPC_INVALID_REQUEST", { field: "apiKey" });
+    this.database.credentials.save(agentInstanceId, this.encryptPayload(credential));
+  }
+
+  encryptPayload(value: unknown): { iv: string; tag: string; ciphertext: string } {
     try {
       const iv = randomBytes(12);
       const cipher = createCipheriv("aes-256-gcm", this.keyValue(), iv);
-      const ciphertext = Buffer.concat([cipher.update(JSON.stringify(credential), "utf8"), cipher.final()]);
-      this.database.credentials.save(agentInstanceId, {
+      const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
+      return {
         iv: iv.toString("base64"),
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
-      });
+      };
     } catch (error) {
       throw new CoreError("CREDENTIAL_STORE_FAILED", { cause: error instanceof Error ? error.message : String(error) });
     }
@@ -65,11 +69,15 @@ export class CredentialService {
   read(agentInstanceId: string): StoredCredential | undefined {
     const encrypted = this.database.credentials.get(agentInstanceId);
     if (!encrypted) return undefined;
+    return this.decryptPayload(encrypted) as StoredCredential;
+  }
+
+  decryptPayload(encrypted: { iv: string; tag: string; ciphertext: string }): unknown {
     try {
       const decipher = createDecipheriv("aes-256-gcm", this.keyValue(), Buffer.from(encrypted.iv, "base64"));
       decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
       const plaintext = Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, "base64")), decipher.final()]).toString("utf8");
-      return JSON.parse(plaintext) as StoredCredential;
+      return JSON.parse(plaintext);
     } catch (error) {
       throw new CoreError("CREDENTIAL_STORE_FAILED", { cause: error instanceof Error ? error.message : String(error) });
     }

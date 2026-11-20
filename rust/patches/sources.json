@@ -3,7 +3,7 @@
     "name": "iroh",
     "version": "1.4.1",
     "archiveSha256": "e3689cab508af9bcef7816c1201b403595ec6aa20e7d15e1f9683bb4be4a5b17",
-    "patchedTreeSha256": "ce099c4d40f6aed9952caa0a8c3f572fc2a4c278883cd6dfcfb769b22be0d233",
+    "patchedTreeSha256": "d703bea7420b8df5c90f4e4b74984f44cf706c40396fc2200085960863c967bb",
     "patch": "iroh-1.4.1.patch",
     "additionalFiles": {
       "LICENSE-APACHE": "licenses/iroh-LICENSE-APACHE",
@@ -16,5 +16,12 @@
     "archiveSha256": "c01a35be3ed37558c8db69554419f24eff8a63599b54f711bbe3863ec727c47d",
     "patchedTreeSha256": "7cede9c4b248a1790c4c7b91592992a54890f01ffee3c7956e5f63aa0630560c",
     "patch": "noq-proto-1.4.0.patch"
+  },
+  {
+    "name": "netwatch",
+    "version": "0.19.3",
+    "archiveSha256": "39da9cad5f23aa43401f09497d3b280e51b5feba115d9ffbf38ca35d6ff95e96",
+    "patchedTreeSha256": "974a0611e3acb18c5627c555086f4914ec12e05eec20ee764fca7ab6365431cf",
+    "patch": "netwatch-0.19.3.patch"
   }
 ]

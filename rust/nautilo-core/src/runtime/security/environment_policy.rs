@@ -94,7 +94,7 @@ pub fn login_profile_directory(instance: &Value) -> crate::errors::CoreResult<Op
         return Err(invalid("loginProfileDirectory", "Use an absolute account configuration directory"));
     }
     let provider = instance.get("providerId").and_then(Value::as_str).unwrap_or("");
-    if provider != "codex" && provider != "claude-code" {
+    if !matches!(provider, "codex" | "claude-code" | "opencode") {
         return Err(invalid("loginProfileDirectory", "This harness does not support isolated login profiles"));
     }
     if instance.get("providerOptions").and_then(|o| o.get("baseUrl")).and_then(Value::as_str).is_some_and(|s| !s.is_empty())
@@ -108,6 +108,12 @@ pub fn login_profile_directory(instance: &Value) -> crate::errors::CoreResult<Op
 /// Apply after all policy and vault merges so a chosen login cannot be overridden.
 pub fn isolate_login_profile(instance: &Value, mut environment: HashMap<String, String>) -> crate::errors::CoreResult<HashMap<String, String>> {
     if let Some(directory) = login_profile_directory(instance)? {
+        if instance["providerId"] == "opencode" {
+            environment.retain(|key, _| !matches!(key.to_ascii_uppercase().as_str(), "XDG_DATA_HOME" | "XDG_STATE_HOME" | "OPENCODE_AUTH_CONTENT" | "OPENCODE_API_KEY"));
+            environment.insert("XDG_DATA_HOME".into(), std::path::Path::new(&directory).join("data").to_string_lossy().into_owned());
+            environment.insert("XDG_STATE_HOME".into(), std::path::Path::new(&directory).join("state").to_string_lossy().into_owned());
+            return Ok(environment);
+        }
         environment.retain(|key, _| {
             let key = key.to_ascii_uppercase();
             !["OPENAI_", "CODEX_", "ANTHROPIC_", "CLAUDE_CODE_OAUTH", "CLAUDE_CODE_API", "CLAUDE_CODE_USE_", "CLAUDE_CODE_SESSION_ACCESS"].iter().any(|prefix| key.starts_with(prefix))

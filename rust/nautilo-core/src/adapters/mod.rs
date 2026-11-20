@@ -62,7 +62,7 @@ pub enum AdapterEvent {
         raw: Option<Value>,
     },
     TurnDiff { diff: String, thread_id: String, turn_id: String, raw: Option<Value> },
-    File { path: String, change_type: Option<String>, additions: Option<i64>, deletions: Option<i64>, diff: Option<String>, raw: Option<Value> },
+    File { path: String, change_type: Option<String>, additions: Option<i64>, deletions: Option<i64>, diff: Option<String>, snapshot: Option<Value>, raw: Option<Value> },
     Session { provider_session_id: String, raw: Option<Value> },
     Status { phase: String, raw: Option<Value> },
     /// Replacement snapshot: context footprint, turn execution, or provider session total.
@@ -294,6 +294,21 @@ pub trait AgentCliAdapter: Send + Sync {
 
 // ---------------------------------------------------------------- plugin wire mapping
 
+/// Preserve independently known sides; missing BEFORE never means an empty file.
+pub(crate) fn file_snapshot(value: &Value) -> Option<Value> {
+    let mut result = serde_json::Map::new();
+    let mut truncated = value["truncated"] == true;
+    for side in ["before", "after"] {
+        if let Some(text) = value[side].as_str() {
+            truncated |= text.chars().count() > 200_000;
+            result.insert(side.into(), Value::String(text.chars().take(200_000).collect()));
+        }
+    }
+    if result.is_empty() { return None; }
+    if truncated { result.insert("truncated".into(), Value::Bool(true)); }
+    Some(Value::Object(result))
+}
+
 /// Converts a plugin-emitted event JSON frame back into an AdapterEvent.
 /// The frame shape matches the TS AdapterEvent union (camelCase fields).
 pub fn event_from_json(value: &Value) -> AdapterEvent {
@@ -346,6 +361,7 @@ pub fn event_from_json(value: &Value) -> AdapterEvent {
             additions: opt_i64("additions"),
             deletions: opt_i64("deletions"),
             diff: opt_str("diff"),
+            snapshot: value.get("snapshot").and_then(file_snapshot),
             raw,
         },
         "session" => AdapterEvent::Session { provider_session_id: opt_str("providerSessionId").unwrap_or_default(), raw },

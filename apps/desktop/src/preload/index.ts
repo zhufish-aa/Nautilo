@@ -61,6 +61,13 @@ const bridge = {
     minimize: (): Promise<void> => ipcRenderer.invoke("window:minimize"),
     toggleMaximize: (): Promise<void> => ipcRenderer.invoke("window:toggle-maximize"),
     close: (): Promise<void> => ipcRenderer.invoke("window:close"),
+    finishDraftClose: (id: string, saved: boolean): Promise<void> => ipcRenderer.invoke("window:drafts-flushed", id, saved),
+    onDraftClose: (callback: (id: string) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, id: string): void => callback(id);
+      ipcRenderer.on("window:flush-drafts", listener);
+      ipcRenderer.send("window:drafts-ready");
+      return () => { ipcRenderer.removeListener("window:flush-drafts", listener); };
+    },
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke("window:is-maximized"),
     onMaximizedChange: (callback: (maximized: boolean) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, maximized: boolean): void => {

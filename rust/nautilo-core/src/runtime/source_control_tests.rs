@@ -9,7 +9,13 @@ async fn worktree_revision_changes_for_edits_with_identical_porcelain_and_line_c
     std::fs::File::options().write(true).open(fixture.root.join("file.txt")).unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()+std::time::Duration::from_secs(1))).unwrap();
     let after=service.status(fixture.cwd()).await.unwrap();
-    assert_eq!(before["changes"],after["changes"]);assert_ne!(before["token"],after["token"]);
+    // The porcelain state and counts can stay identical while the file itself
+    // changed. Its preview version must invalidate independently of other files.
+    assert_ne!(before["changes"][0]["version"],after["changes"][0]["version"]);
+    for field in ["path","additions","deletions","indexStatus","worktreeStatus"] {
+        assert_eq!(before["changes"][0][field],after["changes"][0][field]);
+    }
+    assert_ne!(before["token"],after["token"]);
     assert!(service.mutate(fixture.cwd(),&json!({"action":"stage","token":before["token"],"paths":["file.txt"]})).await.is_err());
 }
 #[test]

@@ -39,6 +39,7 @@ export class AccountGateways {
     }
     const relay = await promise;
     await relay.checkLogin();
+    await relay.configureModels(request);
     relay.update(request);
     request.instance = {
       ...request.instance,

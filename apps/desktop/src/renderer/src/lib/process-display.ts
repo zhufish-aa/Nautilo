@@ -54,12 +54,11 @@ export function toolCallTree(calls: CodeExecution["calls"]): ToolCallBranch[] {
   return result;
 }
 
-/** Keep the collapsed preview steady while the next paragraph is streaming. */
-export function reasoningPreview(text: string, streaming: boolean): string {
-  const paragraphs = text.trimStart().split(/\r?\n[\t ]*\r?\n/);
-  const paragraph = streaming && paragraphs.length > 1 ? paragraphs.at(-2) : paragraphs[0];
-  return (paragraph?.split(/\r?\n/, 1)[0] ?? "").replace(/^\s*(?:#{1,6}\s+|[-*>]\s+)/, "")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/\*\*|__|`/g, "").trim().slice(0, 500);
+/** Follow the newest line, retaining its position when streaming ends. */
+export function reasoningPreview(text: string): string {
+  const content = text.trimEnd();
+  return content.slice(content.lastIndexOf("\n") + 1).replace(/^\s*(?:#{1,6}\s+|[-*>]\s+)/, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/\*\*|__|`/g, "").trim().slice(-500);
 }
 
 export type ToolOutput = { status?: string; fields: Array<[string, string]>; text: string };

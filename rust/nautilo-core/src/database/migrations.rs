@@ -12,6 +12,13 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
     db.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS assistant_records (id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS composer_drafts (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS workflow_templates (id TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(id,revision));
+        CREATE TABLE IF NOT EXISTS workflow_plans (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS workflow_runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, request_id TEXT NOT NULL, revision INTEGER NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL, lease_owner TEXT, lease_until INTEGER, UNIQUE(session_id,request_id));
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_session ON workflow_runs(session_id,updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_workflow_parent ON workflow_runs(json_extract(data,'$.parentRunId'));
+        CREATE TABLE IF NOT EXISTS workflow_events (run_id TEXT NOT NULL, sequence INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run_id,sequence));
         CREATE TABLE IF NOT EXISTS remote_settings (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS remote_devices (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS remote_commands (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT, created_at TEXT NOT NULL);
@@ -27,12 +34,15 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
         CREATE INDEX IF NOT EXISTS idx_project_runs_project ON project_runs(project_id, updated_at DESC);
         CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, member_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
+        CREATE TRIGGER IF NOT EXISTS delete_session_draft AFTER DELETE ON sessions BEGIN DELETE FROM composer_drafts WHERE id=OLD.id; END;
         CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
         CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, project_run_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(project_run_id, updated_at);
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(json_extract(data,'$.workflow.runId'),json_extract(data,'$.workflow.instanceId'),json_extract(data,'$.workflow.attempt'));
+        CREATE INDEX IF NOT EXISTS idx_runs_queue_key ON runs(json_extract(data,'$.queueKey'));
         CREATE TABLE IF NOT EXISTS runtime_events (event_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, session_id TEXT, project_run_id TEXT, run_id TEXT, data TEXT NOT NULL, timestamp TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_events_session_sequence ON runtime_events(session_id, sequence);
         CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON runtime_events(run_id, sequence);
@@ -71,6 +81,7 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
     ensure_column(db, "artifacts", "project_run_id", "TEXT")?;
     ensure_column(db, "artifacts", "task_id", "TEXT")?;
     ensure_column(db, "artifacts", "session_id", "TEXT")?;
+    ensure_column(db,"workflow_runs","pending_actions","INTEGER NOT NULL DEFAULT 0")?;
     db.execute_batch(include_str!("history_projection.sql")).map_err(db_fail)?;
     let version = current_schema_version(db)?;
     if version < 5 {
@@ -92,6 +103,11 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
     }
     if version < 9 { set_schema_version(db, 9)?; }
     if version < 10 { set_schema_version(db, 10)?; }
+    if version < 11 { set_schema_version(db, 11)?; }
+    if version < 12 {
+        db.execute_batch("UPDATE workflow_runs SET pending_actions=(SELECT COUNT(*) FROM json_each(workflow_runs.data,'$.messages') WHERE json_extract(value,'$.status') IN ('queued','delivering','waiting_approval'));") .map_err(db_fail)?;
+        set_schema_version(db,12)?;
+    }
     Ok(())
 }
 

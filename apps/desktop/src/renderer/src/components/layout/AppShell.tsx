@@ -55,13 +55,14 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const sidebarWidth=useRememberedWidth("nautilo.sidebar.width",window.innerWidth<=780?180:window.innerWidth<=1100?240:280,180,480);
   const toggleSidebar = (value: boolean): void => { setCollapsed(value); try { localStorage.setItem("nautilo.sidebar.collapsed", String(value)); } catch { /* Storage can be disabled. */ } };
   // The chat-first workbench uses the full width/height; other pages stay centered.
-  const fullBleed = location.pathname.startsWith("/sessions") || location.pathname.startsWith("/work");
+  const fullBleed = location.pathname === "/work" || location.pathname === "/sessions" || location.pathname.startsWith("/sessions/");
   const isAssistant = location.pathname === "/assistant";
   const isSettings = location.pathname.startsWith("/settings");
   const isRuns = location.pathname === "/runs";
+  const isWorkflows = location.pathname === "/workflows";
 
   return (
-    <div className="app-shell flex h-screen flex-col overflow-hidden bg-canvas text-ink">
+    <div className="app-shell flex h-screen flex-col overflow-hidden bg-canvas text-ink" data-workflow-surface={isWorkflows || undefined}>
       <a
         href="#main-content"
         className="sr-only z-50 rounded-lg bg-accent px-3 py-2 text-sm text-on-accent focus:not-sr-only focus:absolute focus:top-2 focus:left-2"
@@ -91,7 +92,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
             <SessionsPage active={fullBleed} />
           </div>
           {isSettings || isAssistant ? children : !fullBleed ? (
-            <div className={cn(isRuns ? "runs-route-surface min-h-full w-full" : "mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
+            <div className={cn(isRuns ? "runs-route-surface min-h-full w-full" : isWorkflows ? "workflows-route-surface min-h-full w-full px-6 py-5" : "mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
               <PageTransition transitionKey={location.pathname}>{children}</PageTransition>
             </div>
           ) : null}

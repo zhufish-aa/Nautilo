@@ -12,6 +12,7 @@ struct LiveRequest {
     start: Instant,
     row: Value,
     seen: HashSet<String>,
+    mcp: Option<(std::sync::Weak<super::mcp_pool::McpPool>, Vec<super::mcp_pool::Binding>)>,
 }
 pub struct RequestLogService {
     db: Arc<Mutex<Database>>,
@@ -56,6 +57,7 @@ impl RequestLogService {
                 start: Instant::now(),
                 row,
                 seen: HashSet::new(),
+                mcp: None,
             },
         );
         id
@@ -75,9 +77,19 @@ impl RequestLogService {
     pub fn mark(&self, id: &str, stage: &str) {
         self.update(id, |r| mark(r, stage));
     }
+    pub fn mcp(&self, id: &str, pool: &Arc<super::mcp_pool::McpPool>, bindings: Vec<super::mcp_pool::Binding>) {
+        self.update(id, |r| {
+            r.row["mcp"] = pool.observations(&bindings);
+            r.mcp = Some((Arc::downgrade(pool), bindings));
+            true
+        });
+    }
     pub fn attach(&self, id: &str, run: &Value) {
         self.update(id, |r| {
             r.row["runId"] = run["id"].clone();
+            if let Some(model) = run["model"].as_str().filter(|model| !model.is_empty()) {
+                r.row["model"] = json!(model);
+            }
             true
         });
     }
@@ -97,7 +109,9 @@ impl RequestLogService {
         self.update(id,|r|{
             let mut changed=false;
             match event {
-                AdapterEvent::Status{phase,raw} if phase=="runtime_ready" => {changed|=mark(r,"runtimeReady"); if let Some(raw)=raw {let mut safe=json!({"reused":raw["reused"],"pid":raw["pid"],"attachMs":raw["attachMs"]});
+                AdapterEvent::Status{phase,raw} if phase=="runtime_ready" => {changed|=mark(r,"runtimeReady"); sample_mcp(r); if let Some(raw)=raw {let mut safe=json!({"reused":raw["reused"],"pid":raw["pid"],"attachMs":raw["attachMs"]});
+                    if let Some(value)=raw["reason"].as_str().filter(|value| matches!(*value,"resident"|"first_use"|"configuration_changed"|"session_changed"|"process_exited"|"transport_recovery"|"protocol_single_use")) {safe["reason"]=json!(value);}
+                    if let Some(value)=raw["transport"].as_str().filter(|value| value.len()<=32&&value.chars().all(|c| c.is_ascii_lowercase()||c.is_ascii_digit()||"_-".contains(c))) {safe["transport"]=json!(value);}
                     let startup = &raw["startupTimings"];
                     if ["prepareMs", "bootstrapMs", "sessionOpenMs"].iter().all(|key| startup[*key].as_u64().is_some()) {
                         safe["startupTimings"] = json!({"prepareMs": startup["prepareMs"], "bootstrapMs": startup["bootstrapMs"], "sessionOpenMs": startup["sessionOpenMs"]});
@@ -128,7 +142,7 @@ impl RequestLogService {
         });
     }
     pub fn finish(&self, id: &str, status: &str, code: Option<&str>, error: Option<&str>) {
-        self.update(id,|r|{mark(r,"ended");r.row["status"]=json!(if matches!(status,"completed"|"cancelled"|"interrupted"){status}else{"failed"});if error.is_some()||code.is_some(){let message=error.or_else(||r.row["failure"]["message"].as_str()).unwrap_or("Request failed").to_string();r.row["failure"]=json!({"stage":failure_stage(&r.row),"code":code,"message":self.redaction.text(&message)});}true});
+        self.update(id,|r|{mark(r,"ended");sample_mcp(r);r.row["status"]=json!(if matches!(status,"completed"|"cancelled"|"interrupted"){status}else{"failed"});if error.is_some()||code.is_some(){let message=error.or_else(||r.row["failure"]["message"].as_str()).unwrap_or("Request failed").to_string();r.row["failure"]=json!({"stage":failure_stage(&r.row),"code":code,"message":self.redaction.text(&message)});}true});
         self.live.lock().unwrap().remove(id);
     }
     pub fn cancel_queued(&self, session_id: &str, message_id: &str) {
@@ -155,12 +169,15 @@ impl RequestLogService {
     }
     pub fn inventory(&self, session_id: &str) -> CoreResult<Value> {
         let page = self.list(&json!({"sessionId":session_id,"limit":1}))?;
-        let r = &page["items"][0];
+        let current = Repositories::new(&self.db.lock().unwrap().raw).sessions().get(session_id)?.unwrap_or(Value::Null);
+        let latest = &page["items"][0];
+        let r = if !current.is_null() && latest["agentInstanceId"] == current["agentInstanceId"]
+            && latest["connectionId"] == current["connectionId"] && latest["connectionRevision"] == current["connectionRevision"] { latest } else { &Value::Null };
         let mut tools = std::collections::BTreeMap::<String, &str>::new();
         for (field, proof) in [
             ("suppliedTools", "supplied"),
-            ("observedTools", "observed"),
             ("nativeTools", "native"),
+            ("observedTools", "observed"),
         ] {
             for name in names(r.get(field)) {
                 tools.insert(name, proof);
@@ -179,8 +196,13 @@ impl RequestLogService {
             }
         }
         Ok(
-            json!({"sessionId":session_id,"checkedAt":now_iso(),"requestId":r["id"],"nativeReported":r.get("nativeTools").is_some(),"tools":tools.into_iter().map(|(name,evidence)|json!({"name":name,"evidence":evidence})).collect::<Vec<_>>(),"servers":servers.into_values().collect::<Vec<_>>() }),
+            json!({"sessionId":session_id,"checkedAt":now_iso(),"requestId":r["id"],"runId":r["runId"],"connectionId":current["connectionId"],"connectionRevision":current["connectionRevision"],"providerId":r["providerId"],"requestCreatedAt":r["createdAt"],"nativeReported":r.get("nativeTools").is_some(),"tools":tools.into_iter().map(|(name,evidence)|json!({"name":name,"evidence":evidence})).collect::<Vec<_>>(),"servers":servers.into_values().collect::<Vec<_>>() }),
         )
+    }
+}
+fn sample_mcp(request: &mut LiveRequest) {
+    if let Some((pool, bindings)) = &request.mcp {
+        if let Some(pool) = pool.upgrade() { request.row["mcp"] = pool.observations(bindings); }
     }
 }
 fn mark(r: &mut LiveRequest, stage: &str) -> bool {

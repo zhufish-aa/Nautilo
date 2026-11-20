@@ -154,12 +154,18 @@ try {
   assert.equal(diagnostics()[0]?.deepseekRuntime, 'started');
   assert.equal(diagnostics()[1]?.deepseekRuntime, 'reused');
   assert.equal(diagnostics()[0]?.pid, diagnostics()[1]?.pid, 'the second turn must use the same native process');
-  const updated = { ...base, instance: { ...base.instance, providerOptions: { ...base.instance.providerOptions, runtimeConnectionRevision: 2 } } };
+  const updated = { ...base, instance: { ...base.instance, providerOptions: { ...base.instance.providerOptions, runtimeConnectionRevision: 2 },
+    models: [{ ...base.instance.models[0], id: 'after-switch' }] }, model: '' };
+  const requestsBeforeSwitch = requests.length;
   send({ type: 'start', runId: 'changed', resume: session, request: { ...updated, prompt: 'Use the updated connection.' } });
   const changed = await wait(f => f.type === 'event' && f.runId === 'changed' && f.event.kind === 'exit');
   assert.equal(changed.event.exitCode, 0);
   assert.equal(diagnostics()[2]?.deepseekRuntime, 'started', 'a changed connection must rebuild the native configuration');
   assert.notEqual(diagnostics()[0]?.pid, diagnostics()[2]?.pid);
+  const switchedCalls = requests.slice(requestsBeforeSwitch);
+  assert.ok(switchedCalls.length > 0 && switchedCalls.every(call => call.model === 'after-switch'));
+  const profile = await readFile(join(profilePath, 'cordis.patch.yml'), 'utf8');
+  assert.doesNotMatch(profile, /nautilo-test-[12]/, 'temporary providers must not become the saved native default');
   send({ type: 'start', runId: 'cancel-warm', resume: session, request: { ...updated, prompt: 'CANCEL_WARM_TURN' } });
   await wait(f => f.type === 'event' && f.runId === 'cancel-warm' && f.event.kind === 'thinking' && f.event.text?.includes('Thinking'));
   send({ type: 'cancel', runId: 'cancel-warm' });

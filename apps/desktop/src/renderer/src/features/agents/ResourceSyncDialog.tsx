@@ -64,6 +64,7 @@ export function ResourceSyncDialog({
         keep: "Keep native",
         rename: "Rename",
       };
+  const sources = [...new Set((inventory?.resources ?? []).filter(resource => resource.kind === kind).map(resource => resource.source))];
   return (
     <Dialog
       open={open}
@@ -146,9 +147,9 @@ export function ResourceSyncDialog({
           ) : (
             <>
               <div className="resource-sync-resources">
-                {inventory?.resources
-                  .filter((r) => r.kind === kind)
-                  .map((r) => (
+                {sources.map(source => <section className="resource-sync-source" key={source}>
+                  <h3>{source === "unknown" ? (zh ? "来源未记录" : "Source not recorded") : source}</h3>
+                  {inventory?.resources.filter(resource => resource.kind === kind && resource.source === source).map((r) => (
                     <label key={r.id}>
                       <input
                         type="checkbox"
@@ -179,9 +180,9 @@ export function ResourceSyncDialog({
                           {r.sourcePath && ` · ${r.sourcePath}`}
                         </span>
                       </span>
-                      <span className="resource-sync-owner">Nautilo</span>
+                      <span className="resource-sync-owner" title={r.providerIds.join(" · ")}>{r.providerIds.join(" · ") || (zh ? "全部 Harness" : "All harnesses")}</span>
                     </label>
-                  ))}
+                  ))}</section>)}
                 {inventory &&
                   !inventory.resources.some((r) => r.kind === kind) && (
                     <p>{zh ? "没有可同步的资源" : "No resources to sync"}</p>
@@ -238,7 +239,7 @@ export function ResourceSyncDialog({
                 <div className="resource-sync-plan-heading">
                   <strong>{zh ? "同步计划" : "Sync plan"}</strong>
                   <span>
-                    {plan.state === "applied"
+                    {plan.state === "conflict" ? (zh ? "原生配置已变化 · 请重新预览" : "Native files changed · Preview again") : plan.state === "applied"
                       ? zh
                         ? "已应用"
                         : "Applied"
@@ -251,7 +252,7 @@ export function ResourceSyncDialog({
                           : "Not yet applied"}
                   </span>
                 </div>
-                {plan.changes.map((c, i) => (
+                {plan.changes.filter(change => !["unchanged", "keep"].includes(change.operation) || change.conflict).map((c, i) => (
                   <div className="resource-sync-change" key={`${c.path}:${i}`}>
                     <FileCode2 size={15} />
                     <div>
@@ -274,7 +275,12 @@ export function ResourceSyncDialog({
                     <span data-conflict={c.conflict}>{ops[c.operation]}</span>
                   </div>
                 ))}
+                {plan.changes.some(change => ["unchanged", "keep"].includes(change.operation) && !change.conflict) && <details className="resource-sync-identical">
+                  <summary>{zh ? "未更改" : "Unchanged"} · {plan.changes.filter(change => ["unchanged", "keep"].includes(change.operation) && !change.conflict).length}</summary>
+                  {plan.changes.filter(change => ["unchanged", "keep"].includes(change.operation) && !change.conflict).map(change => <p key={`${change.path}:${change.resourceId}`} title={change.path}>{change.name} · {ops[change.operation]}</p>)}
+                </details>}
                 <div className="resource-sync-actions">
+                  {plan.state === "conflict" && <Button variant="outline" disabled={busy} onClick={() => void action("resource.preview", { targetId, capabilityIds: selected.length ? selected : [...new Set(plan.changes.map(change => change.resourceId))], resolution })}>{zh ? "重新预览" : "Preview again"}</Button>}
                   {plan.state === "preview" && (
                     <Button
                       variant="primary"

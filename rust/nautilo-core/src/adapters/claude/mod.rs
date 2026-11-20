@@ -136,6 +136,7 @@ fn claude_runtime_mcp_args(bridge_url: Option<&str>, servers: &[Value]) -> Vec<S
 }
 
 fn claude_permission_prompt_tool_args(request: &AdapterStartRequest, bridge_active: bool) -> Vec<String> {
+    if request.instance["providerOptions"]["accountModelRelay"]==true { return vec![]; }
     if bridge_active && request.request_interaction.is_some() {
         vec![
             "--permission-prompt-tool".to_string(),
@@ -146,7 +147,20 @@ fn claude_permission_prompt_tool_args(request: &AdapterStartRequest, bridge_acti
     }
 }
 
+/// Magpie claudeCLIArgs, scoped to a model worker. The outer Harness keeps its
+/// own tools, Apps, settings, permission prompts and native session lifecycle.
+fn account_model_args(prompt:&str,request:&AdapterStartRequest,resume:Option<&str>)->Vec<String> {
+    let mut settings=json!({"disableDeepLinkRegistration":"disable","showThinkingSummaries":true});
+    let enforced=claude_settings_args(Some(request));
+    if let Some(value)=enforced.get(1).and_then(|value|serde_json::from_str::<Value>(value).ok()) {if let Some(env)=value.get("env"){settings["env"]=env.clone();}}
+    let mut args=vec!["-p".into(),"--output-format".into(),"stream-json".into(),"--verbose".into(),"--include-partial-messages".into(),"--tools".into(),String::new(),"--strict-mcp-config".into(),"--setting-sources".into(),String::new(),"--settings".into(),settings.to_string(),"--dangerously-skip-permissions".into()];
+    args.extend(model_args(Some(request)));args.extend(effort_args(Some(request)));
+    if let Some(id)=resume {args.extend(["--resume".into(),id.into()]);}
+    args.push(prompt.into());args
+}
+
 pub fn build_claude_start_args(instance: &Value, prompt: &str, request: Option<&AdapterStartRequest>) -> Vec<String> {
+    if let Some(request)=request.filter(|request|request.instance["providerOptions"]["accountModelRelay"]==true) {return account_model_args(prompt,request,None);}
     let base_args: Vec<String> = instance
         .get("baseArgs")
         .and_then(Value::as_array)
@@ -179,6 +193,7 @@ pub fn build_claude_resume_args(
     prompt: &str,
     request: Option<&AdapterStartRequest>,
 ) -> Vec<String> {
+    if let Some(request)=request.filter(|request|request.instance["providerOptions"]["accountModelRelay"]==true) {return account_model_args(prompt,request,Some(session_id));}
     let base_args: Vec<String> = instance
         .get("baseArgs")
         .and_then(Value::as_array)
@@ -1037,6 +1052,19 @@ async fn launch_inner(
 #[cfg(test)]
 mod usage_accounting_tests {
     use super::*;
+
+    #[test]
+    fn magpie_model_worker_arguments_are_scoped_to_the_worker_and_keep_native_persistence() {
+        let mut request=AdapterStartRequest {instance:json!({"providerOptions":{}}),..Default::default()};
+        let normal=build_claude_start_args(&request.instance,"hello",Some(&request));
+        assert!(!normal.iter().any(|arg|arg=="--strict-mcp-config"||arg=="--setting-sources"));
+        request.instance["providerOptions"]["accountModelRelay"]=json!(true);
+        let worker=build_claude_resume_args(&request.instance,"native-id","hello",Some(&request));
+        assert!(worker.windows(2).any(|args|args==["--resume","native-id"]));
+        assert!(worker.windows(2).any(|args|args==["--tools",""]));
+        assert!(worker.iter().any(|arg|arg=="--strict-mcp-config"));
+        assert!(!worker.iter().any(|arg|arg=="--no-session-persistence"));
+    }
 
     #[test]
     fn interleaved_child_streams_keep_their_own_message_and_completion_identity() {

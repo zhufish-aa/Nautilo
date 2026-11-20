@@ -864,6 +864,13 @@ async fn run_omp(
     let key = request["localSessionId"].as_str().or(resume.as_deref()).unwrap_or(run_id).to_string();
     let attached=std::time::Instant::now();
     let cached = pool.take(&key);
+    let reason = match &cached {
+        None => "first_use",
+        Some((_, native)) if !native.process.as_ref().is_some_and(|p| p.handle.is_alive()) => "process_exited",
+        Some((previous, _)) if previous != &identity => "configuration_changed",
+        Some((_, native)) if resume.is_none() || native.session_id != resume => "session_changed",
+        _ => "resident",
+    };
     let mut reused = false;
     let mut native = if let Some((previous,cached)) = cached {
         if resume.is_some() && cached.session_id==resume && previous == identity && cached.process.as_ref().is_some_and(|process|process.handle.is_alive()) {reused=true; cached}
@@ -876,7 +883,7 @@ async fn run_omp(
     let handle = started.handle.clone();
     *handle_slot.lock().unwrap() = Some(handle.clone());
     runs.lock().unwrap().insert(run_id.to_string(), handle.clone());
-    let _=sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"omp","transport":"rpc","reused":reused,"pid":handle.pid,"attachMs":attached.elapsed().as_millis()}}));
+    let _=sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"omp","transport":"rpc","reused":reused,"reason":reason,"pid":handle.pid,"attachMs":attached.elapsed().as_millis()}}));
 
     let runtime_tools: Vec<Value> = request.get("runtimeTools").and_then(Value::as_array).cloned().unwrap_or_default();
     // Keep the channel for extension UI interactions (approval prompts); host

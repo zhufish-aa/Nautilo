@@ -22,7 +22,6 @@ export async function forwardNativeEvents(
   run: AdapterRun,
   queue: AsyncQueue<Json>,
   nativeSession: (nativeId: string) => void,
-  checkpoint: () => void,
   failureMessage: (message: string) => string,
 ): Promise<void> {
   const seen = new Map<string, string>();
@@ -73,7 +72,6 @@ export async function forwardNativeEvents(
         if (event.exitCode) {
           queue.push({ error: "Native account request failed" });
         } else {
-          checkpoint();
           queue.push({ done: true });
         }
         return;

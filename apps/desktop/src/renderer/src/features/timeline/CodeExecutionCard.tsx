@@ -1,10 +1,12 @@
 import { memo, useMemo, useState } from "react";
-import { AlertTriangle, Check, Code2, Copy, Loader2 } from "lucide-react";
+import { AlertTriangle, Check, Code2, Copy } from "lucide-react";
 import type { TimelinePayload } from "../../lib/types";
 import { codeExecutionInput } from "../../lib/tool-display";
 import { toolOutput, toolCallTree, codeCallDescription, type ToolCallBranch } from "../../lib/process-display";
 import { ProcessDisclosure } from "./ProcessDisclosure";
 import { ToolActivityIcon } from "./ToolActivityIcon";
+import { WorkflowToolActivity, workflowTool } from "./WorkflowToolActivity";
+import { VirtualList } from "../../components/ui/VirtualList";
 import "./CodeExecutionCard.css";
 
 type Activity = Extract<TimelinePayload, { kind: "tool_activity" }>;
@@ -38,42 +40,52 @@ function Program({ code, zh, truncated }: { code: string; zh: boolean; truncated
   </div>;
 }
 
-const ToolBranch = memo(function ToolBranch({ branch, zh }: { branch: ToolCallBranch; zh: boolean }): JSX.Element {
+const ToolBranch = memo(function ToolBranch({ branch, sessionId, runId, zh }: { branch: ToolCallBranch; sessionId: string; runId?: string; zh: boolean }): JSX.Element {
   const [open, setOpen] = useState(false);
   const call = branch.call;
+  const action = workflowTool(call.name);
   const description = codeCallDescription(call, zh);
-  const Icon = call.status === "running" ? Loader2 : AlertTriangle;
   const input = call.input && typeof call.input === "object" && !Array.isArray(call.input) ? call.input as Record<string, unknown> : { input: call.input };
   return <div className="ptc-branch">
-    <ProcessDisclosure icon={call.status === "done" ? <ToolActivityIcon name={call.name} input={JSON.stringify(call.input)} /> : <Icon size={14} className={call.status === "running" ? "animate-spin" : undefined} />} label={description.title}
+    {action ? <WorkflowToolActivity action={action} name={call.name} sessionId={sessionId} runId={runId} input={call.input} output={call.output} status={call.status} zh={zh} /> : <ProcessDisclosure icon={call.status === "failed" ? <AlertTriangle size={14}/> : <ToolActivityIcon name={call.name} input={JSON.stringify(call.input)} />} label={description.title}
       preview={description.summary} retainPreview open={open} onToggle={() => setOpen(value => !value)} running={call.status === "running"} failed={call.status === "failed"}>
       <div className="ptc-detail">
         {typeof input.code === "string" && <Program code={input.code} zh={zh} />}
         {call.input != null && <dl className="ptc-fields ptc-input">{Object.entries(input).filter(([key]) => !["description", "code"].includes(key)).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</dd></div>)}</dl>}
         <Output value={call.output} zh={zh} failed={call.status === "failed"} />
       </div>
-    </ProcessDisclosure>
-    {branch.children.length > 0 && <div className="ptc-subcalls">{branch.children.map(child => <ToolBranch key={child.call.callId} branch={child} zh={zh} />)}</div>}
+    </ProcessDisclosure>}
   </div>;
 });
 
-export function CodeExecutionCard({ data, locale }: { data: Activity; locale: "zh-CN" | "en-US" }): JSX.Element {
+export function CodeExecutionCard({ data, locale, sessionId, runId }: { data: Activity; locale: "zh-CN" | "en-US"; sessionId: string; runId?: string }): JSX.Element {
   const zh = locale === "zh-CN";
   const [open, setOpen] = useState(false);
   const program = useMemo(() => codeExecutionInput(data.input), [data.input]);
   const branches = useMemo(() => toolCallTree(data.codeExecution?.calls ?? []), [data.codeExecution]);
+  const calls = useMemo(() => {
+    const rows: Array<{ branch: ToolCallBranch; depth: number }> = [];
+    const append = (items: ToolCallBranch[], depth: number): void => { for (const branch of items) { rows.push({ branch, depth }); append(branch.children, depth + 1); } };
+    append(branches, 0); return rows;
+  }, [branches]);
   const result = useMemo(() => toolOutput(data.output, zh), [data.output, zh]);
-  const actualCall = data.codeExecution?.calls.find(call => call.status === "running") ?? data.codeExecution?.calls[0];
-  const preview = [(program.description ?? data.codeExecution?.description)?.split(/\r?\n/, 1)[0] || (actualCall ? codeCallDescription(actualCall, zh).summary || codeCallDescription(actualCall, zh).title : undefined), result.status].filter(Boolean).join(" · ");
-  const Icon = data.status === "running" ? Loader2 : data.status === "failed" ? AlertTriangle : Code2;
+  const actualCall = data.codeExecution?.calls.find(call => call.status === "running") ?? data.codeExecution?.calls.at(-1);
+  const purpose = (program.description ?? data.codeExecution?.description)?.split(/\r?\n/, 1)[0];
+  const activity = actualCall && codeCallDescription(actualCall, zh);
+  const preview = [purpose, calls.length ? (zh ? `${calls.length} 个工具` : `${calls.length} tools`) : undefined,
+    activity && (activity.summary || activity.title), result.status].filter(Boolean).join(" · ");
+  const Icon = data.status === "failed" ? AlertTriangle : Code2;
   return <div className="ptc-execution">
-    <ProcessDisclosure icon={<Icon size={14} className={data.status === "running" ? "animate-spin" : undefined} />} label={zh ? "执行代码" : "Run code"}
+    <ProcessDisclosure icon={<Icon size={14}/>} label={zh ? "执行代码" : "Run code"}
       preview={preview} retainPreview open={open} onToggle={() => setOpen(value => !value)} running={data.status === "running"} failed={data.status === "failed"}>
       <div className="ptc-detail">
-        {program.code && <Program code={program.code} zh={zh} truncated={program.truncated} />}
+        {calls.length > 0 && <VirtualList className="ptc-call-list" label={zh ? "实际工具调用" : "Observed tool calls"} keyboard rows={calls.map(({ branch, depth }) => ({
+          key: branch.call.callId, size: workflowTool(branch.call.name) ? 38 : 30,
+          render: () => <div style={{ paddingInlineStart: Math.min(depth, 8) * 12 }}><ToolBranch branch={branch} sessionId={sessionId} runId={runId} zh={zh}/></div>
+        }))}/>}
+        {program.code && <details className="ptc-source"><summary>{zh ? "源代码" : "Source code"}</summary><Program code={program.code} zh={zh} truncated={program.truncated} /></details>}
         <Output value={data.output} zh={zh} failed={data.status === "failed"} />
       </div>
     </ProcessDisclosure>
-    {branches.length > 0 && <div className="ptc-subcalls">{branches.map(branch => <ToolBranch key={branch.call.callId} branch={branch} zh={zh} />)}</div>}
   </div>;
 }

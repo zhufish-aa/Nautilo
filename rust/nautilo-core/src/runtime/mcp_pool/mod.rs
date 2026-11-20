@@ -1,5 +1,7 @@
 //! Daemon-owned MCP processes. The stdio relay keeps the native MCP wire format.
 mod relay;
+mod metrics;
+pub use metrics::Binding;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -105,6 +107,27 @@ impl McpPool {
         }
     }
 
+    pub fn binding(&self, server: &Value, cwd: &str) -> Option<Binding> {
+        if server["transport"] != "stdio" { return None; }
+        let mut spec = server.clone();
+        if !spec["cwd"].is_string() { spec["cwd"] = json!(cwd); }
+        let prefix = format!("{:x}:", Sha256::digest(spec.to_string()));
+        let existing_pids = self.workers.lock().unwrap().iter()
+            .filter(|(key, worker)| key.starts_with(&prefix) && worker.alive())
+            .filter_map(|(_, worker)| worker.pid()).collect();
+        Some(Binding { name:server["name"].as_str().unwrap_or("MCP").chars().take(200).collect(), prefix, existing_pids })
+    }
+
+    pub fn observations(&self, bindings: &[Binding]) -> Value {
+        let workers = self.workers.lock().unwrap();
+        json!({"scope":"bound_process_snapshot","servers":bindings.iter().map(|binding| {
+            let mut seen = std::collections::HashSet::new();
+            let processes = workers.iter().filter(|(key, worker)| key.starts_with(&binding.prefix) && worker.alive() && seen.insert(worker.pid()))
+                .map(|(_, worker)| { let mut value=worker.observation(); value["reused"]=json!(worker.pid().is_some_and(|pid| binding.existing_pids.contains(&pid))); value }).collect::<Vec<_>>();
+            json!({"name":binding.name,"processes":processes})
+        }).collect::<Vec<_>>()})
+    }
+
     fn worker(&self, spec: &Value, first: &Value, dedicated: bool) -> anyhow::Result<Arc<Worker>> {
         let mut workers = self.workers.lock().unwrap();
         anyhow::ensure!(
@@ -115,7 +138,7 @@ impl McpPool {
             let worker = Worker::start(spec, false)?;
             workers.retain(|_, worker| worker.alive());
             workers.insert(
-                format!("dedicated:{}", uuid::Uuid::new_v4()),
+                format!("{:x}:dedicated:{}", Sha256::digest(spec.to_string()), uuid::Uuid::new_v4()),
                 worker.clone(),
             );
             return Ok(worker);

@@ -51,6 +51,14 @@ impl ApprovalService {
         task_id: Option<&str>,
         session_id: Option<&str>,
     ) -> CoreResult<bool> {
+        self.authorization(operation,project_id,project_run_id,task_id,session_id,true)
+    }
+    /// Preflight a batch without consuming its one-shot grants. Execution
+    /// consumes each grant only when that exact approved operation starts.
+    pub fn has_authorization(&self, operation: &str, project_id: Option<&str>, project_run_id: Option<&str>, task_id: Option<&str>, session_id: Option<&str>) -> CoreResult<bool> {
+        self.authorization(operation,project_id,project_run_id,task_id,session_id,false)
+    }
+    fn authorization(&self, operation: &str, project_id: Option<&str>, project_run_id: Option<&str>, task_id: Option<&str>, session_id: Option<&str>, consume: bool) -> CoreResult<bool> {
         // Keep selecting and consuming a one-shot grant under the same lock.
         let db = lock(&self.db);
         let approvals = Repositories::new(&db.raw).approvals();
@@ -78,7 +86,7 @@ impl ApprovalService {
         };
         let scope = grant.get("scope").and_then(Value::as_str);
         let consumed = grant.get("consumedAt").is_some();
-        if scope == Some("once") && !consumed {
+        if consume && scope == Some("once") && !consumed {
             let mut updated = grant.as_object().cloned().unwrap_or_default();
             updated.insert("consumedAt".to_string(), json!(now_iso()));
             approvals.save(&Value::Object(updated))?;

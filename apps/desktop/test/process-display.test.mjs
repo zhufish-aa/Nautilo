@@ -6,10 +6,17 @@ import { createHarness, delta } from './helpers/orchestration-runtime-harness.mj
 const source = await readFile(new URL('../src/renderer/src/lib/process-display.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 const { reasoningPreview, toolOutput, toolCallTree, mergeCodeExecution, codeCallDescription } = await import(`data:text/javascript,${encodeURIComponent(compiled)}`);
-test('reasoning shows one stable preview line without markup', () => {
-  assert.equal(reasoningPreview('**First paragraph**\n\nSecond unfinished', true), 'First paragraph');
-  assert.equal(reasoningPreview('First\n\nSecond paragraph\n\nThird unfinished', true), 'Second paragraph');
-  assert.equal(reasoningPreview('**First**\ncontinued\n\nSecond', false), 'First');
+test('reasoning follows the newest line without markup or rewinding at paragraph boundaries', () => {
+  assert.equal(reasoningPreview('**First paragraph**\n\nSecond unfinished'), 'Second unfinished');
+  assert.equal(reasoningPreview('First\n\nSecond paragraph\n\nThird unfinished'), 'Third unfinished');
+  assert.equal(reasoningPreview('**First**\ncontinued\n\nSecond\r\n \t\r\n'), 'Second');
+  assert.equal(reasoningPreview('## 检查\n- **正在读取** [文件](https://example.com) `src/main.ts`'), '正在读取 文件 src/main.ts');
+  assert.equal(reasoningPreview(''), '');
+  const longLine = 'old '.repeat(300) + 'latest thought';
+  assert.equal(reasoningPreview(longLine), longLine.slice(-500));
+  for (const suffix of ['N', 'Ne', 'Newest words']) {
+    assert.equal(reasoningPreview(`First\n\n${suffix}`), suffix);
+  }
 });
 test('background receipts retain job status and readable metadata', () => {
   const output = toolOutput(JSON.stringify({ kind: 'promoted', jobId: 'job-1', cwd: 'D:/work', timeoutMs: 240000, output: '' }), true);

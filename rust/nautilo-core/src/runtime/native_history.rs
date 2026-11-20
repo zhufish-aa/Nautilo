@@ -754,6 +754,7 @@ fn plan_import(
                         }
                     }
                     "usage" => "usage.updated",
+                    "file" => "file.changed",
                     _ => continue,
                 };
                 let mut payload = match event["kind"].as_str().unwrap_or("") {
@@ -763,6 +764,7 @@ fn plan_import(
                     "command" => {
                         json!({"callId":event["callId"],"command":event["command"],"cwd":session["nativeWorkingDirectory"],"exitCode":event["exitCode"],"outputSummary":event["output"]})
                     }
+                    "file" => json!({"path":event["path"],"changeType":event["changeType"],"additions":event["additions"],"deletions":event["deletions"],"diff":event["diff"],"callId":event["callId"],"fileSnapshot":event.get("snapshot").and_then(crate::adapters::file_snapshot)}),
                     _ => {
                         let mut payload = event.clone();
                         payload.as_object_mut().unwrap().remove("raw");

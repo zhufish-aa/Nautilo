@@ -8,6 +8,7 @@ import { useSessionsStore } from "../../stores/sessions";
 import { useConnectionsStore } from "../../stores/connections";
 import { sessionErrorPresentation } from "../../lib/session-error-presentation";
 import { ms, stages, statusLabel } from "./request-log-display";
+import { RequestRuntimeDetails } from "./RequestRuntimeDetails";
 
 export function RequestLogRow({
   row,
@@ -67,7 +68,7 @@ export function RequestLogRow({
           >
             <div className="request-log-detail-body">
               <div className="request-log-meta">
-                <Link to={`/sessions/${row.sessionId}`}>
+                <Link to={`/sessions?session=${encodeURIComponent(row.sessionId)}`}>
                   {title || row.sessionId}
                   <ArrowUpRight size={14} />
                 </Link>
@@ -88,6 +89,7 @@ export function RequestLogRow({
                   </span>
                 )}
               </div>
+              <RequestRuntimeDetails row={row} zh={zh}/>
               {row.runtime?.startupTimings && <div className="request-log-meta">
                 <span>{zh ? "运行配置准备" : "Runtime preparation"} · {ms(row.runtime.startupTimings.prepareMs)}</span>
                 <span>{zh ? "加载原生运行环境" : "Native runtime loading"} · {ms(row.runtime.startupTimings.bootstrapMs)}</span>
@@ -151,6 +153,11 @@ export function RequestLogRow({
                   <dt>{zh ? "Nautilo 传入" : "Nautilo supplied"}</dt>
                   <dd>{row.suppliedTools.join(" · ") || "—"}</dd>
                 </dl>
+                <div className="session-tools-inventory-actions">
+                  {row.connectionId && <Link to={`/settings?section=accounts&connection=${encodeURIComponent(row.connectionId)}`}>{zh ? "连接配置" : "Connection"}<ArrowUpRight size={13}/></Link>}
+                  <Link to="/settings?section=mcp">MCP<ArrowUpRight size={13}/></Link>
+                  <Link to="/settings?section=skills">Skills<ArrowUpRight size={13}/></Link>
+                </div>
               </details>
             </div>
           </motion.div>

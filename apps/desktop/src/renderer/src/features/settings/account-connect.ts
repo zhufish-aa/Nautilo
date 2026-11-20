@@ -1,8 +1,8 @@
 import type { RuntimeConnection } from "@agenthub/domain";
 import type { ConnectionDraft } from "../../stores/connections";
-export type AccountHarness = "codex" | "claude-code" | "antigravity";
-export const ACCOUNT_HARNESSES: AccountHarness[] = ["codex", "claude-code", "antigravity"];
-export const accountHarnessName = (harness: string): string => ({ codex: "Codex", "claude-code": "Claude Code", antigravity: "Antigravity" } as Record<string, string>)[harness] ?? harness;
+export type AccountHarness = "codex" | "claude-code" | "antigravity" | "opencode";
+export const ACCOUNT_HARNESSES: AccountHarness[] = ["codex", "claude-code", "antigravity", "opencode"];
+export const accountHarnessName = (harness: string): string => ({ codex: "Codex", "claude-code": "Claude Code", antigravity: "Antigravity", opencode: "OpenCode" } as Record<string, string>)[harness] ?? harness;
 export type ConnectStage = "detecting" | "preparing" | "login" | "saving";
 export interface AccountConnectDependencies {
   detect(harness: AccountHarness): Promise<string>;
@@ -14,6 +14,7 @@ export interface AccountConnectDependencies {
   reusePrepared?: boolean;
   acknowledge?: (profileId: string, providerId: AccountHarness) => Promise<void>;
   wait?: (signal: AbortSignal) => Promise<void>;
+  progress?: (reason: string) => void;
 }
 function check(signal: AbortSignal): void { if (signal.aborted) throw new DOMException("Account login cancelled", "AbortError"); }
 function wait(signal: AbortSignal): Promise<void> {
@@ -40,10 +41,11 @@ export async function connectOfficialAccount(harness: AccountHarness, name: stri
       check(signal); const status = await deps.status(profileId); check(signal);
       if (status.state === "succeeded") break;
       if (status.state !== "running") throw new Error(status.reason || "Official login did not complete. The account has not been added.");
+      deps.progress?.(status.reason ?? "");
       await (deps.wait ?? wait)(signal);
     }
     finished = true; check(signal); stage("saving");
-    const saved = await deps.save({ id: profile.profileId, name, kind: "login", enabled: true, harness, loginProfileDirectory: profile.directory, ...(harness === "antigravity" ? { nativeLogin: true } : {}), models: [] });
+    const saved = await deps.save({ id: profile.profileId, name, kind: "login", enabled: true, harness, loginProfileDirectory: profile.directory, ...(["antigravity", "opencode"].includes(harness) ? { nativeLogin: true } : {}), models: [] });
     // Acknowledgement only removes recovery metadata, never credentials.
     await deps.acknowledge?.(profile.profileId, harness).catch(() => undefined);
     return saved;

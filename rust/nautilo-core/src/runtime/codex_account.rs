@@ -1,6 +1,6 @@
-//! Codex model-provider path: native file-store credentials, coordinated refresh,
-//! and streaming Responses conversion. Encrypted/keychain stores are not treated
-//! as empty file stores: those keep using the selected genuine native runtime.
+//! Magpie's Codex model path: native credentials, coordinated token refresh,
+//! request normalization and streaming Responses conversion. Unsupported stores
+//! are reported explicitly; they never silently switch to an Agent CLI relay.
 use crate::database::{Database, Repositories};
 use serde_json::{json, Value};
 use std::{
@@ -9,9 +9,10 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::watch};
+use tokio::{io::{AsyncReadExt,AsyncWriteExt}, net::TcpStream, sync::watch};
 mod auth;
 mod responses;
+mod request;
 
 use responses::ResponseRelay;
 
@@ -31,39 +32,7 @@ impl CodexAccount {
         mut cancelled: watch::Receiver<bool>,
         headers_started: &mut bool,
     ) -> anyhow::Result<()> {
-        let mut request = crate::adapters::claude::api_proxy::responses_request(body);
-        request["store"] = json!(false);
-        request["stream"] = json!(true);
-        request["parallel_tool_calls"] = body
-            .get("parallel_tool_calls")
-            .cloned()
-            .unwrap_or(json!(true));
-        request["prompt_cache_key"] = json!(identity);
-        if let Some(choice) = body.get("tool_choice") {
-            request["tool_choice"] = if choice["type"] == "function" {
-                json!({"type":"function","name":choice["function"]["name"]})
-            } else {
-                choice.clone()
-            };
-        }
-        for key in [
-            "max_output_tokens",
-            "max_completion_tokens",
-            "temperature",
-            "top_p",
-            "previous_response_id",
-            "user",
-            "safety_identifier",
-            "prompt_cache_options",
-        ] {
-            request.as_object_mut().unwrap().remove(key);
-        }
-        if matches!(
-            body["service_tier"].as_str(),
-            Some("priority" | "ultrafast")
-        ) {
-            request["service_tier"] = body["service_tier"].clone();
-        }
+        let (mut request,names_back) = request::prepare(body,identity,&self.home);
         let saved = Repositories::new(&db.lock().unwrap().raw)
             .account_gateway_sessions()
             .get(&format!("responses:{identity}"))?
@@ -80,7 +49,7 @@ impl CodexAccount {
                 {
                     for r in items {
                         if restored.insert(r["id"].to_string()) {
-                            input.push(r.clone());
+                            let mut r=r.clone();if let Some(object)=r.as_object_mut(){object.remove("id");object.remove("status");}input.push(r);
                         }
                     }
                 }
@@ -91,8 +60,9 @@ impl CodexAccount {
         let mut credential = self.token(None).await?;
         let client = client()?;
         let mut reply = None;
+        let mut disconnected=[0u8;1];
         for attempt in 0..2 {
-            let res = client
+            let request = client
                 .post(&self.endpoint)
                 .bearer_auth(&credential.0)
                 .header("chatgpt-account-id", &credential.1)
@@ -104,17 +74,20 @@ impl CodexAccount {
                 .header("thread-id", identity)
                 .header("Accept", "text/event-stream")
                 .json(&request)
-                .send()
-                .await?;
+                .send();
+            let res=tokio::select!{result=request=>result?,_=cancelled.changed()=>anyhow::bail!("Codex account request cancelled"),_=socket.read(&mut disconnected)=>return Ok(())};
             if res.status() == 401 && attempt == 0 {
                 credential = self.token(Some(&credential.0)).await?;
                 continue;
             }
-            anyhow::ensure!(
-                res.status().is_success(),
-                "Codex model request returned HTTP {} for the selected account",
-                res.status().as_u16()
-            );
+            if !res.status().is_success() {
+                let status=res.status().as_u16();
+                let failure:Value=res.json().await.unwrap_or(Value::Null);
+                let detail=failure["error"]["message"].as_str().or(failure["message"].as_str())
+                    .unwrap_or("The upstream rejected the selected account's model request");
+                let detail=detail.replace(&credential.0,"[redacted]").chars().take(1000).collect::<String>();
+                return Err(crate::runtime::account_auth::ModelRequestError{status,message:format!("Codex model request returned HTTP {status}: {detail}")}.into());
+            }
             reply = Some(res);
             break;
         }
@@ -131,7 +104,7 @@ impl CodexAccount {
         let mut buffer = String::new();
         let mut utf8 = vec![];
         loop {
-            let bytes = tokio::select! {_ = cancelled.changed()=>anyhow::bail!("Codex account request cancelled"),bytes=reply.chunk()=>bytes?};
+            let bytes = tokio::select! {_ = cancelled.changed()=>anyhow::bail!("Codex account request cancelled"),bytes=reply.chunk()=>bytes?,_=socket.read(&mut disconnected)=>return Ok(())};
             let Some(bytes) = bytes else { break };
             utf8.extend_from_slice(&bytes);
             let length = match std::str::from_utf8(&utf8) {
@@ -158,7 +131,8 @@ impl CodexAccount {
                     continue;
                 }
                 let event: Value = serde_json::from_str(&data)?;
-                for delta in parser.event(&event)? {
+                for mut delta in parser.event(&event)? {
+                    request::restore_names(&mut delta,&names_back);
                     if stream {
                         let frame = json!({"id":id,"object":"chat.completion.chunk","model":model,"choices":[{"index":0,"delta":delta,"finish_reason":Value::Null}]});
                         socket
@@ -185,16 +159,16 @@ impl CodexAccount {
                             }
                         }
                     }
-                    while reasoning.len() > 128 {
-                        let key = reasoning.keys().next().unwrap().clone();
-                        reasoning.remove(&key);
-                    }
-                    Repositories::new(&db.lock().unwrap().raw)
-                        .account_gateway_sessions()
-                        .save(
-                            &json!({"id":format!("responses:{identity}"),"reasoning":reasoning}),
-                            &crate::errors::now_iso(),
-                        )?;
+                    // Parallel title/main/tool requests share the account, not
+                    // an HTTP transaction. Merge under the database lock so
+                    // one completed request cannot erase another's call IDs.
+                    let guard = db.lock().unwrap();
+                    let records = Repositories::new(&guard.raw).account_gateway_sessions();
+                    let id = format!("responses:{identity}");
+                    let saved = records.get(&id)?.unwrap_or(Value::Null);
+                    let mut current = saved["reasoning"].as_object().cloned().unwrap_or_default();
+                    current.extend(reasoning.clone());
+                    records.save(&json!({"id":id,"reasoning":current}), &crate::errors::now_iso())?;
                 }
             }
         }
@@ -202,6 +176,7 @@ impl CodexAccount {
             parser.completed,
             "Codex stream ended without a completed response"
         );
+        for call in &mut parser.calls {request::restore_names(call,&names_back);}
         let finish = if parser.calls.is_empty() {
             "stop"
         } else {

@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { isAbsolute, resolve, join } from "node:path";
 import { mkdir, realpath } from "node:fs/promises";
 import { authenticateAntigravity } from "./antigravity-login";
+import { authenticateOpenCode, openCodeProfileEnvironment, resolveOpenCodeExecutable } from "./opencode-login";
 
 export interface AccountLoginInput { profileId: string; providerId: string; executable: string; directory: string }
 export interface AccountLoginStatus { state: "idle" | "running" | "succeeded" | "failed" | "cancelled"; reason?: string }
@@ -12,7 +13,13 @@ const jobs = new Map<string, Job>();
 const allowedEnv = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "ComSpec", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "HOME", "TMPDIR", "SHELL", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"];
 
 export function loginInvocation(input: AccountLoginInput): { command: string; args: string[]; env: Record<string, string> } {
-  if (!input || !input.profileId || !["codex", "claude-code", "antigravity"].includes(input.providerId) || !isAbsolute(input.directory) || /[\r\n\0]/.test(input.directory) || !input.executable?.trim() || /[\r\n\0]/.test(input.executable)) throw new Error("invalid-login-profile");
+  if (!input || !input.profileId || !["codex", "claude-code", "antigravity", "opencode"].includes(input.providerId) || !isAbsolute(input.directory) || /[\r\n\0]/.test(input.directory) || !input.executable?.trim() || /[\r\n\0]/.test(input.executable)) throw new Error("invalid-login-profile");
+  if (input.providerId === "opencode") {
+    const executable = resolveOpenCodeExecutable(input.executable);
+    if (!executable) throw new Error("Install a native OpenCode executable that supports console login.");
+    const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    return { command: executable, args: ["console", "login"], env: openCodeProfileEnvironment(input.directory, environment) };
+  }
   // Do not invoke a shell. Windows npm users should select the native .exe or
   // configure a native CLI installation, rather than interpolating a .cmd shim.
   if (/\.(cmd|bat|ps1)$/i.test(input.executable)) throw new Error("Select a native CLI executable; shell shims are not supported for login");
@@ -52,7 +59,7 @@ export function registerAccountLoginHandlers(): void {
       if ([...jobs.values()].some((job) => job.status.state === "running" && job.directory === directory)) return { ok: false, reason: "This directory already has a login in progress" };
       if (jobs.get(input.profileId)?.status.state === "running") return { ok: false, reason: "Login is already running" };
       if (input.providerId === "antigravity" && [...jobs.values()].some(job => job.status.state === "running" && job.providerId === "antigravity")) return { ok: false, reason: "Google sign-in is already running" };
-      const child = spawn(invocation.command, invocation.args, { env: invocation.env, cwd: directory, shell: false, windowsHide: true, stdio: input.providerId === "antigravity" ? "pipe" : "ignore" });
+      const child = spawn(invocation.command, invocation.args, { env: invocation.env, cwd: directory, shell: false, windowsHide: true, stdio: ["antigravity", "opencode"].includes(input.providerId) ? "pipe" : "ignore" });
       const job: Job = { providerId: input.providerId, directory, child, status: { state: "running" } };
       jobs.set(input.profileId, job);
       const finish = (status: AccountLoginStatus): void => {
@@ -67,8 +74,11 @@ export function registerAccountLoginHandlers(): void {
         else job.status = { state: "running", reason: "Unable to stop or inspect the login process. Its directory remains locked until exit." };
       });
       child.once("exit", (code) => {
-        if (input.providerId !== "antigravity") finish(code === 0 ? { state: "succeeded" } : { state: "failed", reason: "Login did not finish. Use the official CLI in a terminal if browser login requires interactive input." });
+        if (!["antigravity", "opencode"].includes(input.providerId)) finish(code === 0 ? { state: "succeeded" } : { state: "failed", reason: "Login did not finish. Use the official CLI in a terminal if browser login requires interactive input." });
       });
+      if (input.providerId === "opencode") void authenticateOpenCode(child, reason => {
+        if (job.status.state === "running" && !job.terminalStatus) job.status = { state: "running", reason };
+      }).then(() => finish({ state: "succeeded" }), error => finish({ state: "failed", reason: error instanceof Error ? error.message : "OpenCode sign-in failed" }));
       if (input.providerId === "antigravity") void authenticateAntigravity(child).then(() => {
         finish({ state: "succeeded" }); child.kill();
       }, error => {

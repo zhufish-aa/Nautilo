@@ -1,0 +1,5 @@
+@import "../../src/renderer/src/styles/global.css";
+
+/* This independent Vite root lives in test/ui. Scan the production renderer
+   as well so portals receive the same utilities as the real desktop app. */
+@source "../../src/renderer/src";

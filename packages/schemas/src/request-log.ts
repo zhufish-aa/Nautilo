@@ -38,6 +38,8 @@ export interface RequestLog {
     reused?: boolean;
     pid?: number;
     attachMs?: number;
+    reason?: string;
+    transport?: string;
     startupTimings?: {
       prepareMs: number;
       bootstrapMs: number;
@@ -58,6 +60,19 @@ export interface RequestLog {
   observedTools: string[];
   nativeTools?: string[];
   nativeServers?: Array<{ name: string; status?: string }>;
+  /** Counters belong to these exact bound processes, not concurrent per-turn deltas. */
+  mcp?: {
+    scope: "bound_process_snapshot";
+    servers: Array<{ name: string; processes: Array<{
+      pid?: number;
+      shared: boolean;
+      reused: boolean;
+      connections: number;
+      initializations: number;
+      handshakeHits: number;
+      initializeMs?: number;
+    }> }>;
+  };
 }
 export interface RequestLogQuery {
   sessionId?: string;
@@ -74,6 +89,11 @@ export interface SessionToolInventory {
   sessionId: string;
   checkedAt: string;
   requestId?: string;
+  runId?: string;
+  connectionId?: string;
+  connectionRevision?: number;
+  providerId?: string;
+  requestCreatedAt?: string;
   nativeReported: boolean;
   tools: Array<{ name: string; evidence: "native" | "observed" | "supplied" }>;
   servers: Array<{

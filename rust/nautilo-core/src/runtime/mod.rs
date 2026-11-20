@@ -31,9 +31,12 @@ pub mod request_log;
 pub mod config_document;
 pub mod account_gateway;
 pub mod codex_account;
+pub mod opencode_account;
+pub mod antigravity_account;
 pub mod account_auth;
 pub mod mcp_pool;
 pub mod remote;
+pub mod workflow;
 
 pub use event_service::EventService;
 pub use event_subscription_service::EventSubscriptionService;

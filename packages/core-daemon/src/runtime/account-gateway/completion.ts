@@ -7,7 +7,7 @@ export async function writeCompletion(
   body: Json,
   nextFrame: () => Promise<IteratorResult<Json>>,
   cancel: () => Promise<void>,
-  finishTurn: () => void,
+  finishTurn: (content: string) => void,
 ): Promise<void> {
   const id = `chatcmpl-${randomUUID()}`,
     model = body.model,
@@ -37,7 +37,7 @@ export async function writeCompletion(
       throw Error(frame.error);
     }
     if (frame.done) {
-      finishTurn();
+      finishTurn(content);
       break;
     }
     if (frame.usage) {

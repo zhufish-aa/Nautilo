@@ -13,6 +13,9 @@ pub fn lock(db: &std::sync::Arc<std::sync::Mutex<Database>>) -> std::sync::Mutex
 }
 
 pub mod assistant;
+pub mod composer_drafts;
+pub mod workflows;
+pub mod workflow_plans;
 pub mod history_projection;
 pub mod project_poll;
 pub mod native_history;

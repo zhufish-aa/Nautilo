@@ -68,7 +68,11 @@ pub fn prepare(request: &Value) -> anyhow::Result<Config> {
         entries.push(json!({"id":format!("nautilo-mcp-{index}"), "name":"@deepseek-ai/dsh-mcp-client", "config":cfg}));
     }
     let options = &instance["providerOptions"];
-    let selected = request["model"].as_str().map(str::to_string);
+    let selected = request["model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
     let (provider, model) = if options["runtimeConnectionId"].is_string()
         || options["baseUrl"].is_string()
     {
@@ -124,10 +128,11 @@ pub fn prepare(request: &Value) -> anyhow::Result<Config> {
                 anyhow::anyhow!("The selected DeepSeek connection has no API credential")
             })?;
         env.insert(credential_ref.clone(), key);
-        entries[0]["config"]["connection"] = json!({"provider":route,"profile":{
+        let profile = json!({
             "api":api, "baseURL":options["baseUrl"],
             "apiKeyEnv":credential_ref, "models":model_entries
-        }});
+        });
+        entries[0]["config"]["connection"] = json!({"provider":route,"profile":profile});
         (Some(route), Some(selected))
     } else if let Some((provider, model)) = selected.as_deref().and_then(|id| id.split_once("::")) {
         (Some(provider.to_string()), Some(model.to_string()))

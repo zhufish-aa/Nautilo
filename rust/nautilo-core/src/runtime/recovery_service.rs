@@ -65,7 +65,9 @@ impl RecoveryService {
             }
             for run in repos.project_runs().list_all()? {
                 let status = run.get("status").and_then(Value::as_str).unwrap_or("");
-                if INTERRUPTED_PROJECT.contains(&status) {
+                if INTERRUPTED_PROJECT.contains(&status)
+                    && crate::database::workflows::project_graphs(&db.raw, run["id"].as_str().unwrap_or(""))?.is_empty()
+                {
                     let mut updated = run.as_object().cloned().unwrap_or_default();
                     updated.insert("status".to_string(), json!("paused"));
                     updated.insert("recoveryReason".to_string(), json!("daemon_restarted"));
@@ -75,6 +77,7 @@ impl RecoveryService {
                 }
             }
             for task in repos.tasks().list_all()? {
+                if task["workflowRunId"].is_string() { continue; }
                 let status = task.get("status").and_then(Value::as_str).unwrap_or("");
                 if ["queued", "running", "verifying"].contains(&status) {
                     let mut updated = task.as_object().cloned().unwrap_or_default();

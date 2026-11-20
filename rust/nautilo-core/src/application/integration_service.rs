@@ -3,7 +3,7 @@ use crate::{
     adapters::registry::AdapterRegistry,
     database::{Database, Repositories},
     errors::{invalid, not_found, now_iso, CoreResult},
-    runtime::security::CredentialService,
+    runtime::{account_gateway::supports_account_provider, security::CredentialService},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -103,11 +103,11 @@ impl IntegrationService {
                 .ok_or_else(|| not_found("connection", id))?;
             if c["enabled"] != true
                 || c["kind"] != "login"
-                || !matches!(c["harness"].as_str(), Some("codex" | "claude-code"))
+                || !c["harness"].as_str().is_some_and(supports_account_provider)
             {
                 return Err(invalid(
                     "connectionId",
-                    "Account gateway requires an enabled Codex or Claude Code account",
+                    "Account gateway requires an enabled Codex, Claude Code, OpenCode or Antigravity account",
                 ));
             }
             if !accounts.contains(&json!(id)) {

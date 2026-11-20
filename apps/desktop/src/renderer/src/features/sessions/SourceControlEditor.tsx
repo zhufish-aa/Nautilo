@@ -2,6 +2,7 @@ import {lazy,Suspense,useCallback,useEffect,useRef,useState} from "react";
 import {AlertCircle,ArrowLeft,Check,FileDiff,Loader2,RefreshCw,RotateCcw,RotateCw,Save} from "lucide-react";
 import type {SourceControlFile,SourceControlFileVersion,SourceControlRepository,SourceControlSaveResult,SourceControlScope} from "@agenthub/schemas";
 import {requestCore} from "../../lib/bridge";
+import {sourceControlClient} from "./source-control-client";
 import {Button} from "../../components/ui/Button";
 import {SelectField} from "../../components/ui/Select";
 import {readSourceDraft,rememberSourceDraft,type SourceFileDraft} from "./source-control-editor-drafts";
@@ -51,7 +52,7 @@ export function SourceControlEditor({scope,rootPath,path,zh,onClose,onSaved,onBu
     if(!file||!draftRef.current||busyRef.current||loadingRef.current||stale)return;busyRef.current=true;setBusy(true);onBusyRef.current?.(true);setError("");setNotice("");
     const sent={...draftRef.current};
     try{
-      const result=await requestCore<SourceControlSaveResult>("scm.save",{...scope,path,fileVersion:sent.fileVersion,resolution:sent.resolution,...(sent.resolution==="edited"?{content:sent.content}:{}),stage});
+      const result=await sourceControlClient.save(rootPath,{...scope,path,fileVersion:sent.fileVersion,resolution:sent.resolution,...(sent.resolution==="edited"?{content:sent.content}:{}),stage});
       if(disposed.current)return;
       if(!result.saved)throw new Error(zh?"文件保存结果无效，请重新读取。":"Invalid save result. Reload the file.");
       if(result.file&&(result.file.rootPath!==rootPath||result.file.path!==path))throw new Error(zh?"保存结果属于其他工作目录，请重新读取。":"Save result belongs to another worktree. Reload the file.");

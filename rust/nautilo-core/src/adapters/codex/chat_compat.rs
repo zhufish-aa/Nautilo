@@ -119,6 +119,37 @@ pub fn start_codex_chat_compat_app_server(request: AdapterStartRequest, resume_s
 mod tests {
     use super::*;
 
+    #[test]
+    fn chat_relay_errors_keep_actionable_codes_without_reflecting_private_bodies() {
+        let failure = chat_upstream_error(br#"{"error":{"code":"NATIVE_TOOLS_CHANGED","message":"private-body selected-key"}}"#);
+        assert!(failure.contains("NATIVE_TOOLS_CHANGED"));
+        assert!(!failure.contains("private-body"));
+        assert!(!chat_upstream_error(br#"{"error":{"code":"unknown","message":"selected-key"}}"#).contains("selected-key"));
+    }
+
+    #[tokio::test]
+    async fn native_free_quota_stream_error_becomes_a_failed_response_without_leaking_details() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new(); let mut byte = [0];
+            while !header.ends_with(b"\r\n\r\n") { socket.read_exact(&mut byte).await.unwrap(); header.push(byte[0]); }
+            let text = String::from_utf8(header).unwrap();
+            let length: usize = text.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|length| length.trim().parse().unwrap())).unwrap();
+            let mut body = vec![0; length]; socket.read_exact(&mut body).await.unwrap();
+            let body = "data: {\"error\":{\"code\":\"NATIVE_ACCOUNT_ERROR\",\"message\":\"Free usage limit reached. selected-key private-diagnostics\"}}\n\ndata: [DONE]\n\n";
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let proxy = ChatCompatProxy::start(format!("http://127.0.0.1:{port}/v1"), HashMap::new(), false).unwrap();
+        let body = reqwest::Client::new().post(format!("{}/responses", proxy.base_url())).json(&json!({"model":"m","input":"hi"})).send().await.unwrap().text().await.unwrap();
+        assert!(body.contains("response.failed"));
+        assert!(body.contains("OPENCODE_FREE_LIMIT_REACHED"));
+        assert!(!body.contains("response.completed"));
+        assert!(!body.contains("selected-key")); assert!(!body.contains("private-diagnostics"));
+        upstream.await.unwrap(); proxy.close();
+    }
+
     #[tokio::test]
     async fn anthropic_bridge_rejects_wrong_capability_and_unsupported_requests() {
         let proxy = ChatCompatProxy::start_protocol("http://127.0.0.1:1/v1".into(), HashMap::new(), false, true).unwrap();
@@ -461,19 +492,47 @@ async fn handle_chat_request(writer: &mut tokio::net::tcp::OwnedWriteHalf, confi
         .timeout(std::time::Duration::from_secs(600)).build()?;
     let mut upstream = client.post(endpoint).header("content-type", "application/json");
     if !auth.is_empty() { upstream = upstream.header("authorization", auth); }
-    let remote = match upstream.json(&chat_request).send().await {
+    let mut remote = match upstream.json(&chat_request).send().await {
         Ok(remote) => remote,
         Err(_) => return write_json_error(writer, 502, "Chat Completions upstream connection failed").await,
     };
     if !remote.status().is_success() {
         let status = remote.status().as_u16();
-        return write_json_error(writer, status, "Chat Completions upstream rejected the request; check endpoint, model and API key").await;
+        let mut body = Vec::new();
+        while let Ok(Some(chunk)) = remote.chunk().await {
+            if body.len() + chunk.len() > 16 * 1024 { break; }
+            body.extend_from_slice(&chunk);
+        }
+        return write_json_error(writer, status, chat_upstream_error(&body)).await;
     }
     writer.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n").await?;
     write_responses_stream(remote, writer, input).await?;
     writer.write_all(b"0\r\n\r\n").await?;
     writer.flush().await?;
     Ok(())
+}
+
+// Expose actionable local relay failures without reflecting arbitrary upstream
+// bodies (which can contain credentials or private request data).
+fn chat_upstream_error(body: &[u8]) -> &'static str {
+    let parsed = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    match parsed["error"]["code"].as_str().unwrap_or("") {
+        "INVALID_GATEWAY_REQUEST" => "INVALID_GATEWAY_REQUEST: the native account relay could not read the HTTP request",
+        "INVALID_MESSAGES" => "INVALID_MESSAGES: the native account relay requires non-empty message history",
+        "INVALID_CALLER_TOOLS" => "INVALID_CALLER_TOOLS: the native account relay requires named function tools",
+        "TOO_MANY_TOOLS" => "TOO_MANY_TOOLS: the native account relay supports up to 256 caller tools",
+        "NATIVE_CONVERSATION_DIVERGED" => "NATIVE_CONVERSATION_DIVERGED: caller history differs from the pinned native conversation; start a new chat",
+        "NATIVE_TOOLS_CHANGED" => "NATIVE_TOOLS_CHANGED: caller tools changed within the native conversation; start a new chat",
+        "TOOL_RESULTS_REQUIRED" => "TOOL_RESULTS_REQUIRED: return the outstanding caller tool results before another turn",
+        "ACCOUNT_ROUTE_DISABLED" => "ACCOUNT_ROUTE_DISABLED: enable the selected account for other harnesses",
+        "GATEWAY_AUTH_REQUIRED" => "GATEWAY_AUTH_REQUIRED: invalid local account relay credential",
+        "NO_NEW_INPUT" => "NO_NEW_INPUT: no new caller input was supplied",
+        "AGENT_NOT_AUTHENTICATED" => "AGENT_NOT_AUTHENTICATED: sign in to the selected native account",
+        "NATIVE_ACCOUNT_START_FAILED" => "NATIVE_ACCOUNT_START_FAILED: the selected native account runtime could not start",
+        "NATIVE_ACCOUNT_ERROR" if parsed["error"]["message"].as_str().is_some_and(|message| message.to_ascii_lowercase().contains("free usage limit reached")) => "OPENCODE_FREE_LIMIT_REACHED: OpenCode free-model usage limit reached. Wait for the official quota to reset.",
+        "NATIVE_ACCOUNT_ERROR" => "NATIVE_ACCOUNT_ERROR: the selected native account runtime failed",
+        _ => "Chat Completions upstream rejected the request; check endpoint, model and API key",
+    }
 }
 
 async fn handle_anthropic_request(writer: &mut tokio::net::tcp::OwnedWriteHalf, config: &ProxyConfig, input: &Value) -> anyhow::Result<()> {
@@ -1077,7 +1136,9 @@ async fn write_responses_stream(
             bytes.extend_from_slice(&chunk);
         }
         let body: Value = serde_json::from_slice(&bytes)?;
-        anyhow::ensure!(body.get("error").is_none_or(Value::is_null), "Upstream returned an error");
+        if body.get("error").is_some_and(|error| !error.is_null()) {
+            return write_chat_failure(writer, &context, &body).await;
+        }
         process_chat_chunk(&body, &mut context, writer, &tool_types).await?;
     } else {
         let mut decoder = super::anthropic_compat::SseDecoder::default();
@@ -1088,7 +1149,9 @@ async fn write_responses_stream(
             for payload in decoder.feed(&chunk)? {
                 if payload.trim() == "[DONE]" { finished = true; continue; }
                 let chunk: Value = serde_json::from_str(&payload)?;
-                anyhow::ensure!(chunk.get("error").is_none_or(Value::is_null), "Upstream returned an error");
+                if chunk.get("error").is_some_and(|error| !error.is_null()) {
+                    return write_chat_failure(writer, &context, &chunk).await;
+                }
                 if chunk.pointer("/choices/0/finish_reason").is_some_and(|value| !value.is_null()) { finished = true; }
                 process_chat_chunk(&chunk, &mut context, writer, &tool_types).await?;
             }
@@ -1097,6 +1160,12 @@ async fn write_responses_stream(
     }
 
     finalize_responses_stream(&mut context, writer).await
+}
+
+async fn write_chat_failure(writer: &mut tokio::net::tcp::OwnedWriteHalf, context: &ResponseContext, failure: &Value) -> anyhow::Result<()> {
+    let mut response = response_object(context, "failed");
+    response["error"] = json!({"code":"model_error","message":chat_upstream_error(failure.to_string().as_bytes())});
+    write_sse(writer, "response.failed", &json!({"type":"response.failed","response":response})).await
 }
 
 fn response_object(context: &ResponseContext, status: &str) -> Value {

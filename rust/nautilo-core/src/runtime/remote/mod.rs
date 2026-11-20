@@ -4,10 +4,14 @@ mod mobile;
 mod attachments;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod team_tests;
 mod transport;
 mod control;
 mod diagnostics;
+mod direct_network;
 mod proxy;
+mod relays;
 #[cfg(test)]
 mod direct_tests;
 
@@ -58,6 +62,7 @@ pub struct RemoteService {
     lifecycle: AsyncMutex<()>,
     state: Mutex<State>,
     attachments: attachments::RemoteAttachments,
+    relay_probes: relays::RelayProbes,
 }
 struct State {
     endpoint: Option<Endpoint>,
@@ -70,6 +75,7 @@ struct State {
     connections: HashMap<String, Connection>,
     recent_connections: std::collections::VecDeque<Value>,
     http_proxy_source: Option<&'static str>,
+    direct_discovery: direct_network::Discovery,
 }
 impl RemoteService {
     pub fn new(
@@ -84,6 +90,7 @@ impl RemoteService {
             events,
             router: Mutex::new(Weak::new()),
             attachments: attachments::RemoteAttachments::new(attachment_root),
+            relay_probes: relays::RelayProbes::default(),
             lifecycle: AsyncMutex::new(()),
             state: Mutex::new(State {
                 endpoint: None,
@@ -96,6 +103,7 @@ impl RemoteService {
                 connections: HashMap::new(),
                 recent_connections: std::collections::VecDeque::new(),
                 http_proxy_source: None,
+                direct_discovery: direct_network::Discovery::default(),
             }),
         })
     }
@@ -104,6 +112,16 @@ impl RemoteService {
         if let Err(error) = self.reconfigure().await {
             self.state.lock().unwrap().error = Some(error.to_string());
         }
+        let network_service = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let Some(service) = network_service.upgrade() else { break };
+                if let Err(error) = service.refresh_direct_interfaces().await {
+                    service.state.lock().unwrap().error = Some(error.to_string());
+                }
+            }
+        });
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
@@ -244,7 +262,7 @@ impl RemoteService {
         Ok(
             json!({"supported":true,"settings":settings,"state":phase,"error":state.error,
             "endpointId":endpoint.map(Endpoint::id),"internetReady":endpoint.is_some_and(|e|e.home_relay_status().get().iter().any(|s|s.is_connected())),
-            "network":endpoint.and_then(control::network_diagnostics),
+            "network":endpoint.and_then(|endpoint| control::network_diagnostics(endpoint, &state.direct_discovery)),
             "relays":endpoint.map(|e| e.home_relay_status().get().iter().map(|s|json!({"url":s.url().to_string(),"connected":s.is_connected(),"error":s.last_error().map(ToString::to_string)})).collect::<Vec<_>>()).unwrap_or_default(),
             "devices":devices,"pending":state.pending.values().collect::<Vec<_>>()}),
         )
@@ -261,6 +279,7 @@ impl RemoteService {
             state.invitation = None;
             state.pending.clear();
             state.http_proxy_source = None;
+            state.direct_discovery = direct_network::Discovery::default();
             for (_, c) in state.connections.drain() {
                 c.close(0u32.into(), b"remote disabled");
             }

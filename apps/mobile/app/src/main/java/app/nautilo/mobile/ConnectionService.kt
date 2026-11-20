@@ -14,16 +14,19 @@ class ConnectionService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val app get() = application as NautiloApplication
     private lateinit var keeper: ConnectionKeeper
+    private lateinit var wakeLease: ConnectionWakeLease
     override fun onCreate() {
         super.onCreate()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "电脑连接", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
-        keeper = ConnectionKeeper(scope, maintain = { host -> app.peer.awaitConnectionClosed(host) })
+        wakeLease = ConnectionWakeLease(this)
+        keeper = ConnectionKeeper(scope, maintain = { host -> app.peer.maintainConnection(host, wakeLease::renew) })
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP) {
             app.connectionPaused.value = true
             keeper.stop()
+            wakeLease.release()
             scope.launch { try { app.peer.disconnect() } finally { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() } }
             return START_NOT_STICKY
         }
@@ -38,11 +41,12 @@ class ConnectionService : Service() {
             .addAction(Notification.Action.Builder(null, "断开", stop).build()).build()
         if (Build.VERSION.SDK_INT >= 34) startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
         else startForeground(ID, notification)
+        wakeLease.start()
         keeper.keep(host)
         return START_STICKY
     }
     override fun onBind(intent: Intent?): IBinder? = null
-    override fun onDestroy() { keeper.stop(); scope.cancel(); super.onDestroy() }
+    override fun onDestroy() { keeper.stop(); scope.cancel(); wakeLease.release(); super.onDestroy() }
     companion object {
         private const val CHANNEL = "desktop_connection"
         private const val ID = 1

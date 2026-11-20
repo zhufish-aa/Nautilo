@@ -119,13 +119,13 @@ fn delegation_specs(session: &Value, db: &Arc<Mutex<Database>>) -> Vec<Value> {
 
 pub struct MainAgentRuntimeToolProvider {
     db: Arc<Mutex<Database>>,
-    orchestration: Arc<OrchestrationService>,
+    orchestration: std::sync::Weak<OrchestrationService>,
     credentials: Arc<CredentialService>,
 }
 
 impl MainAgentRuntimeToolProvider {
     pub fn new(db: Arc<Mutex<Database>>, orchestration: Arc<OrchestrationService>, credentials: Arc<CredentialService>) -> Self {
-        Self { db, orchestration, credentials }
+        Self { db, orchestration: Arc::downgrade(&orchestration), credentials }
     }
 }
 
@@ -166,6 +166,7 @@ impl RuntimeToolProvider for MainAgentRuntimeToolProvider {
         let credentials = self.credentials.clone();
         let db = self.db.clone();
         let session_id = session.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let run_id = context["runId"].as_str().map(str::to_owned);
         let agent = agent.clone();
         Some(RuntimeToolBinding {
             tools,
@@ -174,13 +175,15 @@ impl RuntimeToolProvider for MainAgentRuntimeToolProvider {
                 let credentials = credentials.clone();
                 let db = db.clone();
                 let session_id = session_id.clone();
+                let run_id = run_id.clone();
                 let agent = agent.clone();
                 Box::pin(async move {
                     let name = call.get("name").and_then(Value::as_str).unwrap_or("");
                     if name == RUNTIME_TOOL_WEB_SEARCH {
                         Ok(execute_official_web_search(&call, &agent, &db, &credentials).await)
                     } else {
-                        orchestration.invoke_runtime_tool(&session_id, name, call.get("arguments").cloned().unwrap_or(Value::Null)).await
+                        let orchestration = orchestration.upgrade().ok_or_else(|| anyhow::anyhow!("Orchestration has stopped"))?;
+                        orchestration.invoke_runtime_tool(&session_id, run_id.as_deref(), &call).await
                     }
                 }) as BoxFuture<anyhow::Result<Value>>
             }),

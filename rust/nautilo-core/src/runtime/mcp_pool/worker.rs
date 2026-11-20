@@ -15,6 +15,7 @@ struct Pending {
     client: String,
     original_id: Value,
     handshake: Option<String>,
+    handshake_started: Option<std::time::Instant>,
 }
 enum Handshake {
     Waiting(Vec<(String, Value)>),
@@ -41,6 +42,7 @@ pub(super) struct Worker {
     initialized: AtomicBool,
     legacy_claimed: AtomicBool,
     stderr_tail: Mutex<String>,
+    metrics: super::metrics::Metrics,
 }
 
 impl Worker {
@@ -79,6 +81,7 @@ impl Worker {
             initialized: AtomicBool::new(false),
             legacy_claimed: AtomicBool::new(false),
             stderr_tail: Mutex::new(String::new()),
+            metrics: Default::default(),
         });
         let owner = worker.clone();
         tokio::spawn(async move {
@@ -124,6 +127,8 @@ impl Worker {
     pub fn alive(&self) -> bool {
         self.process.is_alive()
     }
+    pub fn pid(&self) -> Option<u32> { self.process.pid }
+    pub fn observation(&self) -> Value { self.metrics.snapshot(self.pid(), self.shared) }
     pub fn shared(&self) -> bool {
         self.shared
     }
@@ -136,6 +141,7 @@ impl Worker {
         rejected_probe && !self.legacy_claimed.swap(true, Ordering::AcqRel)
     }
     pub fn attach(&self, id: &str) -> mpsc::UnboundedReceiver<Value> {
+        self.metrics.connected();
         let (sender, receiver) = mpsc::unbounded_channel();
         let tail = self.stderr_tail.lock().unwrap();
         if !tail.is_empty() {
@@ -161,6 +167,7 @@ impl Worker {
             let mut handshakes = self.handshakes.lock().unwrap();
             match handshakes.get_mut(key) {
                 Some(Handshake::Ready(reply)) => {
+                    self.metrics.hit();
                     let mut reply = reply.clone();
                     reply["id"] = message["id"].clone();
                     if let Some(sender) = self.clients.lock().unwrap().get(client) {
@@ -169,6 +176,7 @@ impl Worker {
                     return;
                 }
                 Some(Handshake::Waiting(waiters)) => {
+                    self.metrics.hit();
                     waiters.push((client.into(), message["id"].clone()));
                     return;
                 }
@@ -184,6 +192,8 @@ impl Worker {
             ));
         }
         if message.get("method").is_some() && message.get("id").is_some() {
+            let handshake_started = matches!(message["method"].as_str(), Some("initialize" | "server/discover"))
+                .then(|| { self.metrics.starting(); std::time::Instant::now() });
             let id = uuid::Uuid::new_v4().to_string();
             self.pending.lock().unwrap().insert(
                 id.clone(),
@@ -191,6 +201,7 @@ impl Worker {
                     client: client.into(),
                     original_id: message["id"].clone(),
                     handshake,
+                    handshake_started,
                 },
             );
             message["id"] = json!(id);
@@ -215,6 +226,9 @@ impl Worker {
                 .as_str()
                 .and_then(|id| self.pending.lock().unwrap().remove(id));
             if let Some(request) = request {
+                if message.get("error").is_none() {
+                    if let Some(started) = request.handshake_started { self.metrics.initialized(started); }
+                }
                 if let Some(key) = request.handshake {
                     let previous = {
                         let mut handshakes = self.handshakes.lock().unwrap();

@@ -27,6 +27,11 @@ pub async fn exercise(plugin:&dyn ProviderPlugin,provider:&str){
     request["prompt"]=json!("second");
     let(second,code)=collect(plugin.start("second",request.clone(),Some("fixture-session".into())).await.unwrap()).await;assert_eq!(code,0,"{second}");
     assert_eq!(first.split(':').next(),second.split(':').next(),"runtime restarted");assert!(second.contains(":2:second"),"{second}");
+    request["prompt"]=json!("third");
+    let(third,code)=collect(plugin.start("third",request.clone(),Some("fixture-session".into())).await.unwrap()).await;
+    assert_eq!(code,0,"{third}");assert_eq!(first.split(':').next(),third.split(':').next(),"third turn restarted");
+    assert!(third.contains(":3:third"),"{third}");
+    eprintln!("{provider}: same native fixture PID for three turns: {}",first.split(':').next().unwrap_or("unknown"));
     if ["pi","omp"].contains(&provider) {
         request["prompt"]=json!("/native-status");let(text,code)=collect(plugin.start("command",request.clone(),Some("fixture-session".into())).await.unwrap()).await;
         assert_eq!(code,0);assert!(text.contains("native-command-output"));

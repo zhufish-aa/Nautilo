@@ -4,7 +4,7 @@ import type { ChipTone } from "../../components/ui/Badge";
 import { IdentityAvatar } from "../../components/ui/IdentityAvatar";
 import "./DelegationCard.css";
 
-export function DelegationCard({ name, task, status, tone, running, cancelled, meta, actionLabel, onOpen, input, output, toolName, native, time, zh }: {
+export function DelegationCard({ name, task, status, tone, running, cancelled, meta, actionLabel, onOpen, input, output, toolName, native, time, zh, activity, result, onRetry }: {
   name: string;
   task?: string;
   status: string;
@@ -20,10 +20,15 @@ export function DelegationCard({ name, task, status, tone, running, cancelled, m
   native?: boolean;
   time?: string;
   zh: boolean;
+  activity?: string;
+  result?: string;
+  onRetry?: () => Promise<void>;
 }): JSX.Element {
   const titleId = useId();
   const detailsId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string>();
   const hasDetails = Boolean(input || output);
   const StatusIcon = running ? Loader2 : tone === "ok" ? Check : tone === "danger" || tone === "warn" ? AlertTriangle : cancelled ? X : CircleDashed;
   return <article className="delegation-card" aria-labelledby={titleId}>
@@ -39,10 +44,15 @@ export function DelegationCard({ name, task, status, tone, running, cancelled, m
     </header>
     {task && <div className="delegation-card-task">{task}</div>}
     {Boolean(meta?.length) && <div className="delegation-card-meta">{meta?.map((item, index) => <span key={`${index}-${item}`}>{item}</span>)}</div>}
-    {Boolean(hasDetails || onOpen) && <footer className="delegation-card-footer">
+    {(activity || result) && <p className="delegation-card-activity" title={result ?? activity} data-result={Boolean(result)}>{result ?? activity}</p>}
+    {retryError && <p className="delegation-card-retry-error" role="alert">{retryError}</p>}
+    {Boolean(hasDetails || onOpen || onRetry) && <footer className="delegation-card-footer">
       {hasDetails && <button type="button" className="delegation-card-details-toggle" aria-expanded={detailsOpen} aria-controls={detailsId} onClick={() => setDetailsOpen((open) => !open)}>
         <ChevronDown size={13} aria-hidden />{zh ? "调用详情" : "Call details"}
       </button>}
+      {onRetry && <button type="button" className="delegation-card-open" disabled={retrying} onClick={() => {
+        setRetrying(true); setRetryError(undefined); void onRetry().catch(error => setRetryError(String(error))).finally(() => setRetrying(false));
+      }}>{retrying && <Loader2 size={13} className="motion-safe:animate-spin"/>}{zh ? "重试此任务" : "Retry this task"}</button>}
       {onOpen && <button type="button" className="delegation-card-open" onClick={onOpen}>{actionLabel ?? (zh ? "查看子会话" : "Open session")}<ArrowUpRight size={14} aria-hidden /></button>}
     </footer>}
     {hasDetails && <div id={detailsId} className="delegation-card-details" hidden={!detailsOpen}>

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nautilo.app/schemas/agent-workflow/v1",
+  "title": "Nautilo Agent Workflow v1",
+  "description": "Structural contract. Nautilo additionally validates reachability, named ports, bounded cycles, join scopes, prompt references and pinned dependencies before execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "entry", "nodes", "edges"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "$ref": "#/$defs/id" },
+    "name": { "type": "string" },
+    "entry": { "$ref": "#/$defs/id" },
+    "inputs": { "$ref": "#/$defs/fields" },
+    "inputDefaults": { "type": "object" },
+    "nodes": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "$ref": "#/$defs/node" } },
+    "edges": { "type": "array", "maxItems": 4000, "items": { "$ref": "#/$defs/edge" } },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "maxInstances": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 1000 },
+        "timeoutMs": { "type": "integer", "minimum": 1000, "default": 3600000 },
+        "maxParallel": { "type": "integer", "minimum": 1, "default": 8 },
+        "maxDepth": { "type": "integer", "minimum": 0, "maximum": 32, "default": 8 }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "fieldType": {
+      "oneOf": [
+        { "enum": ["text", "number", "boolean", "json"] },
+        { "type": "string", "pattern": "^list<.+>$", "description": "Inner type is recursively checked by the engine, up to 16 nested levels." },
+        { "type": "object", "additionalProperties": false, "required": ["enum"], "properties": { "enum": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["properties"], "properties": {
+          "properties": { "type": "object", "additionalProperties": { "$ref": "#/$defs/fieldType" } },
+          "required": { "type": "array", "uniqueItems": true, "items": { "type": "string" }, "description": "Names must exist in properties." }
+        } }
+      ]
+    },
+    "fields": { "type": "object", "additionalProperties": { "$ref": "#/$defs/fieldType" } },
+    "ref": { "type": "object", "additionalProperties": false, "required": ["id", "revision"], "properties": { "id": { "$ref": "#/$defs/id" }, "revision": { "type": "integer", "minimum": 1 } } },
+    "exit": { "type": "object", "additionalProperties": false, "required": ["id", "name"], "properties": { "id": { "$ref": "#/$defs/id" }, "name": { "$ref": "#/$defs/id" } } },
+    "edge": {
+      "type": "object", "additionalProperties": false, "required": ["from", "to"],
+      "properties": {
+        "from": { "type": "array", "prefixItems": [{ "$ref": "#/$defs/id" }, { "$ref": "#/$defs/id" }], "minItems": 2, "maxItems": 2 },
+        "to": { "$ref": "#/$defs/id" }, "maxTraversals": { "type": "integer", "minimum": 1 }, "onLimit": { "$ref": "#/$defs/id" }
+      },
+      "dependentRequired": { "maxTraversals": ["onLimit"], "onLimit": ["maxTraversals"] }
+    },
+    "submissionPolicy": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "graceMs": { "type": "integer", "minimum": 0, "default": 3000 }, "reminderIntervalMs": { "type": "integer", "minimum": 100, "default": 15000 }, "maxReminders": { "type": "integer", "minimum": 0, "maximum": 20, "default": 1 }, "timeoutMs": { "type": "integer", "minimum": 100, "default": 60000 } }
+    },
+    "node": {
+      "type": "object", "additionalProperties": false, "required": ["id", "kind", "exits"],
+      "properties": {
+        "id": { "allOf": [{ "$ref": "#/$defs/id" }, { "not": { "pattern": "^\\$" } }] },
+        "name": { "type": "string" },
+        "kind": { "enum": ["main", "dispatch", "agent", "join", "condition", "call"] },
+        "exits": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/exit" } },
+        "role": { "$ref": "#/$defs/id" }, "prompt": { "$ref": "#/$defs/id" },
+        "fallbacks": { "type": "object" },
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "dynamicSubflow": {
+          "type": "object", "additionalProperties": false, "required": ["roles", "maxInstances", "maxDepth"],
+          "properties": {
+            "roles": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+            "maxInstances": { "type": "integer", "minimum": 1, "maximum": 100000 },
+            "maxDepth": { "type": "integer", "minimum": 0, "maximum": 31 }
+          }
+        },
+        "completion": { "enum": ["tool", "structured_final"], "default": "tool" },
+        "outputs": { "$ref": "#/$defs/fields" }, "exitMode": { "enum": ["one", "some"], "default": "one" },
+        "dispatch": { "const": "all" }, "session": { "enum": ["fresh", "reuse"], "default": "fresh" },
+        "forEach": {
+          "type": "object", "additionalProperties": false, "required": ["source", "key", "maxItems", "maxParallel"],
+          "properties": { "source": { "$ref": "#/$defs/id" }, "key": { "$ref": "#/$defs/id" }, "maxItems": { "type": "integer", "minimum": 1 }, "maxParallel": { "type": "integer", "minimum": 1 }, "emptyExit": { "$ref": "#/$defs/id" } }
+        },
+        "scope": { "$ref": "#/$defs/id" }, "wait": { "enum": ["all", "firstValid", "quorum"], "default": "all" },
+        "sources": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "workspace": { "type": "object", "additionalProperties": false, "properties": { "mode": { "enum": ["inherit", "isolated"], "default": "inherit" }, "allowedPaths": { "type": "array", "items": { "$ref": "#/$defs/id" } }, "verificationTemplates": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } } } },
+        "quorum": { "type": "integer", "minimum": 1 }, "remaining": { "enum": ["continue", "cancel"], "default": "continue" },
+        "cases": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["path", "exit"], "properties": { "path": { "$ref": "#/$defs/id" }, "operator": { "enum": ["eq", "ne", "gt", "ge", "lt", "le", "exists", "missing"] }, "equals": true, "exit": { "$ref": "#/$defs/id" } } } },
+        "otherwise": { "$ref": "#/$defs/id" }, "ref": { "$ref": "#/$defs/ref" }, "input": { "type": "object" },
+        "exitMap": { "type": "object", "additionalProperties": { "$ref": "#/$defs/id" } },
+        "submissionPolicy": { "$ref": "#/$defs/submissionPolicy" }, "onError": { "$ref": "#/$defs/id" }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "agent" } } }, "then": { "required": ["role", "prompt"] } },
+        { "if": { "properties": { "kind": { "const": "join" } } }, "then": { "required": ["scope"], "properties": { "exits": { "maxItems": 1 } } } },
+        { "if": { "properties": { "kind": { "const": "condition" } } }, "then": { "required": ["otherwise"] } },
+        { "if": { "properties": { "kind": { "const": "call" } } }, "then": { "required": ["ref"] } },
+        { "if": { "required": ["forEach"] }, "then": { "properties": { "kind": { "const": "agent" } } } },
+        { "if": { "required": ["wait"], "properties": { "wait": { "const": "quorum" } } }, "then": { "required": ["quorum"] } }
+      ]
+    }
+  }
+}

@@ -11,7 +11,7 @@ import { SessionWorkbench, type DrawerKind } from "./SessionWorkbench";
 
 export function SessionsPage({ active = true }: { active?: boolean }): JSX.Element {
   const { locale } = useI18n();
-  const { session, openSession, missingSession } = useConversationSelection(active);
+  const { session, openSession, loadingSession, missingSession, sessionLoadError, retrySession } = useConversationSelection(active);
   const [drawer, setDrawer] = useState<DrawerKind>(null);
   const [preview, setPreview] = useState<{ sessionId: string; path: string }>();
   const openPreview = useCallback((path: string): void => {
@@ -31,7 +31,12 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
     setPreview(undefined);
     setShowAgents(true);
   }, [showAgents, closeAgents]);
-  const openDrawer = useCallback((next: DrawerKind): void => { setPreview(undefined); setDrawer(next); }, []);
+  const teamId = session?.target.teamId;
+  const openDrawer = useCallback((next: DrawerKind): void => {
+    setPreview(undefined);
+    if (!teamId || next === "workflow") setShowAgents(false);
+    setDrawer(next);
+  }, [teamId]);
   const [params, setParams] = useSearchParams();
   useEffect(() => {
     const panel = params.get("panel");
@@ -45,10 +50,11 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
     if (!showAgents || !active) return;
     closeButton.current?.focus();
     const escape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") { setShowAgents(false); trigger.current?.focus(); }
+      if (event.key === "Escape" && !event.defaultPrevented) { setShowAgents(false); trigger.current?.focus(); }
     };
     const dismiss = (event: PointerEvent): void => {
       if (session?.target.teamId || !(event.target instanceof Node)) return;
+      if (event.target instanceof Element && event.target.closest(".session-workspace-menu")) return;
       if (!agentsPanel.current?.contains(event.target) && !trigger.current?.contains(event.target)) setShowAgents(false);
     };
     window.addEventListener("keydown", escape);
@@ -56,12 +62,18 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
     return () => { window.removeEventListener("keydown", escape); document.removeEventListener("pointerdown", dismiss); };
   }, [showAgents, active, session?.target.teamId]);
   const previewPath = requestedWorkspaceFile(preview, session?.id);
+  if (loadingSession || sessionLoadError) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-ink-2">
+    <p role={sessionLoadError ? "alert" : "status"}>{sessionLoadError
+      ? (locale === "zh-CN" ? "暂时打不开这个会话" : "Could not open this conversation")
+      : (locale === "zh-CN" ? "正在打开会话…" : "Opening conversation…")}</p>
+    {sessionLoadError && <button type="button" onClick={retrySession} className="rounded-lg border border-line px-4 py-2 text-ink hover:bg-panel">{locale === "zh-CN" ? "重试" : "Retry"}</button>}
+  </div>;
   if (missingSession) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-ink-2"><p>{locale === "zh-CN" ? "此会话不存在或已移除" : "This conversation is unavailable"}</p><a href="#/sessions?new=1" className="rounded-lg border border-line px-4 py-2 text-ink hover:bg-panel">{locale === "zh-CN" ? "新会话" : "New conversation"}</a></div>;
   if (!session) return <NewConversation mode="code" onCreated={openSession} active={active} />;
   return (
     <div className="relative flex h-full min-h-0">
       <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden" aria-label={locale === "zh-CN" ? "对话" : "Conversation"}>
-        <SessionWorkbench sessionId={session.id} active={active} drawer={drawer} onOpenDrawer={openDrawer} onCloseDrawer={closeDrawer} onOpenSession={openSession} onToggleAgents={toggleAgents} agentsOpen={showAgents} onOpenLocalFile={openPreview} />
+        <SessionWorkbench sessionId={session.id} focusKey={params.get("focus") ?? undefined} active={active} drawer={drawer} onOpenDrawer={openDrawer} onCloseDrawer={closeDrawer} onOpenSession={openSession} onToggleAgents={toggleAgents} agentsOpen={showAgents} onOpenLocalFile={openPreview} />
       </section>
 
       {previewPath && <WorkspacePreview key={session.id} sessionId={session.id} path={previewPath} onClose={closePreview} />}

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::runtime::git::git_command::run_git;
 use crate::runtime::git::repository_service;
@@ -18,6 +19,49 @@ pub struct WorktreeService {
 }
 
 impl WorktreeService {
+    /// Workflow intents pin their base commit before creating a worktree. A
+    /// restarted dispatcher can repeat this operation without choosing a new HEAD.
+    pub async fn ensure_workflow_run(&self, project: &Value, run_id: &str, base: &str) -> anyhow::Result<WorktreeInfo> {
+        let branch=format!("agenthub/run/{}",safe(run_id));
+        let path=self.workflow_target(project["id"].as_str().unwrap_or(""),run_id,"main")?;
+        self.ensure_pinned(project,&path,&branch,base).await
+    }
+    pub async fn ensure_workflow_task(&self, project: &Value, run_id: &str, task_id: &str, base: &str) -> anyhow::Result<WorktreeInfo> {
+        let branch=format!("agenthub/task/{}/{}",safe(run_id),safe(task_id));
+        let path=self.workflow_task_path(project["id"].as_str().unwrap_or(""),run_id,task_id)?;
+        self.ensure_pinned(project,&path,&branch,base).await
+    }
+    /// Bound directory names independently of project IDs and nested app-data
+    /// roots. Full identities remain in branches and durable workflow context.
+    pub fn workflow_task_path(&self, project_id:&str, run_id:&str, task_id:&str)->anyhow::Result<PathBuf> {
+        self.workflow_target(project_id,run_id,&format!("n-{}",&format!("{:x}",Sha256::digest(task_id.as_bytes()))[..24]))
+    }
+    fn workflow_target(&self,project_id:&str,run_id:&str,leaf:&str)->anyhow::Result<PathBuf> {
+        let scope=format!("{:x}",Sha256::digest(format!("{project_id}\0{run_id}").as_bytes()));
+        let target=self.root.join("workflow").join(&scope[..24]).join(leaf);
+        if !target.starts_with(&self.root){anyhow::bail!("Workflow path escaped the configured root");}
+        Ok(target)
+    }
+    async fn ensure_pinned(&self, project: &Value, target: &Path, branch: &str, base: &str) -> anyhow::Result<WorktreeInfo> {
+        if base.len() < 40 || !base.chars().all(|value|value.is_ascii_hexdigit()) { anyhow::bail!("A pinned Git commit is required"); }
+        let repository=project["rootPath"].as_str().ok_or_else(||anyhow::anyhow!("Project path missing"))?;
+        let path=target.to_string_lossy().into_owned();
+        self.add(repository,&path,branch,base).await?;
+        let top=run_git(&path,&["rev-parse","--show-toplevel"],false).await?.stdout;
+        if std::fs::canonicalize(top.trim())? != std::fs::canonicalize(target)? { anyhow::bail!("Workflow worktree root does not match its reserved directory"); }
+        let actual_branch=run_git(&path,&["branch","--show-current"],false).await?.stdout;
+        let head=run_git(&path,&["rev-parse","HEAD"],false).await?.stdout;
+        let status=run_git(&path,&["status","--porcelain=v1"],false).await?.stdout;
+        let common=|cwd:String|async move {
+            let common=run_git(&cwd,&["rev-parse","--git-common-dir"],false).await?.stdout;
+            let common=Path::new(common.trim());
+            Ok::<_,anyhow::Error>(std::fs::canonicalize(if common.is_absolute(){common.to_path_buf()}else{Path::new(&cwd).join(common)})?)
+        };
+        if common(repository.into()).await? != common(path.clone()).await? || actual_branch.trim() != branch
+            || head.trim() != base || !status.trim().is_empty()
+        { anyhow::bail!("Reserved workflow worktree changed before execution was confirmed; retain it for inspection"); }
+        Ok(WorktreeInfo {path,branch_name:branch.into(),base_commit:base.into()})
+    }
     pub fn new(root_path: &str) -> Self {
         let root = std::fs::canonicalize(root_path).unwrap_or_else(|_| Path::new(root_path).to_path_buf());
         let _ = std::fs::create_dir_all(&root);

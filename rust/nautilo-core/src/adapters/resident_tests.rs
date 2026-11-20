@@ -82,6 +82,27 @@ async fn native_residents_reuse_and_recover() {
 }
 
 #[tokio::test]
+async fn claude_account_model_worker_keeps_its_process_for_changed_turn_content() {
+    let directory=std::env::temp_dir().join(format!("nautilo-claude-model-{}",uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let fixture=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/native-session.mjs");
+    #[cfg(windows)]
+    let wrapper={let path=directory.join("claude-fixture.cmd");std::fs::write(&path,format!("@echo off\r\nnode \"{}\" claude %*\r\n",fixture.display())).unwrap();path};
+    #[cfg(not(windows))]
+    let wrapper={use std::os::unix::fs::PermissionsExt;let path=directory.join("claude-fixture");std::fs::write(&path,format!("#!/bin/sh\nexec node '{}' claude \"$@\"\n",fixture.display())).unwrap();std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o700)).unwrap();path};
+    let mut request=request("claude");
+    request.local_session_id=Some(format!("account-model-{}",uuid::Uuid::new_v4()));
+    request.instance=json!({"providerId":"claude-code","executable":wrapper,"baseArgs":[],"providerOptions":{"accountModelRelay":true,"accountRelayContentBlocks":[{"type":"text","text":"first"}]}});
+    let (first,code)=collect(super::claude::resident_test_launch(request.clone(),None).unwrap()).await;assert_eq!(code,0,"{first}");
+    request.prompt="different fallback text".into();
+    request.instance["providerOptions"]["accountRelayContentBlocks"]=json!([{"type":"text","text":"second"}]);
+    let (second,code)=collect(super::claude::resident_test_launch(request.clone(),Some("fixture-session".into())).unwrap()).await;
+    super::claude::resident_test_release(request.local_session_id.as_deref().unwrap()).await;
+    let _=std::fs::remove_dir_all(directory);
+    assert_eq!(code,0,"{second}");assert_eq!(first.split(':').next(),second.split(':').next());assert!(second.contains(":2:second"),"{second}");
+}
+
+#[tokio::test]
 async fn claude_delivers_same_read_and_delayed_child_events_after_foreground_exit() {
     let mut request=request("claude");request.local_session_id=Some("claude-background-test".into());request.prompt="background".into();
     let (sender,mut events)=tokio::sync::mpsc::unbounded_channel();

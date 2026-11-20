@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, rmSync, chmodSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync, chmodSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nativePackaging } from "./native-packaging.mjs";
 import { prepareRustSources } from "./prepare-rust-sources.mjs";
+import { copyAccountNotices } from "./copy-account-notices.mjs";
 
 /**
  * Prepares the platform-specific resources that electron-builder places under
@@ -21,11 +22,20 @@ import { prepareRustSources } from "./prepare-rust-sources.mjs";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const stagingDirectory = resolve(repositoryRoot, process.argv[2] ?? "build/packaged");
 
-const relativeStaging = relative(join(repositoryRoot, "build"), stagingDirectory);
+// Local packaging can stage on a dedicated build drive. The caller explicitly
+// names its root; never remove that root itself or follow a junction outside it.
+const stagingRoot = resolve(process.env.NAUTILO_PACKAGING_ROOT ?? join(repositoryRoot, "build"));
+const relativeStaging = relative(stagingRoot, stagingDirectory);
 if (!relativeStaging || relativeStaging === ".." || relativeStaging.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(relativeStaging)) {
-  throw new Error(`Refusing to write outside the build directory: ${stagingDirectory}`);
+  throw new Error(`Refusing to replace a path outside the packaging root: ${stagingDirectory}`);
 }
-
+mkdirSync(stagingRoot, { recursive: true });
+let existingParent = stagingDirectory;
+while (!existsSync(existingParent)) existingParent = dirname(existingParent);
+const actualRelative = relative(realpathSync(stagingRoot), realpathSync(existingParent));
+if (actualRelative === ".." || actualRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(actualRelative)) {
+  throw new Error(`Packaging target resolves outside its root: ${stagingDirectory}`);
+}
 rmSync(stagingDirectory, { recursive: true, force: true });
 mkdirSync(stagingDirectory, { recursive: true });
 
@@ -51,6 +61,7 @@ if (!existsSync(daemonExecutable)) throw new Error(`Rust daemon build output mis
 const coreDaemonDirectory = join(stagingDirectory, "core-daemon");
 mkdirSync(coreDaemonDirectory, { recursive: true });
 copyFileSync(daemonExecutable, join(coreDaemonDirectory, daemonName));
+copyAccountNotices(coreDaemonDirectory);
 if (process.platform !== "win32") chmodSync(join(coreDaemonDirectory, daemonName), 0o755);
 
 // Bundled for manual "install from local folder": plugins/<id>/ carrying the

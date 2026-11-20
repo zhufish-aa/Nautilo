@@ -3,6 +3,7 @@ members = ["nautilo-core", "plugin-sdk", "plugins/pi", "plugins/trae", "plugins/
 resolver = "2"
 
 [patch.crates-io]
+netwatch = { path = "vendor/generated/netwatch-0.19.3" }
 # Keep the data-path restriction in the QUIC packet builder, including retransmits.
 iroh = { path = "vendor/generated/iroh-1.4.1" }
 noq-proto = { path = "vendor/generated/noq-proto-1.4.0" }

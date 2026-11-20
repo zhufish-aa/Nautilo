@@ -27,6 +27,7 @@ pub fn normalize_json(value: &Value) -> Vec<AdapterEvent> {
             additions: None,
             deletions: None,
             diff: None,
+            snapshot: None,
             raw: Some(value.clone()),
         }];
     }

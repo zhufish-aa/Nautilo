@@ -6,6 +6,8 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.nautilo.mobile.data.*
+import app.nautilo.mobile.transport.EventPoller
+import app.nautilo.mobile.transport.ReadRecovery
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,27 +23,32 @@ import java.time.Instant
 import java.util.UUID
 import kotlin.random.Random
 
-enum class Screen { Projects, NewConversation, Chat, Workspace, FileDiff, Computers, ProjectFiles, FilePreview }
+enum class Screen { Projects, NewConversation, Chat, TeamTasks, Workspace, FileDiff, Computers, ProjectFiles, FilePreview }
 data class MobileState(
     val screen: Screen = Screen.Projects,
     val hosts: List<Host> = emptyList(), val host: Host? = null,
     val connected: Boolean = false, val connecting: Boolean = false,
     val path: String = "", val latency: Long? = null, val system: String = "",
+    val networkHint: String = "",
     val capabilities: Set<String> = emptySet(),
     val connectStage: String = "",
-    val error: String = "", val pairingCode: String = "", val pairing: Boolean = false,
+    val error: String = "", val connectionIssue: String = "", val syncIssue: String = "",
+    val pairingCode: String = "", val pairing: Boolean = false,
     val projects: List<Project> = emptyList(), val sessions: List<Conversation> = emptyList(),
     val session: Conversation? = null, val messages: List<ChatMessage> = emptyList(),
     val activities: List<ActivityItem> = emptyList(), val busy: Boolean = false,
     val runId: String = "", val runStatus: String = "", val elapsed: Long = 0,
-    val runError: String = "",
+    val contextUsage: ContextUsage = ContextUsage(), val compactCommand: String = "", val canCompact: Boolean = false,
+    val compacting: Boolean = false, val compactError: String = "",
     val runs: List<RunInfo> = emptyList(),
     val draft: String = "", val newDraft: String = "", val readOnly: Boolean = false, val hasOlder: Boolean = false,
     val draftAttachments: List<DraftAttachment> = emptyList(), val newAttachments: List<DraftAttachment> = emptyList(), val attachmentLoading: Boolean = false,
-    val models: List<JSONObject> = emptyList(), val modelsLoading: Boolean = false,
+    val models: List<JSONObject> = emptyList(), val defaultModel: String = "", val modelsLoading: Boolean = false,
     val workspace: List<JSONObject> = emptyList(), val workspaceLoading: Boolean = false,
     val diffPath: String = "",
     val members: List<JSONObject> = emptyList(), val interactions: List<JSONObject> = emptyList(),
+    val teamTasks: TeamTaskSnapshot = TeamTaskSnapshot(), val teamTasksLoading: Boolean = false,
+    val teamTasksCancelling: Boolean = false, val teamTasksError: String = "",
     val approvals: List<JSONObject> = emptyList(), val changing: Boolean = false,
     val setup: JSONObject = JSONObject(), val setupLoading: Boolean = false,
     val newModels: List<JSONObject> = emptyList(), val catalogLoading: Boolean = false,
@@ -65,9 +72,17 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
     private val mutable = MutableStateFlow(MobileState(hosts = store.hosts(), host = store.selectedHost()))
     val state = mutable.asStateFlow()
     private var connectionJob: Job? = null
-    private var sessionJob: Job? = null
+    private val sessionSync = SessionSyncController(viewModelScope)
+    private val sessionJob get() = sessionSync.job
     private var projection = SessionProjection()
     private val visibility = MutableStateFlow(false)
+    private val teamController by lazy { MobileTeamController(viewModelScope, visibility, state,
+        { change -> mutable.update(change) }, { host, method, input -> peer.call(host, method, input) }, ::openSession) }
+    fun teamTasks() = teamController.show()
+    fun refreshTeamTasks() = teamController.refresh()
+    fun cancelTeamTasks() = teamController.cancel()
+    fun retryTeamTask(task: TeamTask) = teamController.retry(task)
+    fun openTeamTask(task: TeamTask) = teamController.openTask(task)
     private val foreground get() = visibility.value
     private val connectionWake = Channel<Unit>(Channel.CONFLATED)
     private var sessionGeneration = 0
@@ -82,11 +97,11 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
     init {
         viewModelScope.launch { peer.phase.collect { phase ->
             mutable.update { it.copy(connectStage = phase, connected = it.connected && phase == "ready") }
-            if (phase == "ready" && foreground) connectionWake.trySend(Unit)
+            if (phase in setOf("ready", "disconnected") && foreground) connectionWake.trySend(Unit)
         } }
         viewModelScope.launch { app.connectionPaused.collect { paused -> if (paused) {
-            connectionGeneration++; connectionJob?.cancel(); sessionJob?.cancel()
-            mutable.update { it.copy(connected = false, connecting = false, connectStage = "") }
+            connectionGeneration++; connectionJob?.cancel(); sessionSync.cancel()
+            mutable.update { it.copy(connected = false, connecting = false, connectStage = "", connectionIssue = "", syncIssue = "") }
         } } }
     }
 
@@ -94,21 +109,26 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         if (foreground == active) return
         visibility.value = active
         if (active) {
+            peer.requestHealthCheck()
             val pending = store.pendingHost()
             if (pending != null) resumePairing(pending) else startConnection()
             connectionWake.trySend(Unit)
             if (state.value.connected && state.value.session != null && sessionJob?.isActive != true) watchSession(state.value.session!!)
+        } else {
+            // Pause screen reads, not the service-owned QUIC connection or the desktop run.
+            // Restart from the durable cursor instead of surfacing an expired background poll.
+            sessionSync.cancel()
+            connectionJob?.cancel(); connectionJob = null
+            mutable.update { it.copy(connectionIssue = "", syncIssue = "") }
         }
-        // An outstanding long poll may finish in the background. The loop
-        // checks visibility before starting another, so a quick return can
-        // reuse the same request instead of leaving a server-side waiter.
     }
     private fun cancelFileRequests() { fileGeneration++; filesGeneration++; fileJob?.cancel(); filesJob?.cancel() }
     fun navigate(screen: Screen) {
+        if (screen != Screen.TeamTasks) teamController.leave()
         if (screen !in listOf(Screen.ProjectFiles, Screen.FilePreview)) cancelFileRequests()
         mutable.update { it.copy(screen = screen, filePreview = if (screen == Screen.FilePreview) it.filePreview else RemoteFilePreview()) }
     }
-    fun clearError() { mutable.update { it.copy(error = "") } }
+    fun clearError() { mutable.update { it.copy(error = "", connectionIssue = "", syncIssue = "") } }
     fun openProjectFiles(projectId: String) {
         val project = state.value.projects.find { it.id == projectId } ?: return
         saveDraft()
@@ -261,7 +281,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         saveDraft()
         cancelFileRequests()
         connectionGeneration++; sessionGeneration++
-        connectionJob?.cancel(); sessionJob?.cancel()
+        connectionJob?.cancel(); sessionSync.cancel()
         projection = SessionProjection()
         store.selectHost(host.id)
         mutable.value = MobileState(hosts = store.hosts(), host = host, screen = Screen.Projects)
@@ -273,7 +293,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             cancelFileRequests()
             ConnectionService.pause(app)
             connectionGeneration++; sessionGeneration++
-            connectionJob?.cancel(); sessionJob?.cancel()
+            connectionJob?.cancel(); sessionSync.cancel()
             mutable.value = MobileState(hosts = store.hosts(), host = store.selectedHost(), screen = Screen.Computers)
             viewModelScope.launch { peer.disconnect(); startConnection() }
         } else mutable.update { it.copy(hosts = store.hosts()) }
@@ -292,7 +312,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         }
         saveDraft()
         connectionGeneration++; sessionGeneration++
-        connectionJob?.cancel(); sessionJob?.cancel()
+        connectionJob?.cancel(); sessionSync.cancel()
         connectionJob = viewModelScope.launch {
             mutable.update { it.copy(pairing = true, pairingCode = "", connected = false, connecting = true, error = "", screen = Screen.Computers) }
             try {
@@ -367,22 +387,27 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         connectionJob?.cancel()
         val generation = ++connectionGeneration
         connectionJob = viewModelScope.launch {
+            val recovery = ReadRecovery(report = { error ->
+                if (generation == connectionGeneration && foreground) mutable.update {
+                    it.copy(connectionIssue = error?.let(::readableError).orEmpty())
+                }
+            }, checkConnection = peer::requestHealthCheck)
             var failures = 0
             while (isActive && generation == connectionGeneration) {
                 visibility.first { it }
                 try {
-                    mutable.update { if (it.connected) it else it.copy(connecting = true, connectStage = "connecting", error = "") }
-                    val hello = peer.call(host, "hello")
+                    mutable.update { if (it.connected) it else it.copy(connecting = true, connectStage = "connecting") }
+                    val hello = recovery.read { peer.call(host, "hello") }
                     if (generation != connectionGeneration) return@launch
                     hello.optJSONObject("endpoint")?.takeIf { it.text("id") == host.id }?.let { address ->
                         val current = store.hosts().find { it.id == host.id } ?: host
                         if (current.endpoint.toString() != address.toString()) store.refreshHost(current.copy(endpoint = address))
                     }
-                    mutable.update { it.copy(connected = true, connecting = false, error = "", system = hello.text("system"),
+                    mutable.update { it.copy(connected = true, connecting = false, connectionIssue = "", system = hello.text("system"),
                         capabilities = hello.strings("capabilities").toSet(), hosts = store.hosts(),
-                        readOnly = false, path = peer.path(), latency = peer.latency()) }
+                        readOnly = false, path = peer.path(), latency = peer.latency(), networkHint = peer.networkHint()) }
                     flushOutbox(host)
-                    if (state.value.projects.isEmpty() || state.value.screen == Screen.Projects) refreshProjects(host)
+                    if (state.value.projects.isEmpty() || state.value.screen == Screen.Projects) recovery.read { refreshProjects(host) }
                     if (sessionJob?.isActive != true && state.value.session != null) watchSession(state.value.session!!)
                     failures = 0
                     withTimeoutOrNull(20_000) { connectionWake.receive() }
@@ -398,6 +423,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     private suspend fun refreshProjects(host: Host) {
+        val generation = connectionGeneration
         val projects = peer.call(host, "projects.list").objects("projects").map { Project(it.getString("id"), it.text("name"), it.text("rootPath")) }
         val slots = Semaphore(3)
         val sessions = coroutineScope { projects.map { project -> async { slots.withPermit {
@@ -410,60 +436,123 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             }
             sessions
         } } }.awaitAll().flatten() }
-        if (state.value.host?.id == host.id) mutable.update { it.copy(projects = projects, sessions = sessions.sortedByDescending(Conversation::updatedAt)) }
+        if (generation == connectionGeneration && state.value.host?.id == host.id) mutable.update { it.copy(projects = projects, sessions = sessions.sortedByDescending(Conversation::updatedAt)) }
     }
     fun openSession(session: Conversation) {
+        teamController.leave()
         saveDraft()
-        sessionGeneration++; sessionJob?.cancel()
+        sessionGeneration++; sessionSync.cancel()
         projection = SessionProjection()
         val host = state.value.host ?: return
         mutable.update { it.copy(session = session, screen = Screen.Chat, messages = emptyList(), activities = emptyList(), busy = true,
-            models = emptyList(), workspace = emptyList(), interactions = emptyList(), approvals = emptyList(), runs = emptyList(), runId = "", runStatus = "", error = "",
+            contextUsage = ContextUsage(), compactCommand = "", canCompact = false, compacting = false, compactError = "",
+            models = emptyList(), defaultModel = "", workspace = emptyList(), interactions = emptyList(), approvals = emptyList(), runs = emptyList(), runId = "", runStatus = "", error = "", syncIssue = "",
             draft = store.draft("${host.id}:${session.id}"), draftAttachments = store.attachments("${host.id}:${session.id}")) }
         watchSession(session)
     }
     private fun watchSession(session: Conversation) {
         val host = state.value.host ?: return
         val generation = sessionGeneration
-        sessionJob?.cancel()
-        sessionJob = viewModelScope.launch {
+        sessionSync.cancel()
+        val currentProjection = projection
+        sessionSync.launch(host.id, session.id) { ticket ->
+            val notices = linkedMapOf<String, String>()
+            fun reportRead(source: String, error: Throwable?) {
+                if (!ticket.isCurrent() || generation != sessionGeneration || state.value.host?.id != host.id || !foreground) return
+                if (error == null) notices.remove(source) else notices[source] = readableError(error)
+                mutable.update { it.copy(syncIssue = notices.values.firstOrNull().orEmpty()) }
+            }
+            val recovery = ReadRecovery(report = { error ->
+                reportRead("events", error)
+            }, checkConnection = peer::requestHealthCheck)
+            val poller = EventPoller()
             try {
-                if (projection.epoch.isEmpty()) {
-                    val page = peer.call(host, "session.history", json("sessionId" to session.id))
-                    if (generation != sessionGeneration) return@launch
-                    projection.history(page, initialize = true)
-                }
                 for (command in store.commands().filter { it.hostId == host.id && it.sessionId == session.id }) {
                     val id = PendingCommand.stableMessageId(peer.identity(), command.id)
-                    projection.optimistic(ChatMessage(id, "user", command.params.text("text").ifBlank { "请查看附件。" }, command.createdAt, "waiting", attachmentNames = command.params.objects("_attachments").map { it.text("name") }, attachments = command.params.objects("_attachments").map { ChatAttachment.draft(DraftAttachment.decode(it)) }))
+                    currentProjection.optimistic(ChatMessage(id, "user", command.params.text("text").ifBlank { "请查看附件。" }, command.createdAt, "waiting", attachmentNames = command.params.objects("_attachments").map { it.text("name") }, attachments = command.params.objects("_attachments").map { ChatAttachment.draft(DraftAttachment.decode(it)) }))
                 }
-                refreshSession(host, session.id)
+                // Show cached/journal content before waiting for ancillary configuration.
+                if (!ticket.isCurrent() || generation != sessionGeneration) return@launch
                 publish()
-                while (isActive && foreground && generation == sessionGeneration) {
-                    val events = peer.call(host, "events.wait", json("sessionId" to session.id, "epoch" to projection.epoch, "afterSequence" to projection.sequence))
-                    if (generation != sessionGeneration) return@launch
-                    val changes = events.objects("events")
-                    changes.forEach { projection.apply(it) }
-                    publish()
-                    if (changes.any { it.text("type").startsWith("run.") || it.text("type").startsWith("interaction.") || it.text("type").startsWith("approval.") || it.text("type").startsWith("session.follow_up") || it.text("type") == "session.native_history_synced" || it.text("type") == "session.title_changed" }) {
-                        projection.history(peer.call(host, "session.history", json("sessionId" to session.id)))
-                        refreshSession(host, session.id)
-                        publish()
+                if (currentProjection.epoch.isEmpty()) {
+                    val page = recovery.read { peer.call(host, "session.history", json("sessionId" to session.id)) }
+                    if (!ticket.isCurrent() || generation != sessionGeneration) return@launch
+                    currentProjection.history(page, initialize = true)
+                }
+                if (!ticket.isCurrent()) return@launch
+                publish()
+                recovery.read { refreshSession(host, session.id) { ticket.isCurrent() } }
+                if (!ticket.isCurrent() || generation != sessionGeneration) return@launch
+                publish()
+                // Capacity fallback uses this session's pinned model catalog, as on PC.
+                if (state.value.models.isEmpty()) loadModels()
+                val refreshSignal = Channel<Unit>(Channel.CONFLATED)
+                var historyRequested = false
+                var snapshotRequested = false
+                val refreshJob = launch {
+                    val reads = ReadRecovery(report = { error ->
+                        reportRead("snapshot", error)
+                    }, checkConnection = peer::requestHealthCheck)
+                    for (ignored in refreshSignal) {
+                        val history = historyRequested; val snapshot = snapshotRequested
+                        historyRequested = false; snapshotRequested = false
+                        try {
+                            if (history) {
+                                val epoch = currentProjection.epoch
+                                val page = reads.read { peer.call(host, "session.history", json("sessionId" to session.id)) }
+                                if (!ticket.isCurrent()) return@launch
+                                if (epoch == currentProjection.epoch) currentProjection.history(page)
+                            }
+                            if (snapshot) reads.read { refreshSession(host, session.id) { ticket.isCurrent() } }
+                            if (ticket.isCurrent()) publish()
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (error: Exception) {
+                            // An ancillary read must not cancel the live event subscription.
+                            reportRead("snapshot", error)
+                        }
                     }
                 }
+                while (isActive && foreground && ticket.isCurrent() && generation == sessionGeneration) {
+                    val events = try {
+                        recovery.read { poller.next {
+                            peer.call(host, "events.wait", json("sessionId" to session.id, "epoch" to currentProjection.epoch, "afterSequence" to currentProjection.sequence))
+                        } }
+                    } catch (error: RemoteFailure) {
+                        if (error.code != "CURSOR_RESET_REQUIRED") throw error
+                        val page = recovery.read { peer.call(host, "session.history", json("sessionId" to session.id)) }
+                        if (!ticket.isCurrent() || generation != sessionGeneration) return@launch
+                        // Rebase the durable cursor in place. Do not blank messages already on screen.
+                        currentProjection.history(page, initialize = true)
+                        recovery.read { refreshSession(host, session.id) { ticket.isCurrent() } }
+                        publish()
+                        continue
+                    }
+                    if (!ticket.isCurrent() || generation != sessionGeneration) return@launch
+                    val changes = events.objects("events")
+                    if (changes.isEmpty()) continue
+                    changes.forEach { currentProjection.apply(it) }
+                    publish()
+                    val refresh = SessionRefresh.forEvents(changes.map { it.text("type") })
+                    historyRequested = historyRequested || refresh.history
+                    snapshotRequested = snapshotRequested || refresh.snapshot
+                    if (refresh.history || refresh.snapshot) refreshSignal.trySend(Unit)
+                }
+                refreshSignal.close(); refreshJob.cancel()
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
-                if (generation == sessionGeneration) {
-                    if (error is RemoteFailure && error.code == "CURSOR_RESET_REQUIRED") projection = SessionProjection()
-                    mutable.update { it.copy(error = readableError(error), busy = false) }
-                    if (foreground) connectionWake.trySend(Unit)
+                if (ticket.isCurrent() && generation == sessionGeneration) {
+                    if (foreground) mutable.update { it.copy(error = readableError(error), busy = false) }
+                    if (foreground && error.isConnectionFailure()) connectionWake.trySend(Unit)
                 }
-                // The connection loop hydrates a fresh cursor and restarts this reader.
+                // Transport reads recover above. Authorization and application failures stay visible.
             }
         }
     }
-    private suspend fun refreshSession(host: Host, id: String) {
+    private suspend fun refreshSession(host: Host, id: String, valid: () -> Boolean = { true }) {
         val generation = sessionGeneration
+        val connection = connectionGeneration
+        val readingProjection = projection
+        val readingSequence = readingProjection.sequence
         val params = json("sessionId" to id)
         val snapshot = if ("session.snapshot" in state.value.capabilities) peer.call(host, "session.snapshot", params) else coroutineScope {
             // Older desktops remain compatible; independent reads share one network wait.
@@ -479,14 +568,18 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         val latest = runs.maxByOrNull { it.text("startedAt", it.text("createdAt")) }
         val questions = snapshot.objects("interactions")
         val approvals = snapshot.objects("approvals")
-        if (generation != sessionGeneration || state.value.session?.id != id || state.value.host?.id != host.id) return
-        latest?.let {
+        if (!valid() || connection != connectionGeneration || generation != sessionGeneration || state.value.session?.id != id || state.value.host?.id != host.id) return
+        // A snapshot dispatched before a newer event cannot roll back its run state.
+        latest?.takeIf { projection === readingProjection && projection.sequence == readingSequence }?.let {
             projection.runId = it.text("id"); projection.runStatus = it.text("status")
             projection.startedAt = it.text("startedAt"); projection.endedAt = it.text("endedAt")
         }
         mutable.update { it.copy(sessions = it.sessions.map { item -> if (item.id == id) item.copy(title = config.text("title", item.title)) else item }, session = it.session?.copy(title = config.text("title", it.session.title), model = config.text("model"), effort = config.text("reasoningEffort"),
             provider = detail.optJSONObject("agent")?.text("name").orEmpty(), agentId = detail.optJSONObject("agent")?.text("id").orEmpty(), connectionId = config.text("connectionId"),
-            permissionMode = config.text("permissionMode"), agentMode = config.text("agentMode"), modeLocked = config.optBoolean("modeLocked")), members = detail.objects("members"), interactions = mergeInteractions(it.interactions, projection.interactionList(), questions), approvals = approvals, runs = runs.map(RunInfo::decode), busy = false) }
+            permissionMode = config.text("permissionMode"), agentMode = config.text("agentMode"), modeLocked = config.optBoolean("modeLocked"),
+            teamId = config.text("teamId"), teamName = detail.optJSONObject("team")?.text("name").orEmpty(), parentSessionId = config.text("parentSessionId")),
+            compactCommand = snapshot.optJSONObject("compactCommand")?.text("id").orEmpty(), canCompact = config.optBoolean("hasNativeSession"),
+            members = detail.objects("members"), interactions = mergeInteractions(it.interactions, projection.interactionList(), questions), approvals = approvals, runs = runs.map(RunInfo::decode), busy = false) }
     }
     private fun publish() {
         val seconds = runCatching {
@@ -495,13 +588,19 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         }.getOrDefault(0)
         val currentRun = RunInfo(projection.runId, projection.runStatus, projection.startedAt, projection.endedAt)
         mutable.update { it.copy(messages = projection.messageList(), activities = projection.activityList(), hasOlder = projection.before != null,
+            contextUsage = projection.contextUsage(),
             interactions = mergeInteractions(it.interactions, projection.interactionList()),
-            runId = projection.runId, runStatus = projection.runStatus, runError = projection.runError, elapsed = seconds,
+            runId = projection.runId, runStatus = projection.runStatus, elapsed = seconds,
             runs = if (currentRun.id.isBlank()) it.runs else it.runs.filterNot { run -> run.id == currentRun.id } + currentRun, busy = false) }
     }
     fun older() = action { host, session ->
-        val before = projection.before ?: return@action
-        projection.history(peer.call(host, "session.history", json("sessionId" to session.id, "before" to before)), older = true)
+        val target = projection
+        val generation = sessionGeneration
+        val connection = connectionGeneration
+        val before = target.before ?: return@action
+        val page = peer.call(host, "session.history", json("sessionId" to session.id, "before" to before))
+        if (projection !== target || generation != sessionGeneration || connection != connectionGeneration || state.value.session?.id != session.id || state.value.host?.id != host.id) return@action
+        target.history(page, older = true)
         publish()
     }
     fun send(mode: String? = null, sourceDraftKey: String? = null): Boolean {
@@ -581,6 +680,27 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         } finally { commandLock.unlock() }
     }
     fun retryMessages() = action { host, _ -> flushOutbox(host) }
+    fun compactContext() {
+        val s = state.value; val host = s.host ?: return; val session = s.session ?: return
+        if (!s.connected || s.readOnly || s.compacting || running(s.runStatus) || !s.canCompact || s.compactCommand.isBlank() || "session.compact" !in s.capabilities) return
+        val generation = sessionGeneration
+        mutable.update { it.copy(compacting = true, compactError = "") }
+        viewModelScope.launch {
+            try {
+                peer.call(host, "session.compact", json("sessionId" to session.id))
+                if (generation == sessionGeneration && state.value.host?.id == host.id) {
+                    projection.history(peer.call(host, "session.history", json("sessionId" to session.id)))
+                    refreshSession(host, session.id)
+                    publish()
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                if (generation == sessionGeneration && state.value.host?.id == host.id) mutable.update { it.copy(compactError = readableError(error)) }
+            } finally {
+                if (generation == sessionGeneration && state.value.host?.id == host.id) mutable.update { it.copy(compacting = false) }
+            }
+        }
+    }
     fun cancelRun() = action { host, _ -> peer.call(host, "run.cancel", json("runId" to state.value.runId)) }
     fun newSession(template: Conversation) = actionForHost { host ->
         val created = peer.call(host, "session.create", json("sessionId" to template.id))
@@ -619,7 +739,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             finally { if (generation == catalogGeneration) mutable.update { it.copy(catalogLoading = false) } }
         }
     }
-    fun createSession(projectId: String, agentId: String, connectionId: String, selectedModel: String, effort: String, firstMessage: String = "", permissionMode: String = "", agentMode: String = "", onCreated: () -> Unit = {}) = actionForHost { host ->
+    fun createSession(projectId: String, agentId: String, connectionId: String, selectedModel: String, effort: String, firstMessage: String = "", permissionMode: String = "", agentMode: String = "", teamId: String = "", onCreated: () -> Unit = {}) = actionForHost { host ->
         if (state.value.changing) return@actionForHost
         mutable.update { it.copy(changing = true) }
         val firstAttachments = state.value.newAttachments
@@ -630,6 +750,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             if (effort.isNotEmpty()) input.put("reasoningEffort", effort)
             if (permissionMode.isNotEmpty()) input.put("permissionMode", permissionMode)
             if (agentMode.isNotEmpty()) input.put("agentMode", agentMode)
+            if (teamId.isNotEmpty()) input.put("teamId", teamId)
             val created = peer.call(host, "session.create", input)
             val conversation = Conversation.decode(created)
             mutable.update { it.copy(sessions = listOf(conversation) + it.sessions.filterNot { item -> item.id == conversation.id }) }
@@ -666,8 +787,8 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         val generation = sessionGeneration
         mutable.update { it.copy(modelsLoading = true) }
         try {
-            val models = peer.call(host, "session.models", json("sessionId" to session.id)).objects("models")
-            if (generation == sessionGeneration) mutable.update { it.copy(models = models) }
+            val catalog = peer.call(host, "session.models", json("sessionId" to session.id))
+            if (generation == sessionGeneration && state.value.host?.id == host.id && state.value.session?.connectionId == session.connectionId) mutable.update { it.copy(models = catalog.objects("models"), defaultModel = catalog.text("defaultModel")) }
         } finally { if (generation == sessionGeneration) mutable.update { it.copy(modelsLoading = false) } }
     }
     private var modesJob: Job? = null
@@ -701,15 +822,20 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             }
         } finally { mutable.update { it.copy(changing = false) } }
     }
-    fun configure(model: String, effort: String, connectionId: String? = null, confirmChange: Boolean = false, configured: () -> Unit = {}) = action { host, session ->
+    fun configure(model: String, effort: String, connectionId: String? = null, confirmChange: Boolean = false, teamId: String? = null, configured: () -> Unit = {}) = action { host, session ->
         if (state.value.changing) return@action
         mutable.update { it.copy(changing = true, error = "") }
         try {
-            val input = json("sessionId" to session.id, "model" to model, "reasoningEffort" to effort)
+            val input = json("sessionId" to session.id)
+            if (model != session.model || effort != session.effort || connectionId?.let { it != session.connectionId } == true) {
+                input.put("model", model).put("reasoningEffort", effort)
+            }
             if (connectionId != null) input.put("connectionId", connectionId).put("confirmConnectionChange", confirmChange)
+            if (teamId != null) input.put("teamId", if (teamId.isEmpty()) JSONObject.NULL else teamId)
             peer.call(host, "session.configure", input)
             if (state.value.session?.id == session.id && state.value.host?.id == host.id) {
-                mutable.update { it.copy(session = it.session?.copy(model = model, effort = effort, connectionId = connectionId ?: session.connectionId),
+                mutable.update { it.copy(session = it.session?.copy(model = model, effort = effort, connectionId = connectionId ?: session.connectionId,
+                    teamId = teamId ?: session.teamId, teamName = if (teamId == null) session.teamName else it.setup.objects("teams").find { t -> t.text("id") == teamId }?.text("name").orEmpty()),
                     models = if (connectionId != null && connectionId != session.connectionId) it.newModels else it.models) }
                 configured()
                 viewModelScope.launch {
@@ -756,9 +882,14 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
     }
     private fun actionForHost(block: suspend (Host) -> Unit) {
         val host = state.value.host ?: return
+        val connectionVersion = connectionGeneration
+        val sessionVersion = sessionGeneration
         viewModelScope.launch {
             try { block(host) } catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { mutable.update { it.copy(error = readableError(error)) } }
+            catch (error: Exception) {
+                if (connectionVersion == connectionGeneration && sessionVersion == sessionGeneration && state.value.host?.id == host.id)
+                    mutable.update { it.copy(error = readableError(error)) }
+            }
         }
     }
     override fun onCleared() { saveDraft(); super.onCleared() }

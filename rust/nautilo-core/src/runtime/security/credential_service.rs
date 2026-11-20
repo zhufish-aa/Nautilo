@@ -53,7 +53,7 @@ impl CredentialService {
         Repositories::new(&self.db.lock().unwrap().raw).credentials().save(id, &encrypted)
     }
 
-    fn encrypt_payload(&self, credential: &Value) -> CoreResult<Value> {
+    pub(crate) fn encrypt_payload(&self, credential: &Value) -> CoreResult<Value> {
         (|| -> CoreResult<Value> {
             let key = self.key_value()?;
             let cipher = Aes256Gcm::new((&key).into());
@@ -85,7 +85,10 @@ impl CredentialService {
     pub fn read(&self, agent_instance_id: &str) -> CoreResult<Option<Value>> {
         let encrypted = Repositories::new(&self.db.lock().unwrap().raw).credentials().get(agent_instance_id)?;
         let Some(encrypted) = encrypted else { return Ok(None) };
-        let decode = || -> CoreResult<Value> {
+        self.decrypt_payload(&encrypted).map(Some)
+    }
+
+    pub(crate) fn decrypt_payload(&self, encrypted: &Value) -> CoreResult<Value> {
             let key = self.key_value()?;
             let cipher = Aes256Gcm::new((&key).into());
             let iv = BASE64.decode(encrypted.get("iv").and_then(Value::as_str).unwrap_or("")).map_err(|e| store_fail(e.to_string()))?;
@@ -94,12 +97,11 @@ impl CredentialService {
                 .decode(encrypted.get("ciphertext").and_then(Value::as_str).unwrap_or(""))
                 .map_err(|e| store_fail(e.to_string()))?;
             ciphertext.extend_from_slice(&tag);
+            if iv.len() != 12 || tag.len() != 16 { return Err(store_fail("invalid_encrypted_payload".into())); }
             let plaintext = cipher
                 .decrypt(Nonce::from_slice(&iv), ciphertext.as_slice())
                 .map_err(|e| store_fail(e.to_string()))?;
             serde_json::from_slice(&plaintext).map_err(|e| store_fail(e.to_string()))
-        };
-        decode().map(Some)
     }
 
     /// All stored API keys — feeds the redaction service.
@@ -136,6 +138,24 @@ fn store_fail(reason: String) -> CoreError {
     let mut details = serde_json::Map::new();
     details.insert("cause".to_string(), Value::String(reason));
     CoreError::details(ErrorCode::CredentialStoreFailed, details)
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+    #[test]
+    fn composer_drafts_vault_roundtrips_and_rejects_corrupt_nonce_without_panicking() {
+        let db = Arc::new(Mutex::new(Database::open(std::path::Path::new(":memory:")).unwrap()));
+        let vault = CredentialService { db, key_path: PathBuf::new(), key: Mutex::new(Some([7;32])) };
+        let payload = serde_json::json!({"draft":{"text":"保留中文草稿","attachments":[]},"submissions":[]});
+        let encrypted = vault.encrypt_payload(&payload).unwrap();
+        assert_eq!(vault.decrypt_payload(&encrypted).unwrap(),payload);
+        assert!(!encrypted.to_string().contains("保留中文"));
+        let mut corrupt = encrypted.clone(); corrupt["iv"] = serde_json::json!(BASE64.encode([0u8;3]));
+        assert!(vault.decrypt_payload(&corrupt).is_err());
+        corrupt = encrypted; corrupt["tag"] = serde_json::json!(BASE64.encode([0u8;16]));
+        assert!(vault.decrypt_payload(&corrupt).is_err());
+    }
 }
 
 fn rand_bytes<const N: usize>() -> [u8; N] {

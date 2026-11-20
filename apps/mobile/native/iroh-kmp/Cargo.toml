@@ -32,5 +32,6 @@ debug = 0
 [workspace]
 
 [patch.crates-io]
+netwatch = { path = "../../../../rust/vendor/generated/netwatch-0.19.3" }
 iroh = { path = "../../../../rust/vendor/generated/iroh-1.4.1" }
 noq-proto = { path = "../../../../rust/vendor/generated/noq-proto-1.4.0" }

@@ -253,7 +253,8 @@ export class RunService {
       session = { ...latestSession, agentMode: session.agentMode, model: session.model, reasoningEffort: session.reasoningEffort, serviceTier: session.serviceTier };
     }
     const selectedConnection = boundConnection(this.database, session);
-    if (!selectedConnection && agent.providerOptions?.configurationKind === "harness") throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "Select a provider or login account for this harness" });
+    // An unbound harness uses the CLI's native provider/account configuration.
+    // configurationKind identifies the editor; it is not a source requirement.
     if (selectedConnection) {
       agent = applyConnection(selectedConnection, agent);
       connectionEnvironment(selectedConnection, agent, {}, this.credentials);
@@ -807,7 +808,12 @@ export class RunService {
         changeType,
         additions: event.additions ?? derived.additions,
         deletions: event.deletions ?? derived.deletions,
-        diff: event.diff ? this.redaction.text(event.diff) : undefined
+        diff: event.diff ? this.redaction.text(event.diff) : undefined,
+        fileSnapshot: event.snapshot ? this.redaction.value({
+          ...(typeof event.snapshot.before === "string" ? { before: event.snapshot.before.slice(0, 200_000) } : {}),
+          ...(typeof event.snapshot.after === "string" ? { after: event.snapshot.after.slice(0, 200_000) } : {}),
+          truncated: event.snapshot.truncated || (event.snapshot.before?.length ?? 0) > 200_000 || (event.snapshot.after?.length ?? 0) > 200_000
+        }) as typeof event.snapshot : undefined
       });
     }
     else if (event.kind === "exit") {

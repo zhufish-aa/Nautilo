@@ -6,6 +6,15 @@ use crate::{
 };
 use serde_json::Value;
 
+/// A native provider's HTTP rejection, retaining its status through the local
+/// model endpoint. In particular, quota responses must stay HTTP 429.
+#[derive(Debug)]
+pub struct ModelRequestError { pub status: u16, pub message: String }
+impl std::fmt::Display for ModelRequestError {
+    fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { write!(f,"{}",self.message) }
+}
+impl std::error::Error for ModelRequestError {}
+
 pub fn is_authentication_error(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     [
@@ -48,6 +57,7 @@ pub async fn check_native_login(
     request: &AdapterStartRequest,
 ) -> CoreResult<()> {
     let provider = connection["harness"].as_str().unwrap_or("");
+    if provider == "opencode" && connection["nativeLogin"] == true { return Ok(()); } // The native runtime also supports keyless free models.
     let command = request.instance["executable"].as_str().unwrap_or(provider);
     let mut args: Vec<String> = request.instance["baseArgs"]
         .as_array()

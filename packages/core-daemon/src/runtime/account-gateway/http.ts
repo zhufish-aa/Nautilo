@@ -33,7 +33,6 @@ export async function readRequest(req: IncomingMessage): Promise<Json> {
   if (
     !Array.isArray(body.messages) ||
     !body.messages.length ||
-    body.messages.length > 2000 ||
     body.messages.some((m: Json) => !m || typeof m.role !== "string")
   ) {
     throw new RelayError(
@@ -45,7 +44,6 @@ export async function readRequest(req: IncomingMessage): Promise<Json> {
   const tools = body.tools ?? [];
   if (
     !Array.isArray(tools) ||
-    tools.length > 256 ||
     tools.some(
       (t: Json) =>
         t?.type !== "function" ||
@@ -56,7 +54,7 @@ export async function readRequest(req: IncomingMessage): Promise<Json> {
     throw new RelayError(
       400,
       "INVALID_CALLER_TOOLS",
-      "Expected up to 256 named function tools",
+      "Expected named function tools",
     );
   }
   return body;

@@ -370,6 +370,13 @@ impl ProviderPlugin for DeepSeek {
         let identity = runtime::identity(&request);
         let cache_key = request["localSessionId"].as_str().unwrap_or(&session).to_string();
         let cached = self.pool.lock().unwrap().take(&cache_key);
+        let reason = match &cached {
+            None => "first_use",
+            Some(cached) if !cached.native.alive.load(Ordering::Acquire) => "process_exited",
+            Some(cached) if cached.identity != identity => "configuration_changed",
+            Some(cached) if resume.as_deref() != Some(cached.native.session.lock().unwrap().as_str()) => "session_changed",
+            _ => "resident",
+        };
         let (sender, receiver) = mpsc::unbounded_channel();
         let daemon = self.daemon.lock().unwrap().clone();
         let session_channel = agenthub_plugin_sdk::session_channel(&daemon, &request);
@@ -380,6 +387,7 @@ impl ProviderPlugin for DeepSeek {
         let reusable = cached.as_ref().is_some_and(|cached| {
             resume.is_some()
                 && cached.identity == identity
+                && resume.as_deref() == Some(cached.native.session.lock().unwrap().as_str())
                 && cached.native.alive.load(Ordering::Acquire)
         });
         let workspace_open = if reusable { None } else {
@@ -446,7 +454,7 @@ impl ProviderPlugin for DeepSeek {
                 drop(workspace_open);
                 let attach_ms = started_at.elapsed().as_millis() as u64;
                 native.emit(json!({"kind":"status","phase":"runtime_ready","raw":{
-                    "providerId":"deepseek","transport":"native-web","reused":reusable,
+                    "providerId":"deepseek","transport":"native-web","reused":reusable,"reason":reason,
                     "pid":native.process.pid,"attachMs":attach_ms,
                     "startupTimings":{"prepareMs":prepared_ms,"bootstrapMs":process_ready_ms.saturating_sub(prepared_ms),"sessionOpenMs":attach_ms.saturating_sub(process_ready_ms),"openDetails":opened["timings"]}
                 }}));

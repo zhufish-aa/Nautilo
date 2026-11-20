@@ -1,4 +1,5 @@
 import { assistantModelStep } from "./assistant-model.js";
+import { ComposerDraftService } from "./composer-drafts.js";
 import { registerRemoteAccess } from "./remote-access.js";
 import { assistantRecords, saveAssistantRecord, assistantSessions, assistantExcerpts } from "../database/assistant-reads.js";
 import { TerminalService } from "../runtime/terminal-service.js";
@@ -138,7 +139,15 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("resource.undo",async({planId})=>services.resources.apply(planId,true));
   gateway.register("session.tools", async ({ sessionId }) => services.runs.requestLogs.inventory(sessionId));
   gateway.register("connection.diagnose", async input => diagnosticRedaction.value(await services.connections.diagnose(input)));
-  gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0", features: {sourceControl:1,sourceControlHistory:1,sourceControlHistoryPaging:1,sourceControlEditing:1,terminalTabs:1} }));
+  const composerDrafts = new ComposerDraftService(services.database, services.credentials);
+  gateway.register("composerDraft.list", async () => composerDrafts.list());
+  gateway.register("composerDraft.write", async input => composerDrafts.write(input));
+  gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0", features: {sourceControl:1,sourceControlHistory:1,sourceControlHistoryPaging:1,sourceControlEditing:1,terminalTabs:1,composerDrafts:1,taskRetry:1} }));
+  for (const method of ["templates", "template", "save", "validate", "start", "list", "get", "control", "plan.decide"] as const) {
+    gateway.register(`workflow.${method}`, async () => {
+      throw new CoreError("IPC_INVALID_REQUEST", { field: "backend", reason: "Workflows require the Rust daemon (health.features.workflows=1)." });
+    });
+  }
   gateway.register("project.list", async () => services.projects.list());
   gateway.register("project.add", async (input) => services.projects.add(input));
   gateway.register("project.upsert", async (input) => { services.database.projects.save(input, new Date().toISOString()); return input; });
@@ -221,6 +230,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("orchestration.resolveDelegation", async ({ projectRunId, approved, scope }) => services.orchestration.resolveDelegation(projectRunId, approved, scope));
   gateway.register("orchestration.resolveMerge", async ({ projectRunId, approved, scope }) => services.orchestration.resolveMerge(projectRunId, approved, scope));
   gateway.register("orchestration.recover", async ({ projectRunId, memberId, mode }) => services.orchestration.recover(projectRunId, memberId, mode));
+  gateway.register("orchestration.retryTask", async ({ projectRunId, taskId }) => services.orchestration.retryTask(projectRunId, taskId));
   gateway.register("orchestration.cancel", async ({ projectRunId }) => services.orchestration.cancel(projectRunId));
   gateway.register("session.list", async (input) => services.sessions.list(input));
   gateway.register("session.historyBatch", async ({ items }) => services.database.sessions.historyBatch(items));

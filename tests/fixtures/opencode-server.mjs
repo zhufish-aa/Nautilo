@@ -14,6 +14,12 @@ if (process.argv.includes('fixture-cli')) {
   const state = { pid: process.pid, streamOpens: 0, posts: [], aborts: [], replies: [], deletes: 0, abortFailure: false, unsafePty: false, unknownStatus: false };
   const statuses = {};
   let nextSession = 0;
+  const runtimeMcp = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}').mcp?.nautilo_runtime;
+  async function runtimeRpc(method, params) {
+    const response = await fetch(runtimeMcp.url, { method: 'POST', headers: {'content-type':'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0', id:1, method, params}) });
+    return response.json();
+  }
   function record(frame) {
     const e = frame.payload ?? frame;
     const p = e.properties ?? {};
@@ -60,6 +66,14 @@ if (process.argv.includes('fixture-cli')) {
     if (path === '/question') return json(res,[...questions.values()]);
     if (path === '/permission') return json(res,[...permissions.values()]);
     if (path === '/pty') return json(res, state.unsafePty ? [{ id: 'pty_native', status: 'running' }] : []);
+    if (path === '/mcp') {
+      if (!runtimeMcp) return json(res, {});
+      await runtimeRpc('initialize', {protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'opencode-fixture',version:'1'}});
+      const list = await runtimeRpc('tools/list', {});
+      state.runtimeTools = list.result.tools;
+      return json(res, {nautilo_runtime:{status:'connected'}});
+    }
+    if (path === '/fixture/runtime-tool') return json(res, await runtimeRpc('tools/call', body));
     if (path === '/event') {
       state.streamOpens++;
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });

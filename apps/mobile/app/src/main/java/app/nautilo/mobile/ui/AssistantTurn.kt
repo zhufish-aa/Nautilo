@@ -4,7 +4,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -14,19 +13,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.nautilo.mobile.data.*
+import org.json.JSONObject
 
-@Composable internal fun AssistantTurn(turn: ConversationItem.Turn, error: String = "") {
+@Composable internal fun AssistantTurn(turn: ConversationItem.Turn, interactionContent: @Composable (JSONObject) -> Unit) {
     val seenParts = remember(turn.id) { turn.parts.map { it.key }.toMutableSet() }
     val arrivals = if (turn.completed) emptySet() else turn.parts.map { it.key }.filterNot(seenParts::contains).toSet()
     SideEffect { seenParts.addAll(turn.parts.map { it.key }) }
     if (turn.run == null && turn.answer == null) {
         Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            turn.parts.forEach { part -> key(part.key) { TurnPartView(part, part.key in arrivals) } }
+            turn.parts.forEach { part -> key(part.key) { TurnPartView(part, part.key in arrivals, interactionContent) } }
         }
         return
     }
@@ -34,39 +33,36 @@ import app.nautilo.mobile.data.*
     var expanded by rememberSaveable(turn.id, turn.completed) { mutableStateOf(!turn.completed) }
     val process = turn.process
     val answer = turn.answer
-    val active = !turn.completed
+    val showStatus = turn.isLatestSegment && turn.run != null
     val rotation by animateFloatAsState(if (expanded) 180f else 0f,
         tween(if (LocalNautiloMotion.current) 180 else 0, easing = MotionEase), label = "process-chevron")
     Column(Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
-        Row(Modifier.fillMaxWidth().clickable(enabled = process.isNotEmpty()) { expanded = !expanded }.heightIn(min = 32.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            turn.run?.let { RunStatusLabel(it) } ?: Text(if (active) "执行中" else "已完成", fontSize = 14.sp, color = Secondary)
-            if (process.isNotEmpty()) {
-                Icon(Icons.Outlined.ExpandMore, if (expanded) "收起执行过程" else "展开执行过程", Modifier.size(15.dp).rotate(rotation), tint = Secondary)
+        if (showStatus) {
+            Row(Modifier.fillMaxWidth().clickable(enabled = process.isNotEmpty()) { expanded = !expanded }.heightIn(min = 32.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                RunStatusLabel(requireNotNull(turn.run))
+                if (process.isNotEmpty()) {
+                    Icon(Icons.Outlined.ExpandMore, if (expanded) "收起执行过程" else "展开执行过程", Modifier.size(15.dp).rotate(rotation), tint = Secondary)
+                }
             }
+            NDivider(thickness = .5.dp, color = Line)
+            Spacer(Modifier.height(14.dp))
         }
-        NDivider(thickness = .5.dp, color = Line)
-        Spacer(Modifier.height(14.dp))
         // Render the original sequence. Collapse process rows in place, exactly
         // as on PC; never move commentary, notices or the reply into new groups.
         turn.parts.forEach { part -> key(part.key) {
-            if (part.visible(expanded, answer)) TurnPartView(part, part.key in arrivals)
+            if (part.visible(expanded || !showStatus, answer)) TurnPartView(part, part.key in arrivals, interactionContent)
         } }
-        if (error.isNotBlank()) NPanel(color = Color(0xFFFFF5F4), shape = RoundedCornerShape(14.dp)) {
-            Row(Modifier.padding(13.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Icon(Icons.Outlined.Info, null, Modifier.size(18.dp), tint = Danger)
-                Text(error, color = Danger, fontSize = 13.sp, lineHeight = 21.sp)
-            }
-        }
     }
 }
 
-@Composable private fun TurnPartView(part: TurnPart, animate: Boolean = false) {
+@Composable private fun TurnPartView(part: TurnPart, animate: Boolean, interactionContent: @Composable (JSONObject) -> Unit) {
   MotionArrival(part.key, animate) {
     Column(Modifier.fillMaxWidth().testTag("turn-part:${part.key}")) {
         part.message?.let { Markdown(it.text, Modifier.padding(vertical = 7.dp)) }
         part.activity?.let {
-            if (it.kind == "stopped") Text("已停止", Modifier.padding(vertical = 5.dp), fontSize = 13.sp, color = Secondary)
+            if (it.kind == "interaction") it.payload.optJSONObject("interaction")?.let { request -> interactionContent(request) }
+            else if (it.kind == "stopped") Text("已停止", Modifier.padding(vertical = 5.dp), fontSize = 13.sp, color = Secondary)
             else if (usesEventCard(it)) EventNotice(it) else ProcessActivity(it)
         }
     }

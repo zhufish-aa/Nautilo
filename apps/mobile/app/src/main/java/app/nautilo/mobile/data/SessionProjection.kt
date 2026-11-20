@@ -5,6 +5,8 @@ import java.time.Instant
 
 /** Applies the desktop journal in order without replacing the visible conversation. */
 class SessionProjection(private val subagentBuckets: MutableMap<String, SessionProjection> = linkedMapOf()) {
+    private var usage = ContextUsageProjection()
+    fun contextUsage(): ContextUsage = usage.value()
     private val messages = linkedMapOf<String, ChatMessage>()
     private val activities = linkedMapOf<String, ActivityItem>()
     private val reasoningGeneration = mutableMapOf<String, Int>()
@@ -21,12 +23,11 @@ class SessionProjection(private val subagentBuckets: MutableMap<String, SessionP
     var runStatus = ""
     var startedAt = ""
     var endedAt = ""
-    var runError = ""
 
     fun history(page: JSONObject, initialize: Boolean = false, older: Boolean = false) {
         for (item in page.objects("items")) {
             val value = item.getJSONObject("value")
-            val message = ChatMessage(value.getString("id"), value.text("sender"), value.text("text"), value.text("timelineStartedAt", value.text("createdAt")), runId = value.text("runId"), sequence = value.optLong("sequence"), attachmentNames = value.strings("attachmentNames"), attachments = value.objects("attachments").map(ChatAttachment::decode))
+            val message = ChatMessage(value.getString("id"), value.text("sender"), value.text("text"), value.text("timelineStartedAt", value.text("createdAt")), runId = value.text("runId"), sequence = value.optLong("sequence"), attachmentNames = value.strings("attachmentNames"), attachments = value.objects("attachments").map(ChatAttachment::decode), kind = value.text("kind", "chat"), taskId = value.text("taskId"))
             val current = messages[message.id]
             if (current == null || current.delivery != "sent" || message.text.length >= current.text.length) messages[message.id] = message.copy(
                 time = current?.time?.takeIf(String::isNotBlank) ?: message.time,
@@ -35,6 +36,7 @@ class SessionProjection(private val subagentBuckets: MutableMap<String, SessionP
                 sequence = current?.sequence?.takeIf { it > 0 } ?: message.sequence)
         }
         if (initialize) {
+            usage = ContextUsageProjection()
             sequence = 0
             seen.clear()
             activities.clear()
@@ -46,6 +48,8 @@ class SessionProjection(private val subagentBuckets: MutableMap<String, SessionP
             epoch = page.getString("epoch")
             sequence = page.getLong("sequence")
         }
+        // Independent of the bounded activity page, including when reopening.
+        page.optJSONObject("usage")?.objects("events")?.forEach(usage::ingest)
         if (initialize || older) before = page.optJSONObject("before")
     }
     fun optimistic(message: ChatMessage) { messages.putIfAbsent(message.id, message) }
@@ -69,6 +73,7 @@ class SessionProjection(private val subagentBuckets: MutableMap<String, SessionP
             if (seen.size > 1000) seen.remove(seen.first())
             return
         }
+        usage.ingest(event)
         when (type) {
             "agent.message_delta", "agent.message" -> {
                 if (!includeMessages) { sequence = cursor; return }
@@ -126,18 +131,21 @@ class SessionProjection(private val subagentBuckets: MutableMap<String, SessionP
                 activities[key] = ActivityItem(key, if (type.startsWith("command")) "terminal" else "tool", name, detail.ifEmpty { activities[key]?.detail.orEmpty() }, !type.endsWith("finished") && activities[key]?.running != false, activities[key]?.time ?: time, event.text("runId"), activities[key]?.sequence ?: cursor, type, payload)
             }
             "run.started" -> {
-                runId = event.text("runId", p.text("runId")); runStatus = "running"; startedAt = time; endedAt = ""; runError = ""
+                runId = event.text("runId", p.text("runId")); runStatus = "running"; startedAt = time; endedAt = ""
             }
             "run.waiting" -> runStatus = "waiting"
             "run.completed", "run.cancelled", "run.failed" -> {
                 runStatus = type.substringAfter('.')
                 endedAt = time
-                runError = p.text("message", p.optJSONObject("error")?.text("message").orEmpty())
                 val finishedRun = event.text("runId", runId)
                 activities.replaceAll { _, activity -> if (activity.runId == finishedRun) activity.copy(running = false) else activity }
                 if (type == "run.cancelled") {
                     val key = "stopped:$finishedRun"
                     activities[key] = ActivityItem(key, "stopped", "已停止", time = time, runId = finishedRun, sequence = cursor, eventType = type)
+                } else if (type == "run.failed") {
+                    val key = "failure:${finishedRun.ifBlank { event.getString("eventId") }}"
+                    activities[key] = ActivityItem(key, "error", "运行遇到问题", runFailureDetail(p),
+                        time = time, runId = finishedRun, sequence = cursor, eventType = type)
                 }
             }
             else -> {
@@ -192,7 +200,7 @@ class SessionProjection(private val subagentBuckets: MutableMap<String, SessionP
         if (seen.size > 1000) seen.remove(seen.first())
     }
     fun messageList(): List<ChatMessage> = messages.values.sortedBy {
-        runCatching { Instant.parse(it.time).toEpochMilli() }.getOrDefault(0)
+        runCatching { Instant.parse(it.time) }.getOrDefault(Instant.EPOCH)
     }
     fun activityList(depth: Int = 0, ancestry: Set<String> = emptySet()): List<ActivityItem> = activities.values.toList().takeLast(200).map { item ->
         val bucket = subagentBuckets[item.payload.text("callId")]
@@ -211,6 +219,15 @@ class SessionProjection(private val subagentBuckets: MutableMap<String, SessionP
     private fun finishReasoning(run: String) {
         latestReasoning[run]?.let { key -> activities[key]?.let { activities[key] = it.copy(running = false) } }
     }
+}
+
+private fun runFailureDetail(payload: JSONObject): String {
+    val detail = payload.text("message").ifBlank { payload.optJSONObject("error")?.text("message").orEmpty() }
+    val status = detail.substringBefore(':').toIntOrNull()
+    if (status == 429 && "OpenCode model request returned HTTP 429: Free usage limit reached" in detail) {
+        return "OpenCode 拒绝了这次免费模型请求（HTTP 429）。"
+    }
+    return detail.ifBlank { "这轮请求未完成。" }
 }
 
 /** Same visibility as PC InteractionCards: retain answered questions, hide answered approvals. */

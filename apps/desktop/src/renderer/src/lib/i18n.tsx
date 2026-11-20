@@ -16,6 +16,7 @@ const zh = {
   nav: {
     section: "工作台",
     projects: "项目",
+    workflows: "工作流",
     agents: "Agent",
     teams: "团队",
     tasks: "任务",
@@ -798,6 +799,12 @@ const zh = {
       terminal: "原始终端",
       untitled: "未命名会话"
     },
+    workspace: {
+      title: "工作区", tools: "工作区工具", session: "本次会话",
+      terminal: "终端", browser: "浏览器", git: "Git 源码管理", files: "文件更改与产物",
+      goals: "会话目标", agents: "Agent 分配", newWindow: "在独立窗口打开",
+      closeGoals: "收起会话目标", openFolder: "打开项目文件夹 {name}"
+    },
     todo: {
       goal: "目标"
     },
@@ -1112,6 +1119,7 @@ const en: Messages = {
   nav: {
     section: "Workbench",
     projects: "Projects",
+    workflows: "Workflows",
     agents: "Agents",
     teams: "Teams",
     tasks: "Tasks",
@@ -1893,6 +1901,12 @@ const en: Messages = {
       changes: "Changes",
       terminal: "Raw terminal",
       untitled: "Untitled session"
+    },
+    workspace: {
+      title: "Workspace", tools: "Workspace tools", session: "This conversation",
+      terminal: "Terminal", browser: "Browser", git: "Source control", files: "Changes & artifacts",
+      goals: "Goals", agents: "Agent assignment", newWindow: "Opens in a separate window",
+      closeGoals: "Dismiss goals", openFolder: "Open project folder {name}"
     },
     todo: {
       goal: "Goal"

@@ -16,7 +16,7 @@ impl CodexAccount {
     pub async fn check_login(&self) -> anyhow::Result<()> {
         self.token(None).await.map(|_| ())
     }
-    pub fn file_store(home: &Path, version: &str) -> Option<Self> {
+    pub fn file_store(home: &Path, version: &str) -> anyhow::Result<Self> {
         let config = std::fs::read_to_string(home.join("config.toml"))
             .unwrap_or_default()
             .parse::<toml_edit::DocumentMut>()
@@ -26,24 +26,21 @@ impl CodexAccount {
             .and_then(|c| c.get("cli_auth_credentials_store"))
             .and_then(toml_edit::Item::as_str)
             .unwrap_or("file");
-        let encrypted = config
-            .as_ref()
-            .and_then(|c| c.get("features"))
-            .and_then(|c| c.get("secret_auth_storage"))
-            .and_then(toml_edit::Item::as_bool)
-            .unwrap_or(cfg!(windows));
-        if mode == "ephemeral" || mode == "keyring" || (mode == "auto" && encrypted) {
-            return None;
+        // Magpie codex_store.go: auto falls back to auth.json when present,
+        // including on Windows where encrypted storage itself is unreadable.
+        // Explicit keyring/ephemeral must not borrow a stale auth.json.
+        if mode == "ephemeral" || mode == "keyring" {
+            anyhow::bail!("The selected Codex account uses {mode} credential storage; its native credential is unavailable to the model HTTP client");
         }
-        let value = read_auth(home).ok()?;
+        let value = read_auth(home)?;
         if value["auth_mode"] == "apikey"
             || value["tokens"]["access_token"]
                 .as_str()
                 .is_none_or(str::is_empty)
         {
-            return None;
+            anyhow::bail!("The selected Codex account is not logged in with a ChatGPT account");
         }
-        Some(Self {
+        Ok(Self {
             home: home.into(),
             version: version.into(),
             endpoint: "https://chatgpt.com/backend-api/codex/responses".into(),
@@ -113,6 +110,22 @@ impl CodexAccount {
             }
             Ok::<_, anyhow::Error>((access, account))
         }).await?
+    }
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    #[test]
+    fn auto_uses_the_native_file_fallback_but_explicit_keyring_does_not_borrow_it() {
+        let root=std::env::temp_dir().join(format!("nautilo-codex-store-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("auth.json"),json!({"tokens":{"access_token":"fixture-access","account_id":"fixture-account"}}).to_string()).unwrap();
+        std::fs::write(root.join("config.toml"),"cli_auth_credentials_store = 'auto'\n[features]\nsecret_auth_storage = true\n").unwrap();
+        assert!(CodexAccount::file_store(&root,"0.166.0").is_ok());
+        std::fs::write(root.join("config.toml"),"cli_auth_credentials_store = 'keyring'\n").unwrap();
+        assert!(CodexAccount::file_store(&root,"0.166.0").is_err());
+        let _=std::fs::remove_dir_all(root);
     }
 }
 

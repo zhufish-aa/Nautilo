@@ -42,14 +42,18 @@ import com.journeyapps.barcodescanner.ScanOptions
     }
     val scan = rememberLauncherForActivityResult(ScanContract()) { result -> result.contents?.let(model::pair) }
     LaunchedEffect(invitation) { invitation?.let { model.pair(it); consumed() } }
-    val backTarget = when (state.screen) { Screen.FilePreview -> state.previewBack; Screen.ProjectFiles -> state.filesBack; Screen.FileDiff -> Screen.Workspace; Screen.Workspace -> Screen.Chat; else -> Screen.Projects }
+    val backTarget = when (state.screen) { Screen.FilePreview -> state.previewBack; Screen.ProjectFiles -> state.filesBack; Screen.FileDiff -> Screen.Workspace; Screen.Workspace, Screen.TeamTasks -> Screen.Chat; else -> Screen.Projects }
     val goBack = { if (state.screen == Screen.FilePreview) model.closeFilePreview() else model.navigate(backTarget) }
     BackHandler(state.screen != Screen.Projects) { goBack() }
     NautiloTheme {
         val motion = LocalNautiloMotion.current
         val imageLoader: AttachmentImageLoader = remember(model, state.host?.id) { { attachment, session -> model.attachmentImage(attachment, session) } }
       CompositionLocalProvider(LocalFileOpener provides { reference -> model.previewFile(reference) }, LocalAttachmentImageLoader provides imageLoader) {
-        Column(Modifier.fillMaxSize().background(if (state.screen == Screen.NewConversation || state.screen == Screen.Chat) androidx.compose.ui.graphics.Brush.verticalGradient(listOf(ChatBackground, ChatBackground)) else Backdrop).statusBarsPadding().navigationBarsPadding()) {
+        Column(Modifier.fillMaxSize().background(when (state.screen) {
+            Screen.NewConversation, Screen.Chat -> androidx.compose.ui.graphics.SolidColor(ChatBackground)
+            Screen.TeamTasks -> androidx.compose.ui.graphics.SolidColor(TeamCanvas)
+            else -> Backdrop
+        }).statusBarsPadding().navigationBarsPadding()) {
             if (state.screen != Screen.NewConversation) {
             Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 ActionIcon(if (state.screen == Screen.Projects) Icons.Outlined.Menu else Icons.Outlined.ArrowBack, "返回") {
@@ -60,13 +64,15 @@ import com.journeyapps.barcodescanner.ScanOptions
                     Text(when (state.screen) {
                         Screen.Projects -> "Nautilo"
                         Screen.Chat -> state.session?.title ?: "会话"
+                        Screen.TeamTasks -> "团队任务"
                         Screen.Workspace -> (state.projects.find { it.id == state.session?.projectId }?.name ?: "项目") + " 工作区"
                         Screen.FileDiff -> "文件变更"
                         Screen.Computers -> "电脑连接"
                         Screen.NewConversation -> "新会话"
                         Screen.ProjectFiles -> state.fileProject?.name ?: "项目文件"
                         Screen.FilePreview -> state.filePreview.path.replace('\\','/').substringAfterLast('/')
-                    }, fontSize = if (state.screen == Screen.Projects) 23.sp else 18.sp, fontWeight = FontWeight.Medium,
+                    }, fontSize = if (state.screen in listOf(Screen.Projects, Screen.TeamTasks)) 23.sp else 18.sp,
+                        fontWeight = if (state.screen == Screen.TeamTasks) FontWeight.SemiBold else FontWeight.Medium,
                         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 }
                 when (state.screen) {
@@ -74,22 +80,28 @@ import com.journeyapps.barcodescanner.ScanOptions
                         ActionIcon(Icons.Outlined.Search, "搜索会话") { menu = true }
                         ActionIcon(Icons.Outlined.Edit, "新建会话") { if (state.host == null) pairSheet = true else model.beginConversation() }
                     }
-                    Screen.Chat -> ActionIcon(Icons.Outlined.Workspaces, "工作区") { model.workspace() }
+                    Screen.Chat -> {
+                        ContextUsageIndicator(state, model::compactContext)
+                        if (state.session?.teamId?.isNotEmpty() == true) ActionIcon(Icons.Outlined.Groups, "团队任务") { model.teamTasks() }
+                        ActionIcon(Icons.Outlined.Workspaces, "工作区") { model.workspace() }
+                    }
                     else -> {}
                 }
                 if (state.screen != Screen.Projects) Box {
                     ActionIcon(Icons.Outlined.MoreHoriz, "更多") { menu = true }
                     NMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        if (state.screen == Screen.TeamTasks) NMenuItem(text = { Text("刷新任务") }, onClick = { menu = false; model.refreshTeamTasks() }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) })
                         NMenuItem(text = { Text("电脑连接") }, onClick = { menu = false; model.navigate(Screen.Computers) }, leadingIcon = { Icon(Icons.Outlined.Computer, null) })
                         NMenuItem(text = { Text("重新连接") }, onClick = { menu = false; model.retry() }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) })
                     }
                 }
             }
             }
-            AnimatedVisibility(state.error.isNotEmpty(), enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+            val notice = state.error.ifBlank { state.syncIssue.ifBlank { state.connectionIssue } }
+            AnimatedVisibility(notice.isNotEmpty(), enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Info, null, Modifier.size(16.dp), tint = Danger)
-                    Text(state.error, color = Danger, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+                    Text(notice, color = Danger, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
                     ActionIcon(Icons.Outlined.Close, "收起提示") { model.clearError() }
                 }
             }
@@ -100,6 +112,7 @@ import com.journeyapps.barcodescanner.ScanOptions
                     Screen.Projects -> ProjectsScreen(state, model, menu, { menu = false }, { pairSheet = true })
                     Screen.NewConversation -> NewConversationScreen(state, model)
                     Screen.Chat -> ChatScreen(state, model)
+                    Screen.TeamTasks -> TeamTaskScreen(state, model)
                     Screen.Workspace -> WorkspaceScreen(state, model)
                     Screen.FileDiff -> FileDiffScreen(state, model)
                     Screen.Computers -> ComputersScreen(state, model) { pairSheet = true }

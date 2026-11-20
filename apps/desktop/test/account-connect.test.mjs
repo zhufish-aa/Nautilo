@@ -22,6 +22,19 @@ test('choosing an account detects, allocates, starts official login and saves on
   assert.equal(f.calls[2][1].directory, '/managed/one'); assert.equal(f.calls[2][1].profileId, 'account-one:/managed/one');
   assert.equal(saved.id, 'account-one'); assert.equal(saved.loginProfileDirectory, '/managed/one'); assert.equal(saved.kind, 'login'); assert.equal(saved.apiKey, undefined);
 });
+
+test('OpenCode follows the same isolated official-login pipeline and does not save while device authorization is pending', async () => {
+  let polls=0; const progress=[];
+  const f=fixture({status:async()=>({state:++polls===1?'running':'succeeded',reason:'fixture device code'}),progress:reason=>progress.push(reason)});
+  const saved=await connectOfficialAccount('opencode','OpenCode account',new AbortController().signal,()=>{},f.deps);
+  assert.deepEqual(f.calls.map(call=>call[0]),['detect','prepare','start','save']);
+  assert.equal(f.calls[2][1].providerId,'opencode');
+  assert.equal(saved.nativeLogin,true); assert.equal(saved.loginProfileDirectory,'/managed/one');
+  assert.deepEqual(progress,['fixture device code']);
+  const denied=fixture({status:async()=>({state:'failed',reason:'Authorization denied'})});
+  await assert.rejects(()=>connectOfficialAccount('opencode','OpenCode',new AbortController().signal,()=>{},denied.deps),/denied/);
+  assert.equal(denied.calls.some(call=>call[0]==='save'),false);
+});
 for (const state of ['failed', 'cancelled', 'idle']) test(`official ${state} status never creates a fake account`, async () => {
   const f = fixture({ status: async () => ({ state, reason: 'not completed' }) });
   await assert.rejects(connectOfficialAccount('claude-code', 'Claude', new AbortController().signal, () => {}, f.deps), /not completed/);
@@ -47,6 +60,10 @@ test('profile allocator makes separate protected directories without accepting c
   const base = await mkdtemp(join(tmpdir(), 'account-profile-test-')); t.after(() => rm(base, { recursive: true, force: true }));
   const first = await module.exports.prepareAccountProfile(base, 'codex'), second = await module.exports.prepareAccountProfile(base, 'codex');
   assert.notEqual(first.directory, second.directory); assert.ok(first.directory.startsWith(join(base, 'account-profiles')));
+  const openCode=await module.exports.prepareAccountProfile(base,'opencode');
+  assert.ok(openCode.directory.startsWith(join(base,'account-profiles','opencode-')));
+  assert.ok((await module.exports.recoverableAccountProfiles(base)).some(profile=>profile.profileId===openCode.profileId&&profile.providerId==='opencode'));
+  await module.exports.attachAccountProfile(base,'opencode',openCode.profileId);
   if (process.platform !== 'win32') assert.equal((await stat(first.directory)).mode & 0o777, 0o700); assert.equal((await lstat(first.directory)).isSymbolicLink(), false);
   await assert.rejects(module.exports.prepareAccountProfile(base, '../other'));
   const linkBase = join(base, 'linked'); await mkdir(linkBase); await symlink(join(base, 'account-profiles'), join(linkBase, 'account-profiles'), process.platform === 'win32' ? 'junction' : 'dir');

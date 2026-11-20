@@ -3,7 +3,7 @@ use super::http::{chunk, error, response, write_sse};
 use super::{Conversation, Route};
 use serde_json::{json, Value};
 use std::time::Duration;
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
 
 pub(super) async fn write_completion(
     route: &Route,
@@ -25,8 +25,18 @@ pub(super) async fn write_completion(
         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
     }
     let receiver = conversation.worker.as_mut().unwrap();
+    let mut disconnected = [0u8; 1];
     loop {
-        let frame = tokio::time::timeout(Duration::from_secs(300), receiver.recv()).await;
+        let frame = tokio::select! {
+            frame = tokio::time::timeout(Duration::from_secs(300), receiver.recv()) => frame,
+            _ = socket.read(&mut disconnected) => {
+                route.stop();
+                conversation.worker = None;
+                conversation.pending_history = None;
+                conversation.reusable = false;
+                return Ok(());
+            }
+        };
         let Some(frame) = frame.ok().flatten() else {
             failure = Some("Native account stream ended without a completion".to_string());
             route.stop();
@@ -43,10 +53,13 @@ pub(super) async fn write_completion(
             } else if let Some((hashes, tools)) = conversation.pending_history.take() {
                 conversation.hashes = hashes;
                 conversation.tools = Some(tools);
+                conversation.last_assistant = Some(content.clone());
                 route.checkpoint(
                     identity,
                     &conversation.hashes,
                     conversation.tools.as_deref().unwrap_or(""),
+                    conversation.model.as_deref(),
+                    conversation.last_assistant.as_deref(),
                 );
             }
             conversation.worker = None;
@@ -80,6 +93,7 @@ pub(super) async fn write_completion(
         }
     }
     if let Some(message) = failure {
+        conversation.reusable = false;
         conversation.worker = None;
         conversation.pending_history = None;
         let (code, message) = route.account_error(&message);

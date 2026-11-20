@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, ChevronDown, ChevronUp, Circle, ListChecks, Loader2 } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronUp, Circle, ListChecks, Loader2, X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import type { TodoGoalItem } from "../../lib/todo-goal";
 import { cn } from "../../lib/utils";
@@ -10,7 +10,7 @@ import { cn } from "../../lib/utils";
  * expanded it lists every item. Renders nothing when the agent never used a
  * todo tool in this session.
  */
-export function TodoGoalCard({ todos }: { todos: TodoGoalItem[] }): JSX.Element {
+export function TodoGoalCard({ todos, onClose }: { todos: TodoGoalItem[]; onClose(): void }): JSX.Element {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(true);
   const done = todos.filter((item) => item.status === "done").length;
@@ -18,23 +18,24 @@ export function TodoGoalCard({ todos }: { todos: TodoGoalItem[] }): JSX.Element 
     ?? (done < todos.length ? todos.find((item) => item.status === "pending") : undefined);
 
   return (
-    <div className="absolute top-3 right-4 z-10 w-72 max-w-[calc(100%-2rem)] rounded-xl border border-line bg-panel shadow-sm">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent/70"
-      >
-        <ListChecks className="h-4 w-4 shrink-0 text-ink-2" aria-hidden />
-        <span className="shrink-0 text-sm font-medium text-ink">{t("sessions.todo.goal")}</span>
-        <span className="shrink-0 rounded-full px-1.5 py-px text-xs text-ink-3">
-          {done}/{todos.length}
-        </span>
-        {current && <span className="min-w-0 flex-1 truncate text-xs text-ink-3">{current.title}</span>}
-        {expanded
-          ? <ChevronUp className="h-3.5 w-3.5 shrink-0 text-ink-3" aria-hidden />
-          : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ink-3" aria-hidden />}
-      </button>
+    <section aria-label={t("sessions.workspace.goals")} onKeyDown={event => {
+      if (event.key === "Escape") { event.stopPropagation(); onClose(); }
+    }} className="absolute right-4 top-2 z-10 w-72 max-w-[calc(100%-2rem)] rounded-xl border border-line bg-card shadow-card">
+      <div className="flex items-center gap-1 p-1">
+        <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-card-hover focus-visible:outline-2 focus-visible:outline-accent">
+          <ListChecks className="h-4 w-4 shrink-0 text-ink-2" aria-hidden />
+          <span className="shrink-0 text-sm font-medium text-ink">{t("sessions.todo.goal")}</span>
+          <span className="shrink-0 px-1.5 text-xs tabular-nums text-ink-3">{done}/{todos.length}</span>
+          <span className="min-w-0 flex-1 truncate text-xs text-ink-3">{!expanded && current?.title}</span>
+          {expanded
+            ? <ChevronUp className="h-3.5 w-3.5 shrink-0 text-ink-3" aria-hidden />
+            : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ink-3" aria-hidden />}
+        </button>
+        <button type="button" onClick={onClose} className="workspace-panel-icon" aria-label={t("sessions.workspace.closeGoals")} title={t("sessions.workspace.closeGoals")}>
+          <X size={14} aria-hidden />
+        </button>
+      </div>
       {expanded && (
         <ul className="max-h-60 space-y-1.5 overflow-y-auto border-t border-line px-3 py-2">
           {todos.map((item, index) => (
@@ -51,6 +52,6 @@ export function TodoGoalCard({ todos }: { todos: TodoGoalItem[] }): JSX.Element 
           ))}
         </ul>
       )}
-    </div>
+    </section>
   );
 }

@@ -31,7 +31,7 @@ export class SessionService {
   }
   create(input: IpcRequestMap["session.create"]["input"]): Session {
     const now = new Date().toISOString();
-    let session: Session = { id: randomUUID(), projectId: input.projectId, memberId: input.memberId, connectionId: input.connectionId, connectionRevision: input.connectionRevision, title: input.title ?? "New session", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
+    let session: Session = { id: randomUUID(), projectId: input.projectId, memberId: input.memberId, agentInstanceId: input.agentInstanceId, teamId: input.teamId, model: input.model, reasoningEffort: input.reasoningEffort, permissionMode: input.permissionMode, agentMode: input.agentMode, connectionId: input.connectionId, connectionRevision: input.connectionRevision, title: input.title ?? "New session", status: "idle", unreadCount: 0, createdAt: now, updatedAt: now };
     if (session.connectionId) session = bindNewSession(this.database, session, this.members.resolveSession(session));
     this.database.sessions.save(session);
     return session;
@@ -210,9 +210,10 @@ export class SessionService {
    * would start a new provider thread and lose conversational context.
    */
   upsert(input: IpcRequestMap["session.upsert"]["input"]): Session {
-    const { permissionMode, connectionId, connectionRevision, confirmConnectionChange, connectionContextRebuildRequired: _untrustedRebuild, ...metadata } = input;
+    const { permissionMode, connectionId, connectionRevision, teamId, confirmConnectionChange, connectionContextRebuildRequired: _untrustedRebuild, ...metadata } = input;
     let normalized: Session = {
       ...metadata,
+      ...(Object.prototype.hasOwnProperty.call(input, "teamId") ? { teamId: teamId || undefined } : {}),
       ...(Object.prototype.hasOwnProperty.call(input, "connectionId") ? { connectionId: connectionId ?? undefined, connectionRevision: connectionId === null ? undefined : connectionRevision ?? undefined } : {}),
       ...(Object.prototype.hasOwnProperty.call(input, "permissionMode")
         ? { permissionMode: permissionMode?.trim() || undefined } : {})
@@ -232,6 +233,14 @@ export class SessionService {
       normalized = bindNewSession(this.database, normalized, this.members.resolveSession({ ...current, ...normalized }));
     }
     const connectionChanged = current.connectionId !== normalized.connectionId || current.connectionRevision !== normalized.connectionRevision;
+    const teamChanged = Object.prototype.hasOwnProperty.call(input, "teamId") && current.teamId !== normalized.teamId;
+    if (teamChanged) {
+      const projectRun = current.projectRunId ? this.database.projectRuns.get(current.projectRunId) : undefined;
+      const active = this.database.runs.list().some(run => run.sessionId === current.id && !["completed", "failed", "cancelled", "crashed", "timed_out"].includes(run.status));
+      if (current.parentSessionId || active || (this.pendingFollowUps.get(current.id)?.length ?? 0) > 0 || (projectRun && !["completed", "failed", "cancelled"].includes(projectRun.status))) {
+        throw new CoreError("IPC_INVALID_REQUEST", { field: "teamId", reason: "Wait for team tasks to finish; delegated conversations keep their parent team" });
+      }
+    }
     const hasHistory = Boolean(current.providerSessionId) || this.database.runs.list().some((run) => run.sessionId === current.id) || this.database.sessions.messages(current.id).length > 0;
     if (connectionChanged) {
       if ((hasHistory || current.connectionId) && confirmConnectionChange !== true) throw new CoreError("IPC_INVALID_REQUEST", { field: "confirmConnectionChange", reason: "Confirm rebuilding text context when switching account or supplier" });
@@ -251,7 +260,7 @@ export class SessionService {
       ...current,
       ...normalized,
       createdAt: current.createdAt,
-      projectRunId: normalized.projectRunId ?? current.projectRunId,
+      projectRunId: teamChanged ? undefined : normalized.projectRunId ?? current.projectRunId,
       parentSessionId: normalized.parentSessionId ?? current.parentSessionId,
       taskId: normalized.taskId ?? current.taskId,
       providerSessionId: sameProviderBinding
@@ -268,6 +277,7 @@ export class SessionService {
     return updated;
   }
   async send(input: IpcRequestMap["session.send"]["input"]): Promise<{ accepted: true; runId: string }> {
+    if (input.workflowRef) throw new CoreError("IPC_INVALID_REQUEST", { field: "backend", reason: "Workflow plans require the Rust daemon." });
     // Heal replayed zombie queue entries before this run's events make the
     // renderer re-read the journal (see healFollowUps).
     this.healFollowUps(input.sessionId);

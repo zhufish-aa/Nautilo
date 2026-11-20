@@ -36,7 +36,9 @@ import app.nautilo.mobile.data.*
     var selectedConnection by remember(session.id) { mutableStateOf(session.connectionId) }
     var selectedModel by remember(session.id) { mutableStateOf(session.model) }
     var selectedEffort by remember(session.id) { mutableStateOf(session.effort) }
+    var selectedTeam by remember(session.id) { mutableStateOf(session.teamId) }
     var chooseConnection by remember { mutableStateOf(false) }
+    var chooseTeam by remember { mutableStateOf(false) }
     var confirmSwitch by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     val switching = selectedConnection != session.connectionId
@@ -47,6 +49,8 @@ import app.nautilo.mobile.data.*
     val efforts = chosen?.strings("reasoningEfforts").orEmpty()
     val active = running(state.runStatus)
     val editable = state.connected && !state.changing && !active
+    val teamChanged = selectedTeam != session.teamId
+    val modelChanged = switching || selectedModel != session.model || selectedEffort != session.effort
     LaunchedEffect(session.id) {
         model.clearError()
         if (state.setup.length() == 0) model.loadSetup()
@@ -58,7 +62,23 @@ import app.nautilo.mobile.data.*
         }
     }
     val applySwitch = {
-        model.configure(selectedModel, selectedEffort, selectedConnection, confirmChange = true, configured = close)
+        model.configure(selectedModel, selectedEffort, selectedConnection, confirmChange = true,
+            teamId = selectedTeam.takeIf { teamChanged }, configured = close)
+    }
+    val teamChoice: @Composable () -> Unit = {
+        NPanel(onClick = { chooseTeam = true }, enabled = editable && session.parentSessionId.isEmpty() && "session.team" in state.capabilities,
+            shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, Line), color = Color.White,
+            modifier = Modifier.testTag("session-config-team")) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Icon(Icons.Outlined.Groups, null, Modifier.size(21.dp), tint = Ink)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("协作团队", fontSize = 11.sp, lineHeight = 16.sp, color = ComposerSecondary)
+                    Text(teamSelectionName(selectedTeam, state), fontSize = 14.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
+                }
+                Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp), tint = Ink)
+            }
+        }
     }
     val connectionChoice: @Composable () -> Unit = {
         NPanel(onClick = { chooseConnection = true }, enabled = editable, shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, Line), color = Color.White) {
@@ -108,8 +128,9 @@ import app.nautilo.mobile.data.*
         }
     }
     container {
-      MotionPage(if (chooseConnection) "connections" else "models") {
-      if (chooseConnection) CreationChoiceContent(CreationPicker.Connection, state, session.projectId, session.agentId, selectedConnection, selectedModel, selectedEffort,
+      MotionPage(if (chooseTeam) "teams" else if (chooseConnection) "connections" else "models") {
+      if (chooseTeam) TeamChoiceContent(state, selectedTeam, model::loadSetup, { chooseTeam = false }) { selectedTeam = it; chooseTeam = false }
+      else if (chooseConnection) CreationChoiceContent(CreationPicker.Connection, state, session.projectId, session.agentId, selectedConnection, selectedModel, selectedEffort,
         refresh = {}, newProject = {}, dismiss = { chooseConnection = false }) { id ->
             chooseConnection = false
             if (id != selectedConnection) {
@@ -131,6 +152,7 @@ import app.nautilo.mobile.data.*
             }
             if (!compact) {
                 connectionChoice()
+                teamChoice()
                 if (active) Text("当前轮结束后可切换账号、API 和模型", fontSize = 12.sp, color = Secondary)
                 search()
             }
@@ -138,6 +160,7 @@ import app.nautilo.mobile.data.*
             LazyColumn(Modifier.weight(1f).testTag("session-config-models"), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 if (compact) {
                     item { connectionChoice(); Spacer(Modifier.height(12.dp)) }
+                    item { teamChoice(); Spacer(Modifier.height(12.dp)) }
                     if (active) item { Text("当前轮结束后可切换账号、API 和模型", fontSize = 12.sp, color = Secondary) }
                     item { search(); Spacer(Modifier.height(12.dp)) }
                 }
@@ -155,12 +178,13 @@ import app.nautilo.mobile.data.*
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 NTextButton(onClick = close, enabled = !state.changing, modifier = Modifier.testTag("session-config-cancel")) { Text("取消") }
                 Spacer(Modifier.weight(1f))
-                val changed = switching || selectedModel != session.model || selectedEffort != session.effort
+                val changed = modelChanged || teamChanged
                 NButton(onClick = {
                     if (!changed) close()
                     else if (switching && (state.messages.isNotEmpty() || state.runs.isNotEmpty())) confirmSwitch = true
-                    else model.configure(selectedModel, selectedEffort, if (switching) selectedConnection else null, confirmChange = switching, configured = close)
-                }, enabled = !state.changing && (!changed || (editable && !loading && chosen != null)), modifier = Modifier.testTag("session-config-apply"), shape = RoundedCornerShape(12.dp)) {
+                    else model.configure(selectedModel, selectedEffort, if (switching) selectedConnection else null, confirmChange = switching,
+                        teamId = selectedTeam.takeIf { teamChanged }, configured = close)
+                }, enabled = !state.changing && (!changed || (editable && (!modelChanged || (!loading && chosen != null)))), modifier = Modifier.testTag("session-config-apply"), shape = RoundedCornerShape(12.dp)) {
                     if (state.changing) { NSpinner(Modifier.size(16.dp), strokeWidth = 1.6.dp, color = Color.White); Text(" 正在应用…") }
                     else Text("完成")
                 }

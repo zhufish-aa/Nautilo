@@ -12,6 +12,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { TurnUsage } from "./usage.js";
+import { completedFileChanges } from "./file-changes.js";
+import { openRuntimeTools, RUNTIME_SERVER, type OpenCodeRuntimeTools } from "./runtime-tools.js";
 import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -45,7 +47,7 @@ const descriptor: ProviderDescriptor = {
   name: "OpenCode",
   vendor: "OpenCode",
   capabilities: ["headless_text", "provider_server"],
-  envPassthrough: ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"],
+  envPassthrough: ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"],
   defaultExecutable: "opencode",
   credentialEnv: ["OPENCODE_API_KEY"],
   permissionModes: [
@@ -78,6 +80,7 @@ interface ManagedServer {
   handle: ServerProcessHandle;
   activeRuns: number;
   retireWhenIdle: boolean;
+  runtimeTools?: OpenCodeRuntimeTools;
 }
 
 class OpenCodePluginAdapter implements AgentCliAdapter {
@@ -139,7 +142,9 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     const executable = instance.executable || descriptor.defaultExecutable || "opencode";
     const result = await capture(executable, ["models", "--verbose"], context?.env);
     if (result.exitCode !== 0) throw new Error(result.text.trim() || `opencode models --verbose exited with ${result.exitCode ?? "unknown"}`);
-    return parseOpenCodeModels(result.text);
+    const catalog = parseOpenCodeModels(result.text);
+    if (instance.providerOptions?.nativeLogin === true) catalog.models = catalog.models.filter(model => model.id.startsWith("opencode/") || model.id.startsWith("opencode-go/"));
+    return catalog;
   }
 
   async dispose(): Promise<void> {
@@ -151,11 +156,12 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     await Promise.all(settled.flatMap((result) => {
       if (result.status !== "fulfilled") return [];
       result.value.retireWhenIdle = true;
-      return result.value.activeRuns === 0 ? [result.value.handle.cancel()] : [];
+      return result.value.activeRuns === 0 ? [result.value.handle.cancel().finally(() => result.value.runtimeTools?.close())] : [];
     }));
   }
 
   private spawnRun(request: AdapterStartRequest, args: string[]): AdapterRun {
+    if (request.runtimeTools?.length) return this.spawnRuntimeRun(request, args);
     const env = buildOpenCodeEnvironment(request);
     const resolved = resolveSpawnCommand(request.instance.executable || descriptor.defaultExecutable || "opencode", args, env);
     const child = spawn(resolved.command, resolved.args, {
@@ -179,12 +185,33 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     };
   }
 
+  private spawnRuntimeRun(request: AdapterStartRequest, args: string[]): AdapterRun {
+    const adapter = this;
+    let run: AdapterRun | undefined;
+    let cancelled = false;
+    return {
+      process: deferredProcess(() => run?.process),
+      events: { async *[Symbol.asyncIterator]() {
+        const tools = await openRuntimeTools(request);
+        try {
+          if (cancelled) return;
+          const configured = tools!.inject(request);
+          run = adapter.spawnRun({ ...configured, runtimeTools: undefined }, args);
+          yield* run.events;
+        } finally { await tools?.close(); }
+      } },
+      async cancel() { cancelled = true; await run?.cancel(); },
+      write(input) { run?.write(input); },
+    };
+  }
+
   /**
    * OpenCode's `run --format json` command explicitly denies question and
    * plan_exit requests. Use its documented headless server API instead so the
    * plugin can bridge question.asked to Nautilo and reply over HTTP.
    */
   private serverRun(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
+    if (request.instance.providerOptions?.nativeLogin === true && !request.model?.startsWith("opencode/") && !request.model?.startsWith("opencode-go/")) throw new Error("Select an OpenCode free, Zen or Go model");
     let server: ManagedServer | undefined;
     let sessionId = resume ? (request as AdapterResumeRequest).providerSessionId : undefined;
     let finished = false;
@@ -231,7 +258,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
           await apiJson(baseUrl, request.cwd, `/session/${encodeURIComponent(sessionId)}/prompt_async`, {
             method: "POST",
             body: {
-              ...(openCodeModel(request.instance.providerOptions?.runtimeConnectionId && request.model ? `nautilo/${request.model}` : request.model) ? { model: openCodeModel(request.instance.providerOptions?.runtimeConnectionId && request.model ? `nautilo/${request.model}` : request.model) } : {}),
+              ...(openCodeModel(request.instance.providerOptions?.runtimeConnectionId && !request.instance.providerOptions?.nativeLogin && request.model ? `nautilo/${request.model}` : request.model) ? { model: openCodeModel(request.instance.providerOptions?.runtimeConnectionId && !request.instance.providerOptions?.nativeLogin && request.model ? `nautilo/${request.model}` : request.model) } : {}),
               ...(mode === "plan" || mode === "build" ? { agent: mode } : {}),
               ...(request.reasoningEffort ? { variant: request.reasoningEffort } : {}),
               parts: [
@@ -376,6 +403,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
           server.activeRuns = Math.max(0, server.activeRuns - 1);
           if (server.retireWhenIdle && server.activeRuns === 0) {
             await server.handle.cancel().catch(() => undefined);
+            await server.runtimeTools?.close();
           }
         }
       }
@@ -399,7 +427,11 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
   private serverKey(request: AdapterStartRequest | AdapterResumeRequest): string {
     const executable = request.instance.executable || descriptor.defaultExecutable || "opencode";
     const environment = Object.entries(request.env ?? {}).sort(([left], [right]) => left.localeCompare(right));
-    const environmentHash = createHash("sha256").update(JSON.stringify(environment)).digest("hex");
+    const environmentHash = createHash("sha256").update(JSON.stringify({ environment,
+      options: request.instance.providerOptions, models: request.instance.models,
+      mcp: request.mcpServers, tools: request.runtimeTools,
+      toolSession: request.runtimeTools?.length ? request.localSessionId : undefined,
+    })).digest("hex");
     return [request.instance.id, resolve(request.cwd), executable, environmentHash].join("\0");
   }
 
@@ -409,7 +441,8 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     const existing = this.servers.get(key);
     if (existing) {
       const server = await existing;
-      if (server.handle.child.exitCode === null) return server;
+      if (server.handle.child.exitCode === null) { server.runtimeTools?.update(request); return server; }
+      await server.runtimeTools?.close();
       if (this.servers.get(key) === existing) this.servers.delete(key);
     }
 
@@ -417,6 +450,7 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     this.servers.set(key, starting);
     void starting.then((server) => server.handle.wait().then(() => {
       if (this.servers.get(key) === starting) this.servers.delete(key);
+      void server.runtimeTools?.close();
     }), () => undefined);
     try {
       const server = await starting;
@@ -433,7 +467,8 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
 
   private async launchServer(key: string, request: AdapterStartRequest | AdapterResumeRequest): Promise<ManagedServer> {
     const port = await availablePort();
-    const env = buildOpenCodeEnvironment(request);
+    const runtimeTools = await openRuntimeTools(request);
+    const env = buildOpenCodeEnvironment(runtimeTools?.inject(request) ?? request);
     const args = ["serve", "--hostname", "127.0.0.1", "--port", String(port)];
     const resolvedCommand = resolveSpawnCommand(request.instance.executable || descriptor.defaultExecutable || "opencode", args, env);
     const child = spawn(resolvedCommand.command, resolvedCommand.args, {
@@ -446,9 +481,14 @@ class OpenCodePluginAdapter implements AgentCliAdapter {
     const baseUrl = `http://127.0.0.1:${port}`;
     try {
       await waitForServer(baseUrl, request.cwd, child);
-      return { key, baseUrl, handle, activeRuns: 0, retireWhenIdle: false };
+      if (runtimeTools) {
+        const status = asRecord(await apiJson(baseUrl, request.cwd, "/mcp"));
+        if (asRecord(status[RUNTIME_SERVER]).status !== "connected") throw new Error("OpenCode did not connect Nautilo runtime tools");
+      }
+      return { key, baseUrl, handle, activeRuns: 0, retireWhenIdle: false, runtimeTools };
     } catch (error) {
       await handle.cancel().catch(() => undefined);
+      await runtimeTools?.close();
       throw error;
     }
   }
@@ -467,7 +507,7 @@ function mergeNativeConfig(target: Record<string, unknown>, overlay: Record<stri
 export function buildOpenCodeEnvironment(request: AdapterStartRequest): Record<string, string> {
   const env = { ...(request.env ?? {}) } as Record<string, string>;
     const options = request.instance.providerOptions;
-    if (options?.runtimeConnectionId) {
+    if (options?.runtimeConnectionId && !options.nativeLogin) {
       const api = options.apiType;
       const npm = api === "anthropic-messages" ? "@ai-sdk/anthropic" : api === "openai-responses" ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible";
       const overlay = { enabled_providers: ["nautilo"], provider: { nautilo: {
@@ -921,6 +961,7 @@ export function parseOpenCodeEvent(value: unknown): AdapterEvent[] {
         success: status === "completed" ? true : status === "error" ? false : undefined,
         raw: value
       });
+      events.push(...completedFileChanges(part, value));
       break;
     }
     case "step_finish": {
@@ -982,6 +1023,8 @@ async function fetchOpenCodeSessionParent(baseUrl: string, cwd: string, childSes
 export function withOpenCodeSubagentDispatch(events: AdapterEvent[], subagentDispatchId: string): AdapterEvent[] {
   return events.flatMap((event): AdapterEvent[] => {
     switch (event.kind) {
+      case "file":
+        return [event];
       case "message":
       case "thinking":
       case "tool":
@@ -1099,8 +1142,15 @@ function enrichLastModel(model: ProviderModel | undefined, json: string): void {
       status?: unknown;
       limit?: { context?: unknown };
       variants?: unknown;
+      cost?: { input?: unknown; output?: unknown; cache_read?: unknown; cache_write?: unknown };
     };
     if (typeof meta.name === "string" && meta.name.trim()) model.displayName = meta.name;
+    const pricing: Record<string, number> = {};
+    for (const [source, target] of [["input", "input"], ["output", "output"], ["cache_read", "cacheRead"], ["cache_write", "cacheWrite"]] as const) {
+      const value = meta.cost?.[source];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) pricing[target] = value;
+    }
+    if (Object.keys(pricing).length) model.pricing = pricing;
     const context = meta.limit?.context;
     if (typeof context === "number" && Number.isFinite(context)) model.contextWindow = context;
     if (typeof meta.status === "string" && meta.status !== "active") model.description = `status: ${meta.status}`;
@@ -1119,7 +1169,7 @@ function capture(command: string, args: string[], env?: Record<string, string | 
     const child = spawn(resolved.command, resolved.args, {
       windowsHide: true,
       windowsVerbatimArguments: resolved.verbatim ?? false,
-      env: env ? { ...process.env, ...env } as Record<string, string> : undefined
+      env: env as Record<string, string> | undefined
     });
     const timer = setTimeout(() => {
       void killTree(child);

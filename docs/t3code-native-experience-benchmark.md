@@ -1,8 +1,42 @@
 # T3 Code 原生体验对标与实施记录
 
-更新：2026-11-07。参考 T3 Code 固定提交 `86d8838e91b81d328fd8ced042860c7c60160dcd`，实现使用 Nautilo 自己的代码。
+更新：2026-11-18。参考 T3 Code 固定提交 `86d8838e91b81d328fd8ced042860c7c60160dcd`，实现使用 Nautilo 自己的代码。
 
 目标是完整、连续地使用各 Harness。下表区分已经实现的机制、验证范围和剩余工作；不能把“插件已加载”或能力标签当成完整验收。
+
+### Magpie 账号模型源码移植（2026-11-18）
+
+按用户要求，当前 Electron + Rust 的 Codex、Claude Code、OpenCode 和 Antigravity 账号模型路径改用 Magpie 对应代码移植/复制。没有打包 Magpie 应用或独立 Go 网关。OpenCode 已改为直接 HTTP 推理，Claude/Antigravity 采用 Magpie 本身的原生 CLI/MCP 方案；外层 Harness 原生资源与会话保持原有职责。源码对应、许可证、精确验证范围与未通过项见 [Magpie 账号模型代码移植](magpie-account-ports.md)。
+
+真实 Codex → DeepSeek Harness、Antigravity → DeepSeek Harness 和 OpenCode 登录账号直接 HTTP 的预期回复检查通过。DeepSeek 的完整 OpenCode 免费模型请求仍返回 429；相同请求在原版 Magpie 对照也返回 429，不能判作已验收或直接断言账号用量耗尽。Claude 暂无已保存订阅账号，尚无本次真实订阅推理结论。
+
+DeepSeek Harness 同会话切换账号时，后台从新连接的已启用模型或账号目录解析默认模型，并把实际模型记入本轮运行。会话内的临时路由通过原生模型选择写入该会话，不保存为 DeepSeek 的全局默认。使用隔离的 Nautilo 和 DeepSeek 数据目录，以本机已登录的 Codex 账号完成一轮，从同一会话切换到反重力并清空模型字段，`gemini-3.8-flash` 读取重建的前轮文本并返回预期内容。两轮保持同一个 Nautilo 会话，按现有的账号切换流程重建原生会话；未改用户的会话记录或原生配置。
+
+桌面端的模型菜单可以为下一条消息选择账号或 API。正在运行和已排队的请求保持原连接；下一条发送时才提交新选择，无需单独确认框。若保存新连接失败，草稿与选择都保留。本地账号网关以同一个环回地址接收各 Harness 的模型请求，按每个绑定的本地凭据解析到固定的账号和修订。
+
+验证：本地网关测试在同一地址并行调用两个账号绑定，验证身份隔离及拒绝未授权请求；桌面流程测试覆盖运行中预选、草稿保留、失败重试和原聊天发送。使用隔离的真实 DeepSeek Harness，同一聊天依次调用本地 Chat 测试 API、已登录的反重力 `gemini-3.8-flash`、已登录的 Codex `gpt-6.2-sol`，三轮完成，Gemini 回答包含第一轮的测试内容。该验证不覆盖 OpenCode 免费服务限制或所有 Harness 与账号组合。
+
+手机的新建与修改会话请求使用同一份账号网关能力判断，不再拒绝桌面已支持的反重力与 OpenCode 跨 Harness 绑定。配对后的加密远程协议测试验证 DeepSeek 使用四类账号新建会话，以及现有 DeepSeek 会话切到反重力；Gateway 只启用用户选择的跨 Harness 账号，普通原生登录仍走原生路径。该夹具使用模拟业务路由，不调用真实模型、不替代 Android 真机验证。
+
+移动端 0.1.24 把真实 `run.failed` 事件显示在所属轮次。此前 OpenCode 免费端点在输出前返回 429，Android 因没有正文或可见过程而移除了整轮结果。定向测试覆盖无输出失败、连续两轮失败与重新打开历史；APK 通过发布构建及签名验证。此修复只补齐失败展示，OpenCode 对 DeepSeek 完整请求的 429 仍来自上游。
+
+### OpenCode 登录与旧 CLI 中转的历史记录（2026-11-17）
+
+下列记录描述 11-17 的实现及测试。当前 Rust 模型推理已由上面的 11-18 代码移植替换；这些旧 CLI 中转的成功结果不代表当前直接 HTTP 路径的验收。
+
+- 在“供应商与账号 → 登录账号 → 添加账号 → OpenCode”走与 Codex / Claude Code 相同的独立账号添加流程。使用已核实的 OpenCode 1.19.5 `console login` 原生浏览器设备授权；每个账号分配私有目录，原生凭据/会话写入其 `data/opencode`，原生状态写入 `state/opencode`，不手填 API Key、不复制其他账号凭据。保持原生配置目录、插件、Skills、MCP 和配置优先级；明确清除会覆盖所选账号的 `OPENCODE_AUTH_CONTENT` / `OPENCODE_API_KEY`。旧的无目录共享连接保留原有含义，不自动更换账号。
+- 原生 Console 登录可能在拒绝/过期时仍退出 0。必须同时观察到账号已由 CLI 持久化的成功输出及正常退出，才进入保存连接步骤；窗口/浏览器打开或 CLI 检测成功都不等于登录成功。取消和保存失败沿用原有目录锁定及恢复流程。尚未代用户完成真实浏览器授权；拒绝、过期、分段输出、正常退出和保存门禁由夹具验证。
+- 开启“用于其他 Harness”后，沿用本机会话绑定的模型中转端点；真正的模型请求仍由原生 OpenCode 执行。浏览器/编程工具调用通过现有中转交付调用方并等待真实结果，保留原生会话编号、流式输出及后续轮次。不会把免费模型改为直接访问官方通用 API，也不会因缺少 API Key 拒绝原生免费模型。
+- 模型发现使用所选原生环境，发布 `opencode/*`（含免费模型）与 `opencode-go/*`，保留原生定价元数据。明确绑定原生账号时不生成自定义 `nautilo` API provider，不改写原生模型命名空间，不关闭原生功能。
+- 所选 OpenCode 原生模型的能力元数据随请求传给外层 Harness，保留连接的显式覆盖，修复 DeepSeek 因缺少推理档位元数据拒绝 Low / High / Max 的问题。网关地址表示选定账号；流式或非流式标题、正文、并发请求、重试、压缩后的历史和变更工具集分别匹配原生工作会话。历史与上次实际回答匹配时才恢复对应原生 ID；未匹配时处理独立模型请求，不再以 `NATIVE_CONVERSATION_DIVERGED` / `NATIVE_TOOLS_CHANGED` 拒绝外层 Harness。新请求保留传入的消息角色与历史工具结果，不能称为原生恢复。外层 Harness 的原生会话仍独立持久化，标题生成不关闭。
+- 验证包括：Rust / Node 独立账号隔离、原生配置保留、显式跨 Harness 路由；OpenCode HTTP/SSE 两轮会话与原生命名空间；Node 工具往返/流式/禁用路由和标题与正文交错；桌面 Console 登录、取消与保存恢复。实际 OpenCode 1.19.5 在无凭据临时目录发现免费模型；Node 参考中转调用 `opencode/big-pickle` 取得 HTTP 200；真实 Codex → Rust 中转 → 独立目录的真实 OpenCode 调用 `opencode/deepseek-v4.1-flash-free`（Max）取得预期文本，显式原生 smoke 测试通过。
+- DeepSeek 真实调用复现了流式标题先行导致的 `NATIVE_CONVERSATION_DIVERGED`；不再用“非流式且无工具”猜测标题用途。请求级匹配回归包含标题与工具往返、上下文改写、同输入重试的不同回答分支、并发、失败后重试、重启恢复和首 token 前断开连接；Node 16 项及 Rust 8 项通过。Rust 的两项真实上游检查默认忽略，不能计入这 8 项。
+- DeepSeek 临时连接绑定直接合并 Nautilo 所属路由到原生已验证的 volatile 配置，并走原生路由注册通知；不经过会重新套用用户配置的 `Entry.update`，不另注册整套内建供应商目录，不写用户原始配置。真实 DeepSeek 0.2.1-rc.3 + 模拟上游验证多轮、切连接后恢复同一原生会话、工具/图片/PTC、取消、超时、并发与目录授权闭环通过（30 个本地模型请求）。另外显式运行真实 DeepSeek → Rust → 当前选中的真实 Codex 账号，`gpt-6.1-sol` / Low 返回预期文本，无连接绑定错误；该检查使用隔离的外层会话目录和真实选定账号，不复制登录凭据。
+- 本次未重复消耗 OpenCode 免费模型额度：先前实际服务已返回免费用量上限，DeepSeek → OpenCode 免费模型的正文生成验收仍未记为通过。Codex Chat 兼容层仅暴露受控错误码/额度提示，任意上游正文仍不直接反射；上游 SSE 错误转为 `response.failed`，不伪装为完成或只断开连接。不能据此宣称所有模型、外层 Harness、CLI 版本与完整交互均已验收。
+- 已核实 Magpie 固定提交 `4a1ac84421145de4c4078898c6441487ac45bd5e`：其 [OpenCode 客户端](https://github.com/yetone/magpie/blob/4a1ac84421145de4c4078898c6441487ac45bd5e/internal/provider/opencode_client.go) 直接构造 HTTP 请求及免费模型所需的客户端请求格式；[Claude 订阅桥](https://github.com/yetone/magpie/blob/4a1ac84421145de4c4078898c6441487ac45bd5e/internal/gateway/claude_subscription.go) 通过原生 CLI/MCP 工具暂停、匹配多个运行，并支持新建/恢复等路径。Nautilo 的 Codex 文件凭据路径是直接模型请求；本次 OpenCode 仍经选定账号的原生 CLI，请求级会话匹配借鉴 Claude 桥接的原则。尚未实现 Magpie 的 OpenCode 直连客户端，也不声明任意 API 参数均能经原生 CLI 等价传输。
+- 扩大 Node 回归时，`runtime-connections.test.mjs` 的两项已有 Codex 检查仍失败：`codex_home` 残留和登录状态测试夹具。移除新增 OpenCode 分支后复测仍同样失败，与本次 OpenCode 路由无关，未将该测试文件记为全通过。
+- DeepSeek 插件现有 8 项单元检查中 5 项通过、3 项在旧模拟夹具缺少 `workspaceRegistry.create` 时失败；现有 HEAD 的生产桥已经依赖该服务，本次连接绑定改动在这些无连接夹具中不会执行。没有将该文件记为全通过，也未改动旧夹具。上述真实 DeepSeek CLI + 本地上游及真实 Codex 账号检查独立执行通过。
+- 更新开发预览时还修复了网络初始化拖住本地启动的问题：本地 IPC 就绪后，远程发现仍在同一服务/路由上异步初始化，未关闭远程功能。以现有用户数据重新启动 Electron + Rust，主窗口和本地 IPC 均已就绪；不代表外部网络连接已完成验收。
 
 ## 本批已实现
 

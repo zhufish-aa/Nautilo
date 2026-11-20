@@ -94,9 +94,10 @@ impl SessionService {
             "createdAt": now,
             "updatedAt": now,
         });
-        for field in ["agentInstanceId","connectionId","connectionRevision","model","agentMode","reasoningEffort","serviceTier","permissionMode","parentSessionId"] {
+        for field in ["agentInstanceId","teamId","connectionId","connectionRevision","model","agentMode","reasoningEffort","serviceTier","permissionMode","parentSessionId"] {
             if let Some(value) = input.get(field) { session[field] = value.clone(); }
         }
+        if session["teamId"].is_null() { session.as_object_mut().unwrap().remove("teamId"); }
         let db = self.db.lock().unwrap();
         crate::application::connection_service::bind_session(&db.raw, &mut session, None)?;
         Repositories::new(&db.raw).sessions().save(&session)?;
@@ -159,6 +160,19 @@ impl SessionService {
         let connection_changed = current.get("connectionId") != candidate.get("connectionId") || current.get("connectionRevision") != candidate.get("connectionRevision");
         let runs = repos.runs().list()?;
         let session_runs: Vec<&Value> = runs.iter().filter(|run| run["sessionId"] == id).collect();
+        let team_changed = input.get("teamId").is_some()
+            && current["teamId"].as_str().filter(|id| !id.is_empty()) != candidate["teamId"].as_str().filter(|id| !id.is_empty());
+        if team_changed {
+            if current["parentSessionId"].as_str().is_some_and(|id| !id.is_empty()) {
+                return Err(invalid("teamId", "A delegated conversation keeps its parent team"));
+            }
+            let project_run = current["projectRunId"].as_str().map(|id| repos.project_runs().get(id)).transpose()?.flatten();
+            if project_run.is_some_and(|run| !TERMINAL_PROJECT_RUN_STATUSES.contains(&run["status"].as_str().unwrap_or(""))) {
+                return Err(invalid("teamId", "Wait for the current team task to finish before changing teams"));
+            }
+            candidate.as_object_mut().unwrap().remove("projectRunId");
+        }
+        if candidate["teamId"].is_null() { candidate.as_object_mut().unwrap().remove("teamId"); }
         let started = !repos.sessions().messages(id)?.is_empty() || current.get("providerSessionId").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) || !session_runs.is_empty();
         if started && (current.get("projectId") != candidate.get("projectId") || effective_agent_id(&db.raw,&current)? != effective_agent_id(&db.raw,&candidate)?) {
             return Err(invalid("agentInstanceId","A started session keeps its project and Agent; create another session to change them"));
@@ -166,7 +180,7 @@ impl SessionService {
         let active = session_runs.iter().any(|run| !TERMINAL_RUN_STATUSES.contains(&run["status"].as_str().unwrap_or("")))
             || self.runs.read().unwrap().as_ref().is_some_and(|runs| runs.session_busy(id))
             || self.pending_follow_ups.lock().unwrap().get(id).is_some_and(|items| !items.is_empty());
-        let settings_changed = connection_changed || ["model","agentMode","reasoningEffort","serviceTier"].iter().any(|key| current.get(*key) != candidate.get(*key));
+        let settings_changed = connection_changed || team_changed || ["model","agentMode","reasoningEffort","serviceTier"].iter().any(|key| current.get(*key) != candidate.get(*key));
         if active && settings_changed { return Err(invalid("sessionId","Wait for active and queued requests before changing provider, account or model settings")); }
         if connection_changed && (started || current.get("connectionId").and_then(Value::as_str).is_some()) && input["confirmConnectionChange"] != true {
             return Err(invalid("confirmConnectionChange","Confirm provider/account switch: text history is rebuilt; native reasoning, cache and old image context are not transferred"));
@@ -192,6 +206,7 @@ impl SessionService {
         };
         merged.insert("createdAt".to_string(), current.get("createdAt").cloned().unwrap_or(Value::Null));
         for key in ["projectRunId", "parentSessionId", "taskId"] {
+            if key == "projectRunId" && team_changed { merged.remove(key); continue; }
             match keep(key) {
                 Some(value) => {
                     merged.insert(key.to_string(), value);
@@ -237,6 +252,7 @@ impl SessionService {
             }
         }
         let mut updated = Value::Object(merged);
+        if input.get("teamId").is_none() && team_changed { updated.as_object_mut().unwrap().remove("teamId"); }
         updated.as_object_mut().unwrap().remove("confirmConnectionChange");
         if connection_changed {
             if input.get("connectionId").is_none() { updated.as_object_mut().unwrap().remove("connectionId"); updated.as_object_mut().unwrap().remove("connectionRevision"); }
@@ -296,6 +312,10 @@ impl SessionService {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().get(session_id)?.ok_or_else(|| not_found("session", session_id))?
         };
+        let workflow_reference = input.get("workflowRef").filter(|value| !value.is_null()).map(|reference| {
+            let db = self.db.lock().unwrap();
+            crate::application::workflow_service::workflow_reference(&db.raw, &session, reference)
+        }).transpose()?;
         let existing_messages = {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().messages(session_id)?
@@ -340,7 +360,7 @@ impl SessionService {
             && session.get("parentSessionId").is_none()
             && session.get("runtimeToolVersion").and_then(Value::as_i64) != Some(RUNTIME_TOOL_SCHEMA_VERSION);
         let corrected;
-        let current_text = append_attachment_context(
+        let mut current_text = append_attachment_context(
             if edit_message_id.is_some() {
                 corrected = format!("The user edited an earlier message. Treat the following as the corrected instruction:\n\n{text}");
                 &corrected
@@ -349,6 +369,11 @@ impl SessionService {
             },
             &attachments,
         );
+        if let Some(reference) = &workflow_reference {
+            current_text.push_str(&format!(
+                "\n\n[NAUTILO_WORKFLOW_REFERENCE]\n{reference}\nThe user has referenced this saved workflow. Decide whether it fits their request. If it fits, use agenthub_workflow_plan_context (possibly MCP-namespaced) to inspect this revision and team roster. Write the task for every Agent node and match it to an enabled team member, or a configured Harness when there is no team. Fill the declared workflow inputs from the user's request and submit one plan with agenthub_workflow_propose. On acceptance, tell the user the plan is ready for review and end your turn. If information is missing or the workflow does not fit, ask or explain in the conversation. During this planning turn do not dispatch, start the workflow or carry out its tasks. The user decides from the editable plan card."
+            ));
+        }
         let turn_context = build_bound_turn_context(&session, TurnContextInput {
             current_text: &current_text,
             messages: &existing_messages,
@@ -366,6 +391,11 @@ impl SessionService {
                 let mut updated = edited.as_object().cloned().unwrap_or_default();
                 updated.insert("text".to_string(), json!(text));
                 updated.insert("attachmentIds".to_string(), Value::Array(attachment_ids));
+                if let Some(reference) = &workflow_reference {
+                    updated.insert("workflowRef".into(), reference.clone());
+                } else {
+                    updated.remove("workflowRef");
+                }
                 updated.insert("editedAt".to_string(), json!(now_iso()));
                 Value::Object(updated)
             }
@@ -386,6 +416,9 @@ impl SessionService {
                 }
                 message.insert("text".to_string(), json!(text));
                 message.insert("attachmentIds".to_string(), Value::Array(attachment_ids));
+                if let Some(reference) = &workflow_reference {
+                    message.insert("workflowRef".into(), reference.clone());
+                }
                 message.insert("createdAt".to_string(), json!(now_iso()));
                 Value::Object(message)
             }
@@ -412,6 +445,7 @@ impl SessionService {
                     },
                     synchronize_provider_context: turn_context.recovered,
                     user_message_id: message["id"].as_str().map(str::to_string),
+                    workflow_reference,
                     ..Default::default()
                 },
             )

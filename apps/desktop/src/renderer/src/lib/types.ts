@@ -7,7 +7,9 @@ import type {
   SessionStatus,
   TaskStatus,
   VerificationCommandTemplate,
-  WorkspaceMode
+  WorkspaceMode,
+  WorkflowMention,
+  WorkflowPlan
 } from "@agenthub/domain";
 import type { CodeExecution, ToolFileDiff } from "@agenthub/event-protocol";
 import type { LocalizedText, ProviderPermissionMode } from "@agenthub/provider-sdk";
@@ -148,7 +150,7 @@ export interface UiProject {
   lastOpenedAt?: string;
 }
 
-export type NavKey = "projects" | "agents" | "teams" | "tasks" | "sessions" | "runs" | "settings";
+export type NavKey = "projects" | "agents" | "teams" | "tasks" | "workflows" | "sessions" | "runs" | "settings";
 
 export type BuiltinThemeId = "dark" | "light" | "aurora" | "ukiyoe" | "macos";
 
@@ -241,6 +243,7 @@ export type SessionTarget =
   | { type: "agent"; instanceId: string; teamId?: string };
 
 export interface UiSession {
+  /** Explicit Harness selected for this persisted session, including delegated overrides. */
   connectionId?: string;
   connectionRevision?: number;
   id: string;
@@ -335,7 +338,8 @@ export interface MessageAttachmentView {
 }
 
 export type TimelinePayload =
-    | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string; attachments?: MessageAttachmentView[]; editedAt?: string }
+    | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string; attachments?: MessageAttachmentView[]; editedAt?: string; workflowRef?: WorkflowMention }
+  | { kind: "workflow_plan"; plan: WorkflowPlan; runStatus?: string }
   | { kind: "provider_ui"; method: string; key?: string; text: string; url?: string }
   | { kind: "activity"; phase: "queued" | "provider_queued" | "starting" | "thinking" | "responding" | "completed" | "stopped"; detail?: string }
     | { kind: "reasoning"; text: string; streaming?: boolean; messageId?: string }

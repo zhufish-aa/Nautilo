@@ -7,6 +7,9 @@ import { markdownEntitiesPlugin } from "../../markdown-worker.vite";
 /** Independent QA entry; production builds never import this configuration or fixture. */
 export default defineConfig({
   root: __dirname,
+  // The fixture replaces the native bridge. Its dependency cache must not
+  // replace modules in use by a running Electron renderer.
+  cacheDir: resolve(__dirname, "../../node_modules/.vite-visual"),
   plugins: [react(), tailwindcss(), markdownEntitiesPlugin()],
   worker: { plugins: () => [markdownEntitiesPlugin()] },
   resolve: { alias: [

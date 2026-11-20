@@ -35,9 +35,9 @@ const taskTransitions: Record<TaskStatus, readonly TaskStatus[]> = {
   running: ["waiting_user", "waiting_approval", "verifying", "completed", "failed", "cancelled"],
   waiting_user: ["running", "failed", "cancelled"],
   waiting_approval: ["ready", "blocked_dependency", "running", "failed", "cancelled"],
-  verifying: ["review_required", "merge_ready", "completed", "failed"],
-  review_required: ["merge_ready", "running", "failed"],
-  merge_ready: ["completed", "running", "failed"],
+  verifying: ["review_required", "merge_ready", "completed", "failed", "cancelled"],
+  review_required: ["merge_ready", "running", "failed", "cancelled"],
+  merge_ready: ["completed", "running", "failed", "cancelled"],
   completed: [],
   failed: ["ready", "queued", "cancelled"],
   cancelled: ["ready"]
@@ -49,10 +49,10 @@ const projectRunTransitions: Record<ProjectRunStatus, readonly ProjectRunStatus[
   executing: ["waiting_user", "paused", "verifying", "completed", "failed", "cancelled"],
   waiting_user: ["executing", "failed", "cancelled"],
   paused: ["planning", "executing", "cancelled"],
-  verifying: ["paused", "review_required", "merge_ready", "completed", "failed"],
-  review_required: ["merge_ready", "executing", "failed"],
-  merge_ready: ["merging", "review_required", "executing", "failed"],
-  merging: ["paused", "completed", "review_required", "failed"],
+  verifying: ["paused", "review_required", "merge_ready", "completed", "failed", "cancelled"],
+  review_required: ["merge_ready", "executing", "failed", "cancelled"],
+  merge_ready: ["merging", "review_required", "executing", "failed", "cancelled"],
+  merging: ["paused", "completed", "review_required", "failed", "cancelled"],
   // A chat session may receive another user turn after a previously completed
   // orchestration cycle; runtime-tool delegation reopens that same cycle.
   completed: ["executing", "waiting_user"],

@@ -55,6 +55,7 @@ pub struct Daemon {
     pub slash_commands: SlashCommandService,
     pub capability_imports: CapabilityImportService,
     pub orchestration: std::sync::Arc<OrchestrationService>,
+    pub workflows: Arc<crate::application::workflow_service::WorkflowService>,
     pub plugins: PluginService,
     pub recovery: RecoveryService,
     pub diagnostics: DiagnosticsService,
@@ -99,6 +100,8 @@ impl Daemon {
         let recovery = RecoveryService::new(db.clone(), audit.clone(), events.clone());
         let diagnostics = DiagnosticsService::new(db.clone(), audit.clone(), std::sync::Arc::new(MetricsService::new(db.clone())), redaction.clone(), &data_dir);
         let connections = crate::application::ConnectionService::new(db.clone(), credentials.clone(), adapters.clone());
+        let workflows=crate::application::workflow_service::WorkflowService::new(db.clone(),runs.clone(),events.clone());
+        workflows.set_git_workflows(git_workflows.clone());
         let daemon = Arc::new(Self {
             remote: crate::runtime::remote::RemoteService::new(db.clone(), credentials.clone(), events.clone()),
             data_dir: data_dir.clone(),
@@ -123,15 +126,18 @@ impl Daemon {
                     Some(git_workflows),
                     approvals.clone(),
                 );
-                runs.set_runtime_tool_provider(std::sync::Arc::new(MainAgentRuntimeToolProvider::new(
+                orchestration.set_workflows(&workflows);
+                let native_tools=std::sync::Arc::new(MainAgentRuntimeToolProvider::new(
                     db.clone(),
                     orchestration.clone(),
                     credentials.clone(),
-                )));
+                ));
+                runs.set_runtime_tool_provider(Arc::new(crate::application::workflow_service::tools::WorkflowToolProvider {workflows:Arc::downgrade(&workflows),fallback:native_tools}));
                 orchestration
             },
             plugins: PluginService::new(&data_dir.clone(), adapters.clone()),
             connection_imports: crate::application::connection_import::ConnectionImportService::new(connections.clone(), credentials.clone()),
+            workflows,
             connections,
             agents,
             adapters,
@@ -151,6 +157,7 @@ impl Daemon {
         daemon.plugins.load_all().await;
         daemon.runs.start_mcp_pool().map_err(|error| crate::errors::invalid("mcpPool", &error.to_string()))?;
         daemon.recovery.recover_interrupted()?;
+        daemon.workflows.start_worker();
         Ok(daemon)
     }
 
@@ -174,6 +181,7 @@ impl Daemon {
         const READ_ONLY_IPC: &[&str] = &[
             "remote.status",
             "remote.diagnostics",
+            "remote.relays",
             "scm.status", "scm.diff",
             "health.get",
             "terminal.read", "terminal.list", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities",
@@ -181,6 +189,7 @@ impl Daemon {
             "agent.list",
             "connection.list", "connection.get", "connection.models", "connection.scanNative",
             "team.list",
+            "workflow.templates", "workflow.template", "workflow.list", "workflow.get", "workflow.validate", "workflow.plan.decide",
             "team.get",
             "capability.list",
             "resource.inventory", "resource.history", "requestLog.list", "session.tools", "integration.get", "configuration.list", "configuration.export",
@@ -218,6 +227,9 @@ impl Daemon {
         ];
         let audit = self.audit.clone();
         router.set_observer(Arc::new(move |request, response| {
+            // Draft prompts and attachment paths must never enter plaintext audit records,
+            // including failed saves. They live only in the encrypted draft repository.
+            if request.method.starts_with("composerDraft.") { return; }
             let listing_plugins = request.method == "provider.harnessPlugins" && request.input.pointer("/operation/action").and_then(Value::as_str) == Some("list");
             if response.ok && (READ_ONLY_IPC.contains(&request.method.as_str()) || listing_plugins) {
                 return;

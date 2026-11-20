@@ -8,6 +8,7 @@
   border: 0;
   background: #fff;
 }
+.change-review-drawer[data-review-closing] { pointer-events: none; }
 
 .change-review {
   --review-surface: #fff;

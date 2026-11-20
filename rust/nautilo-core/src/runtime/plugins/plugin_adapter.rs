@@ -508,13 +508,15 @@ impl PluginClient {
         let inner_steer = self.inner.clone();
         let steer_run_id = run_id.clone();
         let steer_acknowledgement = self.capabilities["steerAcknowledgement"] == true;
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(tokio::sync::Mutex::new(false));
         let cancel_flag = cancelled.clone();
+        let (event_stream, event_stream_closed) = oneshot::channel::<()>();
         // Convert plugin wire frames into AdapterEvents.
         let (adapter_sender, adapter_receiver) = mpsc::unbounded_channel::<AdapterEvent>();
         let descriptor = self.descriptor.clone();
         let inner = self.inner.clone();
         tokio::spawn(async move {
+            let _event_stream = event_stream;
             // The plugin chooses its native wire and owns CLI configuration.
             // The host supplies reusable protocol bridges without CLI names.
             let preparation = async {
@@ -556,7 +558,8 @@ impl PluginClient {
                     return;
                 }
             };
-            if cancelled.load(Ordering::Acquire) { return; }
+            let dispatch = cancelled.lock().await;
+            if *dispatch { return; }
             let mut wire_request=crate::adapters::start_request_to_json(&request);
             wire_request["sessionBindingId"]=json!(run_id);
             inner.write(&json!({
@@ -564,6 +567,7 @@ impl PluginClient {
                 "resume": resume.map(Value::String).unwrap_or(Value::Null),
                 "request": wire_request
             })).await;
+            drop(dispatch);
             let mut receiver = receiver;
             while let Some(frame) = receiver.recv().await {
                 if adapter_sender.send(crate::adapters::event_from_json(&frame)).is_err() {
@@ -577,9 +581,15 @@ impl PluginClient {
             adapter_receiver,
             move || {
                 Box::pin(async move {
-                    cancel_flag.store(true, Ordering::Release);
+                    {
+                        let mut cancelled = cancel_flag.lock().await;
+                        *cancelled = true;
+                        inner_cancel.write(&json!({ "type": "cancel", "runId": cancel_run_id })).await;
+                    }
+                    // Keep the channel open for the plugin's real exit frame.
+                    // Session reuse must wait until it has processed the stop.
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(6), event_stream_closed).await;
                     inner_cancel.runs.lock().unwrap().remove(&cancel_run_id);
-                    inner_cancel.write(&json!({ "type": "cancel", "runId": cancel_run_id })).await;
                 }) as crate::adapters::BoxFuture<()>
             },
             move |_input| {},

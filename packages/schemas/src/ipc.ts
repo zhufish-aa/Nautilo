@@ -1,6 +1,7 @@
 import type { AssistantModelStep, AssistantDecision, AssistantLookup, AssistantRead, AssistantSessionPage, AssistantExcerptPage } from "./assistant.js";
 import type { RuntimeConnection, RuntimeConnectionInput } from "@agenthub/domain";
-import type { RemoteStatus, RemoteSettings, RemoteGrant, RemoteInvitation } from "./remote-access.js";
+import type { WorkflowTemplate, WorkflowStart, WorkflowRun, WorkflowValidation, WorkflowDefinition, WorkflowLayout, WorkflowPlan, WorkflowPlanAssignment, WorkflowRef } from "@agenthub/domain";
+import type { RemoteStatus, RemoteSettings, RemoteGrant, RemoteInvitation, RemoteRelayCatalog } from "./remote-access.js";
 import type { HarnessPluginChange, HarnessPluginInventory, HarnessPluginOperation } from "@agenthub/provider-sdk";
 import type {
   AgentInstance,
@@ -29,7 +30,7 @@ import type {
 } from "@agenthub/domain";
 
 /** Missing permissionMode preserves the stored override; null explicitly resets inheritance. */
-export type SessionUpsertInput = Omit<Session, "permissionMode" | "connectionId" | "connectionRevision"> & { permissionMode?: string | null; connectionId?: string | null; connectionRevision?: number | null; confirmConnectionChange?: boolean };
+export type SessionUpsertInput = Omit<Session, "permissionMode" | "connectionId" | "connectionRevision" | "teamId"> & { permissionMode?: string | null; connectionId?: string | null; connectionRevision?: number | null; teamId?: string | null; confirmConnectionChange?: boolean };
 
 export interface NativeHistorySync {
   status: "none" | "opening" | "running" | "syncing" | "synced" | "failed" | "unsupported";
@@ -95,7 +96,7 @@ export interface TerminalMetadata {
   exited?: boolean; exitCode?: number;
 }
 export interface SourceControlScope { sessionId?: string; projectId?: string }
-export interface CoreFeatures { sourceControl?: 1; sourceControlHistory?: 1; sourceControlHistoryPaging?: 1; sourceControlEditing?: 1; terminalTabs?: 1 }
+export interface CoreFeatures { sourceControl?: 1; sourceControlHistory?: 1; sourceControlHistoryPaging?: 1; sourceControlEditing?: 1; terminalTabs?: 1; composerDrafts?: 1; taskRetry?: 1; workflows?: 1; workflowPlans?: 1 }
 export interface SourceControlCommitSummary { hash: string; subject: string; author: string; committedAt: string }
 export interface SourceControlHistoryInput extends SourceControlScope { query?: string; cursor?: string; limit?: number }
 export interface SourceControlHistoryPage {
@@ -103,6 +104,8 @@ export interface SourceControlHistoryPage {
   items: SourceControlCommitSummary[]; nextCursor?: string;
 }
 export interface SourceControlChange {
+  /** Per-file native status and content revision; older peers may omit it. */
+  version?: string;
   path: string; originalPath?: string; indexStatus: string; worktreeStatus: string;
   untracked: boolean; conflict: boolean; submodule: boolean;
   additions?: number; deletions?: number; binary?: boolean; directory?: boolean;
@@ -150,8 +153,18 @@ export interface SourceControlMutation extends SourceControlScope {
   patchToken?: string; hunkIds?: string[]; lines?: number[];
 }
 export interface IpcRequestMap {
+  "workflow.templates": { input: undefined; output: WorkflowTemplate[] };
+  "workflow.template": { input: { id: string; revision?: number }; output: WorkflowTemplate };
+  "workflow.save": { input: { id: string; revision: number; name: string; definition: WorkflowDefinition; layout: WorkflowLayout }; output: WorkflowTemplate };
+  "workflow.validate": { input: { definition: WorkflowDefinition }; output: WorkflowValidation };
+  "workflow.start": { input: WorkflowStart; output: WorkflowRun };
+  "workflow.plan.decide": { input: { sessionId: string; planId: string; action: "approve" | "reject"; assignments?: Record<string, WorkflowPlanAssignment> }; output: WorkflowPlan };
+  "workflow.list": { input: { sessionId?: string; attentionOnly?: boolean }; output: Array<Pick<WorkflowRun,"id" | "revision" | "sessionId" | "projectId" | "status" | "createdAt" | "updatedAt"> & { name?: string; definitionId: string; attention?: Array<{ id: string; kind: string; title: string; instanceId?: string | null; detail?: string | null }> }> };
+  "workflow.get": { input: { runId: string }; output: WorkflowRun };
+  "workflow.control": { input: { runId: string; action: "pause" | "resume" | "cancel" | "approve" | "reject" | "approve_merge" | "reject_merge" | "approve_verification" | "reject_verification" | "recheck_workspace" | "retain_workspace" | "retry_node" | "decline_retry"; instanceId?: string; confirmed?: boolean }; output: WorkflowRun };
   "remote.status": { input: Record<string, never>; output: RemoteStatus };
   "remote.diagnostics": { input: Record<string, never>; output: Record<string, unknown> };
+  "remote.relays": { input: { refresh?: boolean; urls?: string[] }; output: RemoteRelayCatalog };
   "remote.configure": { input: RemoteSettings; output: RemoteStatus };
   "remote.invite": { input: Record<string, never>; output: RemoteInvitation };
   "remote.cancelInvite": { input: Record<string, never>; output: { ok: true } };
@@ -209,6 +222,8 @@ export interface IpcRequestMap {
   "resource.history": { input: Record<string, never>; output: import("./integrations.js").ResourceSyncPlan[] };
 
   "health.get": { input: undefined; output: { status: "ok"; version: string; features?: CoreFeatures } };
+  "composerDraft.list": { input: undefined; output: { items: { id: string; revision: number; value: Record<string, unknown> | null; acceptedMessageIds: string[] }[]; unreadable: string[] } };
+  "composerDraft.write": { input: { id: string; revision: number; value: Record<string, unknown> | null }; output: { saved: boolean; revision: number } };
   "project.list": { input: undefined; output: Project[] };
   "project.add": { input: { rootPath: string; name?: string }; output: Project };
   "project.upsert": { input: Project; output: Project };
@@ -248,20 +263,21 @@ export interface IpcRequestMap {
   "orchestration.resolveDelegation": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.resolveMerge": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.recover": { input: { projectRunId: string; memberId: string; mode: "resume" | "replace" }; output: ProjectRun };
+  "orchestration.retryTask": { input: { projectRunId: string; taskId: string }; output: Task };
   "orchestration.cancel": { input: { projectRunId: string }; output: ProjectRun };
   "session.list": { input: { projectId: string; memberId?: string }; output: Session[] };
   "session.history": { input: SessionHistoryInput; output: SessionHistory };
   "session.historyBatch": { input: { items: SessionHistoryInput[] }; output: { items: SessionHistory[] } };
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
   "session.generateTitle": { input: { sessionId: string }; output: { title?: string } };
-  "session.create": { input: { projectId: string; memberId: string; title?: string; connectionId?: string; connectionRevision?: number }; output: Session };
+  "session.create": { input: { projectId: string; memberId: string; agentInstanceId?: string; teamId?: string; title?: string; connectionId?: string; connectionRevision?: number; model?: string; reasoningEffort?: string; permissionMode?: string; agentMode?: string }; output: Session };
   "session.upsert": { input: SessionUpsertInput; output: Session };
   "session.delete": { input: { sessionId: string }; output: { removed: true; sessionIds: string[] } };
   "session.followUp": { input: { sessionId: string; text: string; messageId?: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };
   "session.followUp.list": { input: { sessionId: string }; output: { items: Array<{ messageId: string; text: string; queuedAt: string }> } };
   "session.followUp.cancel": { input: { sessionId: string; messageId: string }; output: { cancelled: true } };
   "session.followUp.steer": { input: { sessionId: string; messageId: string }; output: { accepted: true; mode: "steer" | "queue" } };
-  "session.send": { input: { sessionId: string; text: string; messageId?: string; attachments?: MessageAttachmentInput[]; editMessageId?: string }; output: { accepted: true; runId: string } };
+  "session.send": { input: { sessionId: string; text: string; messageId?: string; attachments?: MessageAttachmentInput[]; editMessageId?: string; workflowRef?: WorkflowRef }; output: { accepted: true; runId: string } };
   "slashCommand.list": { input: { sessionId: string }; output: SlashCommandDefinition[] };
   "slashCommand.execute": { input: { sessionId: string; commandId: string; argument?: string }; output: SlashCommandResult };
   "slashCommand.continue": { input: { sessionId: string; commandId: string; actionId: string; selectedOptionIds?: string[] }; output: SlashCommandResult };

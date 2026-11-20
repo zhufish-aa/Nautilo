@@ -373,6 +373,9 @@ pub struct RunRepository<'a> {
 }
 
 impl<'a> RunRepository<'a> {
+    pub fn latest_for_session(&self, session_id: &str) -> CoreResult<Option<Value>> {
+        self.db.query_row("SELECT data FROM runs WHERE session_id=?1 ORDER BY rowid DESC LIMIT 1",[session_id],|row|row.get::<_,String>(0)).optional().map_err(db_fail).map(|row|row.map(parse_row))
+    }
     pub fn list_for_session(&self, session_id: &str) -> CoreResult<Vec<Value>> {
         self.db.prepare("SELECT data FROM runs WHERE session_id=?1 ORDER BY updated_at").map_err(db_fail)?.query_map(params![session_id],|row|row.get::<_,String>(0)).map_err(db_fail)?.collect::<Result<Vec<_>,_>>().map_err(db_fail).map(|rows|rows.into_iter().map(parse_row).collect())
     }
@@ -649,6 +652,23 @@ impl<'a> EventRepository<'a> {
         Ok(())
     }
 
+    /// Append a structural event inside the caller's IMMEDIATE transaction.
+    /// Unlike append(), this never replaces an earlier journal entry.
+    pub(crate) fn append_in_transaction(&self, event: &mut Value) -> CoreResult<i64> {
+        if self.db.is_autocommit() || !event.is_object()
+            || event["type"].as_str().is_none_or(|kind| kind.ends_with("_delta"))
+        {
+            return Err(crate::errors::invalid("event", "A structural event requires an active write transaction"));
+        }
+        let sequence = self.next_sequence(str_field(event, "sessionId"), str_field(event, "runId"))?;
+        event["sequence"] = json!(sequence);
+        self.db.execute(
+            "INSERT INTO runtime_events(event_id, sequence, session_id, project_run_id, run_id, data, timestamp) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![str_field(event,"eventId").unwrap_or(""), sequence, str_field(event,"sessionId"), str_field(event,"projectRunId"), str_field(event,"runId"), event.to_string(), str_field(event,"timestamp").unwrap_or("")],
+        ).map_err(db_fail)?;
+        Ok(sequence)
+    }
+
     /// Allocates the sequence and inserts atomically: BEGIN IMMEDIATE takes
     /// the write lock BEFORE MAX(sequence) is read, so a second daemon process
     /// sharing the data dir cannot allocate the same sequence (which the
@@ -902,6 +922,16 @@ pub struct VerificationRepository<'a> {
 }
 
 impl<'a> VerificationRepository<'a> {
+    pub fn unsettled_workflow(&self, workflow: &str, instance: Option<&str>) -> CoreResult<Vec<Value>> {
+        let mut statement = self.db.prepare(
+            "SELECT data FROM verification_results WHERE json_extract(data,'$.workflow.runId')=?1
+             AND (?2 IS NULL OR json_extract(data,'$.workflow.instanceId')=?2)
+             AND json_extract(data,'$.status') IN ('starting','running')"
+        ).map_err(db_fail)?;
+        let rows = statement.query_map(params![workflow, instance], |row| row.get::<_, String>(0)).map_err(db_fail)?;
+        rows.map(|row| row.map(parse_row).map_err(db_fail)).collect()
+    }
+
     pub fn save(&self, result: &Value) -> CoreResult<()> {
         self.db
             .prepare(

@@ -118,6 +118,8 @@ export interface AgentHubBridge {
     minimize(): Promise<void>;
     toggleMaximize(): Promise<void>;
     close(): Promise<void>;
+    onDraftClose?(callback: (id: string) => void): () => void;
+    finishDraftClose?(id: string, saved: boolean): Promise<void>;
     isMaximized(): Promise<boolean>;
     onMaximizedChange(callback: (maximized: boolean) => void): () => void;
   };

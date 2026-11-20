@@ -4,8 +4,44 @@ use base64::Engine;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::oneshot;
 
+#[test]
+fn opencode_native_account_keeps_its_provider_and_native_resources_instead_of_creating_an_api_overlay() {
+    let request = json!({"instance":{"providerId":"opencode","providerOptions":{"runtimeConnectionId":"selected-account","nativeLogin":true}},
+        "env":{"XDG_DATA_HOME":"account-dir","OPENCODE_CONFIG_CONTENT":"{\"enabled_providers\":[\"opencode-go\"],\"plugin\":[\"native-plugin\"]}"}});
+    let env = runtime_environment(&request).unwrap();
+    let config: Value = serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+    assert_eq!(env["XDG_DATA_HOME"], "account-dir");
+    assert_eq!(config["enabled_providers"], json!(["opencode-go"]));
+    assert_eq!(config["plugin"], json!(["native-plugin"]));
+    assert!(config["provider"]["nautilo"].is_null());
+}
+
+#[tokio::test]
+async fn opencode_account_model_namespace_and_session_survive_two_native_turns() {
+    let f = Fixture::new();
+    let mut request = f.request("go-first", "go-local");
+    request["instance"]["providerOptions"] = json!({"runtimeConnectionId":"native-account","nativeLogin":true});
+    request["model"] = json!("opencode/fixture-free");
+    request["env"]["OPENCODE_CONFIG_CONTENT"] = json!("{\"enabled_providers\":[\"opencode-go\"]}");
+    let first = f.start_request("go-first", request.clone(), None).await;
+    let session = first.session.clone();
+    let state = f.call("/fixture/state", None).await;
+    assert_eq!(state["posts"][0]["body"]["model"], json!({"providerID":"opencode","modelID":"fixture-free"}));
+    complete(&f, &first, "first account reply").await;
+    first.finish(0).await;
+    request["sessionBindingId"] = json!("go-second");
+    let second = f.start_request("go-second", request.clone(), Some(&session)).await;
+    assert_eq!(second.session, session);
+    complete(&f, &second, "second account reply").await;
+    second.finish(0).await;
+    request["model"] = json!("openai/other-model");
+    assert!(f.plugin.start("wrong-provider", request, None).await.is_err());
+    f.plugin.dispose().await;
+}
+
 #[derive(Default)]
 struct Channel {
+    tools: Mutex<Vec<(String, String, Value)>>,
     events: Mutex<Vec<(String, Value)>>,
     questions: Mutex<Vec<(String, Value)>>,
     leases: Mutex<Vec<(String, bool)>>,
@@ -13,6 +49,11 @@ struct Channel {
     waiting: Arc<AtomicUsize>,
 }
 impl DaemonChannel for Channel {
+    fn call_session_tool(&self, binding: &str, name: &str, arguments: Value)
+        -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
+        self.tools.lock().unwrap().push((binding.into(), name.into(), arguments));
+        Box::pin(async { json!({"success":true,"content":"{\"taskId\":\"configured-task\",\"sessionId\":\"configured-child\"}"}) })
+    }
     fn hold_session(
         &self,
         binding: &str,
@@ -108,10 +149,12 @@ impl Fixture {
             std::env::temp_dir().join(format!("nautilo-opencode-{}", next_native_id("fixture")));
         std::fs::create_dir_all(&directory).unwrap();
         let node = std::env::var("NAUTILO_TEST_NODE").unwrap_or("node".into());
-        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../tests/fixtures/opencode-server.mjs")
             .canonicalize()
             .unwrap();
+        let script = directory.join("server.mjs");
+        std::fs::copy(source, &script).unwrap();
         #[cfg(windows)]
         let executable = {
             let executable = directory.join("opencode.cmd");
@@ -200,6 +243,7 @@ impl Fixture {
             .await
     }
     async fn start_request(&self, run: &str, request: Value, resume: Option<&str>) -> Turn {
+        let local = request["localSessionId"].as_str().unwrap_or("").to_string();
         let mut events = self
             .plugin
             .start(run, request, resume.map(str::to_string))
@@ -209,7 +253,7 @@ impl Fixture {
         let session = tokio::time::timeout(Duration::from_secs(8), async {
             while let Some(event) = events.recv().await {
                 let session = event["providerSessionId"].as_str().map(str::to_string);
-                assert_ne!(event["kind"], "exit", "{event:?}");
+                assert_ne!(event["kind"], "exit", "{initial:?} {event:?}");
                 initial.push(event);
                 if let Some(session) = session {
                     return session;
@@ -220,9 +264,11 @@ impl Fixture {
         .await
         .unwrap();
         // HTTP acknowledgement and the native user-message event have both arrived.
+        let server = self.plugin.pool.lock().unwrap().servers.values()
+            .find(|server| server.events.has_local(&local)).unwrap().clone();
         let user = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let state = self.call("/fixture/state", None).await;
+                let state = api_json(&server.base_url, &server.cwd, "/fixture/state", "GET", None).await.unwrap();
                 if let Some(post) = state["posts"]
                     .as_array()
                     .unwrap()
@@ -272,6 +318,61 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
+#[tokio::test]
+async fn runtime_tools_register_and_return_receipts_across_resident_turns() {
+    let mut f = Fixture::new();
+    f.request["runtimeTools"] = json!([
+        {"name":"agenthub_delegate","description":"Configured member","inputSchema":{"type":"object","required":["memberId","task"]}},
+        {"name":"agenthub_plan","description":"Task DAG","inputSchema":{"type":"object"}}
+    ]);
+    let first = f.start("runtime-first", "team-local", None).await;
+    let server = f.server();
+    let native = first.session.clone();
+    let tools = f.call("/fixture/state", None).await["runtimeTools"].clone();
+    assert_eq!(tools[0]["name"], "agenthub_delegate");
+    assert_eq!(tools[1]["name"], "agenthub_plan");
+    let args = json!({"memberId":"member_93b9ead6","task":"Read the current directory"});
+    let receipt = f.call("/fixture/runtime-tool", Some(json!({"name":"agenthub_delegate","arguments":args}))).await;
+    assert_eq!(receipt["result"]["isError"], false);
+    assert!(receipt["result"]["content"][0]["text"].as_str().unwrap().contains("configured-child"));
+    assert_eq!(f.channel.tools.lock().unwrap()[0].0, "runtime-first");
+    complete(&f, &first, "dispatched").await;
+    first.finish(0).await;
+    let second = f.start("runtime-second", "team-local", Some(&native)).await;
+    assert!(Arc::ptr_eq(&server, &f.server()), "a new turn must reuse its server and MCP connection");
+    let _ = f.call("/fixture/runtime-tool", Some(json!({"name":"agenthub_plan","arguments":{"tasks":[]}}))).await;
+    let unknown = f.call("/fixture/runtime-tool", Some(json!({"name":"not_registered","arguments":{}}))).await;
+    assert_eq!(unknown["error"]["code"], -32602);
+    assert_eq!(f.channel.tools.lock().unwrap().len(), 2);
+    assert_eq!(f.channel.tools.lock().unwrap()[1].0, "runtime-second");
+    assert_eq!(f.channel.tools.lock().unwrap()[1].1, "agenthub_plan");
+    complete(&f, &second, "done").await;
+    second.finish(0).await;
+    f.plugin.dispose().await;
+}
+
+#[tokio::test]
+async fn runtime_tools_are_isolated_between_local_sessions() {
+    let mut f = Fixture::new();
+    f.request["runtimeTools"] = json!([{"name":"agenthub_delegate","description":"Dispatch","inputSchema":{"type":"object"}}]);
+    let a = f.start("team-a-turn", "team-a", None).await;
+    let server_a = f.server();
+    let b = f.start("team-b-turn", "team-b", None).await;
+    let server_b = f.plugin.pool.lock().unwrap().servers.values().find(|server| server.events.has_local("team-b")).unwrap().clone();
+    assert!(!Arc::ptr_eq(&server_a, &server_b));
+    assert_ne!(server_a.runtime_tools.as_ref().unwrap().url, server_b.runtime_tools.as_ref().unwrap().url);
+    for server in [&server_a, &server_b] {
+        let result = api_json(&server.base_url, &server.cwd, "/fixture/runtime-tool", "POST", Some(json!({"name":"agenthub_delegate","arguments":{"task":"inspect"}}))).await.unwrap();
+        assert_eq!(result["result"]["isError"], false);
+    }
+    assert_eq!(f.channel.tools.lock().unwrap().iter().map(|t|t.0.as_str()).collect::<Vec<_>>(), vec!["team-a-turn","team-b-turn"]);
+    f.plugin.cancel("team-a-turn").await;
+    f.plugin.cancel("team-b-turn").await;
+    a.finish(130).await;
+    b.finish(130).await;
+    f.plugin.dispose().await;
+}
+
 struct Turn {
     events: mpsc::UnboundedReceiver<Value>,
     initial: Vec<Value>,

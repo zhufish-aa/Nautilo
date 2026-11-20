@@ -19,6 +19,7 @@ export function accountLoginRequired(account: RuntimeConnection): CoreError {
 }
 
 export async function checkNativeAccountLogin(account: RuntimeConnection, request: AdapterStartRequest): Promise<void> {
+  if (account.harness === "opencode" && account.nativeLogin) return; // Native OpenCode also serves free models without a saved key.
   if (account.harness === "antigravity") return; // Official ACP reports authentication on its own connection.
   const args = [...request.instance.baseArgs, ...(account.harness === "codex" ? ["login", "status"] : ["auth", "status", "--json"])];
   const invocation = account.harness === "codex"

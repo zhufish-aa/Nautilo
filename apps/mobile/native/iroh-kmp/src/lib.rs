@@ -29,6 +29,9 @@ mod nautilo_policy;
 #[cfg(target_os = "android")]
 mod android_init;
 
+#[cfg(target_os = "android")]
+mod direct_network;
+
 pub use config::{EndpointOptions, RelayModeOption};
 pub use connection::{ConnPath, IrohConnection, PathKind};
 pub use crypto::{ed25519_public_from_secret, ed25519_sign, ed25519_verify, generate_ed25519_keypair, Ed25519Keypair};

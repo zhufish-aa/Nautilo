@@ -59,6 +59,10 @@ impl RemoteService {
             .secret_key(self.identity()?)
             .alpns(if settings.relay_mode == "direct" { vec![ALPN_V2.to_vec()] } else { vec![ALPN_V2.to_vec(), ALPN.to_vec()] })
             .transport_config(transport);
+        let interfaces = if settings.relay_mode == "direct" {
+            tokio::task::spawn_blocking(direct_network::bindings).await.unwrap_or_default()
+        } else { Vec::new() };
+        if !interfaces.is_empty() { builder = direct_network::bind(builder, &interfaces)?; }
         if settings.relay_mode == "lan" {
             builder = builder
                 .clear_address_lookup()
@@ -87,8 +91,10 @@ impl RemoteService {
             let mut state = self.state.lock().unwrap();
             state.endpoint = Some(endpoint.clone());
             state.http_proxy_source = proxy.map(|(_, source)| source);
+            state.direct_discovery.interfaces = interfaces;
             state.generation
         };
+        self.start_direct_discovery(endpoint.clone(), generation, settings);
         let service = self.clone();
         tokio::spawn(async move {
             service.accept_connections(endpoint, generation).await;

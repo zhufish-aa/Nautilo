@@ -70,10 +70,14 @@ pub fn validate(snapshot: &Value, session: &str) -> anyhow::Result<()> {
                 anyhow::ensure!(
                     matches!(
                         entry["event"]["kind"].as_str(),
-                        Some("thinking" | "tool" | "command" | "usage")
+                        Some("thinking" | "tool" | "command" | "usage" | "file")
                     ),
                     "Unsupported native history activity"
                 );
+                if entry["event"]["kind"] == "file" {
+                    anyhow::ensure!(entry["event"]["path"].as_str().is_some_and(|path|!path.is_empty()),
+                        "Native file activity has no path");
+                }
             }
         }
     }

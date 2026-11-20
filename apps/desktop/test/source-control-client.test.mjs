@@ -31,3 +31,43 @@ test("a failed preview is retryable and the memory cache evicts older file conte
   for(let index=0;index<25;index++)await api.diff(scope,repository(),{...selection,path:`${index}.ts`});
   assert.equal(api.peekDiff(scope,repository(),selection),undefined);assert.ok(api.peekDiff(scope,repository(),{...selection,path:"24.ts"}));assert.equal(calls,27);
 });
+
+test("per-file revisions retain unaffected previews when another file changes",async()=>{
+  let calls=0;
+  const api=client(async(method,input)=>{calls++;return{...input,patch:"+cached"};});
+  const before={...repository("old-index"),changes:[{path:"a.ts",version:"a1"},{path:"b.ts",version:"b1"}]};
+  const shown=await api.diff(scope,before,selection);
+  const after={...repository("new-index"),changes:[{path:"a.ts",version:"a1"},{path:"b.ts",version:"b2"}]};
+  assert.equal(await api.diff(scope,after,selection),shown);
+  assert.equal(calls,1);
+});
+
+test("repository mutations serialize Windows path aliases and status reads wait for the final save",async()=>{
+  const starts=[],releases=[];
+  const api=client(async(method,input)=>{
+    starts.push(method);
+    if(method==="scm.status")return repository("after-save");
+    await new Promise(done=>releases.push(done));
+    return method==="scm.mutate"?{status:repository("after-stage")}:{...input,saved:true};
+  });
+  api.rememberStatus(scope,repository());
+  const staged=api.mutate(scope,"D:/repo",{operation:"stage",paths:["a.ts"]});
+  const saved=api.save("d:\\REPO",{...scope,path:"a.ts",content:"edited",expectedHash:"version"});
+  const status=api.status(scope);
+  await new Promise(setImmediate);
+  assert.deepEqual(starts,["scm.mutate"]);
+  releases.shift()();await staged;await new Promise(setImmediate);
+  assert.deepEqual(starts,["scm.mutate","scm.save"]);
+  releases.shift()();await saved;
+  assert.equal((await status).token,"after-save");
+  assert.equal(api.peekStatus(scope).token,"after-save");
+});
+
+test("a diff invalidated during a save cannot repopulate the preview cache",async()=>{
+  let finish;
+  const api=client(async(method,input)=>method==="scm.diff"?new Promise(done=>finish=()=>done({...input,patch:"+stale"})):{saved:true});
+  const read=api.diff(scope,repository(),selection);
+  await api.save("D:/repo",{...scope,path:"a.ts",content:"new",expectedHash:"old"});
+  finish();await read;
+  assert.equal(api.peekDiff(scope,repository(),selection),undefined);
+});

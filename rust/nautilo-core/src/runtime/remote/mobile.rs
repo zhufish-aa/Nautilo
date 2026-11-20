@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::account_gateway::supports_account_provider;
 
 pub(super) fn approval_resolution(params: &Value) -> Result<Value> {
     let approval_id = params["approvalId"].as_str().filter(|id| !id.is_empty() && id.len() <= 128)
@@ -12,13 +13,22 @@ pub(super) fn approval_resolution(params: &Value) -> Result<Value> {
 }
 
 impl RemoteService {
+    pub(super) async fn mobile_compact_command(&self, session: &str) -> Result<Option<Value>> {
+        let commands = self.dispatch("slashCommand.list", json!({"sessionId":session})).await?;
+        Ok(commands.as_array().into_iter().flatten().find(|c|
+            c["execution"] == "provider" && (c["name"] == "/compact" || c["providerCommand"] == "compact")).cloned())
+    }
     pub(super) fn mobile_account_route(&self, input: &mut Value) -> Result<()> {
         let options = self.repo.mobile_options()?;
         let agent = options["agents"].as_array().and_then(|a| a.iter().find(|a| a["id"] == input["agentInstanceId"]))
             .ok_or_else(|| anyhow::anyhow!("HARNESS_NOT_AVAILABLE"))?;
         if let Some(connection) = options["connections"].as_array().and_then(|c| c.iter().find(|c| c["id"] == input["connectionId"])) {
             if connection["kind"] == "login" && connection["harness"] != agent["providerId"] {
-                anyhow::ensure!(matches!(connection["harness"].as_str(), Some("codex" | "claude-code")), "CONNECTION_NOT_AVAILABLE");
+                anyhow::ensure!(
+                    agent["providerId"] != "antigravity"
+                        && connection["harness"].as_str().is_some_and(supports_account_provider),
+                    "CONNECTION_NOT_AVAILABLE"
+                );
                 input["_mobileAccountRoute"] = connection["id"].clone();
             }
         }
@@ -100,6 +110,7 @@ impl RemoteService {
         params: &Value,
     ) -> Result<Value> {
         let mut input = self.repo.session_template(session)?;
+        self.repo.mobile_select_team(&mut input, params)?;
         let changed = select_configuration_connection(&mut input, params)?;
         if !changed && params.get("model").is_none() && params.get("reasoningEffort").is_none() {
             self.mobile_validate_modes(&mut input, params, Some(session)).await?;
@@ -161,8 +172,8 @@ pub(super) fn connection_catalog_input(connection: &Value, agent: &Value, revisi
 
 fn sanitized_models(catalog: Value) -> Value {
     let models = catalog["models"].as_array().into_iter().flatten().filter(|v| v["enabled"] != false).map(|v|
-        json!({"id":v["id"],"displayName":v["displayName"],"reasoningEfforts":v["reasoningEfforts"],"defaultReasoningEffort":v["defaultReasoningEffort"]})).collect::<Vec<_>>();
-    json!({"models":models,"source":catalog["source"]})
+        json!({"id":v["id"],"displayName":v["displayName"],"reasoningEfforts":v["reasoningEfforts"],"defaultReasoningEffort":v["defaultReasoningEffort"],"contextWindow":v["contextWindow"]})).collect::<Vec<_>>();
+    json!({"models":models,"source":catalog["source"],"defaultModel":catalog["defaultModel"]})
 }
 
 pub(super) fn browse_directories(params: &Value) -> Result<Value> {

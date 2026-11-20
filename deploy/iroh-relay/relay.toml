@@ -1,0 +1,12 @@
+# HTTPS relay-only deployment. No UDP/QAD service is required for relay mode.
+enable_relay = true
+enable_quic_addr_discovery = false
+enable_metrics = false
+http_bind_addr = "127.0.0.1:3340"
+access = "everyone"
+
+[tls]
+https_bind_addr = "0.0.0.0:8443"
+cert_mode = "Reloading"
+manual_cert_path = "/etc/iroh/certs/fullchain.pem"
+manual_key_path = "/etc/iroh/certs/privkey.pem"

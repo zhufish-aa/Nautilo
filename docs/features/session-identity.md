@@ -6,14 +6,13 @@ The composer exposes only model and reasoning-effort buttons. The model menu inc
 
 ## Switching account/provider
 
-- Idle conversations can change connection for the next request, including explicitly returning to their legacy Agent configuration.
-- The UI asks for confirmation naming the destination connection and API endpoint (or official login harness). It explains the saved chat text and latest eight artifact names/paths that will be shared with that destination, including data previously sent elsewhere.
+- In the desktop composer, choosing a connection selects where the next message will go, including when a turn is active or the user returns to the native Agent configuration. The menu explains that continuing this chat shares saved text and recent artifact names/paths with the selected destination. Sending applies the choice without a separate dialog.
 - Native reasoning/cache, tool events and old image binaries do not migrate. Users must reattach required images. History remains visible; this is not a lossless transfer of provider-native context. Oversized text is rejected rather than silently truncated.
-- The confirmation flag is sent only with the approved change. Failed persistence retains the old connection and leaves confirmation available to retry. The server-returned revision is authoritative.
-- Active or queued requests block changes. Sends wait for pending configuration writes. Previously recorded runs and their pricing snapshots keep their original identity.
-- Bound connection revisions are read explicitly, not silently replaced by current heads. A newer revision of the same connection has an explicit “Update to connection vN” action and the same confirmation.
+- The approval flag is sent only when submitting a message under a user-selected new connection. Failed persistence retains the current connection and the composer draft. The server-returned revision is authoritative.
+- Active and previously queued requests keep their saved configuration. A draft targeting the new connection can be edited during the turn and sent once those requests finish. Previously recorded runs and their pricing snapshots keep their original identity.
+- Bound connection revisions are read explicitly. The “Update to vN” action selects the newer revision for the next message.
 - Supported choices mirror the backend's existing protocol constraints. Codex/Anthropic translation is not advertised without a proven enabled capability. Missing/failed connection reads do not fall back to another provider.
 
 ## Tests
 
-`session-connections.test.mjs` verifies compatibility filtering. `session-controls-dom.cjs` bundles the actual component and verifies Agent immutability, compact controls, confirmation/cancel/failure/retry, server revision capture, source-specific models, same-ID revision update availability, running-state lock, and team-member resolution using an in-memory bridge. `navigation-dom.cjs` covers the full App including settings and first send. These are DOM tests, not live provider/WebView verification.
+`session-connections.test.mjs` verifies compatibility filtering. `conversation-connection-flow.test.mjs` exercises the composer and covers native discovery, pinned revisions, selecting a different account during a turn, failure/retry, and the next send reaching that account in the same chat. `session-controls-dom.cjs` covers Agent identity, choosing the next model and connection revision, and team-member resolution. These tests use an in-memory bridge.

@@ -173,7 +173,7 @@ export function conversationRows(events: readonly TimelineEvent[], running: bool
     const lastRunId = [...turn].reverse().find((event) => event.runId)?.runId;
     const streaming = turn.some((event) => !event.background && event.data.kind === "message" && event.data.streaming);
     const completed = !streaming && (!running || Boolean(lastRunId && finishedRuns.has(lastRunId)) || (!last && !lastRunId));
-    const lastContent = [...turn].reverse().find((event) => !["activity", "run_status", "error", "approval"].includes(event.data.kind));
+    const lastContent = [...turn].reverse().find((event) => !["activity", "run_status", "error", "approval", "workflow_plan"].includes(event.data.kind));
     // Keep the current reply in the same DOM slot while streaming and after
     // persistence/completion. Moving it out of the process fold remounts its
     // Markdown and briefly clears/reanimates an already visible answer.

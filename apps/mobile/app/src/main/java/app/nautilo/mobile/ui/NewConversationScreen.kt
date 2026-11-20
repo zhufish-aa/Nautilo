@@ -56,11 +56,12 @@ import app.nautilo.mobile.data.*
     var effort by rememberSaveable { mutableStateOf("") }
     var permissionMode by rememberSaveable { mutableStateOf("") }
     var agentMode by rememberSaveable { mutableStateOf("") }
+    var teamId by rememberSaveable(state.host?.id) { mutableStateOf("") }
     var modeSettings by remember { mutableStateOf(false) }
     var picker by remember { mutableStateOf<CreationPicker?>(null) }
     var newProject by remember { mutableStateOf(false) }
     var configuration by remember { mutableStateOf(false) }
-    var configurationBefore by remember { mutableStateOf(listOf("", "", "", "", "", "")) }
+    var configurationBefore by remember { mutableStateOf(listOf("", "", "", "", "", "", "")) }
     var returnToConfiguration by remember { mutableStateOf(false) }
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -95,7 +96,7 @@ import app.nautilo.mobile.data.*
     val canSend = (state.newDraft.isNotBlank() || state.newAttachments.isNotEmpty()) && !state.attachmentLoading && state.connected && !state.changing && !state.setupLoading &&
         !state.catalogLoading && project != null && agent != null
     val send = {
-        if (canSend) model.createSession(projectId, agentId, connectionId, selectedModel, effort, firstMessage = state.newDraft, permissionMode = permissionMode, agentMode = agentMode)
+        if (canSend) model.createSession(projectId, agentId, connectionId, selectedModel, effort, firstMessage = state.newDraft, permissionMode = permissionMode, agentMode = agentMode, teamId = teamId)
         Unit
     }
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -127,7 +128,7 @@ import app.nautilo.mobile.data.*
             onAttach = { files.launch(arrayOf("*/*")) }, onRemoveAttachment = { model.removeAttachment(it, newConversation = true) }, onVoice = voice, onSend = send,
             configurationEnabled = !state.setupLoading && !state.changing, onConfiguration = {
                 focus.clearFocus(); keyboard?.hide()
-                configurationBefore = listOf(agentId, connectionId, selectedModel, effort, permissionMode, agentMode)
+                configurationBefore = listOf(agentId, connectionId, selectedModel, effort, permissionMode, agentMode, teamId)
                 configuration = true
             },
             onModes = if ("session.modes" in state.capabilities) { { modeSettings = true } } else null)
@@ -136,6 +137,7 @@ import app.nautilo.mobile.data.*
         agentId = configurationBefore[0]; connectionId = configurationBefore[1]
         selectedModel = configurationBefore[2]; effort = configurationBefore[3]
         permissionMode = configurationBefore[4]; agentMode = configurationBefore[5]
+        teamId = configurationBefore[6]
         configuration = false; returnToConfiguration = false
     }
     val dismissPicker = {
@@ -150,18 +152,19 @@ import app.nautilo.mobile.data.*
         if (field == null) NewConversationSettingsContent(agent?.text("name") ?: "选择 Harness", connection?.text("name") ?: "原生配置",
             if (state.catalogLoading) "正在加载…" else chosen?.text("displayName", selectedModel) ?: "默认模型",
             if (efforts.isEmpty()) null else effortName(effort).ifEmpty { "默认" }, !state.catalogLoading,
-            cancel = cancelConfiguration, done = { configuration = false }, choose = { value ->
+            team = teamSelectionName(teamId, state), cancel = cancelConfiguration, done = { configuration = false }, choose = { value ->
                 returnToConfiguration = true; configuration = false; picker = value
             })
         else CreationChoiceContent(field, state, projectId, agentId, connectionId, selectedModel, effort,
-            refresh = { model.loadNewModels(agentId, connectionId, refresh = true) },
-            newProject = { picker = null; newProject = true }, dismiss = dismissPicker) { value ->
+            refresh = { if (field == CreationPicker.Team) model.loadSetup() else model.loadNewModels(agentId, connectionId, refresh = true) },
+            newProject = { picker = null; newProject = true }, dismiss = dismissPicker, team = teamId) { value ->
             when (field) {
                 CreationPicker.Project -> { if (projectId != value) { permissionMode = ""; agentMode = "" }; projectId = value }
                 CreationPicker.Harness -> { if (agentId != value) { permissionMode = ""; agentMode = "" }; agentId = value }
                 CreationPicker.Connection -> connectionId = value
                 CreationPicker.Model -> { selectedModel = value; effort = state.newModels.find { it.text("id") == value }?.let { it.text("defaultReasoningEffort").ifBlank { it.strings("reasoningEfforts").firstOrNull().orEmpty() } }.orEmpty() }
                 CreationPicker.Effort -> effort = value
+                CreationPicker.Team -> teamId = value
             }
             picker = null
             if (returnToConfiguration) { returnToConfiguration = false; configuration = true }
@@ -176,7 +179,7 @@ import app.nautilo.mobile.data.*
 }
 
 @Composable internal fun NewConversationSettingsContent(harness: String, connection: String, model: String, effort: String?,
-    ready: Boolean, cancel: () -> Unit, done: () -> Unit, choose: (CreationPicker) -> Unit) {
+    ready: Boolean, team: String = "独立工作", cancel: () -> Unit, done: () -> Unit, choose: (CreationPicker) -> Unit) {
     Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).padding(horizontal = 20.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("模型与设置", Modifier.weight(1f), fontSize = 20.sp, fontWeight = FontWeight.Medium)
@@ -187,6 +190,7 @@ import app.nautilo.mobile.data.*
             ConfigurationChoice("连接", connection, Icons.Outlined.PersonOutline) { choose(CreationPicker.Connection) }
             ConfigurationChoice("模型", model, Icons.Outlined.Layers) { choose(CreationPicker.Model) }
             if (effort != null) ConfigurationChoice("推理强度", effort, Icons.Outlined.AutoAwesome) { choose(CreationPicker.Effort) }
+            ConfigurationChoice("协作团队", team, Icons.Outlined.Groups) { choose(CreationPicker.Team) }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             NTextButton(cancel, modifier = Modifier.testTag("new-config-cancel")) { Text("取消") }

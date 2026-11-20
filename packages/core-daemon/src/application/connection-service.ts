@@ -48,8 +48,9 @@ function normalize(input: RuntimeConnectionInput): RuntimeConnectionInput {
     return { ...common, protocol: input.protocol, baseUrl: url.toString().replace(/\/$/, "") };
   }
   const candidate = { providerId: input.harness, baseArgs: [], providerOptions: { loginProfileDirectory: input.loginProfileDirectory } } as unknown as AgentInstance;
-  if (input.harness === "antigravity") {
-    if (input.nativeLogin !== true) return invalid("nativeLogin", "Antigravity uses its official unified Google account");
+  if (input.harness === "antigravity" || input.harness === "opencode") {
+    if (input.nativeLogin !== true) return invalid("nativeLogin", "Use this harness's native account and configuration");
+    if (input.harness === "opencode" && input.loginProfileDirectory !== undefined && !loginProfileDirectory(candidate)) return invalid("loginProfileDirectory", "Choose an isolated account directory");
     return { ...common, harness: input.harness, nativeLogin: true, loginProfileDirectory: input.loginProfileDirectory };
   }
   if (input.nativeLogin === true) return invalid("nativeLogin", "This harness requires an isolated account directory");
@@ -65,6 +66,7 @@ export class ConnectionService {
   get(id: string, revision?: number): RuntimeConnection { return readConnection(this.database, id, revision); }
   upsert(input: IpcRequestMap["connection.upsert"]["input"]): RuntimeConnection {
     const value = normalize(input.connection);
+    if (value.kind === "login" && value.harness === "opencode" && !value.loginProfileDirectory && this.database.runtimeConnections.list().some(item => item.id !== value.id && item.kind === "login" && item.harness === "opencode" && item.nativeLogin && !item.loginProfileDirectory)) return invalid("harness", "Use the existing native OpenCode connection");
     if (value.kind === "login" && value.harness === "antigravity" && this.database.runtimeConnections.list().some(item => item.id !== value.id && item.kind === "login" && item.harness === "antigravity")) return invalid("harness", "Antigravity shares one official Google account through the OS keyring; use the existing connection");
     if (input.clearApiKey !== undefined && typeof input.clearApiKey !== "boolean") return invalid("clearApiKey", "Use a boolean value");
     if (input.expectedRevision !== undefined && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)) return invalid("expectedRevision", "Use a positive integer revision");

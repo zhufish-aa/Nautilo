@@ -316,7 +316,8 @@ for (const tool of tools) {
   for (const [camel,snake] of Object.entries({tabId:"tab_id",spaceId:"space_id",timeoutMs:"timeout_ms",controlTimeoutMs:"control_timeout_ms",viewId:"view_id",jsonPath:"json_path"})) {
     if (properties[camel] || properties[snake]) properties[camel] = properties[snake] = properties[camel] ?? properties[snake];
   }
-  properties.contract_version = {type:"integer",enum:[1,2],default:1,description:"1 preserves existing responses; 2 returns the strict receipt envelope with uppercase errors and data payload."};
+  // Gemini's Schema enum is string-only; integer bounds preserve the same 1/2 contract.
+  properties.contract_version = {type:"integer",minimum:1,maximum:2,default:1,description:"1 preserves existing responses; 2 returns the strict receipt envelope with uppercase errors and data payload."};
 }
 const readProperties=tools.find(tool=>tool.name === "browser_read").inputSchema.properties;
 Object.assign(readProperties,{format:{enum:["text","refs"],default:"text"},root:{type:"string"},view_id:{type:"string"},viewId:{type:"string"},limit:{type:"integer",minimum:1,maximum:24000,description:"Character limit for text; node count 1–200 for format:refs."}});

@@ -88,6 +88,7 @@ fn item_events(event_type: &str, item: &Value, raw: &Value) -> Vec<AdapterEvent>
                         additions: change.get("additions").and_then(number_of),
                         deletions: change.get("deletions").and_then(number_of),
                         diff: change.get("diff").and_then(text_of).or_else(|| change.get("patch").and_then(text_of)),
+                        snapshot: None,
                         raw: Some(raw.clone()),
                     })
                 })
@@ -432,6 +433,7 @@ fn parse_item(method: &str, params: &Value) -> Vec<AdapterEvent> {
                     additions: change.get("additions").and_then(number_of),
                     deletions: change.get("deletions").and_then(number_of),
                     diff: change.get("diff").and_then(text_of).or_else(|| change.get("patch").and_then(text_of)),
+                    snapshot: None,
                     raw: Some(params.clone()),
                 })
             })

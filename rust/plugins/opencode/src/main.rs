@@ -6,6 +6,8 @@
 
 mod runtime;
 mod history;
+mod file_changes;
+mod runtime_tools;
 #[cfg(test)]
 mod tests;
 
@@ -118,7 +120,9 @@ fn build_opencode_mcp_config(servers: Option<&Value>) -> Option<Value> {
 /// Add run-scoped MCP entries through OpenCode's native config overlay.
 /// Native global/project files and their unknown fields remain untouched.
 fn runtime_environment(request: &Value) -> anyhow::Result<HashMap<String, String>> {
-    let mut env = agenthub_plugin_sdk::connection::prepare_request(request, env_of(request))?;
+    let mut env = if request.pointer("/instance/providerOptions/nativeLogin") == Some(&json!(true)) {
+        env_of(request)
+    } else { agenthub_plugin_sdk::connection::prepare_request(request, env_of(request))? };
     if let Some(config) = build_opencode_mcp_config(request.get("mcpServers")) {
         let mut merged: Value = env.get("OPENCODE_CONFIG_CONTENT")
             .map(|text| serde_json::from_str(text)).transpose()?.unwrap_or_else(||json!({}));
@@ -138,11 +142,12 @@ fn executable_of(instance: &Value) -> String {
 }
 
 async fn capture(command: &str, args: &[&str], env: Option<HashMap<String, String>>) -> (String, Option<i32>) {
+    let inherit_env = env.is_none();
     let mut started = match process::start(&ProcessRequest {
         command: command.to_string(),
         args: args.iter().map(|s| s.to_string()).collect(),
         env,
-        inherit_env: true,
+        inherit_env,
         timeout_ms: Some(8_000),
         idle_timeout_ms: Some(4_000),
         max_output_bytes: Some(512 * 1024),
@@ -173,9 +178,11 @@ struct ManagedServer {
     events: Arc<Runtime>,
     terminals: AtomicUsize,
     external_use: AtomicBool,
+    runtime_tools: Option<runtime_tools::RuntimeTools>,
 }
 impl ManagedServer {
     async fn close(&self) {
+        if let Some(tools) = &self.runtime_tools { tools.close(); }
         self.events.close();
         self.handle.cancel().await;
     }
@@ -216,7 +223,8 @@ impl OpenCodePlugin {
         let env = env_of(request);
         let mut pairs: Vec<(&String, &String)> = env.iter().collect();
         pairs.sort();
-        let config = json!({"env":pairs,"baseArgs":instance["baseArgs"],"providerOptions":instance["providerOptions"],
+        let local = request["runtimeTools"].as_array().filter(|tools| !tools.is_empty()).map(|_| &request["localSessionId"]);
+        let config = json!({"env":pairs,"baseArgs":instance["baseArgs"],"providerOptions":instance["providerOptions"],"toolSession":local,
             "models":instance["models"],"skills":request["skills"],"mcpServers":request["mcpServers"],"runtimeTools":request["runtimeTools"]});
         let hash = format!("{:x}", Sha256::digest(config.to_string().as_bytes()));
         [
@@ -243,6 +251,7 @@ impl OpenCodePlugin {
         let existing = self.pool.lock().unwrap().servers.get(&key).cloned();
         if let Some(existing) = existing {
             if existing.handle.is_alive() && existing.events.alive.load(Ordering::Acquire) {
+                if let Some(tools) = &existing.runtime_tools { tools.bind(request)?; }
                 return Ok(existing);
             }
             anyhow::ensure!(existing.terminals.load(Ordering::Acquire) == 0 && !existing.external_use.load(Ordering::Acquire),
@@ -284,6 +293,9 @@ impl OpenCodePlugin {
     ) -> anyhow::Result<Arc<ManagedServer>> {
         let instance = &request["instance"];
         let cwd = request["cwd"].as_str().unwrap_or("").to_string();
+        let daemon = self.daemon.lock().unwrap().clone();
+        let runtime_tools = runtime_tools::RuntimeTools::start(request, daemon).await?;
+        let configured = runtime_tools.as_ref().map(|tools| tools.inject(request));
         let port = std::net::TcpListener::bind("127.0.0.1:0")?
             .local_addr()?
             .port();
@@ -297,7 +309,7 @@ impl OpenCodePlugin {
                 port.to_string(),
             ],
             cwd: Some(cwd.clone()),
-            env: Some(runtime_environment(request)?),
+            env: Some(runtime_environment(configured.as_ref().unwrap_or(request))?),
             ..Default::default()
         })?;
         let base_url = format!("http://127.0.0.1:{port}");
@@ -324,7 +336,13 @@ impl OpenCodePlugin {
             _ = interrupted => Err(anyhow::anyhow!("OpenCode server startup was cancelled")),
         };
         match ready {
-            Ok(events) => Ok(Arc::new(ManagedServer {
+            Ok(events) => {
+                if let Some(tools) = &runtime_tools {
+                    if let Err(error) = tools.verify(&base_url, &cwd).await {
+                        events.close(); handle.cancel().await; return Err(error);
+                    }
+                }
+                Ok(Arc::new(ManagedServer {
                 key,
                 base_url,
                 cwd,
@@ -332,7 +350,8 @@ impl OpenCodePlugin {
                 events,
                 terminals: AtomicUsize::new(0),
                 external_use: AtomicBool::new(false),
-            })),
+                runtime_tools,
+            }))},
             Err(error) => {
                 handle.cancel().await;
                 Err(error)
@@ -612,6 +631,7 @@ fn parse_opencode_event(value: &Value) -> Vec<Value> {
                 "success": if status == "completed" { json!(true) } else if status == "error" { json!(false) } else { Value::Null },
                 "raw": value
             }));
+            events.extend(file_changes::completed(&part, value));
         }
         "step_finish" => {
             if let Some(tokens) = part.get("tokens").filter(|t| t.is_object()) {
@@ -662,7 +682,7 @@ fn with_subagent_dispatch(events: Vec<Value>, dispatch_id: &str) -> Vec<Value> {
         .into_iter()
         .filter_map(|event| {
             let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
-            if ["message", "thinking", "tool", "command"].contains(&kind) {
+            if ["message", "thinking", "tool", "command", "file"].contains(&kind) {
                 let mut mapped = event.as_object().cloned().unwrap_or_default();
                 mapped.insert("subagentDispatchId".to_string(), json!(dispatch_id));
                 Some(Value::Object(mapped))
@@ -948,9 +968,10 @@ impl ProviderPlugin for OpenCodePlugin {
         })
     }
 
-    async fn list_models(&self, instance: &Value, _context: &Value) -> anyhow::Result<Value> {
+    async fn list_models(&self, instance: &Value, context: &Value) -> anyhow::Result<Value> {
         let executable = executable_of(instance);
-        let (text, code) = capture(&executable, &["models", "--verbose"], None).await;
+        let env = context["env"].as_object().map(|_| env_of(context));
+        let (text, code) = capture(&executable, &["models", "--verbose"], env).await;
         if code != Some(0) {
             anyhow::bail!(if text.trim().is_empty() {
                 format!("opencode models --verbose exited with {}", code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()))
@@ -958,7 +979,11 @@ impl ProviderPlugin for OpenCodePlugin {
                 text.trim().to_string()
             });
         }
-        Ok(parse_opencode_models(&text))
+        let mut catalog = parse_opencode_models(&text);
+        if instance.pointer("/providerOptions/nativeLogin") == Some(&json!(true)) {
+            if let Some(models) = catalog["models"].as_array_mut() { models.retain(|model| model["id"].as_str().is_some_and(|id| id.starts_with("opencode/") || id.starts_with("opencode-go/"))); }
+        }
+        Ok(catalog)
     }
 
     async fn start(
@@ -967,6 +992,9 @@ impl ProviderPlugin for OpenCodePlugin {
         request: Value,
         resume: Option<String>,
     ) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+        if request.pointer("/instance/providerOptions/nativeLogin") == Some(&json!(true)) {
+            anyhow::ensure!(request["model"].as_str().is_some_and(|model| model.starts_with("opencode/") || model.starts_with("opencode-go/")), "Select an OpenCode free, Zen or Go model");
+        }
         if request["providerCommand"] == "compact" && resume.is_none() {
             anyhow::bail!("OpenCode context compaction requires an existing provider session");
         }
@@ -1097,11 +1125,14 @@ impl OpenCodePlugin {
     async fn spawn_run(&self, control: &Arc<RunControl>, request: Value, args: Vec<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         agenthub_plugin_sdk::images::read_request_images(&request)?;
         let instance = request.get("instance").cloned().unwrap_or(Value::Null);
+        let daemon = self.daemon.lock().unwrap().clone();
+        let tools = runtime_tools::RuntimeTools::start(&request, daemon).await?;
+        let configured = tools.as_ref().map(|tools| tools.inject(&request));
         let started = process::start(&ProcessRequest {
             command: executable_of(&instance),
             args,
             cwd: request.get("cwd").and_then(Value::as_str).map(str::to_string),
-            env: Some(runtime_environment(&request)?),
+            env: Some(runtime_environment(configured.as_ref().unwrap_or(&request))?),
             timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
             idle_timeout_ms: request.get("idleTimeoutMs").and_then(Value::as_u64),
             max_output_bytes: Some(request.get("maxOutputBytes").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(20 * 1024 * 1024)),
@@ -1112,6 +1143,7 @@ impl OpenCodePlugin {
         started.handle.end_stdin();
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
         tokio::spawn(async move {
+            let _tools = tools;
             let _ = sender.send(json!({ "kind": "commands", "commands": native_commands() }));
             let mut pending_stdout = String::new();
             let mut pending_stderr = String::new();
@@ -1187,13 +1219,15 @@ impl OpenCodePlugin {
                 route.finish(130, None);
                 return Ok(());
             }
-            let reused = self
-                .pool
-                .lock()
-                .unwrap()
-                .servers
-                .get(&Self::server_key(&request))
-                .is_some_and(|s| s.handle.is_alive() && s.events.alive.load(Ordering::Acquire));
+            let (reused, reason) = {
+                let pool = self.pool.lock().unwrap();
+                match pool.servers.get(&Self::server_key(&request)) {
+                    Some(s) if s.handle.is_alive() && s.events.alive.load(Ordering::Acquire) => (true, "resident"),
+                    Some(_) => (false, "process_exited"),
+                    None if pool.servers.values().any(|s| s.events.has_local(&route.local_id)) => (false, "configuration_changed"),
+                    None => (false, "first_use"),
+                }
+            };
             server = self.server_for_control(&request, Some(control)).await?;
             if control.cancelled.load(Ordering::Acquire) {
                 self.retire_if_unused(&server).await;
@@ -1226,7 +1260,7 @@ impl OpenCodePlugin {
                 .events
                 .begin(&session_id, &user_message, route.clone())?;
             *control.native.lock().unwrap() = Some((server.clone(), route.clone()));
-            let _ = sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"opencode","transport":"http-sse","reused":reused,"pid":server.handle.pid,"attachMs":attached.elapsed().as_millis()}}));
+            let _ = sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"opencode","transport":"http-sse","reused":reused,"reason":reason,"pid":server.handle.pid,"attachMs":attached.elapsed().as_millis()}}));
             let _ = sender.send(json!({"kind":"status","phase":"runtime_capabilities","raw":{"providerId":"opencode","source":"native-handshake","transport":"http-sse","reported":{"sessionStatusReady":true,"sessionBackgroundEvents":true}}}));
             let _ = sender.send(json!({"kind":"commands","commands":native_commands()}));
             let _ = sender.send(json!({"kind":"session","providerSessionId":session_id,"raw":{"providerUserMessageId":user_message}}));
@@ -1343,9 +1377,8 @@ async fn submit_prompt(
         }
         let mut body = Map::new();
         let selected = request.get("model").and_then(Value::as_str).map(|model| {
-            if instance
-                .pointer("/providerOptions/runtimeConnectionId")
-                .is_some()
+            if instance.pointer("/providerOptions/runtimeConnectionId").is_some()
+                && instance.pointer("/providerOptions/nativeLogin") != Some(&json!(true))
             {
                 format!("nautilo/{model}")
             } else {
@@ -1594,6 +1627,11 @@ fn enrich_model(model: &mut Value, json_text: &str) {
         return;
     };
     let Some(object) = model.as_object_mut() else { return };
+    let mut pricing = Map::new();
+    for (source, target) in [("input", "input"), ("output", "output"), ("cache_read", "cacheRead"), ("cache_write", "cacheWrite")] {
+        if let Some(value) = meta["cost"][source].as_f64().filter(|value| value.is_finite() && *value >= 0.0) { pricing.insert(target.into(), json!(value)); }
+    }
+    if !pricing.is_empty() { object.insert("pricing".into(), Value::Object(pricing)); }
     if let Some(name) = meta.get("name").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
         object.insert("displayName".to_string(), json!(name));
     }

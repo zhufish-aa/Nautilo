@@ -2,7 +2,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { UI_EASE_OUT, useUiReducedMotion } from "../../lib/ui-motion";
-import { Orbit, BarChart3, Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { Orbit, BarChart3, Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2, Workflow } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { NautiloMark } from "../ui/IdentityAvatar";
 import { cn, formatRelativeTime } from "../../lib/utils";
@@ -161,6 +161,10 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
           </button>
         </div>
         <div className="sidebar-feature-nav">
+          <NavLink to="/workflows" className={rowClass}>
+            {location.pathname === "/workflows" && activeSurface}
+            <Workflow size={16} aria-hidden/>{zh ? "工作流" : "Workflows"}
+          </NavLink>
           <NavLink to="/settings?section=agents" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Boxes size={16} />{zh ? "Harness 管理" : "Harnesses"}</NavLink>
           <NavLink to="/settings?section=skills" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Puzzle size={16} />{zh ? "技能与连接器" : "Skills & connectors"}</NavLink>
           <NavLink to="/runs" className={rowClass}>

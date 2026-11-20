@@ -1,0 +1,123 @@
+.wf-preview-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--wf-selection-stroke) 42%, var(--wf-border));
+  color: var(--wf-code-ink);
+}
+.wf-preview-status {
+  color: var(--wf-code-ink);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.wf-node { --wf-beam-ink: var(--wf-flow-ink); }
+.wf-node[data-motion-state="looping"] { --wf-beam-ink: var(--wf-loop-flow-ink); }
+.wf-canvas { --wf-play-state: running; }
+.wf-canvas[data-motion-playing="false"] { --wf-play-state: paused; }
+
+.wf-node-breath {
+  position: absolute;
+  inset: -2px -2px auto auto;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--wf-surface-card);
+  border-radius: 50%;
+  background: var(--wf-beam-ink);
+}
+.wf-success-mark { display: inline-grid; place-items: center; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .wf-canvas[data-motion-reduced="false"] .wf-node-plate {
+    transition: translate var(--wf-motion-micro) var(--wf-motion-panel-ease), border-color 120ms ease, box-shadow 120ms ease;
+  }
+  .wf-canvas[data-motion-reduced="false"] .wf-node-content { transition: translate var(--wf-motion-micro) var(--wf-motion-panel-ease); }
+  .wf-canvas[data-motion-reduced="false"] .wf-node-plate::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: var(--wf-shadow-raised);
+    opacity: 0;
+    transition: opacity var(--wf-motion-micro) ease;
+  }
+  .wf-canvas[data-motion-reduced="false"] :is(.wf-wire-row, .wf-wire-caption) { transition: opacity var(--wf-motion-micro) ease; }
+  .wf-canvas[data-dragging] :is(.wf-node-plate, .wf-node-content) { transition: none; }
+
+  .wf-canvas[data-motion-reduced="false"] .wf-port-face { transition: scale var(--wf-motion-micro) var(--wf-motion-spring); }
+  .wf-canvas[data-motion-reduced="false"] .wf-port[data-linking="true"] .wf-port-face { scale: var(--wf-port-scale); }
+  .wf-canvas[data-motion-reduced="false"] .wf-input-magnet {
+    scale: var(--wf-port-scale);
+    animation: wf-magnet-in var(--wf-motion-micro) var(--wf-motion-spring);
+  }
+
+  .workflow-studio[data-motion-reduced="false"] .wf-library-list {
+    transition: opacity var(--wf-motion-panel) var(--wf-motion-panel-ease), translate var(--wf-motion-panel) var(--wf-motion-panel-ease), display var(--wf-motion-panel) allow-discrete;
+  }
+  .workflow-studio[data-motion-reduced="false"] .wf-library-list[hidden] { opacity: 0; translate: -5px 0; pointer-events: none; }
+  @starting-style {
+    .workflow-studio[data-motion-reduced="false"] .wf-editor-grid[data-library-transition="true"] .wf-library-list:not([hidden]) { opacity: 0; translate: -5px 0; }
+  }
+
+  .wf-canvas[data-motion-reduced="false"] .wf-node-beam {
+    position: absolute;
+    inset: -1px;
+    padding: var(--wf-beam-width);
+    border-radius: inherit;
+    container-type: size;
+    overflow: hidden;
+    mask: linear-gradient(var(--wf-surface-card) 0 0) content-box, linear-gradient(var(--wf-surface-card) 0 0);
+    mask-composite: exclude;
+  }
+  .wf-node-beam::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: calc(max(100cqw, 100cqh) * 1.5);
+    aspect-ratio: 1;
+    background: conic-gradient(from .09turn, transparent 0 75%, color-mix(in srgb, var(--wf-beam-ink) 22%, transparent) 80%, var(--wf-beam-ink) 96%, var(--wf-beam-ink) 98%, transparent);
+    transform: translate(-50%, -50%) rotate(0turn);
+    animation: wf-beam-spin 2200ms linear infinite;
+    animation-play-state: var(--wf-play-state);
+  }
+  .wf-canvas[data-motion-reduced="false"] .wf-node-breath {
+    animation: wf-breath 1500ms ease-in-out infinite;
+    animation-play-state: var(--wf-play-state);
+  }
+
+  .wf-wire-row { --wf-dash-distance: -8px; }
+  .wf-wire-row[data-limit="true"] { --wf-dash-distance: -6px; }
+  .wf-canvas[data-motion-reduced="false"] .wf-wire-row[data-loop-moving="true"] > .wf-wire {
+    animation: wf-dash-flow 420ms linear infinite;
+    animation-play-state: var(--wf-play-state);
+  }
+  .wf-join-ripple, .wf-node-flash {
+    position: absolute;
+    inset: -2px;
+    border: 2px solid var(--wf-emerald-ink);
+    border-radius: inherit;
+    animation: wf-pass-flash 400ms var(--wf-motion-panel-ease) both;
+    animation-play-state: var(--wf-play-state);
+  }
+  .wf-join-ripple {
+    border-color: var(--wf-join-ripple);
+    animation-name: wf-join-ripple;
+    animation-duration: var(--wf-ripple-duration);
+  }
+  .wf-success-mark[data-flash="true"] {
+    animation: wf-check-in var(--wf-motion-micro) var(--wf-motion-spring) both;
+    animation-play-state: var(--wf-play-state);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine) {
+  .wf-canvas[data-motion-reduced="false"] .wf-node[data-hovered="true"] :is(.wf-node-plate, .wf-node-content) { translate: 0 var(--wf-node-lift); }
+  .wf-canvas[data-motion-reduced="false"] .wf-node[data-hovered="true"] .wf-node-plate::before { opacity: 1; }
+  .wf-canvas[data-motion-reduced="false"] .wf-port:hover .wf-port-face { scale: var(--wf-port-scale); }
+}
+
+@keyframes wf-beam-spin { to { transform: translate(-50%, -50%) rotate(1turn); } }
+@keyframes wf-breath { 0%, 100% { scale: .85; opacity: .58; } 50% { scale: 1.14; opacity: 1; } }
+@keyframes wf-dash-flow { to { stroke-dashoffset: var(--wf-dash-distance); } }
+@keyframes wf-magnet-in { from { scale: .92; opacity: .7; } }
+@keyframes wf-join-ripple { from { scale: .98; opacity: .65; } to { scale: 1.54; opacity: 0; } }
+@keyframes wf-pass-flash { from { scale: .99; opacity: .75; } to { scale: 1.025; opacity: 0; } }
+@keyframes wf-check-in { from { scale: .88; opacity: .55; } to { scale: 1; opacity: 1; } }

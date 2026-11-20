@@ -107,11 +107,11 @@ internal fun toolInputFileDiff(name: String, input: String): JSONObject? {
     val after = parsed.firstString(if (kind == "write") listOf("content", "text", "data") else listOf("new_string", "newString", "new_text", "newText", "after")) ?: return null
     return json("operation" to kind, "path" to parsed.firstText(pathKeys), "before" to before, "after" to after).apply { if (parsed.optBoolean("__truncated")) put("truncated", true) }
 }
-internal fun reasoningPreview(text: String, streaming: Boolean): String {
-    val paragraphs = text.trimStart().split(Regex("\\r?\\n[\\t ]*\\r?\\n"))
-    return (if (streaming && paragraphs.size > 1) paragraphs[paragraphs.size - 2] else paragraphs.firstOrNull().orEmpty())
-        .lineSequence().firstOrNull().orEmpty().replace(Regex("^\\s*(?:#{1,6}\\s+|[-*>]\\s+)"), "")
-        .replace(Regex("\\[([^]]+)]\\([^)]*\\)"), "$1").replace(Regex("\\*\\*|__|`"), "").trim().take(500)
+internal fun reasoningPreview(text: String): String {
+    // Keep the newest line during streaming and after completion. Trailing
+    // paragraph separators must not clear the preview or rewind it to the start.
+    return text.trimEnd().substringAfterLast('\n').replace(Regex("^\\s*(?:#{1,6}\\s+|[-*>]\\s+)"), "")
+        .replace(Regex("\\[([^]]+)]\\([^)]*\\)"), "$1").replace(Regex("\\*\\*|__|`"), "").trim().takeLast(500)
 }
 internal data class ToolOutput(val status: String? = null, val fields: List<Pair<String, String>> = emptyList(), val text: String = "")
 internal fun toolOutput(output: String): ToolOutput {

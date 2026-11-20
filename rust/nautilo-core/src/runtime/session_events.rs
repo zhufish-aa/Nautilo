@@ -78,6 +78,23 @@ pub(super) struct NativeOrigin {
 }
 
 impl RunService {
+    /// Serialize cleanup with user turns, then verify ownership again. An old
+    /// workflow must never close a session that another turn has since taken over.
+    pub(crate) async fn release_native_session_if_latest(&self, session: &Value, expected_run: &str) -> CoreResult<bool> {
+        let session_id = session["id"].as_str().unwrap_or("");
+        let (sender,receiver) = tokio::sync::oneshot::channel();
+        self.session_queue.enqueue_launch(session_id,None,||async move {
+            let latest = Repositories::new(&self.db.lock().unwrap().raw).runs().latest_for_session(session_id);
+            let result = match latest {
+                Ok(Some(latest)) if latest["id"] == expected_run => self.release_native_session(session).await.map(|_|true),
+                Ok(_) => Ok(false), Err(error) => Err(error),
+            };
+            let _ = sender.send(result);
+            let (_,completion) = watch::channel(true);
+            Ok(("native-session-cleanup".into(),completion))
+        }).await;
+        receiver.await.map_err(|_|CoreError::reason(ErrorCode::IpcInternalError,"Native cleanup result was lost"))?
+    }
     /// Main-agent partial output is committed on a stopped/closed foreground
     /// stream; child output must stay buffered for its native completion.
     pub(super) fn handoff_message_buffers(
@@ -423,7 +440,10 @@ impl RunService {
         let service = Arc::downgrade(self);
         let expected = session.clone();
         let instance = agent.clone();
-        let context = json!({"projectRunId":context.project_run_id,"taskId":context.task_id});
+        let context = json!({
+            "projectRunId":context.project_run_id,"taskId":context.task_id,"workflow":context.workflow,
+            "workflowReference":context.workflow_reference,"runId":run["id"],"messageKind":context.message_kind,
+        });
         let tool = Arc::new(move |input: Value| {
             let service = service.upgrade();
             let expected = expected.clone();

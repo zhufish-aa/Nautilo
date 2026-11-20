@@ -1,6 +1,7 @@
 Pinned upstream sources (MIT OR Apache-2.0; licenses are retained per crate):
   iroh 1.4.1: https://github.com/n0-computer/iroh
   noq-proto 1.4.0: https://github.com/n0-computer/noq
+  netwatch 0.19.3: https://github.com/n0-computer/net-tools
 
 Nautilo changes:
   noq-proto/src/config/transport.rs: optional per-path STREAM payload filter.
@@ -14,8 +15,16 @@ Nautilo changes:
   noq-proto/src/n0_nat_traversal.rs + connection/mod.rs: read-only peer candidate
     diagnostics on both QUIC sides (server REACH_OUT, client ADD_ADDRESS).
   iroh/src/endpoint/connection.rs: expose those candidates under unstable-net-report.
+  iroh/src/socket/stun.rs + socket/transports: bounded RFC 5389 Binding probes
+    share the exact QUIC socket and normal receive loop. Validate transaction ID,
+    response source, framing and XOR-MAPPED-ADDRESS; never compete for UDP reads.
+  iroh/src/endpoint.rs: explicit probe_stun API; applications own refresh/expiry
+    and must verify an actual QUIC IP path before describing a connection as direct.
 
 Only the patches and pinned checksums are tracked in rust/patches.
+Android's netwatch socket patch retains an explicit Network binding across UDP
+socket recovery. Iroh exposes this for its UDP sockets only; TCP/HTTP and
+process-wide routing remain unchanged. OS binding failures are returned.
 scripts/prepare-rust-sources.mjs downloads the official crates, verifies SHA-256,
 applies the patches and verifies the complete patched source tree. Generated
 sources and archives live in rust/vendor/generated and are excluded from Git.

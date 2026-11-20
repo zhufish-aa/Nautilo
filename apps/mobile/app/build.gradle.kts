@@ -28,8 +28,8 @@ android {
         applicationId = "app.nautilo.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.1.12"
+        versionCode = 25
+        versionName = "0.1.24"
         manifestPlaceholders["appLabel"] = "Nautilo"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

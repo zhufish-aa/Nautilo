@@ -10,8 +10,11 @@ use crate::errors::{not_found, now_iso, CoreResult};
 use crate::ipc_gateway::Router;
 
 pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
+    reg(router, daemon, "composerDraft.list", |d, _| crate::application::composer_drafts::list(d));
+    reg(router, daemon, "composerDraft.write", |d, input| crate::application::composer_drafts::write(d, &input));
     reg(router, daemon, "remote.status", |d, _| d.remote.status().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
     { let remote=daemon.remote.clone(); router.register("remote.diagnostics",move|_| { let remote=remote.clone(); async move { remote.diagnostics().await } }); }
+    { let remote=daemon.remote.clone(); router.register("remote.relays",move|input| { let remote=remote.clone(); async move { remote.relays(input).await } }); }
     reg(router, daemon, "remote.invite", |d, _| d.remote.invite().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
     reg(router, daemon, "remote.cancelInvite", |d, _| d.remote.cancel_invite().map_err(|e|crate::errors::invalid("remote", &e.to_string())));
     reg(router, daemon, "remote.approve", |d, input| d.remote.approve(input).map_err(|e|crate::errors::invalid("remote", &e.to_string())));
@@ -27,7 +30,16 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             result.map(|mut result|{if let Some(error)=result["error"].as_str(){let redacted=daemon.redaction.text(error);result["error"]=json!(redacted);}result}).map_err(|error|anyhow::Error::new(crate::errors::invalid("sourceControl",&daemon.redaction.text(&error.to_string()))))
         }});
     }
-    router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION, "features":{"sourceControl":1,"sourceControlHistory":1,"sourceControlHistoryPaging":1,"sourceControlEditing":1,"terminalTabs":1} })) });
+    router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION, "features":{"sourceControl":1,"sourceControlHistory":1,"sourceControlHistoryPaging":1,"sourceControlEditing":1,"terminalTabs":1,"composerDrafts":1,"taskRetry":1,"workflows":1,"workflowPlans":1} })) });
+    reg(router,daemon,"workflow.templates",|d,_|d.workflows.list_templates());
+    reg(router,daemon,"workflow.template",|d,input|d.workflows.get_template(&input));
+    reg(router,daemon,"workflow.save",|d,input|d.workflows.save_template(&input));
+    reg(router,daemon,"workflow.validate",|d,input|Ok(d.workflows.validate(&input)));
+    reg(router,daemon,"workflow.list",|d,input|d.workflows.list(&input));
+    reg(router,daemon,"workflow.get",|d,input|d.workflows.inspect(input["runId"].as_str().unwrap_or("")));
+    reg(router,daemon,"workflow.start",|d,input|d.workflows.start(&input));
+    reg(router,daemon,"workflow.plan.decide",|d,input|d.workflows.decide_plan(&input));
+    reg(router,daemon,"workflow.control",|d,input|d.workflows.control(&input));
     reg(router,daemon,"terminal.open",|d,input| {
         let session=input["sessionId"].as_str().map(|id|Repositories::new(&d.db.lock().unwrap().raw).sessions().get(id)).transpose()?.flatten();
         let project_id=input["projectId"].as_str().or_else(||session.as_ref().and_then(|session|session["projectId"].as_str())).unwrap_or("");
@@ -85,6 +97,7 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         let daemon=daemon.clone();
         router.register("terminal.status",move |input|{let daemon=daemon.clone();async move {
             let id=input["sessionId"].as_str().unwrap_or("");
+            if input["retrySync"]==true { daemon.runs.sync_native_file_changes(id).await?; }
             daemon.runs.reconcile_native_history(id,input["retrySync"]==true).await?;
             daemon.runs.native_terminal_status(id).map_err(anyhow::Error::new)
         }});
@@ -393,6 +406,9 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             input.get("memberId").and_then(Value::as_str).unwrap_or(""),
             input.get("mode").and_then(Value::as_str).unwrap_or("resume"),
         )
+    });
+    reg(router, daemon, "orchestration.retryTask", |d, input| {
+        d.orchestration.retry_task(input["projectRunId"].as_str().unwrap_or(""), input["taskId"].as_str().unwrap_or(""))
     });
     {
         let daemon = daemon.clone();

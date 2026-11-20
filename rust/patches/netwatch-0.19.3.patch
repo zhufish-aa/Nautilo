@@ -1,0 +1,116 @@
+--- a/src/udp.rs
++++ b/src/udp.rs
+@@ -19,6 +19,7 @@
+ #[derive(Debug)]
+ pub struct UdpSocket {
+     socket: RwLock<SocketState>,
++    network_handle: std::sync::atomic::AtomicU64,
+     recv_waker: AtomicWaker,
+     send_waker: AtomicWaker,
+     /// Set to true, when an error occurred, that means we need to rebind the socket.
+@@ -81,7 +82,7 @@
+     pub fn rebind(&self) -> io::Result<()> {
+         {
+             let mut guard = self.socket.write().unwrap();
+-            guard.rebind()?;
++            guard.rebind(self.network_handle.load(std::sync::atomic::Ordering::Acquire))?;
+ 
+             // Clear errors
+             self.is_broken
+@@ -97,10 +98,11 @@
+     }
+ 
+     fn bind_raw(addr: impl Into<SocketAddr>) -> io::Result<Self> {
+-        let socket = SocketState::bind(addr.into())?;
++        let socket = SocketState::bind(addr.into(), 0)?;
+ 
+         Ok(UdpSocket {
+             socket: RwLock::new(socket),
++            network_handle: std::sync::atomic::AtomicU64::new(0),
+             recv_waker: AtomicWaker::default(),
+             send_waker: AtomicWaker::default(),
+             is_broken: AtomicBool::new(false),
+@@ -187,6 +189,18 @@
+         let (socket, _state) = guard.try_get_connected()?;
+ 
+         socket.local_addr()
++    }
++
++    /// Bind only this UDP socket to an Android Network. The binding is retained
++    /// when recovering the socket; process-wide routing and TCP are unchanged.
++    #[cfg(target_os = "android")]
++    pub fn bind_android_network(&self, handle: u64) -> io::Result<()> {
++        use std::os::fd::AsRawFd;
++        let guard = self.socket.write().unwrap();
++        let (socket, _) = guard.try_get_connected()?;
++        bind_android_network(handle, socket.as_raw_fd())?;
++        self.network_handle.store(handle, std::sync::atomic::Ordering::Release);
++        Ok(())
+     }
+ 
+     /// Closes the socket, and waits for the underlying `libc::close` call to be finished.
+@@ -294,7 +308,7 @@
+             return Ok(());
+         }
+ 
+-        guard.rebind()?;
++        guard.rebind(self.network_handle.load(std::sync::atomic::Ordering::Acquire))?;
+         self.is_broken
+             .store(false, std::sync::atomic::Ordering::Release);
+         drop(guard);
+@@ -761,13 +775,21 @@
+         }
+     }
+ 
+-    fn bind(addr: SocketAddr) -> io::Result<Self> {
++    fn bind(addr: SocketAddr, network_handle: u64) -> io::Result<Self> {
+         let network = IpFamily::from(addr.ip());
+         let socket = socket2::Socket::new(
+             network.into(),
+             socket2::Type::DGRAM,
+             Some(socket2::Protocol::UDP),
+         )?;
++
++        #[cfg(target_os = "android")]
++        if network_handle != 0 {
++            use std::os::fd::AsRawFd;
++            bind_android_network(network_handle, socket.as_raw_fd())?;
++        }
++        #[cfg(not(target_os = "android"))]
++        let _ = network_handle;
+ 
+         if let Err(err) = socket.set_recv_buffer_size(SOCKET_BUFFER_SIZE) {
+             debug!(
+@@ -817,7 +839,7 @@
+         })
+     }
+ 
+-    fn rebind(&mut self) -> io::Result<()> {
++    fn rebind(&mut self, network_handle: u64) -> io::Result<()> {
+         let addr = match self {
+             Self::Connected { addr, .. } => *addr,
+             Self::Closed { addr, .. } => *addr,
+@@ -835,7 +857,7 @@
+             };
+         }
+ 
+-        match Self::bind(addr) {
++        match Self::bind(addr, network_handle) {
+             Ok(new_state) => {
+                 *self = new_state;
+                 Ok(())
+@@ -899,6 +921,14 @@
+     }
+ }
+ 
++#[cfg(target_os = "android")]
++fn bind_android_network(handle: u64, fd: std::os::fd::RawFd) -> io::Result<()> {
++    #[link(name = "android")]
++    unsafe extern "C" { fn android_setsocknetwork(network: u64, fd: i32) -> i32; }
++    if unsafe { android_setsocknetwork(handle, fd) } == 0 { Ok(()) }
++    else { Err(io::Error::last_os_error()) }
++}
++
+ impl Drop for UdpSocket {
+     fn drop(&mut self) {
+         if let Some((socket, _)) = self.socket.write().unwrap().close()

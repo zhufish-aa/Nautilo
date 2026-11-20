@@ -22,8 +22,9 @@ const tools = [
 const programs = [JSON.stringify({ description: "检查文件", code: "const r = await read();\nconsole.log(r);" }),
   '{"description":"部分代码","code":"console.log(\\"hello\\");\\nconst n = ', "console.log('raw code');"]
   .map(input => ({ input, expected: codeExecutionInput(input) }));
-const previews = [["## 检查文件\n\n后面的段落还在输出", true], ["**完整的想法** [链接](https://example.com)\n\n下一段", false], ["读取文件\n\n正在读取…\n\n", true]]
-  .map(([text, streaming]) => ({ text, streaming, expected: reasoningPreview(text, streaming) }));
+const previews = ["## 检查文件\n\n后面的段落还在输出", "**完整的想法** [链接](https://example.com)\n\n下一段", "读取文件\n\n正在读取…\n\n",
+  "First\n\nSecond\nLatest line\r\n \t\r\n", "旧思考。".repeat(200) + "正在检查最新文件", "检查\n- **正在读取** [文件](https://example.com) `src/main.ts`", ""]
+  .map(text => ({ text, expected: reasoningPreview(text) }));
 const outputs = ["plain output", "requested cancellation of job task-42", JSON.stringify({ kind: "promoted", jobId: "job-1", cwd: "D:\\Nautilo", timeoutMs: 15000, output: "started" }),
   JSON.stringify({ status: "running", jobId: "job-2", output: "more output" }), JSON.stringify({ exitCode: 0, output: "done" })]
   .map(input => ({ input, expected: toolOutput(input, true) }));

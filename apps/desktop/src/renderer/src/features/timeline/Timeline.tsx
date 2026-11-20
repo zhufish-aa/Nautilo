@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { BrowserActivity } from "./BrowserActivity";
 import { isBrowserTool } from "../../lib/browser-display";
@@ -9,6 +9,7 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ChevronRight,
   Copy,
   FileCode2,
   FileText,
@@ -16,27 +17,38 @@ import {
   GitBranch,
   ImageIcon,
   Loader2,
-  Pencil
+  Pencil,
+  Terminal,
+  Workflow
 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { SessionErrorCard } from "./SessionErrorCard";
-import { getBridge } from "../../lib/bridge";
+import { getBridge, requestCore } from "../../lib/bridge";
+import { useSessionsStore } from "../../stores/sessions";
+import { useCoreFeatures } from "../../lib/use-core-features";
+import { delegationActivity } from "../../lib/delegation-activity";
 import { cn, formatDateTime } from "../../lib/utils";
 import type { TimelineEvent } from "../../lib/types";
+import type { WorkflowMention } from "@agenthub/domain";
+import { WorkflowPlanCard } from "../sessions/WorkflowPlanCard";
 import { StatusChip, Tag } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
-import { resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
+import { ensureProjectRunHydrated, resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
 import { toolActivityLabel, toolInputFileDiff } from "../../lib/tool-display";
 import { MarkdownContent } from "./MarkdownContent";
 import { DelegationCard } from "./DelegationCard";
 import { CodeExecutionCard } from "./CodeExecutionCard";
 import { ProcessDisclosure } from "./ProcessDisclosure";
 import { ToolActivityIcon } from "./ToolActivityIcon";
+import { WorkflowToolActivity, workflowTool } from "./WorkflowToolActivity";
 import { ManagedApprovalCard } from "./ManagedApprovalCard";
 import { reasoningPreview } from "../../lib/process-display";
 import { useStreamingText } from "../../lib/streaming-text";
-import { useMessageEntrance, useSurfaceEntrance } from "../../lib/ui-motion";
+import { useMessageEntrance, useSurfaceEntrance, useUiReducedMotion } from "../../lib/ui-motion";
+import { ConversationNavigator } from "./ConversationNavigator";
+import { locationAtRow, type ConversationLocation } from "../../lib/conversation-navigation";
 import { reconcileTimelineKeys, type TimelineKeySequence } from "../../lib/timeline-row-keys";
+import { resolveReadingAnchor, timelinePositions } from "../../lib/timeline-position";
 import { ToolFileDiffView } from "./ToolFileDiffView";
 import { TimelineImage } from "./TimelineImage";
 import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupTextMenu } from "./media-actions";
@@ -45,8 +57,10 @@ import { resolveFileOpenTarget } from "../../lib/file-references";
 import { fileChangeCounts } from "../../lib/changed-files";
 import { diffLines } from "../../lib/line-diff";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import "./conversation-details.css";
 
 const FOLLOW_TAIL_THRESHOLD = 120;
+const EMPTY_LOCATIONS: ConversationLocation[] = [];
 
 /**
  * Owns the vertical viewport for a timeline. TimelineEventView below is a
@@ -54,6 +68,8 @@ const FOLLOW_TAIL_THRESHOLD = 120;
  * control the scrolling element.
  */
 export interface TimelineRow {
+  result?: boolean;
+  estimatedHeight?: number;
   key: string;
   render: () => ReactNode;
 }
@@ -71,6 +87,8 @@ export function TimelineViewport({
   sessionKey,
   contentKey,
   forceFollowKey,
+  focusKey,
+  locations = EMPTY_LOCATIONS,
   active = true,
   className
 }: {
@@ -78,6 +96,8 @@ export function TimelineViewport({
   sessionKey: string;
   contentKey?: unknown;
   forceFollowKey?: string;
+  focusKey?: string;
+  locations?: ConversationLocation[];
   active?: boolean;
   className?: string;
 }): JSX.Element {
@@ -85,23 +105,33 @@ export function TimelineViewport({
   const contentRef = useSurfaceEntrance<HTMLDivElement>(sessionKey, active);
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
-  const previousForceFollowKeyRef = useRef(forceFollowKey);
+  const previousForceFollowKeyRef = useRef({ sessionKey, key: forceFollowKey });
   const previousContentKeyRef = useRef<unknown>(contentKey);
   const previousRowCountRef = useRef(rows.length);
   const virtualized = rows.length > 80;
+  const reduced = useUiReducedMotion();
+  const [currentLocation, setCurrentLocation] = useState(0);
+  const navigationLock = useRef(false);
+  const pendingNavigation = useRef<ConversationLocation>();
 
   const keySequenceRef = useRef<TimelineKeySequence>();
   const keySequence = reconcileTimelineKeys(keySequenceRef.current, rows, sessionKey);
   keySequenceRef.current = keySequence;
+  const previousKeys = useRef(keySequence);
+  const pendingReading = useRef<{ key: string; offset: number }>();
 
   const virtualizer = useVirtualizer({
+    // Measuring a newly mounted row can update the virtual window during a
+    // React commit. Batch that update instead of re-entering it with flushSync.
+    useFlushSync: false,
     enabled: active && virtualized,
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    // A folded turn block (header + fold row + answer) is typically under
-    // 100px; estimate low so the scrollbar starts near the measured total
-    // instead of visibly shrinking as rows get measured.
-    estimateSize: () => 96,
+    initialOffset: () => timelinePositions.get(sessionKey)?.top ?? 0,
+    scrollPaddingStart: 12,
+    // Compact steps start folded at 30px. Guessing a full message height for
+    // each one makes long turns shrink under the scrollbar as rows appear.
+    estimateSize: (index) => rows[index]?.estimatedHeight ?? 96,
     // Keep overscan tight: each row renders markdown on mount, and extra
     // off-screen rows would parse long answers before they are visible.
     overscan: 2,
@@ -120,16 +150,120 @@ export function TimelineViewport({
       element.scrollTop = element.scrollHeight;
     }
     lastScrollTopRef.current = element.scrollTop;
-  }, [active]);
+    timelinePositions.set(sessionKey, { top: element.scrollTop, follow: true });
+  }, [active, sessionKey]);
 
-  // A newly opened session (or a page becoming visible again) starts at the
-  // tail. This runs after the layout has a real height, unlike a one-time
-  // scroll in the parent workbench.
+  const jumpToLocation = useCallback((location: ConversationLocation) => {
+    pendingReading.current = undefined;
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    followTailRef.current = false;
+    navigationLock.current = true;
+    setCurrentLocation(locationAtRow(locations, location.rowIndex));
+    const row = viewport.querySelector<HTMLElement>(`[data-index="${location.rowIndex}"]`);
+    if (row) {
+      pendingNavigation.current = undefined;
+      const top = row.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop - 12;
+      viewport.scrollTo({ top: Math.max(0, top), behavior: reduced || virtualized ? "auto" : "smooth" });
+      timelinePositions.set(sessionKey, { top: Math.max(0, top), follow: false });
+    } else if (virtualized) {
+      pendingNavigation.current = location;
+      virtualizer.scrollToIndex(location.rowIndex, { align: "start" });
+    }
+  }, [locations, reduced, sessionKey, virtualized, virtualizer]);
+  const focused = useRef<string>();
+  useEffect(() => {
+    if (!active || !focusKey || focused.current === `${sessionKey}:${focusKey}`) return;
+    const index = focusKey === "result" ? rows.reduce((last,row,index) => row.result ? index : last, -1) : keySequence.keys.indexOf(focusKey);
+    if (index < 0) return;
+    focused.current = `${sessionKey}:${focusKey}`;
+    jumpToLocation({ id: focusKey, rowKey: rows[index].key, rowIndex: index, title: "", preview: "", timestamp: "" });
+  }, [focusKey, sessionKey, active, keySequence, jumpToLocation]);
+
+  // The target may not have a DOM node until the virtualizer changes windows.
+  // Once measured, align it exactly instead of leaving the estimate as the result.
+  const visibleRows = virtualizer.getVirtualItems();
+  const windowStart = visibleRows[0]?.index;
+  const windowEnd = visibleRows[visibleRows.length - 1]?.index;
+  const saveReadingPosition = (viewport: HTMLDivElement): void => {
+    if (!active) return;
+    const scrollTop = viewport.scrollTop;
+    let firstIndex: number | undefined;
+    let locationIndex: number | undefined;
+    let offset = 0;
+    if (virtualized) {
+      const first = virtualizer.getVirtualItemForOffset(scrollTop + 1);
+      firstIndex = first?.index;
+      offset = first ? Math.max(0, scrollTop - first.start) : 0;
+      locationIndex = virtualizer.getVirtualItemForOffset(scrollTop + 32)?.index;
+    } else {
+      const top = viewport.getBoundingClientRect().top;
+      const items = contentRef.current?.children;
+      if (items) for (let index = 0; index < items.length; index++) {
+        const rectangle = items[index].getBoundingClientRect();
+        if (firstIndex === undefined && rectangle.bottom > top + 1) {
+          firstIndex = index;
+          offset = Math.max(0, top - rectangle.top);
+        }
+        if (rectangle.bottom > top + 32) { locationIndex = index; break; }
+      }
+    }
+    timelinePositions.set(sessionKey, { top: scrollTop, follow: followTailRef.current,
+      rowKey: firstIndex === undefined ? undefined : rows[firstIndex]?.key, offset });
+    if (locationIndex !== undefined) setCurrentLocation(locationAtRow(locations, locationIndex));
+  };
+  useLayoutEffect(() => {
+    const target = pendingNavigation.current;
+    const viewport = scrollRef.current;
+    if (!target || !viewport) return;
+    const row = viewport.querySelector<HTMLElement>(`[data-index="${target.rowIndex}"]`);
+    if (!row) return;
+    const top = row.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop - 12;
+    pendingNavigation.current = undefined;
+    viewport.scrollTop = Math.max(0, top);
+    lastScrollTopRef.current = viewport.scrollTop;
+    timelinePositions.set(sessionKey, { top: viewport.scrollTop, follow: false });
+  }, [windowStart, windowEnd, sessionKey, virtualizer.getTotalSize()]);
+
+  // Returning to a conversation restores the reader's position. Live updates
+  // keep following only if the reader left it at the tail.
   useLayoutEffect(() => {
     if (!active) return;
-    followTailRef.current = true;
-    scrollToTail();
+    pendingNavigation.current = undefined;
+    navigationLock.current = false;
+    const saved = timelinePositions.get(sessionKey);
+    followTailRef.current = saved?.follow ?? true;
+    const viewport = scrollRef.current;
+    if (viewport && saved && !saved.follow) {
+      viewport.scrollTop = saved.top;
+      lastScrollTopRef.current = viewport.scrollTop;
+    } else scrollToTail();
   }, [active, scrollToTail, sessionKey]);
+
+  // Row IDs survive streaming, history prepends and folding. Pixel offsets
+  // alone cannot preserve the reader when rows before the viewport change.
+  useLayoutEffect(() => {
+    const previous = previousKeys.current;
+    previousKeys.current = keySequence;
+    if (!active || followTailRef.current || pendingNavigation.current) return;
+    const saved = timelinePositions.get(sessionKey);
+    const index = resolveReadingAnchor(saved?.rowKey, keySequence.keys, previous.sessionKey === sessionKey ? previous.keys : []);
+    if (index < 0) return;
+    pendingReading.current = { key: keySequence.keys[index], offset: saved?.rowKey === keySequence.keys[index] ? saved.offset ?? 0 : 0 };
+    if (virtualized) virtualizer.scrollToIndex(index, { align: "start" });
+  }, [keySequence, active, sessionKey, virtualized]);
+  useLayoutEffect(() => {
+    const pending = pendingReading.current;
+    const viewport = scrollRef.current;
+    if (!pending || !viewport || followTailRef.current) return;
+    const index = keySequence.keys.indexOf(pending.key);
+    const row = viewport.querySelector<HTMLElement>(`[data-index="${index}"]`);
+    if (!row) return;
+    pendingReading.current = undefined;
+    viewport.scrollTop += row.getBoundingClientRect().top - viewport.getBoundingClientRect().top + pending.offset;
+    lastScrollTopRef.current = viewport.scrollTop;
+    timelinePositions.set(sessionKey, { top: viewport.scrollTop, follow: false, rowKey: pending.key, offset: pending.offset });
+  }, [keySequence, windowStart, windowEnd, active, sessionKey, virtualizer.getTotalSize()]);
 
   // Event arrays are replaced for both appended events and streaming patches.
   // The virtualizer re-measures rows, so a growing live turn changes the total
@@ -149,12 +283,17 @@ export function TimelineViewport({
   }, [rows.length, scrollToTail]);
 
   useLayoutEffect(() => {
-    if (forceFollowKey === previousForceFollowKeyRef.current) return;
-    previousForceFollowKeyRef.current = forceFollowKey;
+    const previous = previousForceFollowKeyRef.current;
+    previousForceFollowKeyRef.current = { sessionKey, key: forceFollowKey };
+    // Opening a cached conversation is not a newly sent message.
+    if (previous.sessionKey !== sessionKey || forceFollowKey === previous.key) return;
     if (forceFollowKey === undefined) return;
+    pendingNavigation.current = undefined;
+    navigationLock.current = false;
     followTailRef.current = true;
+    pendingReading.current = undefined;
     scrollToTail();
-  }, [forceFollowKey, scrollToTail]);
+  }, [forceFollowKey, scrollToTail, sessionKey]);
 
   // Child streams/Markdown workers can commit after the parent's event effect.
   // Observe actual content and viewport sizes, then pin once on the next frame.
@@ -190,6 +329,8 @@ export function TimelineViewport({
   }, [totalSize, scrollToTail]);
 
   return (
+    <div className="relative h-full min-h-0">
+    {active && <ConversationNavigator sessionKey={sessionKey} locations={locations} current={followTailRef.current ? Math.max(0, locations.length - 1) : currentLocation} onNavigate={jumpToLocation} />}
     <div
       ref={scrollRef}
       onScroll={(event) => {
@@ -200,15 +341,30 @@ export function TimelineViewport({
           // Collapsing process rows or enlarging the viewport clamps scrollTop
           // to a smaller bottom offset. That is not the user scrolling up.
           followTailRef.current = false;
-        } else if (gap < FOLLOW_TAIL_THRESHOLD && element.scrollTop > lastScrollTopRef.current) {
+        } else if (!navigationLock.current && gap < FOLLOW_TAIL_THRESHOLD && element.scrollTop > lastScrollTopRef.current) {
           // Only scrolling DOWN into the tail re-engages follow mode.
           followTailRef.current = true;
         }
         lastScrollTopRef.current = element.scrollTop;
+        saveReadingPosition(element);
       }}
       onWheel={(event) => {
+        navigationLock.current = false;
+        pendingNavigation.current = undefined;
+        pendingReading.current = undefined;
         // Wheel input is the other explicit way to pause follow mode.
         if (event.deltaY < 0) followTailRef.current = false;
+      }}
+      onPointerDown={() => { navigationLock.current = false; pendingNavigation.current = undefined; pendingReading.current = undefined; }}
+      onClickCapture={(event) => {
+        const trigger = event.target instanceof Element && event.target.closest("button.process-disclosure-row, button.conversation-process-toggle, button.conversation-file-change");
+        if (!trigger || !event.currentTarget.contains(trigger)) return;
+        // Reading a past detail is a manual navigation. Do not follow its expanding height back to the tail.
+        navigationLock.current = true;
+        followTailRef.current = false;
+        pendingReading.current = undefined;
+        pendingNavigation.current = undefined;
+        saveReadingPosition(event.currentTarget);
       }}
       style={{ overflowAnchor: "none", willChange: "scroll-position" }}
       className={cn("relative h-full overflow-y-auto", className)}
@@ -232,6 +388,7 @@ export function TimelineViewport({
           </div>
         ))}
       </div>
+    </div>
     </div>
   );
 }
@@ -287,11 +444,11 @@ function CardShell({
 function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor = true }: {
   event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> };
   locale: "zh-CN" | "en-US";
-  onEditMessage?: (messageId: string, text: string) => void;
+  onEditMessage?: (messageId: string, text: string, workflowRef?: WorkflowMention) => void;
   onOpenLocalFile?: (path: string) => void;
   showAuthor?: boolean;
 }): JSX.Element {
-  const { sender, authorName, text, streaming, messageId, attachments, editedAt } = event.data;
+  const { sender, authorName, text, streaming, messageId, attachments, editedAt, workflowRef } = event.data;
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
@@ -326,6 +483,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
             void popupTextMenu(window.getSelection()?.toString() ?? "", t);
           }}
         >
+          {isUser && workflowRef && <span className="workflow-reference-chip mb-1.5" title={"v" + workflowRef.revision}><Workflow size={13} aria-hidden /><span>{workflowRef.name}</span></span>}
           <MarkdownContent source={visibleText} inverted={false} onOpenLocalFile={onOpenLocalFile} streaming={Boolean(streaming)} />
           {attachments && attachments.length > 0 && (
             <div className={cn("mt-2.5 grid gap-2", attachments.length > 1 && "sm:grid-cols-2")}>
@@ -388,7 +546,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
             {isUser && messageId && onEditMessage && (
               <button
                 type="button"
-                onClick={() => onEditMessage(messageId, text)}
+                onClick={() => onEditMessage(messageId, text, workflowRef)}
                 className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-card-hover hover:text-ink"
                 aria-label={locale === "zh-CN" ? "编辑" : "Edit"}
                 title={locale === "zh-CN" ? "编辑" : "Edit"}
@@ -420,9 +578,9 @@ function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kin
   const [open, setOpen] = useState(false);
   const streaming = Boolean(event.data.streaming);
   const visibleText = useStreamingText(event.data.text, streaming, `${event.sessionId}:${event.id}`);
-  const preview = useMemo(() => reasoningPreview(visibleText, streaming), [visibleText, streaming]);
+  const preview = useMemo(() => reasoningPreview(visibleText), [visibleText]);
   return <ProcessDisclosure className="reasoning-card" icon={<Atom size={14} />} label={locale === "zh-CN" ? "思考" : "Thinking"}
-    preview={preview} open={open} onToggle={() => setOpen(value => !value)} running={streaming}>
+    preview={preview} followPreviewTail open={open} onToggle={() => setOpen(value => !value)} running={streaming}>
     <MarkdownContent source={visibleText} streaming={streaming} />
   </ProcessDisclosure>;
 }
@@ -494,6 +652,9 @@ function SubagentCard({ event, locale, onOpenSubagent }: { event: TimelineEvent 
       ? t("sessions.status.completed")
       : t("sessions.cards.failed");
   const activityCount = subagent?.activities?.length ?? 0;
+  const activities = subagent?.activities ?? [];
+  const latest = [...activities].reverse().find(data => delegationActivity(data, locale === "zh-CN"));
+  const result = status === "done" ? [...activities].reverse().find(data => data.kind === "message" && data.sender === "agent" && !data.streaming) : undefined;
   return (
     <DelegationCard
       name={subagent?.agentType || t("sessions.cards.subagent")}
@@ -502,6 +663,8 @@ function SubagentCard({ event, locale, onOpenSubagent }: { event: TimelineEvent 
       tone={tone}
       running={status === "running"}
       native
+      activity={delegationActivity(latest, locale === "zh-CN")}
+      result={delegationActivity(result, locale === "zh-CN")}
       zh={locale === "zh-CN"}
       meta={[subagent?.model, subagent?.background ? t("sessions.cards.subagentBackground") : undefined].filter((value): value is string => Boolean(value))}
       actionLabel={activityCount > 0 ? t("sessions.cards.subagentDetailCount", { count: activityCount }) : t("sessions.cards.subagentDetail")}
@@ -599,6 +762,14 @@ function RecoveryDecisionCard({ event, locale }: { event: TimelineEvent & { data
 }
 
 function TaskUpdateCard({ event, t, locale, onOpenSession }: { event: TimelineEvent & { data: { kind: "task_update" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string; onOpenSession?: (id: string) => void }): JSX.Element {
+  const features = useCoreFeatures();
+  const child = useSessionsStore(state => state.sessions.find(session => session.id === event.data.sessionId || session.taskId === event.data.taskId));
+  const owner = useSessionsStore(state => state.sessions.find(session => session.id === event.sessionId));
+  const latest = useSessionsStore(state => {
+    const items = child ? state.events[child.id] : undefined;
+    return items && [...items].reverse().find(item => delegationActivity(item.data, locale === "zh-CN"));
+  });
+  const result = useSessionsStore(state => child && event.data.status === "completed" ? [...(state.events[child.id] ?? [])].reverse().find(item => item.data.kind === "message" && item.data.sender === "agent" && !item.data.streaming) : undefined);
   const statusTone: Record<string, "muted" | "info" | "accent" | "ok" | "danger" | "warn"> = {
     draft: "muted",
     ready: "muted",
@@ -623,7 +794,16 @@ function TaskUpdateCard({ event, t, locale, onOpenSession }: { event: TimelineEv
       running={event.data.status === "running" || event.data.status === "verifying"}
       cancelled={event.data.status === "cancelled"}
       zh={locale === "zh-CN"}
-      onOpen={event.data.sessionId && onOpenSession ? () => onOpenSession(event.data.sessionId!) : undefined}
+      onOpen={child && onOpenSession ? () => onOpenSession(child.id) : undefined}
+      actionLabel={event.data.status === "completed" ? (locale === "zh-CN" ? "查看结果" : "View result") : undefined}
+      activity={delegationActivity(latest?.data, locale === "zh-CN")}
+      result={delegationActivity(result?.data, locale === "zh-CN")}
+      onRetry={features.taskRetry && owner?.projectRunId && ["failed", "cancelled"].includes(event.data.status) ? async () => {
+        const projectRunId = owner?.projectRunId;
+        if (!projectRunId) return;
+        await requestCore("orchestration.retryTask", { projectRunId, taskId: event.data.taskId });
+        await ensureProjectRunHydrated(projectRunId);
+      } : undefined}
       input={event.data.dispatchCall?.input}
       output={event.data.dispatchCall?.output}
       toolName={event.data.dispatchCall?.toolName}
@@ -632,46 +812,32 @@ function TaskUpdateCard({ event, t, locale, onOpenSession }: { event: TimelineEv
   );
 }
 
-function commandPresentation(command: string): { summary: string; full: string } {
-  const full = command.replaceAll("\\\\", "\\").replace(/\s+/g, " ").trim();
-  const executableMatch = full.match(/^"([^"]+)"|^(\S+)/);
-  const executable = (executableMatch?.[1] ?? executableMatch?.[2] ?? "command").split(/[\\/]/).at(-1)?.replace(/\.exe$/i, "") ?? "command";
-  const commandBody = full.match(/(?:^|\s)-(?:Command|c)\s+(.+)$/i)?.[1]?.replace(/^"|"$/g, "")
-    ?? full.slice(executableMatch?.[0].length ?? 0).trim();
-  const targetPath = commandBody.match(/-(?:LiteralPath|Path)\s+['"]([^'"]+)['"]/i)?.[1];
-  const operation = commandBody.match(/^([\w-]+)/)?.[1];
-  const targetName = targetPath?.split(/[\\/]/).at(-1);
-  const label = targetName
-    ? [executable, operation, targetName].filter(Boolean).join(" · ")
-    : commandBody ? `${executable} · ${commandBody}` : executable;
-  return { full, summary: label.length > 96 ? `${label.slice(0, 93)}…` : label };
+function commandPresentation(command: string): { executor?: string; summary: string } {
+  const singleLine = command.replace(/\s+/g, " ").trim();
+  const prefix = singleLine.match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/);
+  const executor = (prefix?.[1] ?? prefix?.[2] ?? prefix?.[3])?.split(/[\\/]/).at(-1)?.replace(/\.exe$/i, "");
+  const argumentsText = singleLine.slice(prefix?.[0].length ?? 0).trim();
+  const summary = /^(?:powershell|pwsh)$/i.test(executor ?? "")
+    ? argumentsText.match(/(?:^|\s)-(?:Command|c)\s+(.+)$/i)?.[1]?.replace(/^"|"$/g, "") ?? argumentsText
+    : argumentsText;
+  return { executor, summary };
 }
 
 function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "command" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
   const [open, setOpen] = useState(false);
   const { command, status, exitCode, output, attempts = 1 } = event.data;
-  const presented = commandPresentation(command);
+  const { executor, summary } = commandPresentation(command);
   const zh = locale === "zh-CN";
-  return (
-    <article>
-      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}
-        className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-[13px] text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50">
-        {status === "running" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-label={t("sessions.cards.running")} />}
-        {status === "failed" && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
-        {status === "done" && <ToolActivityIcon name="exec_command" input={JSON.stringify({ command })} />}
-        <span className="truncate" title={presented.full}>{zh ? "运行" : "Ran"} {presented.summary}</span>
-        {attempts > 1 && <span className="shrink-0 text-xs">{zh ? `${attempts} 次` : `${attempts} attempts`}</span>}
-        <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !open && "-rotate-90")} aria-hidden />
-      </button>
-      {open && (
-        <div className="mt-2 max-h-72 overflow-auto rounded-xl border border-line bg-card">
-          <pre className="px-3.5 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all text-ink-2">{presented.full}</pre>
-          {output && <pre className="border-t border-line px-3.5 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-ink-2">{output}</pre>}
-          {exitCode !== undefined && <p className={cn("border-t border-line px-3.5 py-2 text-xs", exitCode === 0 ? "text-ink-3" : "text-danger")}>{t("sessions.cards.exitCode", { code: exitCode })}</p>}
-        </div>
-      )}
-    </article>
-  );
+  return <ProcessDisclosure className="command-card" icon={status === "failed" ? <AlertTriangle size={14} /> : <Terminal size={14} />}
+    label={zh ? "运行" : status === "running" ? "Running" : "Ran"} badge={executor} preview={summary} previewTitle={command} monospace retainPreview
+    open={open} onToggle={() => setOpen(value => !value)} running={status === "running"} failed={status === "failed"}
+    accessory={status === "running" || attempts > 1 ? <>{status === "running" && <span className="sr-only">{t("sessions.cards.running")}</span>}{attempts > 1 && (zh ? `${attempts} 次` : `${attempts} attempts`)}</> : undefined}>
+    <div className="command-disclosure-output">
+      <pre><code>{command}</code></pre>
+      {output && <pre>{output}</pre>}
+      {exitCode !== undefined && <p className="command-disclosure-exit" data-failed={exitCode !== 0 || undefined}>{t("sessions.cards.exitCode", { code: exitCode })}</p>}
+    </div>
+  </ProcessDisclosure>;
 }
 
 function FileChangeCard({
@@ -688,34 +854,48 @@ function FileChangeCard({
   onOpenLocalFile?: (path: string) => void;
 }): JSX.Element {
   const { files } = event.data;
+  const rows = files.map(file => ({ file, counts: file.comparisonUnavailable ? undefined : fileChangeCounts(file) }));
+  const totals = rows.reduce((sum, { counts }) => counts ? {
+    additions: sum.additions + counts.additions, deletions: sum.deletions + counts.deletions, known: sum.known + 1,
+  } : sum, { additions: 0, deletions: 0, known: 0 });
+  const columnStyles = {
+    "--conversation-added-width": `${Math.max(3, String(totals.additions).length + 1)}ch`,
+    "--conversation-removed-width": `${Math.max(3, String(totals.deletions).length + 1)}ch`,
+  } as CSSProperties;
+  const renderCounts = ({ additions, deletions }: { additions: number; deletions: number }) => <span className="conversation-file-counts">
+    <span className="conversation-file-added">+{additions}</span><span className="conversation-file-removed">−{deletions}</span>
+  </span>;
   return (
-    <ul className="overflow-hidden rounded-xl border border-line bg-card">
-      {event.data.source === "provider" && (
-        <li className="border-b border-line px-3.5 py-2 text-xs text-ink-3">
-          {locale === "zh-CN" ? `本轮原生差异 · ${files.length} 个文件` : `Provider turn diff · ${files.length} files`}
-        </li>
-      )}
-      {files.map((file) => {
-        const counts = fileChangeCounts(file);
+    <section className="conversation-file-changes" style={columnStyles}>
+      {event.data.source === "provider" && <header className="conversation-file-changes-header">
+        <span className="conversation-file-changes-title">{locale === "zh-CN" ? `本轮原生差异 · ${files.length} 个文件` : `Provider turn diff · ${files.length} files`}</span>
+        {totals.known > 0 && <span className="conversation-file-count-label">
+          {totals.known < files.length && (locale === "zh-CN" ? "已知变更" : "Known changes")}{renderCounts(totals)}
+        </span>}
+      </header>}
+      <ul className="conversation-file-changes-list">
+      {rows.map(({ file, counts }) => {
+        const basename = Math.max(file.path.lastIndexOf("/"), file.path.lastIndexOf("\\")) + 1;
         const open = (): void => {
           if (onViewDiff && (file.diff || !onOpenLocalFile)) onViewDiff(file.path);
           else openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
         };
         return (
-          <li key={file.path} className="border-b border-line last:border-0">
-            <button type="button" title={file.path} onClick={open}
-              className="flex w-full items-center gap-2.5 px-3.5 py-3 text-left text-[13px] outline-none transition-colors hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/50">
-              <FileCode2 className="h-4 w-4 shrink-0 text-ink-3" aria-hidden />
-              <span className="min-w-0 flex-1 truncate text-ink-2">{file.path}</span>
-              {file.comparisonUnavailable
-                ? <span className="shrink-0 text-xs text-ink-3" title={file.reason}>{locale === "zh-CN" ? "无法比较" : "Unavailable"}</span>
-                : <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
-              <ChevronDown className="h-3.5 w-3.5 -rotate-90 text-ink-3" aria-hidden />
+          <li key={file.path}>
+            <button type="button" className="conversation-file-change" title={file.path} onClick={open}>
+              <FileCode2 size={15} className="conversation-file-change-icon" aria-hidden />
+              <span className="conversation-file-name-group">
+                {basename > 0 && <span className="conversation-file-directory">{file.path.slice(0, basename)}</span>}
+                <span className="conversation-file-name">{file.path.slice(basename)}</span>
+              </span>
+              {counts ? renderCounts(counts) : <span className="conversation-file-unavailable" title={file.reason}>{locale === "zh-CN" ? "无法比较" : "Unavailable"}</span>}
+              <ChevronRight size={13} className="conversation-file-change-arrow" aria-hidden />
             </button>
           </li>
         );
       })}
-    </ul>
+      </ul>
+    </section>
   );
 }
 
@@ -847,13 +1027,15 @@ function TimelineEventViewImpl({
   onEditMessage,
   onOpenSubagent,
   onOpenLocalFile,
+  onOpenWorkflow,
   showAuthor = true
 }: {
   event: TimelineEvent;
   onViewDiff?: (path?: string) => void;
   onOpenSession?: (id: string) => void;
-  onEditMessage?: (messageId: string, text: string) => void;
+  onEditMessage?: (messageId: string, text: string, workflowRef?: WorkflowMention) => void;
   onOpenSubagent?: (eventId: string) => void;
+  onOpenWorkflow?: (runId: string) => void;
   /** Work mode only: local file clicks route to the session's preview pane. */
   onOpenLocalFile?: (path: string) => void;
   showAuthor?: boolean;
@@ -864,6 +1046,8 @@ function TimelineEventViewImpl({
   switch (data.kind) {
     case "message":
       return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />;
+    case "workflow_plan":
+      return <WorkflowPlanCard key={data.plan.id} plan={data.plan} runStatus={data.runStatus} onViewExecution={onOpenWorkflow}/>;
     case "provider_ui":
       if (data.method === "open_url" && data.url) return <a href={data.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 py-1 text-[13px] text-accent underline underline-offset-4" onClick={(event) => { const bridge = getBridge(); if (bridge) { event.preventDefault(); void bridge.shell.openExternal(data.url!).catch(() => {}); } }}>{data.text || (locale === "zh-CN" ? "打开授权链接" : "Open authorization link")} ↗</a>;
       return data.method === "notify" ? <p className="whitespace-pre-wrap py-1 text-[13px] text-ink-2">{data.text}</p> : null;
@@ -871,12 +1055,16 @@ function TimelineEventViewImpl({
       return <ActivityLine event={event as TimelineEvent & { data: { kind: "activity" } }} locale={locale} />;
     case "reasoning":
       return <ReasoningCard event={event as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
-    case "tool_activity":
+    case "tool_activity": {
       if (data.subagent) return <SubagentCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} onOpenSubagent={onOpenSubagent} />;
-      if (data.toolName === "run_code" || data.codeExecution) return <CodeExecutionCard data={data} locale={locale} />;
+      const action = workflowTool(data.toolName);
+      if (action) return <WorkflowToolActivity action={action} name={data.toolName} sessionId={event.sessionId} runId={event.runId}
+        input={data.input} output={data.output} status={data.status} zh={locale === "zh-CN"} />;
+      if (data.toolName === "run_code" || data.codeExecution) return <CodeExecutionCard data={data} locale={locale} sessionId={event.sessionId} runId={event.runId} />;
       return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
+    }
     case "tool_group":
-        return <div className="space-y-1">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onViewDiff={onViewDiff} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />)}</div>;
+        return <div className="space-y-1">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onViewDiff={onViewDiff} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenWorkflow={onOpenWorkflow} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />)}</div>;
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
     case "artifact":
@@ -938,6 +1126,7 @@ export const TimelineEventView = memo(
     && prev.onOpenSession === next.onOpenSession
     && prev.onEditMessage === next.onEditMessage
     && prev.onOpenSubagent === next.onOpenSubagent
+    && prev.onOpenWorkflow === next.onOpenWorkflow
     && prev.onOpenLocalFile === next.onOpenLocalFile
     && prev.showAuthor === next.showAuthor
 );

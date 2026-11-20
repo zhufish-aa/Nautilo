@@ -2,6 +2,8 @@
 
 The production Electron application hosts an authenticated QUIC endpoint in the Rust daemon. The settings entry is **远程连接 / Remote access**. The native Android companion is in `apps/mobile`; see its README for the APK build and pairing instructions.
 
+Relay mode includes an on-demand public node selector and cached PC-to-relay HTTPS probes. Self-hosting (including deployment without a domain) is documented in [自建中继](remote-relay-hosting.md), with a Docker template in `deploy/iroh-relay/`. Local-only IPC `remote.relays` returns the SDK node catalog; `refresh:true` probes it without restarting the endpoint. The phone RPC allowlist does not expose this method.
+
 ## Connection model
 
 - Iroh 1.4.1 provides authenticated endpoint identities, TLS-encrypted QUIC streams, NAT traversal, network-change handling and encrypted relay fallback.
@@ -95,6 +97,9 @@ For `session.send` and `session.followUp`, the returned `messageId` identifies t
 The legacy Node daemon returns `supported:false` for remote status and `REMOTE_BACKEND_REQUIRED` for management mutations. The production Rust backend implements the transport.
 
 ## Validation
+
+Direct interface selection, same-socket STUN discovery and diagnostics are
+documented in [Direct connection discovery](remote-direct-discovery.md).
 
 Focused Rust tests use real encrypted QUIC endpoints and a temporary SQLite database. They cover pending pairing, bad/expired tokens, desktop approval, owner access, duplicate/concurrent mutation IDs, reconnect, revocation, cursor replay, durable command reservations, sanitized creation options, pinned account revisions, and Unicode directory creation. They use a stub application handler for message dispatch so these unit tests incur no model calls.
 

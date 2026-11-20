@@ -27,6 +27,8 @@ use crate::process_runtime::{ProcessEvent, ProcessRequest, ProcessRuntime, Timeo
 mod session_pool;
 #[path = "session_events.rs"]
 mod session_events;
+#[path = "workflow_tools.rs"]
+mod workflow_tools;
 
 const CODEX_WEB_SEARCH_MODE: &str = "live";
 const CODEX_MODEL_CATALOG_PREFIX: &str = "agenthub-codex-model-";
@@ -72,6 +74,7 @@ fn thread_options(request: &AdapterStartRequest, include_dynamic_tools: bool) ->
 
 fn build_codex_dynamic_tools(tools: Option<&Value>, include_image_generation: bool) -> CoreResult<Option<Value>> {
     let mut source: Vec<Value> = tools.and_then(Value::as_array).cloned().unwrap_or_default();
+    source.retain(|tool| !workflow_tools::is_workflow_tool(tool));
     if include_image_generation {
         source.retain(|tool| tool.get("name").and_then(Value::as_str) != Some(CODEX_IMAGE_GENERATION_TOOL_NAME));
         source.push(codex_image_generation_tool());
@@ -333,10 +336,12 @@ pub struct PooledCodexAppServer {
     /// cold-starts a fresh one with the new settings.
     config_fingerprint: u64,
     generation: u64,
+    spawn_reason: &'static str,
     /// Keeps the latest config tombstone alive while any old waiter can retry.
     _pool_lifetime: Arc<()>,
     /// Temp model catalog created at cold start; removed with the process.
     catalog_cleanup: Mutex<Option<PathBufCleanup>>,
+    workflow_tools: Option<workflow_tools::WorkflowTools>,
 }
 
 // Retain only configuration identity after a process exits. A queued request
@@ -393,6 +398,12 @@ fn acquire_codex_app_server_matching(
     // can still retry. Prune orphan tombstones on acquisition, without keeping
     // dead process handles or an unbounded history of deleted instance ids.
     pool.retain(|_, entry| entry.connection.is_some() || Arc::strong_count(&entry.lifetime) > 1);
+    let spawn_reason = match pool.get(&key) {
+        Some(entry) if entry.config_fingerprint != fingerprint => "configuration_changed",
+        Some(_) if queued_origin.is_some() => "transport_recovery",
+        Some(_) => "process_exited",
+        None => "first_use",
+    };
     let lifetime = pool.get(&key).map(|entry| entry.lifetime.clone()).unwrap_or_else(|| Arc::new(()));
     if let Some(dead) = pool.get(&key).and_then(|entry| entry.connection.as_ref())
         .filter(|connection| !connection.rpc.process_handle().is_alive()).cloned()
@@ -435,11 +446,15 @@ fn acquire_codex_app_server_matching(
     // Use the instance's full configured model list (not the per-run
     // model): a reused resident process serves every model switch, so
     // the catalog must not depend on the first turn's selection.
+    let workflow_tools = workflow_tools::WorkflowTools::start(request)
+        .map_err(|error| CoreError::reason(ErrorCode::RunStartFailed, error.to_string()))?;
     let model_catalog = create_codex_custom_model_catalog_file(&request.instance, None)?;
+    let mut mcp_servers = request.mcp_servers.clone().unwrap_or_default();
+    if let Some(tools) = &workflow_tools { mcp_servers.push(tools.server()); }
     let args = match build_codex_app_server_args(
         &request.instance,
         request.env.as_ref(),
-        request.mcp_servers.as_deref(),
+        Some(&mcp_servers),
         model_catalog.as_ref().map(|(path, _)| path.as_str()),
     ) {
         Ok(args) => args,
@@ -471,8 +486,10 @@ fn acquire_codex_app_server_matching(
         loaded_thread_id: Mutex::new(None),
         events: Arc::new(session_events::SessionEvents::default()),
         catalog_cleanup: Mutex::new(model_catalog.map(|(_, cleanup)| cleanup)),
+        workflow_tools,
         config_fingerprint: fingerprint,
         generation,
+        spawn_reason,
         _pool_lifetime: lifetime.clone(),
         instance_key: key.clone(),
     });
@@ -497,6 +514,7 @@ fn codex_config_fingerprint(request: &AdapterStartRequest) -> u64 {
     if let Some(servers) = &request.mcp_servers {
         json!(servers).to_string().hash(&mut hasher);
     }
+    json!(workflow_tools::specs(request)).to_string().hash(&mut hasher);
     if let Some(env) = &request.env {
         let mut keys: Vec<&String> = env.keys().collect();
         keys.sort();
@@ -606,6 +624,7 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                     }
                 }
                 let rpc = connection.rpc.clone();
+                if let Some(tools) = &connection.workflow_tools { tools.bind(&request); }
                 if let Err(error)=connection.events.listen(&rpc).await {
                     let _=sender.send(AdapterEvent::Error{message:error.to_string()});
                     rpc.process_handle().cancel().await;discard_codex_app_server(&connection);break;
@@ -622,7 +641,7 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                 }
                 let already_initialized = connection.initialized.load(Ordering::SeqCst);
                 let loaded_thread_id = connection.loaded_thread_id.lock().unwrap().clone();
-                let turn = run_turn(rpc.clone(), &request, resume_session.clone(), state.clone(), sender.clone(), already_initialized, loaded_thread_id,context.clone());
+                let turn = run_turn(rpc.clone(), &request, resume_session.clone(), state.clone(), sender.clone(), already_initialized, loaded_thread_id,context.clone(),connection.spawn_reason);
                 tokio::pin!(turn);
                 let mut timed_out = false;
                 let result = tokio::select! {
@@ -822,6 +841,7 @@ async fn run_turn(
     already_initialized: bool,
     loaded_thread_id: Option<String>,
     context: Arc<session_events::Context>,
+    spawn_reason: &'static str,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let warm_thread = resume_session.is_some() && resume_session == loaded_thread_id;
@@ -839,13 +859,13 @@ async fn run_turn(
     }
     let _ = sender.send(AdapterEvent::Status { phase: "runtime_ready".into(), raw: Some(json!({
         "providerId":"codex", "transport":"app-server", "reused":already_initialized, "pid":rpc.process_handle().pid,
-        "attachMs":started.elapsed().as_millis()
+        "attachMs":started.elapsed().as_millis(), "reason":if already_initialized {"resident"} else {spawn_reason}
     })) });
     timing("initialized");
     let thread_id = if warm_thread {
         resume_session.clone()
     } else {
-        let mut thread_params = thread_options(request, true)?;
+        let mut thread_params = thread_options(request, resume_session.is_none())?;
         let method = if resume_session.is_some() { "thread/resume" } else { "thread/start" };
         if let Some(session) = &resume_session {
             thread_params.insert("threadId".to_string(), json!(session));
@@ -1367,6 +1387,113 @@ mod queue_tests {
         pooled.rpc.process_handle().cancel().await;
         discard_codex_app_server(&pooled);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn workflow_codex_adds_tools_to_an_existing_native_thread_without_recreating_it() {
+        let (request, root) = fake_request("before-workflow-tools");
+        let native = "native-thread-created-before-workflows";
+        let mut first = start_single_connection(request.clone(), Some(native.into())).unwrap();
+        collect(&mut first).await;
+        let mut with_tools = request.clone();
+        with_tools.prompt = "workflow-tools-attached".into();
+        with_tools.runtime_tools = Some(json!([
+            {"name":"agenthub_delegate","inputSchema":{"type":"object"}},
+            {"name":"agenthub_workflow_schema","inputSchema":{"type":"object"}}
+        ]));
+        with_tools.execute_runtime_tool = Some(Arc::new(|_|Box::pin(async {
+            Ok(json!({"success":true,"content":"workflow schema"}))
+        })));
+        assert_ne!(codex_config_fingerprint(&request), codex_config_fingerprint(&with_tools));
+        let dynamic = build_codex_dynamic_tools(with_tools.runtime_tools.as_ref(), false).unwrap().unwrap();
+        assert_eq!(dynamic.as_array().unwrap().len(), 1);
+        assert_eq!(dynamic[0]["name"], "agenthub_delegate");
+        let mut second = start_single_connection(with_tools.clone(), Some(native.into())).unwrap();
+        let events = collect(&mut second).await;
+        assert!(events.iter().any(|e|matches!(e,AdapterEvent::Session{provider_session_id,..} if provider_session_id == native)));
+        let pooled = acquire_codex_app_server(&with_tools).unwrap();
+        let server = pooled.workflow_tools.as_ref().unwrap().server();
+        let args = build_codex_mcp_config_args(&[server.clone(), json!({"name":"user_mcp","transport":"http","url":"http://127.0.0.1:12345/mcp"})]);
+        assert!(args.iter().any(|a|a.contains(server["name"].as_str().unwrap())));
+        assert!(args.iter().any(|a|a.contains("user_mcp")));
+        let mut third = start_single_connection(with_tools.clone(), Some(native.into())).unwrap();
+        collect(&mut third).await;
+        assert!(Arc::ptr_eq(&pooled, &acquire_codex_app_server(&with_tools).unwrap()));
+        let log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        let messages: Vec<Value> = log.lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(messages.iter().filter(|m|m["event"] == "spawn").count(), 2);
+        assert!(!messages.iter().any(|m|m["method"] == "thread/start"));
+        let resumes:Vec<_> = messages.iter().filter(|m|m["method"] == "thread/resume").collect();
+        assert_eq!(resumes.len(), 2);
+        assert!(resumes.iter().all(|m|m["params"]["threadId"] == native && m["params"].get("dynamicTools").is_none()));
+        cleanup(&with_tools, root).await;
+    }
+
+    /// This opt-in test uses the installed CLI's real handshake, MCP discovery
+    /// and native thread persistence. It sends no turn/start or model request.
+    #[tokio::test]
+    #[ignore = "Set NAUTILO_WORKFLOW_CODEX_CLI to an installed Codex executable"]
+    async fn workflow_codex_native_cli_discovers_tools_on_the_original_persisted_thread() -> anyhow::Result<()> {
+        let executable = std::env::var("NAUTILO_WORKFLOW_CODEX_CLI")?;
+        let root = std::env::temp_dir().join(format!("nautilo-workflow-native-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("home"))?;
+        let mut environment = crate::runtime::security::environment_policy::build_environment(None, Default::default());
+        environment.insert("CODEX_HOME".into(), root.join("home").to_string_lossy().into_owned());
+        let mut request = AdapterStartRequest {
+            instance: json!({"id":Uuid::new_v4().to_string(),"executable":executable}),
+            local_session_id: Some(Uuid::new_v4().to_string()),
+            cwd: root.to_string_lossy().into_owned(),
+            env: Some(environment),
+            ..Default::default()
+        };
+        let mut processes = vec![];
+        let outcome = tokio::time::timeout(Duration::from_secs(45), async {
+            let original = acquire_codex_app_server(&request)?;
+            processes.push(original.clone());
+            original.rpc.request("initialize", codex_app_server_initialize_params()).await?;
+            original.rpc.notify("initialized", json!({}));
+            let started = original.rpc.request("thread/start", json!(thread_options(&request, true)?)).await?;
+            let native_id = started["thread"]["id"].as_str().ok_or_else(||anyhow::anyhow!("Native thread id missing"))?.to_string();
+            // An empty native thread is lazy-persisted. Append fixture history
+            // through the native API, without starting a model turn, then unload
+            // it so the CLI flushes its own rollout before transport replacement.
+            original.rpc.request("thread/inject_items", json!({"threadId":native_id,"items":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Local workflow protocol fixture. No model turn is requested."}]}]})).await?;
+            original.rpc.request("thread/unsubscribe", json!({"threadId":native_id})).await?;
+            original.rpc.process_handle().cancel().await;
+            discard_codex_app_server(&original);
+            request.runtime_tools = Some(json!([{"name":"agenthub_workflow_schema","description":"Inspect the workflow definition language.","inputSchema":{"type":"object","properties":{},"required":[]}}]));
+            request.execute_runtime_tool = Some(Arc::new(|_|Box::pin(async {Ok(json!({"success":true,"content":"workflow v1"}))})));
+            let upgraded = acquire_codex_app_server(&request)?;
+            processes.push(upgraded.clone());
+            let server = upgraded.workflow_tools.as_ref().unwrap().server();
+            upgraded.rpc.request("initialize", codex_app_server_initialize_params()).await?;
+            upgraded.rpc.notify("initialized", json!({}));
+            let mut params = thread_options(&request, false)?;
+            params.insert("threadId".into(), json!(native_id));
+            let resumed = upgraded.rpc.request("thread/resume", json!(params)).await?;
+            anyhow::ensure!(resumed["thread"]["id"] == native_id, "Codex changed the native thread identity");
+            let mut discovered = false;
+            for _ in 0..30 {
+                let status = upgraded.rpc.request("mcpServerStatus/list", json!({"limit":100})).await?;
+                if status["data"].as_array().into_iter().flatten().any(|s|s["name"] == server["name"] && s["tools"].as_object().is_some_and(|tools|tools.contains_key("workflow_schema"))) {
+                    discovered = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            anyhow::ensure!(discovered, "The real native CLI did not discover workflow_schema on its resumed thread");
+            let receipt = upgraded.rpc.request("mcpServer/tool/call",json!({"threadId":native_id,"server":server["name"],"tool":"workflow_schema","arguments":{}})).await?;
+            anyhow::ensure!(receipt.to_string().contains("workflow v1"), "Native MCP tool receipt was not returned: {receipt}");
+            Ok::<_, anyhow::Error>(())
+        }).await;
+        for process in &processes {
+            process.rpc.process_handle().cancel().await;
+            discard_codex_app_server(process);
+        }
+        drop(processes);
+        let _ = std::fs::remove_dir_all(&root);
+        outcome??;
+        Ok(())
     }
 
     #[tokio::test]

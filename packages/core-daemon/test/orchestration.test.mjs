@@ -696,6 +696,41 @@ test("cancelling an already terminal project run is a no-op success", async () =
   fixture.database.close();
 });
 
+for (const stoppedStatus of ["failed", "cancelled"]) test(`retrying one ${stoppedStatus} task preserves completed siblings and rejects duplicate dispatch`, async () => {
+  let release;
+  const gate = new Promise(done => release = done);
+  const fixture = setup({responder: ({prompt}) => prompt.includes("[AGENTHUB_PLANNER_DECISION]")
+    ? {text:JSON.stringify({mode:"direct",rationale:"main"})}
+    : prompt.includes("[AGENTHUB_DELEGATED_TASK]") ? {text:"selected task result",waitFor:gate} : {text:"done"}});
+  const started=fixture.orchestration.start({projectId:"project",teamId:"team",goal:"initial main turn"});
+  await fixture.orchestration.wait(started.projectRun.id);
+  const seed=(id,status,dependencies=[])=>({...plannedTask(id,"child",dependencies),projectRunId:started.projectRun.id,status,attempt:1,priority:1,createdAt:now,updatedAt:now});
+  const successful=seed("successful","completed"),selected=seed("selected",stoppedStatus,["successful"]);
+  fixture.database.tasks.save(successful);fixture.database.tasks.save(selected);
+  const before=fixture.prompts.length;
+  const retried=fixture.orchestration.retryTask(started.projectRun.id,"selected");
+  assert.equal(retried.attempt,2);
+  assert.throws(()=>fixture.orchestration.retryTask(started.projectRun.id,"selected"));
+  await waitUntil(()=>fixture.prompts.length>before,"selected child did not dispatch");
+  assert.deepEqual(fixture.database.tasks.get("successful"),successful);
+  release();
+  await waitUntil(()=>fixture.database.tasks.get("selected").status==="completed","selected retry did not finish");
+  assert.equal(fixture.prompts.length,before+1,"retry must not restart main or successful siblings");
+  assert.ok(fixture.database.sessions.messages(started.mainSession.id).some(message=>message.taskId==="selected"&&message.text.includes("selected task result")));
+  fixture.database.close();
+});
+
+test("a selected retry refuses blocked dependencies before changing task state", async()=>{
+  const fixture=setup({responder:({prompt})=>prompt.includes("[AGENTHUB_PLANNER_DECISION]")?{text:JSON.stringify({mode:"direct",rationale:"main"})}:{text:"done"}});
+  const started=fixture.orchestration.start({projectId:"project",teamId:"team",goal:"initial"});
+  await fixture.orchestration.wait(started.projectRun.id);
+  const task={...plannedTask("blocked","child",["missing"]),projectRunId:started.projectRun.id,status:"failed",attempt:1,priority:0,createdAt:now,updatedAt:now};
+  fixture.database.tasks.save(task);
+  assert.throws(()=>fixture.orchestration.retryTask(started.projectRun.id,task.id));
+  assert.deepEqual(fixture.database.tasks.get(task.id),task);
+  fixture.database.close();
+});
+
 test("two runtime-delegated members sharing one Codex instance execute in distinct concurrent sessions", { timeout: 10_000 }, async () => {
   const daemon = new CoreDaemon({ databasePath: ":memory:", enableGitWorkflows: false });
   const startedChildren = new Map();

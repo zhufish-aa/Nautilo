@@ -66,37 +66,29 @@ export function NewConversation({ mode = "code", onCreated, active = true }: {
     const source = connections.find((item) => item.id === member.connectionId);
     return harness && source && connectionSupportsAgent(source, harness);
   }));
-  useEffect(() => {
-    if (!configuration.connectionId && compatibleConnections.length === 1) {
-      const only = compatibleConnections[0]!;
-      setConfiguration((current) => ({ ...current, connectionId: only.id, connectionRevision: only.revision }));
-    }
-  }, [instance?.id, configuration.connectionId, compatibleConnections.length, compatibleConnections[0]?.id]);
   const blockingReason = !getBridge() ? (zh ? "请在桌面应用中连接 Agent。" : "Connect an agent in the desktop app.")
     : !project ? (zh ? "选择一个项目后即可发送。" : "Choose a project to send your message.")
     : !instance ? (zh ? "请先在设置中安装并启用一个 Harness。" : "Install and enable a harness in settings first.")
-    : !connection ? configuration.connectionId
-      ? (zh ? "所选供应商与当前 Harness 不兼容或已停用，请重新选择。" : "The selected provider is incompatible with this harness or disabled. Choose another connection.")
-      : (zh ? "请选择供应商或登录账号，然后选择模型。" : "Choose a provider or login account, then select a model.")
-    : connection.kind === "api" && connection.hasCredential === false ? (zh ? "这个供应商尚未保存 API Key，请在供应商设置中补充。" : "This provider has no saved API key. Add it in provider settings.")
+    : configuration.connectionId && !connection ? (zh ? "所选供应商与当前 Harness 不兼容或已停用，请重新选择。" : "The selected provider is incompatible with this harness or disabled. Choose another connection.")
+    : connection?.kind === "api" && connection.hasCredential === false ? (zh ? "这个供应商尚未保存 API Key，请在供应商设置中补充。" : "This provider has no saved API key. Add it in provider settings.")
     : !teamReady ? (zh ? "团队成员尚未配置兼容的 Harness 与供应商。" : "Configure a compatible harness and connection for each team member.")
-    : !selectedModel && hasConfiguredConnectionModels(connection) ? (zh ? "请在供应商设置中保存并启用一个模型。" : "Save and enable a model in provider settings.")
+    : connection && !selectedModel && hasConfiguredConnectionModels(connection) ? (zh ? "请在供应商设置中保存并启用一个模型。" : "Save and enable a model in provider settings.")
     : undefined;
   const canStart = !blockingReason;
   const openAgentSettings = (): void => {
     navigate("/settings?section=agents", { state: { returnTo: location.pathname + location.search } });
   };
   const create = (text: string): string | undefined => {
-    if (!canStart || !project || !instance || !connection || !getBridge()) return undefined;
+    if (!canStart || !project || !instance || !getBridge()) return undefined;
     const session = useSessionsStore.getState().createSession({
       projectId: project.id,
       target: { type: "agent", instanceId: instance.id, teamId: teamId || undefined },
       title: text.trim().slice(0, 48) || (zh ? "新对话" : "New conversation"),
       mode,
       ...effectiveConfiguration,
-      model: selectedModel,
-      connectionId: connection.id,
-      connectionRevision: connection.revision
+      model: connection ? selectedModel : effectiveConfiguration.model,
+      connectionId: connection?.id,
+      connectionRevision: connection?.revision
     });
     onCreated(session.id);
     return session.id;
@@ -130,7 +122,6 @@ export function NewConversation({ mode = "code", onCreated, active = true }: {
           </label>
         </div>
         {!teamReady && <p className="mb-3 text-xs text-warn">{zh ? "这个团队的成员需要迁移到 Harness 与独立连接。" : "Team members need a harness and an independent connection."}<button className="ml-2 underline" onClick={() => navigate(`/settings?section=teams&team=${encodeURIComponent(teamId)}`)}>{zh ? "配置团队" : "Configure team"}</button></p>}
-        {instance && !compatibleConnections.length && <p className="mb-3 text-xs text-ink-3">{zh ? "当前 Harness 没有可用的兼容连接。" : "No compatible connection is available for this harness."}<button className="ml-2 underline" onClick={() => navigate("/settings?section=accounts")}>{zh ? "管理供应商与账号" : "Manage connections"}</button></p>}
         <Composer
           draftId="new:conversation"
           running={false}

@@ -1,0 +1,28 @@
+.conversation-navigator {
+  position: absolute;
+  z-index: 12;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  color: var(--ink);
+}
+.conversation-navigator-track { max-height: min(58vh, 440px); overflow-y: auto; scrollbar-width: none; padding-block: 8px; }
+.conversation-navigator-track::-webkit-scrollbar { display: none; }
+.conversation-navigator-track > button { display: flex; align-items: center; width: 24px; height: 10px; padding: 0 6px; outline: none; }
+.conversation-navigator-track > button > span { display: block; width: 7px; height: 2px; border-radius: 2px; background: currentColor; opacity: .28; transition: width 160ms ease, opacity 160ms ease; }
+.conversation-navigator-track > button[data-bookmarked] > span { height: 3px; width: 11px; opacity: .7; }
+.conversation-navigator-track > button[data-current] > span,
+.conversation-navigator-track > button:hover > span,
+.conversation-navigator-track > button:focus-visible > span { width: 18px; opacity: 1; }
+.conversation-navigator-preview { position: absolute; left: 24px; top: 50%; margin-top: -60px; width: min(330px, calc(100vw - 110px)); padding: 12px 14px 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: 0 10px 36px #00000018, 0 2px 8px #00000008; }
+.conversation-navigator-preview-heading { display: flex; align-items: flex-start; gap: 12px; }
+.conversation-navigator-jump { flex: 1; min-width: 0; text-align: left; font: inherit; font-size: 13px; font-weight: 600; line-height: 20px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.conversation-navigator-bookmark { display: grid; place-items: center; padding: 3px; border-radius: 4px; }
+.conversation-navigator-bookmark:hover { background: var(--card-hover); }
+.conversation-navigator-preview p { margin: 7px 0 9px; font-size: 12px; line-height: 19px; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.conversation-navigator-preview footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 8px; font-size: 11px; color: var(--ink-2); }
+.conversation-navigator-preview footer button { display: inline-flex; align-items: center; gap: 3px; font-weight: 500; }
+.conversation-navigator button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+@media (min-width: 1200px) { .conversation-navigator { left: clamp(4px, calc((100% - 1000px) / 2 - 38px), 80px); } }
+@media (prefers-reduced-motion: reduce) { .conversation-navigator-track > button > span { transition: none; } }

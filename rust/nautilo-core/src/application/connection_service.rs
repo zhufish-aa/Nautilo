@@ -42,6 +42,9 @@ impl ConnectionService {
         let encrypted = api_key.map(|key| self.credentials.encrypt(&json!({"apiKey":key}))).transpose()?;
         let db = self.db.lock().unwrap();
         let repos = Repositories::new(&db.raw);
+        if connection["kind"]=="login" && connection["harness"]=="opencode" && connection["loginProfileDirectory"].as_str().is_none_or(str::is_empty) && repos.runtime_connections().list_default()?.iter().any(|v|v["kind"]=="login"&&v["harness"]=="opencode"&&v["nativeLogin"]==true&&v["loginProfileDirectory"].as_str().is_none_or(str::is_empty)&&v["id"]!=id) {
+            return Err(invalid("harness","Use the existing native OpenCode connection"));
+        }
         if connection["kind"]=="login" && connection["harness"]=="antigravity" && repos.runtime_connections().list_default()?.iter().any(|v|v["kind"]=="login"&&v["harness"]=="antigravity"&&v["id"]!=id) {
             return Err(invalid("harness","Antigravity shares one official Google account through the OS keyring; use the existing Antigravity connection"));
         }
@@ -242,8 +245,12 @@ fn validate_connection(value: &Value) -> CoreResult<Value> {
         }
         Some("login") => {
             let harness = result["harness"].as_str().unwrap_or("");
-            if harness=="antigravity" {
-                if result["nativeLogin"]!=true{return Err(invalid("nativeLogin","Antigravity uses its official unified Google account"));}
+            if harness=="antigravity" || harness=="opencode" {
+                if result["nativeLogin"]!=true{return Err(invalid("nativeLogin","Use this harness's native account and configuration"));}
+                if harness == "opencode" && result.get("loginProfileDirectory").is_some() {
+                    let directory = login_profile_directory(&json!({"providerId":harness,"baseArgs":[],"providerOptions":{"loginProfileDirectory":result["loginProfileDirectory"]}}))?;
+                    if directory.is_none() { return Err(invalid("loginProfileDirectory", "Select an explicit account directory")); }
+                }
             }else{
                 if result["nativeLogin"]==true{return Err(invalid("nativeLogin","This harness requires an isolated account directory"));}
                 login_profile_directory(&json!({"providerId":harness,"baseArgs":[],"providerOptions":{"loginProfileDirectory":result["loginProfileDirectory"]}}))?
@@ -293,9 +300,10 @@ pub fn bind_session(db: &Connection, session: &mut Value, current: Option<&Value
 
 pub fn resolve_session_connection(db: &Connection, session: &Value, agent: &Value) -> CoreResult<(Value,Option<Value>)> {
     let Some(id) = session.get("connectionId").and_then(Value::as_str) else {
-        if agent.pointer("/providerOptions/configurationKind").and_then(Value::as_str) == Some("harness") {
-            return Err(invalid("connectionId", "Select a provider or login account for this harness"));
-        }
+        // No Nautilo binding means the CLI's native configuration. The harness
+        // marker describes the instance editor, not an authentication requirement.
+        // Keep the original instance so native provider/model/account resolution
+        // remains owned by the CLI instead of selecting an unrelated connection.
         return Ok((agent.clone(),None));
     };
     let h = head(db,id)?;
@@ -324,8 +332,9 @@ pub fn apply_connection(agent: &Value, connection: &Value) -> CoreResult<Value> 
             if connection["viaAccountGateway"]!=true {return Err(invalid("connectionId","Login account belongs to a different harness"));}
             if agent.get("profile").and_then(Value::as_str).is_some_and(|s|!s.is_empty())||agent["baseArgs"].as_array().is_some_and(|a|!a.is_empty()){return Err(invalid("baseArgs","Account routes require standard harness arguments"));}
             options.insert("accountGateway".into(),json!(true));options.insert("apiType".into(),json!("openai-completions"));if harness=="codex"{options.insert("wireApi".into(),json!("chat"));}
-        }else if harness=="antigravity"&&connection["nativeLogin"]==true{
+        }else if matches!(harness,"antigravity"|"opencode")&&connection["nativeLogin"]==true{
             options.insert("nativeLogin".into(),json!(true));
+            if harness == "opencode" && connection["loginProfileDirectory"].is_string() { options.insert("loginProfileDirectory".into(), connection["loginProfileDirectory"].clone()); }
         }else{options.insert("loginProfileDirectory".into(),connection["loginProfileDirectory"].clone());}
     } else {
         let protocol = connection["protocol"].as_str().unwrap_or("");
@@ -352,6 +361,7 @@ pub fn connection_environment(agent: &Value, connection: &Value, credentials: &C
     connection_environment_with_descriptor(agent, connection, credentials, env, None)
 }
 pub fn connection_environment_with_descriptor(agent: &Value, connection: &Value, credentials: &CredentialService, mut env: HashMap<String,String>, descriptor: Option<&Value>) -> CoreResult<HashMap<String,String>> {
+    if connection["kind"]=="login" && connection["harness"]=="opencode" && connection["nativeLogin"]==true && agent["providerId"]=="opencode" { return isolate_login_profile(agent, env); }
     env.retain(|key,_| {
         let key = key.to_ascii_uppercase();
         if ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "TRAE_CONFIG_FILE"].contains(&key.as_str()) { return true; }
@@ -378,6 +388,54 @@ pub fn connection_environment_with_descriptor(agent: &Value, connection: &Value,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_isolated_accounts_pin_native_identity_and_preserve_configuration() {
+        let (service, dir) = fixture();
+        for id in ["first-opencode", "second-opencode"] {
+            let profile = dir.join(id);
+            let saved = service.upsert(&json!({"connection":{"id":id,"name":id,"kind":"login","enabled":true,"harness":"opencode","nativeLogin":true,"loginProfileDirectory":profile,"models":[]}})).unwrap();
+            let bound = apply_connection(&json!({"providerId":"opencode","baseArgs":[],"providerOptions":{}}), &saved).unwrap();
+            let env = connection_environment(&bound, &saved, &service.credentials, HashMap::from([
+                ("XDG_DATA_HOME".into(), "wrong-account".into()),
+                ("OPENCODE_AUTH_CONTENT".into(), "wrong-auth".into()),
+                ("OPENCODE_CONFIG_CONTENT".into(), "{\"plugin\":[\"native-plugin\"],\"mcp\":{}}".into()),
+                ("XDG_CONFIG_HOME".into(), "native-config".into()),
+            ])).unwrap();
+            assert_eq!(env["XDG_DATA_HOME"], profile.join("data").to_string_lossy());
+            assert_eq!(env["XDG_STATE_HOME"], profile.join("state").to_string_lossy());
+            assert_eq!(env["XDG_CONFIG_HOME"], "native-config");
+            assert!(env["OPENCODE_CONFIG_CONTENT"].contains("native-plugin"));
+            assert!(!env.contains_key("OPENCODE_AUTH_CONTENT"));
+        }
+        assert!(service.upsert(&json!({"connection":{"id":"bad-opencode","name":"bad","kind":"login","enabled":true,"harness":"opencode","nativeLogin":true,"loginProfileDirectory":"relative"}})).is_err());
+        drop(service); std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_native_account_needs_no_key_and_preserves_configuration_for_free_models() {
+        let (service, dir) = fixture();
+        let account = json!({"id":"native-opencode","name":"OpenCode","kind":"login","enabled":true,"harness":"opencode","nativeLogin":true,"models":[]});
+        let saved = service.upsert(&json!({"connection":account})).unwrap();
+        assert_eq!(saved["nativeLogin"], true);
+        assert_eq!(saved["hasCredential"], false);
+        let native = json!({"providerId":"opencode","baseArgs":[],"providerOptions":{}});
+        let bound = apply_connection(&native, &saved).unwrap();
+        assert_eq!(bound["providerOptions"]["nativeLogin"], true);
+        assert!(bound["providerOptions"].get("loginProfileDirectory").is_none());
+        let env = HashMap::from([("XDG_DATA_HOME".into(),"native-data".into()),("OPENCODE_CONFIG_CONTENT".into(),"{\"plugin\":[\"native-plugin\"]}".into())]);
+        let prepared = connection_environment(&bound,&saved,&service.credentials,env.clone()).unwrap();
+        assert_eq!(prepared,env);
+        let mut duplicate = account.clone(); duplicate["id"] = json!("duplicate-native");
+        assert!(service.upsert(&json!({"connection":duplicate})).is_err());
+        let outer = json!({"providerId":"pi","baseArgs":[],"providerOptions":{}});
+        assert!(apply_connection(&outer, &saved).is_err());
+        let mut enabled = saved.clone(); enabled["viaAccountGateway"] = json!(true);
+        let routed = apply_connection(&outer, &enabled).unwrap();
+        assert_eq!(routed["providerOptions"]["accountGateway"], true);
+        assert!(routed["providerOptions"].get("loginProfileDirectory").is_none());
+        drop(service); std::fs::remove_dir_all(dir).unwrap();
+    }
     use crate::adapters::{AdapterCapabilities, AdapterDetectionResult, AdapterRun, AdapterStartRequest, AgentCliAdapter};
 
     struct ModelProbe(Arc<Mutex<Vec<(Value, Value)>>>);
@@ -488,7 +546,26 @@ mod tests {
         let main = router.main(&run,&team,None).unwrap();
         assert_eq!(main["connectionId"], "worker-provider");
         assert_eq!(main["model"], "worker-model");
-        assert!(resolve_session_connection(&service.db.lock().unwrap().raw,&json!({}),&harness).is_err());
+        let (native, connection) = resolve_session_connection(&service.db.lock().unwrap().raw,&json!({}),&harness).unwrap();
+        assert_eq!(native,harness);
+        assert!(connection.is_none());
+    }
+    #[test]
+    fn unbound_harness_preserves_native_configuration_without_selecting_an_account() {
+        let (service, _) = fixture();
+        service.upsert(&json!({"connection":provider("unrelated"),"apiKey":"unrelated-key"})).unwrap();
+        for harness in ["opencode", "codex", "claude-code", "pi", "omp", "deepseek", "kimi-code", "trae", "antigravity"] {
+            let agent = json!({"id":format!("harness-{harness}"),"providerId":harness,"executable":"native-cli","baseArgs":["--profile","personal"],
+                "env":{"NATIVE_OPTION":"preserved"},"providerOptions":{"configurationKind":"harness","nativeExtension":"keep"}});
+            let session = json!({"id":"native","model":"opencode/deepseek-v4.1-flash-free","providerSessionId":"native-thread"});
+            let (resolved, binding) = resolve_session_connection(&service.db.lock().unwrap().raw,&session,&agent).unwrap();
+            assert_eq!(resolved,agent);
+            assert!(binding.is_none());
+            let mut explicit = session.clone();
+            explicit["connectionId"] = json!("missing-account");
+            explicit["connectionRevision"] = json!(1);
+            assert!(resolve_session_connection(&service.db.lock().unwrap().raw,&explicit,&agent).is_err(),"An invalid explicit account must not fall back to native configuration");
+        }
     }
     #[test]
     fn revisions_preserve_encrypted_credentials_and_no_plaintext_metadata() {

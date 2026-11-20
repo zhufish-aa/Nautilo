@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url);
 let JSDOM, VirtualConsole;
 try { ({ JSDOM, VirtualConsole } = require(process.env.NAUTILO_JSDOM_PATH ?? 'jsdom')); } catch {}
 
-test('configured API models, draft revisions and sending stay consistent across settings changes', {
+test('native discovery and saved connections support changing the next message without interrupting the current turn', {
   skip: !JSDOM && 'Set NAUTILO_JSDOM_PATH to an isolated jsdom installation',
 }, async () => {
   const desktop = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -22,14 +22,15 @@ test('configured API models, draft revisions and sending stay consistent across 
   try {
     const runtimeSource = await readFile(join(src, 'lib/orchestration-runtime.ts'), 'utf8');
     const runtimeNames = [...runtimeSource.matchAll(/export (?:async )?function (\w+)/g)].map(match => match[1]);
-    await esbuild.build({
+    const bundle = await esbuild.build({
       stdin: {
         resolveDir: desktop, loader: 'tsx', contents: `
           import React from 'react';
           import {createRoot} from 'react-dom/client';
           import {MemoryRouter} from 'react-router-dom';
           import {NewConversation} from '${src}/features/sessions/NewConversation';
-          import {SessionModelControl} from '${src}/features/sessions/SessionModelControl';
+          import {Composer} from '${src}/features/sessions/Composer';
+          import {sendWorkbenchMessage as sendExisting} from '${src}/lib/orchestration-runtime.ts';
           import {I18nProvider} from '${src}/lib/i18n';
           import {TooltipProvider} from '${src}/components/ui/Tooltip';
           import {useAgentsStore as agents} from '${src}/stores/agents';
@@ -39,18 +40,19 @@ test('configured API models, draft revisions and sending stay consistent across 
           import {useTeamsStore as teams} from '${src}/stores/teams';
           import {useComposerDraftsStore as drafts} from '${src}/stores/composer-drafts';
           const root=createRoot(document.getElementById('root'));
-          window.qa={agents,projects,connections,sessions,teams,drafts,sent:[],created:[],
-            render:(key='draft',sessionId)=>root.render(<MemoryRouter><I18nProvider><TooltipProvider>
-              {sessionId ? <SessionModelControl key={key} sessionId={sessionId}/> : <NewConversation key={key} onCreated={id=>window.qa.created.push(id)}/>}
+          window.qa={agents,projects,connections,sessions,teams,drafts,sent:[],created:[],configured:[],followUps:[],sendExisting,
+            render:(key='draft',sessionId,running=false)=>root.render(<MemoryRouter><I18nProvider><TooltipProvider>
+              {sessionId ? <Composer key={key} sessionId={sessionId} running={running}/> : <NewConversation key={key} onCreated={id=>window.qa.created.push(id)}/>}
             </TooltipProvider></I18nProvider></MemoryRouter>)};
         `,
       },
-      outfile: output, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic',
+      outfile: output, write: false, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic',
+      loader: { '.png': 'dataurl', '.svg': 'dataurl' },
       nodePaths: [join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': '"test"' },
       plugins: [{ name: 'no-cli', setup(build) {
         build.onResolve({ filter: /orchestration-runtime$/ }, () => ({ path: 'runtime', namespace: 'no-cli' }));
         build.onLoad({ filter: /.*/, namespace: 'no-cli' }, () => ({ contents: runtimeNames.map(name =>
-          `export async function ${name}(...args){${name === 'sendWorkbenchMessage' ? 'window.qa.sent.push(args);' : ''}}`
+          `export async function ${name}(...args){${name === 'sendWorkbenchMessage' ? 'if (args[0]==="old") return window.qa.sendExisting(...args); window.qa.sent.push(args);' : name === 'configureWorkbenchSession' ? 'window.qa.configured.push(args);' : name === 'sendWorkbenchFollowUp' ? 'window.qa.followUps.push(args);' : ''}}`
         ).join('\n') }));
       } }],
     });
@@ -66,21 +68,56 @@ test('configured API models, draft revisions and sending stay consistent across 
     w.HTMLElement.prototype.hasPointerCapture = () => false;
     w.HTMLElement.prototype.setPointerCapture = w.HTMLElement.prototype.releasePointerCapture = () => {};
     const writes = [];
+    const deliveries = [];
+    const enabledRoutes = [];
+    let savedExisting;
+    let blockSwitch = false;
     w.agenthub = { core: { request: async ({ method, input }) => {
-      if (method !== 'session.upsert') throw Error(`Unexpected IPC: ${method}`);
-      writes.push(input);
-      return input;
+      if (method === 'health.get') return { features: {} };
+      if (method === 'connection.gateway') {
+        enabledRoutes.push(input);
+        return { ...account, accountGateway: true };
+      }
+      if (method === 'session.upsert') {
+        if (input.id === 'old' && input.confirmConnectionChange && blockSwitch) throw Error('The connection is temporarily unavailable');
+        writes.push(input);
+        const saved = input.connectionId === null ? { ...input, connectionId: undefined, connectionRevision: undefined } : input;
+        if (input.id === 'old') savedExisting = saved;
+        return saved;
+      }
+      if (method === 'session.send') {
+        deliveries.push({ ...input, connectionId: savedExisting.connectionId, model: savedExisting.model });
+        return { accepted: true, runId: 'completed' };
+      }
+      if (method === 'session.history') return { session: savedExisting, reset: true, cursor: { scope: 'messages:session:old', epoch: 'test', revision: 1 }, items: [] };
+      if (method === 'artifact.changes') return { reset: true, cursor: { scope: 'artifacts:session:old', epoch: 'test', revision: 1 }, items: [] };
+      if (method === 'event.subscribe') return { subscriptionId: 'test' };
+      if (method === 'event.replay') return { events: [], lastSequence: 0 };
+      if (method === 'event.wait') return new Promise(() => {});
+      if (method === 'session.followUp.list') return { items: [] };
+      if (method === 'run.list' || method === 'slashCommand.list') return [];
+      if (method === 'agent.upsert' || method === 'project.upsert') return input;
+      throw Error(`Unexpected IPC: ${method}`);
     } } };
-    w.eval(await readFile(output, 'utf8'));
+    w.eval(bundle.outputFiles.find(file => file.path.endsWith('.js')).text);
     const q = w.qa;
     const settle = () => new Promise(resolve => w.setTimeout(resolve, 70));
     const now = '2026-11-03T00:00:00Z';
     const model = id => ({ id, displayName: id, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultReasoningEffort: 'low', capabilities: [], serviceTiers: [] });
     const saved = { id: 'deepseek', name: 'DeepSeek', kind: 'api', protocol: 'chat', enabled: true, hasCredential: true, revision: 1, models: [model('deepseek/flash')], createdAt: now, updatedAt: now };
-    const account = { ...saved, id: 'account', name: 'Codex account', kind: 'login', harness: 'codex', models: [model('account-model')] };
+    const account = { ...saved, id: 'account', name: 'Antigravity', kind: 'login', harness: 'antigravity', models: [model('gemini-flash')] };
     const historicalReads = [];
     q.connections.setState({ connections: [saved, account], hydrate: async () => {}, get: async (id, revision) => { historicalReads.push(revision); return { ...saved, revision }; } });
-    q.agents.setState({ instances: [{ id: 'h', providerId: 'codex', configurationKind: 'harness', displayName: 'Codex', executable: 'codex', baseArgs: [], enabled: true, status: 'available' }] });
+    const nativeReads = [];
+    q.agents.setState({
+      instances: [{ id: 'h', providerId: 'codex', configurationKind: 'harness', displayName: 'Codex', executable: 'codex', baseArgs: [], enabled: true, status: 'available' }],
+      loadModels: async id => {
+        nativeReads.push(id);
+        const catalog = { providerId: 'codex', models: [model('native-default')], defaultModel: 'native-default', source: 'provider_cli', fetchedAt: now };
+        q.agents.setState({ modelCatalogs: { [id]: catalog } });
+        return catalog;
+      },
+    });
     q.projects.setState({ projects: [{ id: 'p', name: 'Project', rootPath: '/test', verificationTemplates: [] }] });
     q.teams.setState({ teams: [] });
     q.drafts.getState().setText('new:conversation', 'Test message');
@@ -89,15 +126,23 @@ test('configured API models, draft revisions and sending stay consistent across 
     const send = () => d.querySelector('.composer-send');
     const menu = () => d.querySelector('.composer-model-menu');
     const openModels = async () => { d.querySelector('.composer-model-trigger').click(); await settle(); };
-    assert.equal(send().disabled, true, 'multiple sources require an explicit account selection');
-    assert.equal(d.querySelector('.composer [role="status"]'), null, 'the composer does not show the removed configuration hint');
-    const provider = d.querySelector('[aria-label="供应商或账号"]');
-    provider.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    const chooseSource = async (trigger, label) => {
+      trigger.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await settle();
+      const option = [...d.querySelectorAll('[role="option"]')].find(item => item.textContent.startsWith(label));
+      assert.ok(option, `${label} is selectable`);
+      option.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await settle(); await settle();
+    };
+    assert.equal(send().disabled, false, 'the native CLI is usable without a managed account');
+    assert.match(d.querySelector('[aria-label="供应商或账号"]').textContent, /使用 Harness 原生配置/);
+    assert.ok(nativeReads.includes('h'), 'native harnesses discover their own model catalog');
+    await openModels();
+    assert.equal(menu().querySelector('.model-menu-option').textContent, 'native-default');
+    d.querySelector('.composer-model-trigger').click();
     await settle();
-    const option = [...d.querySelectorAll('[role="option"]')].find(item => item.textContent === 'DeepSeek');
-    assert.ok(option, 'the saved API provider is selectable');
-    option.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    await settle(); await settle();
+    assert.equal(d.querySelector('.composer [role="status"]'), null, 'the composer does not show the removed configuration hint');
+    await chooseSource(d.querySelector('[aria-label="供应商或账号"]'), 'DeepSeek');
     assert.equal(send().disabled, false, 'one saved API model makes a typed draft sendable');
     await openModels();
     assert.equal(menu().querySelectorAll('.model-menu-option').length, 1);
@@ -157,10 +202,50 @@ test('configured API models, draft revisions and sending stay consistent across 
     assert.equal(send().disabled, true);
     assert.match(send().title, /不兼容/);
 
+    // Selecting native explicitly must clear the API revision/model and stay
+    // selected even when there is exactly one managed connection available.
+    q.agents.setState({ instances: [{ ...q.agents.getState().instances[0], baseArgs: [] }] });
+    q.connections.setState({ connections: [edited] });
+    await settle();
+    await openModels();
+    await chooseSource(menu().querySelector('[aria-label="供应商或账号"]'), '使用 Harness 原生配置');
+    assert.equal(send().disabled, false);
+    assert.match(d.querySelector('[aria-label="供应商或账号"]').textContent, /使用 Harness 原生配置/);
+    await openModels();
+    assert.equal(menu().querySelectorAll('.model-menu-option').length, 1);
+    assert.equal(menu().querySelector('.model-menu-option').textContent, 'native-default');
+    menu().querySelector('.model-menu-option').click();
+    await settle();
+    send().click();
+    await settle();
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1].connectionId, undefined);
+    assert.equal(writes[1].connectionRevision, undefined);
+    assert.equal(writes[1].model, 'native-default');
+    assert.notEqual(writes[1].reasoningEffort, 'max', 'API reasoning settings cannot leak into native config');
+
+    // Native discovery is optional: without a catalog or saved accounts the
+    // CLI still receives an unbound session and uses its own defaults.
+    q.connections.setState({ connections: [] });
+    q.agents.setState({ modelCatalogs: {}, loadModels: async () => { throw Error('Native discovery unavailable'); } });
+    q.drafts.getState().setText('new:conversation', 'Use native defaults');
+    q.render('native-defaults');
+    await settle(); await settle();
+    assert.equal(send().disabled, false);
+    assert.match(d.querySelector('.composer-model-trigger').textContent, /原生默认模型/);
+    send().click();
+    await settle();
+    assert.equal(writes.length, 3);
+    for (const field of ['connectionId', 'connectionRevision', 'model', 'reasoningEffort']) {
+      assert.equal(writes[2][field], undefined, `native defaults must not inject ${field}`);
+    }
+
     // Existing conversations remain bound to their immutable historical source.
-    q.agents.setState({ instances: [{ ...q.agents.getState().instances[0], providerId: 'codex', baseArgs: [] }] });
-    q.sessions.setState({ sessions: [{ id: 'old', target: { type: 'agent', instanceId: 'h' }, connectionId: 'deepseek', connectionRevision: 1, model: 'deepseek/flash', status: 'idle' }] });
-    q.render('existing', 'old');
+    q.connections.setState({ connections: [edited, account] });
+    q.agents.setState({ instances: [{ ...q.agents.getState().instances[0], providerId: 'deepseek', baseArgs: [] }] });
+    q.sessions.setState({ sessions: [{ id: 'old', projectId: 'p', title: 'Existing chat', target: { type: 'agent', instanceId: 'h' }, connectionId: 'deepseek', connectionRevision: 1, model: 'deepseek/flash', status: 'idle', createdAt: now, updatedAt: now, unreadCount: 0 }], foreground: { old: { status: 'running' } } });
+    q.drafts.getState().setText('old', 'Use the previous context');
+    q.render('existing', 'old', true);
     await settle(); await settle();
     await openModels();
     assert.equal(menu().querySelectorAll('.model-menu-option').length, 1);
@@ -168,6 +253,45 @@ test('configured API models, draft revisions and sending stay consistent across 
     assert.ok(historicalReads.includes(1));
     assert.equal(q.sessions.getState().sessions[0].connectionRevision, 1);
     assert.equal(q.connections.getState().connections[0].revision, 3);
+    await chooseSource(menu().querySelector('[aria-label="供应商或账号"]'), 'Antigravity');
+    assert.equal(q.configured.length, 0, 'selecting while running does not write the active configuration');
+    assert.equal(enabledRoutes.length, 0, 'selecting does not enable cross-harness access before sending');
+    assert.equal(q.sessions.getState().sessions[0].connectionId, 'deepseek');
+    assert.equal(q.sessions.getState().nextTurnModels.old.connectionId, 'account');
+    assert.match(d.querySelector('.composer-model-trigger').title, /Antigravity.*gemini-flash/);
+    assert.equal(d.querySelector('[role="alertdialog"], [role="dialog"]'), null);
+    assert.equal(send().disabled, true, 'draft is not sent as steering to the previous account');
+    d.querySelector('textarea').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+    assert.equal(q.followUps.length, 0);
+    assert.equal(d.querySelector('textarea').value, 'Use the previous context');
+
+    // The selection survives view changes, and only the next explicit send
+    // commits the new binding. Rejecting that write must leave the draft local.
+    q.sessions.setState({ foreground: { old: { status: 'completed' } } });
+    q.render('reopened', 'old');
+    await settle();
+    assert.equal(send().disabled, false);
+    blockSwitch = true;
+    send().click();
+    await settle();
+    assert.equal(deliveries.length, 0);
+    assert.equal(q.sessions.getState().sessions[0].connectionId, 'deepseek');
+    assert.equal(q.sessions.getState().nextTurnModels.old.connectionId, 'account');
+    assert.equal(d.querySelector('textarea').value, 'Use the previous context');
+    blockSwitch = false;
+    send().click();
+    await settle(); await settle();
+    assert.equal(deliveries.length, 1);
+    assert.equal(deliveries[0].sessionId, 'old');
+    assert.equal(deliveries[0].text, 'Use the previous context');
+    assert.equal(deliveries[0].connectionId, 'account');
+    assert.equal(deliveries[0].model, 'gemini-flash');
+    assert.equal(enabledRoutes.length, 1);
+    assert.equal(enabledRoutes[0].connectionId, 'account');
+    const savedSwitch = writes.find(input => input.id === 'old' && input.confirmConnectionChange);
+    assert.equal(savedSwitch.connectionRevision, 1);
+    assert.equal(savedSwitch.reasoningEffort, '');
+    assert.equal(q.sessions.getState().nextTurnModels.old, undefined);
     assert.deepEqual(errors, []);
   } finally {
     dom?.window.close();

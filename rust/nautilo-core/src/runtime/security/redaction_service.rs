@@ -25,6 +25,10 @@ pub struct RedactionService {
     values: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
 }
 
+pub(crate) struct RedactionSnapshot {
+    secrets: Vec<String>,
+}
+
 impl Default for RedactionService {
     fn default() -> Self {
         Self { values: Arc::new(Vec::new) }
@@ -36,15 +40,32 @@ impl RedactionService {
         Self { values }
     }
 
+    /// Capture the current secrets before taking a lock that their source needs.
+    pub(crate) fn snapshot(&self) -> RedactionSnapshot {
+        RedactionSnapshot {
+            secrets: (self.values)().into_iter().filter(|item| item.len() >= 4).collect(),
+        }
+    }
+
     pub fn text(&self, value: &str) -> String {
+        self.snapshot().text(value)
+    }
+
+    pub fn value(&self, input: &Value) -> Value {
+        self.snapshot().value(input)
+    }
+}
+
+impl RedactionSnapshot {
+    fn text(&self, value: &str) -> String {
         let mut result = secret_pattern().replace_all(value, "[REDACTED]").into_owned();
-        for secret in (self.values)().into_iter().filter(|item| item.len() >= 4) {
-            result = result.replace(&secret, "[REDACTED]");
+        for secret in &self.secrets {
+            result = result.replace(secret, "[REDACTED]");
         }
         result
     }
 
-    pub fn value(&self, input: &Value) -> Value {
+    pub(crate) fn value(&self, input: &Value) -> Value {
         self.redact(input, None)
     }
 

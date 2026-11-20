@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { useEffect, useMemo, useRef } from "react";
 import { ChevronDown, CornerDownRight, FileText, Folder, Plus, MessageSquarePlus, Trash2 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { cn, formatRelativeTime } from "../../lib/utils";
@@ -11,8 +10,13 @@ import { useSessionsStore } from "../../stores/sessions";
 import { useSettingsStore } from "../../stores/settings";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
-import { groupSidebarEntries, UNGROUPED_PROJECT, visibleSidebarEntries } from "../../lib/sidebar-navigation";
+import { groupSidebarEntries, UNGROUPED_PROJECT } from "../../lib/sidebar-navigation";
 import { visibleSessionStatus } from "../../lib/session-lifecycle";
+import { sessionActivityStatus } from "../../lib/runs-dashboard";
+import { pendingCountsBySession } from "../../lib/notification-policy";
+import { useInteractionsStore } from "../../stores/interactions";
+import { useProjectNavigation } from "../../stores/project-navigation";
+import { VirtualList } from "../../components/ui/VirtualList";
 
 export function sessionTargetName(
   session: UiSession,
@@ -74,7 +78,9 @@ function SessionItem({
   const teams = useTeamsStore((state) => state.teams);
   const instances = useAgentsStore((state) => state.instances);
   const orchestrationLifecycle = useSessionsStore((state) => state.running[session.id]);
-  const status = visibleSessionStatus(session.status, orchestrationLifecycle);
+  const foreground = useSessionsStore(state => state.foreground[session.id]);
+  const interactions = useInteractionsStore(state => state.bySession[session.id]);
+  const status = sessionActivityStatus(session.status, foreground, orchestrationLifecycle, interactions?.filter(item => item.status === "pending").length) as VisibleStatus;
   const statusLabel = STATUS_DOT[status] ? t(`sessions.status.${status}` as MessageKey) : null;
   const isChild = depth > 0;
   const targetName = sessionTargetName(session, teams, instances);
@@ -82,11 +88,7 @@ function SessionItem({
   const visualDepth = Math.min(depth, 4);
 
   return (
-    <motion.li
-      initial={{ opacity: 0, x: -8 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, height: 0, marginTop: 0, overflow: "hidden" }}
-      transition={{ duration: 0.16, ease: "easeOut" }}
+    <div
       className="group relative min-w-0"
       data-session-id={session.id}
       style={{ paddingInlineStart: `${24 + visualDepth * 12}px` }}
@@ -99,6 +101,7 @@ function SessionItem({
         />
       )}
       <button
+        data-list-action
         onClick={onSelect}
         aria-current={active ? "page" : undefined}
         className={cn(
@@ -152,7 +155,7 @@ function SessionItem({
       >
         <Trash2 className="h-3.5 w-3.5" aria-hidden />
       </button>
-    </motion.li>
+    </div>
   );
 }
 
@@ -174,11 +177,11 @@ export function SessionListPanel({
   embedded?: boolean;
 }): JSX.Element {
   const { t, locale } = useI18n();
-  const [limits, setLimits] = useState<Record<string, number>>({});
   const allSessions = useSessionsStore((state) => state.sessions);
   const projects = useProjectsStore((state) => state.projects);
   const collapsedProjects = useSettingsStore((state) => state.collapsedProjects);
   const toggleProjectCollapsed = useSettingsStore((state) => state.toggleProjectCollapsed);
+  const navigation = useProjectNavigation();
   const sessions = useMemo(
     () => mode ? allSessions.filter((session) => (session.mode ?? "code") === mode) : allSessions,
     [allSessions, mode]
@@ -200,6 +203,22 @@ export function SessionListPanel({
     if (collapsedProjects.includes(groupId)) toggleProjectCollapsed(groupId);
   }, [activeSessionId, sessions, projects, collapsedProjects, toggleProjectCollapsed]);
 
+  const listRows: Array<{ key: string; size?: number; render: () => JSX.Element }> = [];
+  for (const [projectId, entries] of grouped) {
+    const project = projects.find(item => item.id === projectId);
+    const expanded = !collapsedProjects.includes(projectId);
+    listRows.push({ key: `project:${projectId}`, size: 38, render: () => <div className="mt-1.5 flex min-w-0 items-center gap-1">
+      <button type="button" data-list-action aria-expanded={expanded} onClick={() => toggleProjectCollapsed(projectId)}
+        title={project?.rootPath} className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-[14px] font-semibold text-ink hover:bg-card-hover focus-visible:ring-2 focus-visible:ring-accent">
+        <ChevronDown size={14} className={cn("shrink-0 transition-transform", !expanded && "-rotate-90")}/><Folder size={16} className="shrink-0"/>
+        <span className="truncate">{project?.name ?? (locale === "zh-CN" ? "未分组" : "Ungrouped")}</span>
+      </button>{project && <button type="button" onClick={() => onNew(project.id)} className="rounded-md p-1.5 text-ink-2 hover:bg-card-hover" aria-label={locale === "zh-CN" ? `在 ${project.name} 中新建会话` : `New chat in ${project.name}`}><Plus size={14}/></button>}
+    </div> });
+    if (!expanded) continue;
+    entries.forEach(entry => listRows.push({ key: entry.session.id, render: () => <SessionItem entry={entry} active={entry.session.id === activeSessionId}
+      onSelect={() => { navigation.remember(projectId, { lastSessionId: entry.session.id }); onSelect(entry.session.id); }} onDelete={() => onDelete(entry.session)}/> }));
+  }
+
   return (
     <aside
       aria-label={t("sessions.title")}
@@ -211,59 +230,8 @@ export function SessionListPanel({
           {t("sessions.new")}
         </Button>
       </div>}
-      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-3">
-        {grouped.map(([projectId, projectEntries]) => {
-          const project = projects.find((item) => item.id === projectId);
-          const containsActive = projectEntries.some((entry) => entry.session.id === activeSessionId);
-          const expanded = !collapsedProjects.includes(projectId);
-          const limit = limits[projectId] ?? 60;
-          const visibleEntries = visibleSidebarEntries(projectEntries, limit, activeSessionId);
-          return (
-            <section key={projectId} className="min-w-0 overflow-hidden mt-1.5 first:mt-0">
-              <div className="flex min-w-0 items-center gap-1">
-                <button type="button" onClick={() => toggleProjectCollapsed(projectId)} aria-expanded={expanded}
-                  className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-[14px] font-medium text-ink hover:bg-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-                  title={project?.rootPath ?? (locale === "zh-CN" ? "未分组" : "Ungrouped")}>
-                  <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform duration-150", !expanded && "-rotate-90")} aria-hidden />
-                  {project && <Folder className="h-4 w-4 shrink-0 text-ink-2" aria-hidden />}
-                  <span className="min-w-0 flex-1 truncate">{project?.name ?? (locale === "zh-CN" ? "未分组" : "Ungrouped")}</span>
-                  {!expanded && containsActive && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-hidden />}
-                </button>
-                {project && <button type="button" onClick={() => onNew(project.id)}
-                  className="rounded-md p-1.5 text-ink-3 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-                  aria-label={locale === "zh-CN" ? `在 ${project.name} 中新建会话` : `New chat in ${project.name}`} title={locale === "zh-CN" ? "新会话" : "New chat"}>
-                  <Plus className="h-3.5 w-3.5" aria-hidden />
-                </button>}
-              </div>
-              <AnimatePresence initial={false}>
-                {expanded && (
-                  <motion.ul
-                    key="list"
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.18, ease: "easeOut" }}
-                    className="min-w-0 space-y-0.5 overflow-hidden"
-                  >
-                    <AnimatePresence initial={false}>
-                      {visibleEntries.map((entry) => (
-                        <SessionItem
-                          key={entry.session.id}
-                          entry={entry}
-                          active={entry.session.id === activeSessionId}
-                          onSelect={() => onSelect(entry.session.id)}
-                          onDelete={() => onDelete(entry.session)}
-                        />
-                      ))}
-                    </AnimatePresence>
-                    {visibleEntries.length < projectEntries.length && <li><button type="button" onClick={() => setLimits((current) => ({ ...current, [projectId]: limit + 60 }))} className="w-full rounded-lg px-4 py-2 text-left text-xs text-ink-3 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">{locale === "zh-CN" ? "显示更多对话" : "Show more chats"}</button></li>}
-                  </motion.ul>
-                )}
-              </AnimatePresence>
-            </section>
-          );
-        })}
-      </div>
+      <VirtualList rows={listRows} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-3" label={t("sessions.title")} keyboard
+        position={navigation.position} onPosition={navigation.rememberPosition}/>
     </aside>
   );
 }

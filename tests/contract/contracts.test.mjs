@@ -34,6 +34,9 @@ assert.equal(isPlannerDecision({ mode: "direct" }), false);
 assert.equal(validatePlannerDecision(direct).mode, "direct");
 assert.equal(canTransitionTask("ready", "queued"), true);
 assert.equal(canTransitionTask("completed", "running"), false);
+for (const state of ["verifying", "review_required", "merge_ready"]) {
+  assert.equal(canTransitionTask(state, "cancelled"), true);
+}
 assert.deepEqual(availableActions({ runStatus: "running" }), ["stop_run"]);
 assert.equal(errorCatalog.RUN_TIMEOUT.retryable, true);
 assert.equal(errorCatalog.PATH_POLICY_VIOLATION.retryable, false);

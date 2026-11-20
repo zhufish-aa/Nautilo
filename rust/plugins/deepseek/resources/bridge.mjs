@@ -4,6 +4,8 @@ import { createServer } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, relative } from 'node:path';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 
 export const name = 'nautilo-transport';
 export const inject = ['sessionController', 'workspaceRegistry', 'agents', 'sessions', 'agentPresets', 'permissionPresets', 'llm', 'tools', 'loader'];
@@ -29,45 +31,57 @@ export async function apply(ctx, config = {}) {
     return false;
   }
   let binding;
+  const watchedAdapters = new WeakSet();
+  let volatileRuntime;
   async function bindConnection() {
     if (!config.connection) return Promise.resolve();
     if (binding) {
       await binding;
       return;
     }
-    return binding ??= (async () => {
+    binding = (async () => {
       const started = performance.now();
       const pendingPlugins = [...ctx.loader.entries()]
         .filter(entry => entry._initTask || entry.fiber?.inertia)
         .map(entry => entry.options.name);
       await ctx.loader.await();
       const loaded = performance.now();
-      const entry = [...ctx.loader.entries()].find(entry => entry.options.name === '@deepseek-ai/dsh-llm-pi-ai');
+      const entry = [...ctx.loader.entries()].find(entry => entry.options.name === '@deepseek-ai/dsh-llm-pi-ai' && entry.fiber?.config?.providers);
       if (!entry?.fiber) throw new Error('The native profile has no active multi-provider adapter');
-      // Volatile snapshots are deeply frozen. Schemastery normalizes nested
-      // dictionaries in place (including valid `off: null` entries), so feeding
-      // the snapshot back into validation fails even though its values are valid.
-      const previous = structuredClone(entry.fiber.config.providers.get());
-      // Entry.update applies native volatile fields in place. Fiber.update
-      // restarts the adapter and its dependants even when only a route changes.
-      // Retain the profile's raw options so later native settings writes cannot
-      // persist this session's temporary gateway address or credential reference.
-      const storedConfig = entry.options.config;
-      try {
-        await entry.update({ config: {
-          ...storedConfig,
-          providers: { ...previous, [config.connection.provider]: config.connection.profile },
+      // Entry.update passes through persistent user settings, which can replace
+      // the temporary route even when it reports success. Apply our single
+      // owned route to the native volatile reference instead. Raw profile and
+      // settings documents remain untouched, including all other providers.
+      volatileRuntime ??= import(pathToFileURL(createRequire(process.argv[1]).resolve('@deepseek-ai/cosmokit')).href);
+      const { updateVolatile } = await volatileRuntime;
+      const fiber = entry.fiber;
+      const install = () => {
+        const current = fiber.config.providers.get();
+        const selected = current[config.connection.provider];
+        if (selected?.apiKeyEnv === config.connection.profile.apiKeyEnv && selected?.baseURL === config.connection.profile.baseURL) return;
+        const candidate = entry.moduleNamespace.Config({ providers: {
+          ...structuredClone(current), [config.connection.provider]: structuredClone(config.connection.profile),
         } });
-      } finally {
-        entry.options.config = storedConfig;
+        updateVolatile(fiber.config.providers, candidate.providers);
+        fiber.ctx.emit('loader/volatile-update', [['providers']]);
+      };
+      install();
+      if (!watchedAdapters.has(fiber)) {
+        watchedAdapters.add(fiber);
+        ctx.effect(() => fiber.ctx.on('loader/volatile-update', install));
       }
-      await ctx.loader.await();
       const applied = entry.fiber.config.providers.get()[config.connection.provider];
       if (applied?.apiKeyEnv !== config.connection.profile.apiKeyEnv || applied?.baseURL !== config.connection.profile.baseURL) {
-        throw new Error('DeepSeek could not apply the selected connection');
+        throw new Error('DeepSeek could not apply the selected connection: ' + JSON.stringify({
+          routePresent: !!applied,
+          endpointMatches: applied?.baseURL === config.connection.profile.baseURL,
+          credentialReferenceMatches: applied?.apiKeyEnv === config.connection.profile.apiKeyEnv,
+          credentialReferenceType: typeof applied?.apiKeyEnv,
+        }));
       }
       return { loaderWaitMs: Math.round(loaded - started), providerUpdateMs: Math.round(performance.now() - loaded), pendingPlugins };
     })();
+    try { return await binding; } finally { binding = undefined; }
   }
 
   function ask(kind, data, signal) {
@@ -282,8 +296,20 @@ export async function apply(ctx, config = {}) {
       const resolved = performance.now();
       const selectedMode = ctx.agentPresets.composedPreset(agent.ctx);
       if (body.agentMode && body.agentMode !== selectedMode) await ctx.agentPresets.select(agent, body.agentMode);
-      if (body.model) await ctx.sessionController.selectModel({ sessionId, provider: body.provider, model: body.model,
-        ...(body.reasoningEffort ? { reasoningEffort: body.reasoningEffort } : {}) });
+      if (body.model) {
+        const selection = { provider: body.provider, model: body.model,
+          ...(body.reasoningEffort ? { reasoningEffort: body.reasoningEffort } : {}) };
+        if (config.connection) {
+          const controller = ctx.sessionController.agents;
+          await controller.serializeImageAdmission(agent, async () => {
+            const { provider, model, reasoningEffort } = await ctx.llm.resolveCallConfig(selection);
+            controller.selectForNextRequest(agent, { provider, model,
+              ...(reasoningEffort === undefined ? {} : { reasoningEffort }) });
+          });
+        } else {
+          await ctx.sessionController.selectModel({ sessionId, ...selection });
+        }
+      }
       if (body.permissionMode) ctx.permissionPresets.set(agent.session, body.permissionMode);
       sessions.add(sessionId);
       emitContext(agent);

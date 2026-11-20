@@ -2,8 +2,8 @@ import type { SessionTreeEntry } from "./session-tree";
 import type { UiSession } from "./types";
 
 /** Keep history links deterministic, including IDs containing URL delimiters. */
-export function sessionLocation(session: Pick<UiSession, "id" | "mode">): string {
-  return `/sessions?session=${encodeURIComponent(session.id)}`;
+export function sessionLocation(session: Pick<UiSession, "id" | "mode">, focus?: string): string {
+  return `/sessions?session=${encodeURIComponent(session.id)}${focus ? `&focus=${encodeURIComponent(focus)}` : ""}`;
 }
 
 /** Searching is read-only and includes all conversations, not only this mode. */

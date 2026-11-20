@@ -283,12 +283,21 @@ test('team members use their own pinned connection during delegation and recover
   assert.equal(main.model, 'worker-model');
 });
 
-test('runtime-only harness requires an explicit source before launch', async (t) => {
+test('an unbound harness launches with its native configuration without selecting another connection', async (t) => {
   const f = await fixture(t);
-  const harness = { ...f.agent, providerOptions: { configurationKind: 'harness' } };
+  f.connections.upsert({ connection: f.input('unrelated-account'), apiKey: 'unrelated-key' });
+  const harness = { ...f.agent, providerOptions: { configurationKind: 'harness', nativeExtension: 'preserved' } };
   f.db.agents.save(harness, f.agent.updatedAt);
-  await assert.rejects(f.runs.launch(f.session(), harness, 'without a source'));
-  assert.equal(f.requests.length, 0);
+  const session = f.session('native', { model: 'opencode/deepseek-v4.1-flash-free' });
+  await (await f.runs.launch(session, harness, 'using native configuration')).completion;
+  assert.equal(f.requests.length, 1);
+  const request = f.requests[0].request;
+  assert.equal(request.model, session.model);
+  assert.deepEqual(request.instance.providerOptions, harness.providerOptions);
+  assert.equal(request.env.OPENAI_API_KEY, 'ambient-secret');
+  assert.equal(request.env.NAUTILO_CONNECTION_API_KEY, undefined);
+  assert.equal(f.db.sessions.get(session.id).connectionId, undefined);
+  assert.deepEqual(f.db.agents.get(harness.id).providerOptions, harness.providerOptions);
 });
 
 

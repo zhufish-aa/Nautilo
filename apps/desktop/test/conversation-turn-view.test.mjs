@@ -13,8 +13,9 @@ test('process stays expanded while generating, collapses after the result, and c
   const modules = {
     react: { useId: () => 'process', useState: initial => { expansion ??= initial; return [expansion, value => { expansion = value; }]; } },
     'react/jsx-runtime': require('react/jsx-runtime'),
-    'lucide-react': { Bot: () => null, ChevronDown: () => null, Loader2: () => null },
+    'lucide-react': { Check: () => null, ChevronRight: () => null, CircleAlert: () => null, Square: () => null },
     '../../lib/i18n': { useI18n: () => ({ locale: 'zh-CN' }) },
+    './WorkflowToolActivity': { workflowTool: name => name === 'agenthub_workflow_status' ? 'status' : undefined },
     './Timeline': { TimelineEventView: ({ event, showAuthor }) => React.createElement('div', null, showAuthor && 'Nautilo', event.data.text ?? event.data.toolName) }
   };
   const source = readFileSync(new URL('../src/renderer/src/features/timeline/ConversationTurnView.tsx', import.meta.url), 'utf8');
@@ -27,6 +28,7 @@ test('process stays expanded while generating, collapses after the result, and c
   const after = { id: 'after', data: { kind: 'message', sender: 'agent', text: 'Checking the delegated result' } };
   const task = { id: 'task', data: { kind: 'task_update', text: 'Team task card', status: 'running' } };
   const command = { id: 'command', data: { kind: 'tool_activity', toolName: 'Verify directory' } };
+  assert.equal(exports.isTurnTraceStep({ data: { kind: 'tool_activity', toolName: 'agenthub_workflow_status' } }), true);
   const notice = { id: 'notice', data: { kind: 'approval', text: 'Approval needed' } };
   const turn = { id: 'turn', events: [before, dispatch, after, task, command, notice, result], completed: false };
   const assertOrder = (markup, labels) => {
@@ -41,6 +43,8 @@ test('process stays expanded while generating, collapses after the result, and c
   assert.match(live, /Reading the file/);
   assert.match(live, /Final answer/);
   assert.match(live, /aria-expanded="true"/);
+  assert.match(live, /conversation-activity-pulse/);
+  assert.doesNotMatch(live, /data-activity-(mark|sweep)/);
   assert.doesNotMatch(live, /assistant-identity|assistant-mark/);
   assertOrder(live, ['Reading the file', 'Native child dispatch', 'Checking the delegated result', 'Team task card', 'Verify directory', 'Approval needed', 'Final answer']);
   const done = { ...turn, completed: true, result, durationMs: 72_000 };
@@ -48,6 +52,7 @@ test('process stays expanded while generating, collapses after the result, and c
   assert.doesNotMatch(collapsed, /Reading the file/);
   assert.match(collapsed, /Final answer/);
   assert.match(collapsed, /已完成，用时 1分12秒/);
+  assert.doesNotMatch(collapsed, /conversation-activity-pulse/);
   assert.doesNotMatch(collapsed, /项过程|assistant-identity/);
   assert.ok(collapsed.indexOf('conversation-turn-summary') < collapsed.indexOf('Final answer'));
   assert.equal((collapsed.match(/Native child dispatch/g) ?? []).length, 1, 'native delegation remains visible outside the collapsed process');

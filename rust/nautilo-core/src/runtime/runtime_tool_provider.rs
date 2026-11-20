@@ -7,6 +7,8 @@ pub const RUNTIME_TOOL_SCHEMA_VERSION: i64 = 3;
 
 pub struct RuntimeToolBinding {
     pub tools: Vec<Value>,
+    /// Native adapters/MCP bridges consume {success: bool, content: string}.
+    /// The content is JSON text when a tool returns a structured receipt.
     pub execute: std::sync::Arc<dyn Fn(Value) -> crate::adapters::BoxFuture<anyhow::Result<Value>> + Send + Sync>,
 }
 

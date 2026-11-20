@@ -4,23 +4,19 @@
  * Uses the repository's installed esbuild; does not change application dependencies.
  */
 const path = require('node:path');
-const fs = require('node:fs');
-const os = require('node:os');
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const desktop = path.resolve(__dirname, '../..');
 const fromVite = createRequire(require.resolve('vite/package.json', { paths: [desktop] }));
 const esbuild = fromVite('esbuild');
 const { JSDOM, VirtualConsole } = require(process.env.NAUTILO_JSDOM_PATH || 'jsdom');
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'nautilo-navigation-'));
 const errors = [], failures = [], passed = [];
 let dom;
 const recordRejection = error => errors.push(`Unhandled rejection: ${error?.message ?? error}`);
 process.on("unhandledRejection", recordRejection);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 (async () => {
-  const output = path.join(scratch, 'entry.js');
-  await esbuild.build({ entryPoints: [path.join(__dirname, 'navigation-entry.tsx')], outfile: output, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.png': 'dataurl', '.css': 'empty', '.ttf': 'dataurl' }, nodePaths: [path.join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': '"test"' }, plugins: [{ name: 'test-worker-stub', setup(build) { build.onResolve({ filter: /\?worker/ }, args => ({ path: args.path, namespace: 'test-worker' })); build.onLoad({ filter: /.*/, namespace: 'test-worker' }, () => ({ contents: 'export default class Worker { postMessage() {} terminate() {} }' })); } }] });
+  const bundle = await esbuild.build({ entryPoints: [path.join(__dirname, 'navigation-entry.tsx')], write: false, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.png': 'dataurl', '.svg': 'dataurl', '.css': 'empty', '.ttf': 'dataurl' }, nodePaths: [path.join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': '"test"' }, plugins: [{ name: 'test-worker-stub', setup(build) { build.onResolve({ filter: /\?worker/ }, args => ({ path: args.path, namespace: 'test-worker' })); build.onLoad({ filter: /.*/, namespace: 'test-worker' }, () => ({ contents: 'export default class Worker { postMessage() {} terminate() {} }' })); } }] });
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', error => errors.push(error.message));
   virtualConsole.on('error', (...args) => errors.push(args.join(' ')));
@@ -31,7 +27,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   w.HTMLElement.prototype.scrollTo = w.HTMLElement.prototype.scrollIntoView = function () {};
   d.queryCommandSupported = () => false; d.execCommand = () => true;
   w.URL.createObjectURL = () => 'blob:unit'; w.URL.revokeObjectURL = () => {}; w.DOMMatrix = class {};
-  w.eval(fs.readFileSync(output, 'utf8'));
+  w.eval(bundle.outputFiles[0].text);
   await sleep(250);
   const qa = w.qa, now = '2026-11-03T02:00:00Z';
   qa.projects.setState({ projects: ['p', 'q'].map(id => ({ id, name: id === 'p' ? 'Nautilo' : 'Website', rootPath: `/test/${id}`, repositoryType: 'git', workspaceMode: 'direct', scanning: false, verificationTemplates: [], addedAt: now })) });
@@ -109,13 +105,74 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     d.activeElement.click(); await sleep(250);
     assert(w.location.hash.startsWith('#/sessions?session=')); assert.equal(d.querySelectorAll('.composer').length, 1);
   });
-  await check('legacy Work sessions expose terminal and diff drawers with Escape focus return', async () => {
+  const openWorkspace = async () => {
+    const trigger = d.querySelector('button[aria-label="工作区"]');
+    assert(trigger, 'workspace trigger');
+    trigger.focus();
+    key(trigger, 'ArrowDown');
+    return waitFor(() => d.querySelector('[role="menu"][aria-label="工作区"]'), 'workspace menu');
+  };
+  await check('workspace groups available tools and opens legacy Work drawers with focus return', async () => {
     await route('/work?session=s1');
-    for (const label of ['原始终端', 'Diff / 产物']) {
-      const trigger = d.querySelector(`button[aria-label="${label}"]`); assert(trigger, label); trigger.focus(); trigger.click(); await sleep(100);
-      const region = d.querySelector('aside[role="region"]'); assert(region, `${label} region`);
+    for (const [shortcut, label] of [['T', '终端'], ['D', '文件更改与产物']]) {
+      const menu = await openWorkspace();
+      assert.equal(menu.querySelectorAll('[role="group"]').length, 2);
+      assert(!menu.querySelector('[data-shortcut="B"]'), 'browser requires a bridge');
+      const item = menu.querySelector(`[data-shortcut="${shortcut}"]`);
+      assert(item.textContent.includes(label));
+      if (shortcut === 'T') item.click(); else key(menu, shortcut.toLowerCase());
+      const region = await waitFor(() => d.querySelector('aside[role="region"]:not([hidden])'), label);
+      await sleep(100);
       assert.equal(d.activeElement, region);
-      key(region, 'Escape'); await sleep(120); assert(!d.querySelector('aside[role="region"]')); assert.equal(d.activeElement, trigger);
+      key(region, 'Escape'); await sleep(120); assert(!d.querySelector('aside[role="region"]:not([hidden])'));
+      assert.equal(d.activeElement, d.querySelector('button[aria-label="工作区"]'));
+    }
+  });
+  await check('goal progress, pinning and workspace shortcuts stay local to the conversation', async () => {
+    const saved = qa.sessions.getState().events;
+    const plan = { kind: 'tool_activity', toolName: 'update_plan', status: 'done', input: JSON.stringify({ plan: [{ step: 'A', status: 'completed' }, { step: 'B', status: 'in_progress' }] }) };
+    qa.sessions.setState({ events: { ...saved, s1: [...(saved.s1 ?? []), { id: 'workspace-plan', sessionId: 's1', sequence: 99, timestamp: now, data: plan }] } });
+    const menu = await openWorkspace();
+    assert.match(menu.querySelector('[data-shortcut="L"]').textContent, /1\/2/);
+    key(menu, 'l');
+    const card = await waitFor(() => d.querySelector('section[aria-label="会话目标"]'), 'pinned goal');
+    assert.match(card.textContent, /B/);
+    const pin = (await openWorkspace()).querySelector('[data-shortcut="L"]');
+    assert.equal(pin.getAttribute('aria-checked'), 'true');
+    key(pin, 'Escape'); await sleep(80);
+    assert(card.isConnected);
+    card.querySelector('button[aria-label="收起会话目标"]').click(); await sleep(60);
+    assert(!card.isConnected);
+    const composer = d.querySelector('.composer textarea');
+    composer.focus(); key(composer, 't'); assert.equal(d.activeElement, composer); assert(!d.querySelector('aside[role="region"]:not([hidden])'));
+    await openWorkspace(); await route('/sessions?session=s2');
+    assert(!d.querySelector('[role="menu"][aria-label="工作区"]'));
+    const next = await openWorkspace(); assert(!next.querySelector('[data-shortcut="L"]'));
+    key(next, 'Escape'); await sleep(80);
+    qa.sessions.setState({ events: saved });
+  });
+  await check('detached browser and project folder keep the current terminal open', async () => {
+    const windows = [], folders = [];
+    const originalBridge = w.agenthub;
+    await route('/sessions?session=s1');
+    key(await openWorkspace(), 't');
+    const terminal = await waitFor(() => d.querySelector('aside[aria-label="终端"]:not([hidden])'), 'active terminal');
+    try {
+      w.agenthub = { ...originalBridge, browser: {},
+        window: { isMaximized: async () => false, onMaximizedChange: () => () => {} },
+        panels: { onDock: () => () => {}, open: async target => { windows.push(target); return true; } },
+        shell: { openPath: async path => { folders.push(path); return ''; } } };
+      qa.sessions.setState(state => ({ sessions: state.sessions.map(session => session.id === 's1' ? { ...session } : session) }));
+      key(await openWorkspace(), 'b');
+      await waitFor(() => windows.length, 'browser window');
+      assert.equal(windows[0].kind, 'browser'); assert.equal(windows[0].sessionId, 's1');
+      key(await openWorkspace(), 'f');
+      await waitFor(() => folders.length, 'project folder');
+      assert.equal(folders[0], '/test/p');
+      assert.equal(d.querySelector('aside[aria-label="终端"]:not([hidden])'), terminal);
+      key(await openWorkspace(), 't'); await waitFor(() => !d.querySelector('aside[aria-label="终端"]:not([hidden])'), 'closed terminal');
+    } finally {
+      if (originalBridge) w.agenthub = originalBridge; else delete w.agenthub;
     }
   });
   await check('image preview traps Tab, zooms, closes and restores focus', async () => {
@@ -147,6 +204,110 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const confirm = buttons.find(button => /删除/.test(button.textContent) && !/取消/.test(button.textContent)); assert(confirm); confirm.click(); await sleep(300);
     assert(!qa.sessions.getState().sessions.some(item => item.id === 's0'));
     assert.equal(qa.sessions.getState().activeSessionId, undefined); assert(w.location.hash.includes('new=1'));
+  });
+  await check('execution opens beside chat and loads the selected workflow child even with a stale session list', async () => {
+    const runId = 'workflow-inspection', selected = 'child/workflow:second';
+    const definition = { schemaVersion: 1, id: 'analysis', name: '证据检查', entry: 'main', inputs: {}, nodes: [
+      { id: 'main', kind: 'main', exits: [{ id: 'next', name: '开始' }] },
+      { id: 'analysis', name: '综合判断', kind: 'agent', role: 'Analyst', prompt: '检查证据。', exits: [{ id: 'review', name: '证据冲突' }, { id: 'done', name: '已定位' }] },
+      { id: 'verify', name: '独立复核', kind: 'agent', role: 'Verifier', prompt: '复核证据。', exits: [{ id: 'done', name: '已通过' }] },
+    ], edges: [{ from: ['main', 'next'], to: 'analysis' }, { from: ['analysis', 'review'], to: 'verify' },
+      { from: ['analysis', 'done'], to: '$return' }, { from: ['verify', 'done'], to: '$return' }] };
+    const parent = qa.sessions.getState().sessions.find(item => item.id === 's1');
+    const child = { ...parent, id: selected, title: '综合判断的子会话', memberId: 'a', agentInstanceId: 'a', parentSessionId: parent.id };
+    const first = { ...child, id: 'child/workflow:first', title: '综合判断的第一次会话' };
+    const time = Date.parse(now);
+    const evidenceJson = JSON.stringify({ summary: '原始样本 {"result":"READY"}', files: ['src/workflow.ts'] });
+    const instance = (session, iteration, status) => ({ id: `analysis-${iteration}`, nodeId: 'analysis', sessionId: session.id,
+      iteration, attempt: 1, status, reminders: 0, createdAt: time + iteration, updatedAt: time,
+      prompt: `检查第 ${iteration} 组证据。代码证据：${evidenceJson}\n然后复核。`,
+      incoming: { from: 'main', branch: 'next', result: { summary: `上游记录 ${iteration}`, evidence: ['原始样本', '执行结果：{status: "ready"}'] } } });
+    const instanceRows = [instance(first, 1, 'completed'), instance(child, 2, 'running')];
+    const plan = { id: 'workflow-inspection-plan', sessionId: parent.id, runId, status: 'approved', createdAt: now,
+      template: { id: definition.id, name: definition.name, revision: 1 }, nodes: [
+        { key: 'verify', name: '独立复核', role: 'Verifier', task: '复核证据。', assignment: { agentInstanceId: 'reviewer' } },
+      ] };
+    const run = { id: runId, revision: 1, sessionId: parent.id, status: 'running', projectId: parent.projectId,
+      definition, createdAt: time, updatedAt: time, events: [], messages: [], instances: instanceRows };
+    const requested = [];
+    const agents = qa.agents.getState().instances;
+    qa.agents.setState({ instances: [...agents, { ...agents[0], id: 'reviewer', providerId: 'opencode', displayName: 'OpenCode' }] });
+    w.agenthub = { window: { isMaximized: async () => false, onMaximizedChange: () => () => {} }, core: { request: async ({ method, input }) => {
+      if (method === 'workflow.get') { assert.equal(input.runId, runId); return w.structuredClone?.(run) ?? run; }
+      if (method === 'provider.models') return { providerId: 'codex', source: 'test', fetchedAt: now, models: [] };
+      if (method === 'run.list') {
+        const item = instanceRows.find(row => row.sessionId === input?.sessionId);
+        return item ? [{ id: `agent-run-${item.iteration}`, sessionId: item.sessionId, agentInstanceId: 'a', status: item.status,
+          workflow: { runId, instanceId: item.id, attempt: 1 } }] : [];
+      }
+      if (method === 'session.history') {
+        requested.push(input.sessionId);
+        const session = input.sessionId === selected ? child : input.sessionId === first.id ? first : { ...parent, agentInstanceId: 'a', memberId: 'a' };
+        return { session, items: [], reset: !input.cursor, cursor: { epoch: 'workflow-fixture', scope: `messages:session:${input.sessionId}`, revision: 0 } };
+      }
+      if (method === 'artifact.changes') return { cursor: { scope: `artifacts:session:${input.sessionId}`, epoch: 'workflow-fixture', revision: 0 }, reset: !input.cursor, items: [] };
+      if (method === 'event.subscribe') return { subscriptionId: input.sessionId };
+      if (method === 'event.wait') await sleep(80);
+      if (method === 'event.replay' || method === 'event.wait') return { events: [], lastSequence: 0 };
+      if (method === 'session.followUp.list') return { items: [] };
+      if (method === 'health.get') return { features: {} };
+      return [];
+    } } };
+    try {
+      await route('/sessions?session=s1');
+      const inspect = async iteration => {
+        qa.sessions.getState()._replaceEvents(parent.id, [{ id: 'workflow-plan', sessionId: parent.id, sequence: 1,
+          timestamp: now, data: { kind: 'workflow_plan', plan, runStatus: 'running' } }]);
+        const parentHash = w.location.hash;
+        (await waitFor(() => find('查看执行'), 'execution action')).click();
+        const panel = await waitFor(() => d.querySelector('.workflow-execution-drawer [data-node-id="analysis"] .wf-node-body'), 'execution side panel');
+        panel.click();
+        assert.equal(w.location.hash, parentHash);
+        assert(d.querySelector('section[aria-label="对话"] .composer'));
+        const selector = await waitFor(() => d.querySelector('.workflow-execution-drawer select[aria-label="选择节点执行实例"]'), 'execution attempts');
+        selector.value = `analysis-${iteration}`; selector.dispatchEvent(new w.Event('change', { bubbles: true }));
+        const id = instanceRows[iteration - 1].sessionId;
+        assert(!qa.sessions.getState().sessions.some(item => item.id === id));
+        find('打开子会话 ↗').click();
+        await waitFor(() => qa.sessions.getState().activeSessionId === id && d.querySelector('.workspace-conversation-header h1')?.textContent.includes('综合判断'), 'loaded child conversation');
+        assert.equal(w.location.hash, `#/sessions?session=${encodeURIComponent(id)}`);
+        assert(requested.includes(id));
+      };
+      await inspect(2);
+      const dispatch = await waitFor(() => d.querySelector('.workflow-dispatch-card'), 'child dispatch information');
+      assert.match(dispatch.textContent, /检查第 2 组证据/);
+      assert.match(dispatch.querySelector('.workflow-dispatch-preview').textContent, /代码证据：JSON/);
+      const toggleDetails = dispatch.querySelector('.workflow-dispatch-toggle');
+      dispatch.querySelector('.workflow-dispatch-preview').click();
+      await waitFor(() => toggleDetails.getAttribute('aria-expanded') === 'true', 'dispatch details open');
+      assert.equal(dispatch.querySelector('.workflow-dispatch-preview-clip').getAttribute('aria-hidden'), 'true');
+      assert.match(dispatch.querySelector('.workflow-dispatch-incoming').textContent, /上游记录 2.*原始样本/);
+      assert.equal(dispatch.querySelector('.workflow-dispatch-json pre').textContent, JSON.stringify(JSON.parse(evidenceJson), null, 2));
+      assert.equal(dispatch.querySelector('.workflow-dispatch-incoming .workflow-dispatch-json pre').textContent, '{status: "ready"}');
+      toggleDetails.click();
+      await waitFor(() => toggleDetails.getAttribute('aria-expanded') === 'false', 'dispatch details closed');
+      await route('/sessions?session=s1');
+      await inspect(1);
+      await waitFor(() => d.querySelector('.workflow-dispatch-card')?.textContent.includes('上游记录 1'), 'first dispatch after navigation');
+      qa.sessions.getState()._replaceEvents(first.id, [{ id: 'mcp-receipt', sessionId: first.id, runId: 'agent-run-1', sequence: 1, timestamp: now,
+        data: { kind: 'tool_activity', status: 'done', toolName: 'nautilo_runtime_agenthub_workflow_submit',
+          input: JSON.stringify({ instanceId: 'analysis-1', attempt: 1, branch: '证据冲突', result: { summary: '检查通过' } }), output: JSON.stringify({ accepted: true }) } }]);
+      const toggle = await waitFor(() => d.querySelector('.conversation-process-toggle'), 'process summary');
+      if (toggle.getAttribute('aria-expanded') === 'false') toggle.click();
+      const step = await waitFor(() => d.querySelector('.workflow-tool-activity button:has(.workflow-tool-node)'), 'friendly workflow MCP trace');
+      assert(step.querySelector('[data-provider="codex"] img'));
+      assert(step.querySelector('.workflow-tool-route [data-provider="opencode"] img'));
+      assert.match(step.textContent, /提交节点结果.*出口.*证据冲突.*独立复核.*已接收/);
+      step.click();
+      const raw = await waitFor(() => d.querySelector('.workflow-tool-raw'), 'technical details');
+      assert.equal(raw.open, false);
+      assert(d.querySelector('.workflow-tool-detail').textContent.includes('检查通过'));
+    } finally {
+      await route('/sessions?new=1');
+      delete w.agenthub;
+      qa.agents.setState({ instances: agents });
+      await sleep(50);
+    }
   });
   await check('first Send preserves selected model, permission and Plan using an in-memory bridge', async () => {
     const calls = [];
@@ -193,4 +354,4 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   await check('no React DOM or unhandled runtime errors', () => assert.deepEqual(errors, []));
   console.log(JSON.stringify({ passed, failures, errors }, null, 2));
   if (failures.length) process.exitCode = 1;
-})().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => { dom?.window.close(); process.removeListener('unhandledRejection', recordRejection); fs.rmSync(scratch, { recursive: true, force: true }); });
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => { dom?.window.close(); process.removeListener('unhandledRejection', recordRejection); });

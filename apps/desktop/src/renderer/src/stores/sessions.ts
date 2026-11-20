@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Session as DomainSession } from "@agenthub/domain";
+import type { Session as DomainSession, WorkflowMention } from "@agenthub/domain";
 import { getBridge, requestCore } from "../lib/bridge";
 import { newId } from "../lib/utils";
 import type {
@@ -25,6 +25,12 @@ const EMPTY_ARTIFACTS: SessionArtifact[] = [];
  * fallback that never changes identity (React #185 guard). */
 export const SESSION_EMPTY = { events: EMPTY_EVENTS, lines: EMPTY_LINES, artifacts: EMPTY_ARTIFACTS } as const;
 
+export type NextTurnModel = Pick<UiSession, "connectionId" | "connectionRevision" | "model" | "reasoningEffort" | "serviceTier"> & {
+  sourceConnectionId?: string;
+  sourceConnectionRevision?: number;
+  enableAccountRoute?: boolean;
+};
+
 /**
  * Sessions store: the append-only event log is the single source of truth.
  * Every event gets a monotonic per-session sequence; the runner keeps appending
@@ -46,14 +52,17 @@ interface SessionsState {
   activeAgentRunIds: Record<string, string | undefined>;
   /** Follow-ups waiting in the daemon queue, oldest first (F: queued messages). */
   queuedFollowUps: Record<string, QueuedFollowUp[]>;
+  /** A composer choice for the next message; the live turn keeps its saved configuration. */
+  nextTurnModels: Record<string, NextTurnModel | undefined>;
   activeSessionId?: string;
-  editingMessage?: { sessionId: string; messageId: string; text: string };
+  editingMessage?: { sessionId: string; messageId: string; text: string; workflowRef?: WorkflowMention };
 
   setActiveSession: (id: string | undefined) => void;
   markSessionsRead: (ids: string[]) => void;
   removeSessions: (sessionIds: string[]) => void;
-  startEditingMessage: (sessionId: string, messageId: string, text: string) => void;
+  startEditingMessage: (sessionId: string, messageId: string, text: string, workflowRef?: WorkflowMention) => void;
   cancelEditingMessage: () => void;
+  setNextTurnModel: (sessionId: string, selection: NextTurnModel | undefined) => void;
   createSession: (input: {
     connectionId?: string;
     connectionRevision?: number;
@@ -125,6 +134,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       foreground: {},
       activeAgentRunIds: {},
       queuedFollowUps: {},
+      nextTurnModels: {},
       activeSessionId: undefined,
       editingMessage: undefined,
 
@@ -164,12 +174,20 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
             foreground: keep(state.foreground),
             running: keep(state.running),
             activeAgentRunIds: keep(state.activeAgentRunIds),
-            queuedFollowUps: keep(state.queuedFollowUps)
+            queuedFollowUps: keep(state.queuedFollowUps),
+            nextTurnModels: keep(state.nextTurnModels)
           };
         }),
 
-      startEditingMessage: (sessionId, messageId, text) => set({ editingMessage: { sessionId, messageId, text } }),
+      startEditingMessage: (sessionId, messageId, text, workflowRef) => set({ editingMessage: { sessionId, messageId, text, workflowRef } }),
       cancelEditingMessage: () => set({ editingMessage: undefined }),
+      setNextTurnModel: (sessionId, selection) => set((state) => {
+        if (!state.sessions.some((session) => session.id === sessionId)) return state;
+        const nextTurnModels = { ...state.nextTurnModels };
+        if (selection) nextTurnModels[sessionId] = selection;
+        else delete nextTurnModels[sessionId];
+        return { nextTurnModels };
+      }),
 
       createSession: ({ connectionId, connectionRevision, projectId, target, title, model, agentMode, reasoningEffort, serviceTier, permissionMode, parentSessionId, runId, mode }) => {
         const now = new Date().toISOString();
@@ -419,7 +437,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           contextUsage: Object.fromEntries(sessions.map((session) => [session.id, state.contextUsage[session.id]])),
           providerCommandRevisions: Object.fromEntries(sessions.map((session) => [session.id, state.providerCommandRevisions[session.id] ?? 0])),
           foreground: Object.fromEntries(sessions.map((session) => [session.id, state.foreground[session.id]])),
-          queuedFollowUps: Object.fromEntries(sessions.map((session) => [session.id, state.queuedFollowUps[session.id] ?? []]))
+          queuedFollowUps: Object.fromEntries(sessions.map((session) => [session.id, state.queuedFollowUps[session.id] ?? []])),
+          nextTurnModels: Object.fromEntries(Object.entries(state.nextTurnModels).filter(([id]) => ids.has(id)))
         };
       }),
 

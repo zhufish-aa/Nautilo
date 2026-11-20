@@ -1187,6 +1187,13 @@ async fn run_pi(
     let key = request["localSessionId"].as_str().or(resume.as_deref()).unwrap_or(run_id).to_string();
     let attached=std::time::Instant::now();let mut reused=false;
     let cached = pool.take(&key);
+    let reason = match &cached {
+        None => "first_use",
+        Some((_, native)) if !native.process.as_ref().is_some_and(|p| p.handle.is_alive()) => "process_exited",
+        Some((previous, _)) if previous != &identity => "configuration_changed",
+        Some((_, native)) if resume.is_none() || native.session_id != resume => "session_changed",
+        _ => "resident",
+    };
     let mut native = if let Some((previous, cached)) = cached {
         if resume.is_some() && cached.session_id==resume && previous == identity && cached.process.as_ref().is_some_and(|process|process.handle.is_alive()) { reused=true;cached }
         else { cached.close().await; open_pi(&request,&resume,&channel,run_id).await? }
@@ -1200,7 +1207,7 @@ async fn run_pi(
     let handle = started.handle.clone();
     *handle_slot.lock().unwrap() = Some(handle.clone());
     runs.lock().unwrap().insert(run_id.to_string(), handle.clone());
-    let _=sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"pi","transport":"rpc","reused":reused,"pid":handle.pid,"attachMs":attached.elapsed().as_millis()}}));
+    let _=sender.send(json!({"kind":"status","phase":"runtime_ready","raw":{"providerId":"pi","transport":"rpc","reused":reused,"reason":reason,"pid":handle.pid,"attachMs":attached.elapsed().as_millis()}}));
 
     let mut native_session_id=native.session_id.clone();
     let parse_state = native.parse_state.clone();

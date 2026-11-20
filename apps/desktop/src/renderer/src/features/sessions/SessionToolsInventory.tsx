@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import type { SessionToolInventory } from "@agenthub/schemas";
 import { requestCore } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
+import { useSessionsStore } from "../../stores/sessions";
 import "../settings/request-logs.css";
 
 export function SessionToolsInventory({
@@ -17,13 +18,17 @@ export function SessionToolsInventory({
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const version = useRef(0);
+  const identity = useSessionsStore(state => {
+    const session = state.sessions.find(item => item.id === sessionId);
+    return JSON.stringify([sessionId, session?.target, session?.connectionId, session?.connectionRevision]);
+  });
   useEffect(() => {
     version.current++;
     setResult(undefined);
     setError("");
     setOpen(false);
     setBusy(false);
-  }, [sessionId]);
+  }, [identity]);
   const load = async () => {
     const current = ++version.current;
     setBusy(true);
@@ -71,6 +76,10 @@ export function SessionToolsInventory({
             </Link>
           </div>
           {error && <p role="alert">{error}</p>}
+          {result?.requestId && <div className="session-tool-evidence" title={result.requestId}>
+            <span>{zh ? "请求" : "Request"} {result.requestId.slice(0, 8)}</span>
+            <span>{zh ? "连接版本" : "Connection revision"} {result.connectionRevision ?? "—"}</span>
+          </div>}
           {result && !result.nativeReported && (
             <p>
               {zh
@@ -93,6 +102,11 @@ export function SessionToolsInventory({
               <span>{server.status || labels[server.evidence]}</span>
             </div>
           ))}
+          <div className="session-tools-inventory-actions">
+            {result?.connectionId && <Link to={`/settings?section=accounts&connection=${encodeURIComponent(result.connectionId)}`}>{zh ? "检查连接" : "Check connection"}<ArrowUpRight size={13}/></Link>}
+            <Link to="/settings?section=mcp">MCP<ArrowUpRight size={13}/></Link>
+            <Link to="/settings?section=skills">Skills<ArrowUpRight size={13}/></Link>
+          </div>
         </div>
       )}
     </section>

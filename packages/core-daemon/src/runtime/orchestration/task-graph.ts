@@ -30,7 +30,7 @@ export class TaskGraph {
   releaseApproval(projectRunId: ProjectRunId): Task[] {
     const tasks = this.database.tasks.list(projectRunId);
     for (const task of tasks) {
-      if (task.status !== "waiting_approval") continue;
+      if (task.workflowRunId || task.status !== "waiting_approval") continue;
       this.saveStatus(task, task.dependencies.length === 0 ? "ready" : "blocked_dependency");
     }
     return this.database.tasks.list(projectRunId);
@@ -40,7 +40,7 @@ export class TaskGraph {
     const tasks = this.database.tasks.list(projectRunId);
     const byId = new Map(tasks.map((task) => [task.id, task]));
     for (const task of tasks) {
-      if (task.status !== "blocked_dependency") continue;
+      if (task.workflowRunId || task.status !== "blocked_dependency") continue;
       const dependencies = task.dependencies.map((id) => byId.get(id));
       if (dependencies.every((dependency) => dependency?.status === "completed")) this.saveStatus(task, "ready");
     }
@@ -49,7 +49,7 @@ export class TaskGraph {
 
   ready(projectRunId: ProjectRunId): Task[] {
     return this.refresh(projectRunId)
-      .filter((task) => task.status === "ready")
+      .filter((task) => !task.workflowRunId && task.status === "ready")
       .sort((left, right) => left.priority - right.priority);
   }
 
@@ -69,7 +69,7 @@ export class TaskGraph {
     while (changed) {
       changed = false;
       for (const task of tasks) {
-        if (cancelled.has(task.id) || task.status === "completed") continue;
+        if (task.workflowRunId || cancelled.has(task.id) || task.status === "completed") continue;
         if (task.dependencies.some((dependency) => cancelled.has(dependency))) {
           cancelled.add(task.id);
           changed = true;
@@ -77,7 +77,7 @@ export class TaskGraph {
       }
     }
     for (const task of tasks) {
-      if (task.id !== failedTaskId && cancelled.has(task.id) && !["completed", "cancelled"].includes(task.status)) {
+      if (!task.workflowRunId && task.id !== failedTaskId && cancelled.has(task.id) && !["completed", "cancelled"].includes(task.status)) {
         this.saveStatus(task, "cancelled");
       }
     }

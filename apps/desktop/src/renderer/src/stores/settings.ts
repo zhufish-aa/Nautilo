@@ -10,6 +10,9 @@ export const TOGGLABLE_NAV_KEYS: NavKey[] = ["teams", "tasks", "sessions", "runs
 export const PINNED_NAV_KEYS: NavKey[] = ["projects", "agents", "settings"];
 
 interface SettingsState {
+  /** Stable IDs only; previews remain in the encrypted conversation store. */
+  conversationBookmarks: Record<string, string[]>;
+  toggleConversationBookmark: (sessionId: string, messageId: string) => void;
   theme: ThemePreference;
   locale: LocaleCode;
   reduceMotion: boolean;
@@ -43,6 +46,14 @@ interface SettingsState {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
+      conversationBookmarks: {},
+      toggleConversationBookmark: (sessionId, messageId) => set(state => {
+        const previous = state.conversationBookmarks[sessionId] ?? [];
+        const next = previous.includes(messageId) ? previous.filter(id => id !== messageId) : [...previous, messageId];
+        const conversationBookmarks = { ...state.conversationBookmarks };
+        if (next.length) conversationBookmarks[sessionId] = next; else delete conversationBookmarks[sessionId];
+        return { conversationBookmarks };
+      }),
       theme: "system",
       locale: "zh-CN",
       reduceMotion: false,

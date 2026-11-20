@@ -10,7 +10,7 @@ import { useAgentsStore } from "../../src/renderer/src/stores/agents";
 import { useTeamsStore } from "../../src/renderer/src/stores/teams";
 import { useSettingsStore } from "../../src/renderer/src/stores/settings";
 import { useProviderToolsStore } from "../../src/renderer/src/stores/provider-tools";
-import type { TimelinePayload, UiSession, UiProject, AgentInstanceConfig, UiTeam } from "../../src/renderer/src/lib/types";
+import type { TimelineEvent, TimelinePayload, UiSession, UiProject, AgentInstanceConfig, UiTeam } from "../../src/renderer/src/lib/types";
 import type { ProviderCapability } from "@agenthub/domain";
 import "./visual.css";
 
@@ -18,7 +18,8 @@ const now = "2026-11-03T02:00:00Z";
 const params = new URLSearchParams(location.search);
 const scenario = params.get("scenario") ?? "home";
 const section = params.get("section") ?? "appearance";
-useSettingsStore.setState({ onboardingCompleted: true, locale: "zh-CN", theme: params.get("theme") === "dark" ? "dark" : "light", reduceMotion: true, collapsedProjects: ["website"], hiddenNav: [] });
+const traceScenario = scenario === "conversation-trace";
+useSettingsStore.setState({ onboardingCompleted: true, locale: "zh-CN", theme: params.get("theme") === "dark" ? "dark" : "light", reduceMotion: !traceScenario || params.has("reduceMotion"), collapsedProjects: ["website"], hiddenNav: [] });
 localStorage.setItem("nautilo.sidebar.collapsed", String(params.get("collapsed") === "1"));
 useProjectsStore.setState({ projects: [
   { id: "nautilo", name: "Nautilo", rootPath: "/sample/nautilo", repositoryType: "git", workspaceMode: "direct", scanning: false, verificationTemplates: [], addedAt: now },
@@ -50,11 +51,57 @@ const conversation: TimelinePayload[] = [
   { kind: "tool_activity", toolName: "apply_patch", status: "done", input: "src/ExportButton.tsx", output: "界面示例，未修改真实文件。" }
 ];
 if (scenario === "approval") conversation.push({ kind: "approval", approval: { id: "example-approval", title: "运行命令", description: "npm test -- ExportButton\n工作目录 /sample/nautilo\n界面示例，不会执行命令。", kind: "command", status: "pending", createdAt: now } });
-useSessionsStore.setState({ sessions, activeSessionId: scenario === "conversation" || scenario === "approval" ? "export" : undefined,
-  events: { export: conversation.map((data, index) => ({ id: `example-${index}`, sessionId: "export", sequence: index + 1, timestamp: now, data })) },
+
+function exampleTrace(): TimelineEvent[] {
+  const rows: TimelineEvent[] = [];
+  const append = (id: string, seconds: number, data: TimelinePayload, runId?: string): void => {
+    rows.push({ id, sessionId: "export", sequence: rows.length + 1, timestamp: new Date(Date.parse(now) + seconds * 1000).toISOString(), data, runId });
+  };
+  if (params.has("manyTurns")) for (let index = 0; index < 36; index++) {
+    const seconds = (index - 36) * 4;
+    append(`history-request-${index}`, seconds, { kind: "message", sender: "user", text: `继续第 ${index + 1} 个检查。` });
+    append(`history-check-${index}`, seconds + 1, { kind: "reasoning", text: "核对当前结果。" });
+    append(`history-answer-${index}`, seconds + 2, { kind: "message", sender: "agent", text: "已完成这项检查。" });
+  }
+  const trace = "trace-run";
+  append("trace-request", 0, { kind: "message", sender: "user", text: "检查导出按钮的加载状态，并跑一遍回归。" });
+  append("trace-start", 0, { kind: "activity", phase: "starting" }, trace);
+  append("trace-thought", 2, { kind: "reasoning", text: "核对导出入口和按钮状态，确认提交期间只触发一次请求。" }, trace);
+  append("trace-command", 4, { kind: "command", status: "done", exitCode: 0,
+    command: "pwsh -NoProfile -Command \"Get-Content -LiteralPath 'apps/desktop/src/renderer/src/features/export/ExportButton.tsx'\"",
+    output: Array.from({ length: 96 }, (_, index) => `${index + 1}  ${index % 2 ? "按钮状态已核对" : "等待导出操作完成"}`).join("\n") }, trace);
+  append("trace-review", 5, { kind: "reasoning", text: "检查加载中、执行完成和失败重试三个状态。" }, trace);
+  append("trace-git", 7, { kind: "command", status: "done", exitCode: 0, command: "git diff --check -- apps/desktop/src/renderer/src/features/export", output: "检查通过。" }, trace);
+  if (params.has("longHistory")) for (let index = 0; index < 86; index++) {
+    append(`trace-more-${index}`, 7.01 + index / 100, { kind: "reasoning", text: `核对第 ${index + 1} 条记录。` }, trace);
+  }
+  append("trace-update", 9, { kind: "message", sender: "agent", text: "导出入口已经接上加载状态。现在核对键盘访问和重复点击。" }, trace);
+  const directory = "apps/desktop/src/renderer/src/features/export/";
+  const files = [
+    { path: directory + "ExportButton.tsx", additions: 6, deletions: 3 },
+    { path: directory + "ExportOptions.tsx", additions: 7, deletions: 16 },
+    { path: directory + "components/toolbar/keyboard/ExportShortcut.tsx", additions: 7, deletions: 7 },
+    { path: "apps\\desktop\\test\\export-button.test.mjs", additions: 93, deletions: 15 },
+  ].map(file => ({ ...file, changeType: "modified" as const,
+    diff: `--- a/${file.path}\n+++ b/${file.path}\n@@ -1 +1 @@\n-export const busy = false;\n+export const busy = pending;` }));
+  append("trace-diff", 12, { kind: "file_change", source: "provider", files }, trace);
+  append("trace-last-check", 14, { kind: "reasoning", text: "核对通过，可以交付。" }, trace);
+  append("trace-result", 20, { kind: "message", sender: "agent", text: "已完成导出按钮的加载反馈。导出期间会显示进度，并保留键盘操作。\n\n四个文件已更新，回归检查通过。" }, trace);
+  append("trace-complete", 20, { kind: "activity", phase: "completed" }, trace);
+  append("trace-emoji", 24, { kind: "message", sender: "user", text: "🥺" });
+  if (params.has("running")) {
+    append("trace-live-thought", 25, { kind: "reasoning", text: "正在核对测试输出。", streaming: true }, "trace-live");
+    append("trace-live-command", 26, { kind: "command", command: "pwsh -NoProfile -Command \"pnpm test -- export\"", status: "running", output: "正在运行回归测试……" }, "trace-live");
+  }
+  append("trace-confirm", 27, { kind: "message", sender: "agent", text: "可以直接在桌面端点开导出菜单验证。", streaming: params.has("running") }, "trace-live");
+  return rows;
+}
+
+useSessionsStore.setState({ sessions, activeSessionId: scenario === "conversation" || scenario === "approval" || traceScenario ? "export" : undefined,
+  events: { export: traceScenario ? exampleTrace() : conversation.map((data, index) => ({ id: `example-${index}`, sessionId: "export", sequence: index + 1, timestamp: now, data })) },
   contextUsage: { export: { contextUsed: 28000, contextWindow: 100000 } }
 });
-const routes: Record<string, string> = { home: "/sessions?new=1", conversation: "/sessions?session=export", approval: "/sessions?session=export", projects: "/projects", team: "/teams/sample-team", settings: `/settings?section=${encodeURIComponent(section)}`, skills: "/settings?section=skills", search: "/sessions?new=1" };
+const routes: Record<string, string> = { home: "/sessions?new=1", conversation: "/sessions?session=export", "conversation-trace": "/sessions?session=export", approval: "/sessions?session=export", projects: "/projects", team: "/teams/sample-team", settings: `/settings?section=${encodeURIComponent(section)}`, skills: "/settings?section=skills", search: "/sessions?new=1" };
 if (!location.hash) location.hash = routes[scenario] ?? routes.home;
 createRoot(document.getElementById("root")!).render(<HashRouter><I18nProvider><App /></I18nProvider></HashRouter>);
 const marker = document.createElement("div");

@@ -1,0 +1,76 @@
+@import "./workflow-tokens.css";
+
+.workflow-dispatch-frame { flex: none; padding-block-end: 8px; }
+.workflow-dispatch-card {
+  --workflow-dispatch-ink: #3f3f46;
+  --workflow-dispatch-code-surface: #f4f5f7;
+  border: 1px solid var(--conversation-detail-border);
+  border-radius: 12px;
+  background: var(--conversation-detail-surface);
+  font-size: 13px;
+}
+.dark .workflow-dispatch-card {
+  --workflow-dispatch-ink: #d4d4d8;
+  --workflow-dispatch-code-surface: #111318;
+}
+.workflow-dispatch-heading { display: flex; align-items: center; gap: 9px; padding: 9px 12px 9px 13px; }
+.workflow-dispatch-mark { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 8px; }
+.workflow-dispatch-title { display: flex; flex: 1; align-items: baseline; gap: 8px; min-width: 0; }
+.workflow-dispatch-title strong { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--ink); font-weight: 600; }
+.workflow-dispatch-title > span { min-width: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: var(--conversation-detail-muted); font-size: 11.5px; }
+.workflow-dispatch-title > span::before { content: "·"; margin-inline-end: 8px; }
+.workflow-dispatch-iteration { position: relative; display: inline-flex; flex: none; align-items: center; }
+.workflow-dispatch-iteration select { appearance: none; min-height: 26px; padding: 3px 23px 3px 8px; border: 1px solid var(--conversation-detail-border); border-radius: 6px; color: var(--ink); background: var(--conversation-detail-header); font: inherit; font-size: 11px; cursor: pointer; }
+.workflow-dispatch-iteration > svg { position: absolute; inset-inline-end: 7px; pointer-events: none; color: var(--conversation-detail-muted); }
+.workflow-dispatch-icon-button { display: grid; place-items: center; flex: none; width: 26px; height: 26px; border-radius: 6px; color: var(--conversation-detail-muted); cursor: pointer; }
+.workflow-dispatch-toggle { margin-inline-start: -4px; }
+.workflow-dispatch-card[data-open] .workflow-dispatch-toggle svg { transform: rotate(180deg); }
+.workflow-dispatch-card :is(button, select):focus-visible, .workflow-dispatch-copy:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+
+.workflow-dispatch-fold { display: grid; grid-template-rows: 1fr 0fr; border-top: 1px solid var(--conversation-detail-border); }
+.workflow-dispatch-card[data-open] .workflow-dispatch-fold { grid-template-rows: 0fr 1fr; }
+.workflow-dispatch-fold > div { min-block-size: 0; min-width: 0; overflow: hidden; }
+.workflow-dispatch-card[data-open] .workflow-dispatch-preview-clip,
+.workflow-dispatch-card:not([data-open]) .workflow-dispatch-details { visibility: hidden; }
+.workflow-dispatch-preview { display: grid; gap: 3px; width: 100%; min-width: 0; padding: 8px 13px 9px; border-radius: 0 0 11px 11px; cursor: pointer; text-align: start; line-height: 1.5; }
+.workflow-dispatch-preview > span { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.workflow-dispatch-preview strong { flex: none; font-size: 11.5px; font-weight: 500; color: var(--conversation-detail-muted); }
+.workflow-dispatch-preview > span > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 12px; }
+.workflow-dispatch-body { max-block-size: min(44dvh, 300px); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 11px 12px 13px 13px; }
+.workflow-dispatch-body::-webkit-scrollbar { width: 5px; }
+.workflow-dispatch-body::-webkit-scrollbar-button { display: none; }
+.workflow-dispatch-body::-webkit-scrollbar-track { background: transparent; }
+.workflow-dispatch-body::-webkit-scrollbar-thumb { border-radius: 5px; background: color-mix(in srgb, var(--ink) 18%, transparent); }
+.workflow-dispatch-body::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--ink) 35%, transparent); }
+.workflow-dispatch-body > section + section { margin-top: 13px; }
+.workflow-dispatch-incoming { min-width: 0; }
+.workflow-dispatch-incoming h4 { margin: 0 0 5px; font-size: 12px; font-weight: 600; }
+.workflow-dispatch-body h4 { margin: 0 0 5px; color: var(--conversation-detail-muted); font-size: 11.5px; font-weight: 500; }
+.workflow-dispatch-card .workflow-dispatch-inset { padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--workflow-dispatch-code-surface) 45%, var(--conversation-detail-surface)); color: var(--workflow-dispatch-ink); font-size: 12.5px; font-weight: 400; line-height: 1.65; }
+.workflow-dispatch-origin, .workflow-dispatch-history > summary { color: var(--conversation-detail-muted); font-size: 11px; }
+.workflow-dispatch-origin { margin-bottom: 6px; }
+.workflow-dispatch-history { margin-top: 7px; }
+.workflow-dispatch-history > summary { cursor: pointer; width: fit-content; }
+.workflow-dispatch-value { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--workflow-dispatch-ink, var(--ink-2)); line-height: 1.65; }
+.workflow-dispatch-json { position: relative; margin-block: 6px; border: 1px solid var(--conversation-detail-border); border-radius: 7px; background: var(--workflow-dispatch-code-surface, var(--conversation-detail-header)); }
+.workflow-dispatch-json:only-child { margin-block: 0; }
+.workflow-dispatch-json pre { margin: 0; padding: 8px 36px 8px 9px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--workflow-dispatch-ink, var(--ink-2)); font: 400 12px/1.65 var(--font-mono); }
+.workflow-dispatch-json code { font: inherit; }
+.workflow-dispatch-copy { position: absolute; inset-block-start: 4px; inset-inline-end: 4px; }
+.workflow-dispatch-incoming dl { margin: 0; }
+.workflow-dispatch-incoming dl > div + div { margin-top: 6px; }
+.workflow-dispatch-incoming dt, .workflow-dispatch-item strong { color: var(--conversation-detail-muted); font-size: 11.5px; font-weight: 500; overflow-wrap: anywhere; }
+.workflow-dispatch-incoming dd { margin: 2px 0 0; }
+.workflow-dispatch-incoming ul { margin: 0; padding-inline-start: 15px; list-style: disc; }
+.workflow-dispatch-incoming li + li { margin-top: 3px; }
+.workflow-dispatch-item { display: grid; gap: 3px; margin-top: 8px; }
+.wf-inspector .workflow-dispatch-incoming { margin-top: 10px; padding: 10px; border: 1px solid var(--wf-border); border-radius: 8px; max-block-size: 220px; overflow: auto; }
+
+@media (hover: hover) and (pointer: fine) {
+  .workflow-dispatch-preview:hover, .workflow-dispatch-icon-button:hover { background: var(--conversation-detail-hover); }
+  .workflow-dispatch-icon-button:hover { color: var(--ink); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-reduce-motion]) .workflow-dispatch-fold { transition: grid-template-rows var(--conversation-detail-duration) var(--conversation-detail-ease); }
+  html:not([data-reduce-motion]) .workflow-dispatch-toggle svg { transition: transform var(--conversation-detail-duration) var(--conversation-detail-ease); }
+}

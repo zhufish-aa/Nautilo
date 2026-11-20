@@ -252,7 +252,7 @@ class MobileDesignSnapshotTest {
                 NautiloTheme {
                     Box(Modifier.fillMaxSize().background(Color(0xFFEDEDED)).padding(bottom = 28.dp), contentAlignment = Alignment.BottomCenter) {
                         Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).background(Color.White, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).padding(top = 14.dp)) {
-                            NewConversationSettingsContent("DeepSeek Harness", "DeepSeek API", "DeepSeek V4", "最高", true, {}, {}, {})
+                            NewConversationSettingsContent("DeepSeek Harness", "DeepSeek API", "DeepSeek V4", "最高", true, cancel = {}, done = {}, choose = {})
                         }
                     }
                 }
@@ -270,7 +270,7 @@ class MobileDesignSnapshotTest {
                 NautiloTheme {
                     Box(Modifier.fillMaxSize().background(Color(0xFFEDEDED)).padding(bottom = 28.dp), contentAlignment = Alignment.BottomCenter) {
                         Column(Modifier.fillMaxWidth().height(560.dp).background(Color.White, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).padding(top = 14.dp)) {
-                            CreationChoiceContent(CreationPicker.Harness, state, "", "0", "", "", "", {}, {}, {}, {})
+                            CreationChoiceContent(CreationPicker.Harness, state, "", "0", "", "", "", refresh = {}, newProject = {}, dismiss = {}, select = {})
                         }
                     }
                 }

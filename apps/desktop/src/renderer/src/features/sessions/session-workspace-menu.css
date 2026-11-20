@@ -1,0 +1,114 @@
+.session-workspace-trigger {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding-inline: 9px 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.session-workspace-trigger:hover,
+.session-workspace-trigger[data-state="open"] { background: var(--card-hover); color: var(--ink); border-color: var(--line-strong); }
+.session-workspace-trigger:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+.session-workspace-chevron { color: var(--ink-3); }
+.session-workspace-trigger[data-state="open"] .session-workspace-chevron { transform: rotate(180deg); }
+
+.session-workspace-menu {
+  z-index: 60;
+  box-sizing: border-box;
+  width: 284px;
+  max-width: var(--radix-dropdown-menu-content-available-width);
+  max-height: var(--radix-dropdown-menu-content-available-height);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow-pop-value);
+  outline: none;
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin);
+  scrollbar-width: thin;
+}
+.session-workspace-project {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 9px 13px;
+  margin: 0 0 4px;
+  border-bottom: 1px solid var(--line);
+}
+.session-workspace-project-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+}
+.session-workspace-project > div { min-width: 0; }
+.session-workspace-project[role="menuitem"] { cursor: pointer; outline: none; }
+.session-workspace-project[role="menuitem"][data-highlighted] { background: var(--card-hover); border-radius: 8px 8px 0 0; }
+.session-workspace-folder-arrow { flex: none; margin-inline-start: auto; color: var(--ink-3); }
+.session-workspace-project strong,
+.session-workspace-project div > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-workspace-project strong { font-size: 13px; font-weight: 600; line-height: 19px; }
+.session-workspace-project div > span { color: var(--ink-3); font-size: 11px; line-height: 17px; }
+.session-workspace-group { display: grid; gap: 1px; }
+.session-workspace-divider { height: 1px; margin: 5px 4px; background: var(--line); }
+.session-workspace-caption { padding: 4px 9px 3px; color: var(--ink-3); font-size: 11px; font-weight: 500; }
+.session-workspace-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 20px;
+  user-select: none;
+  outline: none;
+}
+.session-workspace-item-label { flex: 1; }
+.session-workspace-item > svg { flex: none; }
+.session-workspace-item-icon { stroke-width: 1.65; }
+.session-workspace-item[data-highlighted] { background: var(--card-hover); color: var(--ink); }
+.session-workspace-item:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+.session-workspace-detail { color: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.session-workspace-item kbd {
+  display: grid;
+  place-items: center;
+  min-width: 19px;
+  height: 19px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-soft);
+  color: var(--ink-3);
+  font: 500 10px/1 var(--font-mono);
+}
+
+@container chat-column (max-width: 560px) {
+  .workspace-conversation-header { column-gap: 8px; padding-inline-end: 14px; }
+  .session-workspace-trigger { width: 32px; justify-content: center; padding: 0; }
+  .session-workspace-trigger > span, .session-workspace-chevron { display: none; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .session-workspace-menu[data-state="open"] { animation: session-workspace-appear 120ms var(--ease-out-ui); }
+  .session-workspace-chevron { transition: transform 120ms var(--ease-out-ui); }
+}
+@keyframes session-workspace-appear {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}

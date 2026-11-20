@@ -6,7 +6,7 @@ import ts from "typescript";
 const source = await readFile(new URL("../src/renderer/src/stores/composer-drafts.ts", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   .replace('from "zustand"', `from ${JSON.stringify(import.meta.resolve("zustand"))}`);
-const { useComposerDraftsStore: store, deliverComposerSubmission: deliver } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(compiled)}`);
+const { useComposerDraftsStore: store, deliverComposerSubmission: deliver, serializeComposerDraft, restoreComposerDraft, setComposerSubmissionPreparation } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(compiled)}`);
 
 test.beforeEach(() => store.setState({ drafts: {}, pending: {}, failed: {} }));
 
@@ -153,4 +153,56 @@ test("retrying an original new message never inherits a different edit target", 
   await deliver(first, async () => { throw new Error("offline"); });
   const retry = store.getState().begin("a", "message", "different-message-edit", first.token);
   assert.equal(retry.editMessageId, undefined);
+});
+
+test("restart reconciles an accepted send without sending it again", () => {
+  store.getState().setText("a", "delivered before restart");
+  const sent = store.getState().begin("a", "message");
+  const saved = serializeComposerDraft(store.getState(), "a");
+  store.setState({ drafts: {}, pending: {}, failed: {} });
+  restoreComposerDraft("a", saved, [sent.messageId], store.getState());
+  assert.equal(store.getState().drafts.a, undefined);
+  assert.equal(store.getState().failed.a, undefined);
+  assert.deepEqual(store.getState().pending, {});
+});
+
+test("an ambiguous send after restart remains an explicit retry with the same message ID", () => {
+  store.getState().setText("a", "pending at crash");
+  const sent = store.getState().begin("a", "steer");
+  const saved = serializeComposerDraft(store.getState(), "a");
+  store.setState({ drafts: {}, pending: {}, failed: {} });
+  restoreComposerDraft("a", saved, [], store.getState());
+  assert.deepEqual(store.getState().pending, {});
+  const retry = store.getState().begin("a", "message");
+  assert.equal(retry.messageId, sent.messageId);
+  assert.equal(retry.kind, "steer");
+  store.getState().move({ ...retry, kind: "message" }, "a");
+  assert.equal(serializeComposerDraft(store.getState(), "a").submissions[0].kind, "message");
+});
+
+test("typing while the vault loads wins over an older recovered draft", () => {
+  const baseline = store.getState();
+  store.getState().setText("a", "new typing");
+  restoreComposerDraft("a", { draft: { text: "old", attachments: [] }, submissions: [] }, [], baseline);
+  assert.equal(store.getState().drafts.a.text, "new typing");
+});
+
+test("invalid persisted attachment metadata cannot crash the composer", () => {
+  assert.throws(() => restoreComposerDraft("a", { draft: { text: "bad", attachments: [{}] }, submissions: [] }, [], store.getState()), /Invalid saved/);
+  assert.equal(store.getState().drafts.a, undefined);
+});
+
+test("a retry confirmed as already accepted never dispatches the message again", async () => {
+  store.getState().setText("a", "accepted despite lost receipt");
+  const first = store.getState().begin("a", "message");
+  store.getState().finish(first, "timeout");
+  const retry = store.getState().begin("a", "message", undefined, first.token);
+  let sends = 0;
+  setComposerSubmissionPreparation(async () => "accepted");
+  try {
+    assert.equal(await deliver(retry, async () => { sends++; }), true);
+    assert.equal(sends, 0);
+    assert.equal(store.getState().drafts.a, undefined);
+    assert.equal(store.getState().failed.a, undefined);
+  } finally { setComposerSubmissionPreparation(async () => {}); }
 });

@@ -18,6 +18,27 @@ fn session() -> Value {
 }
 
 #[test]
+fn missing_native_file_receipts_backfill_once_without_creating_messages_or_runs() {
+    let db=rusqlite::Connection::open_in_memory().unwrap();
+    crate::database::migrations::migrate(&db).unwrap();
+    let repos=Repositories::new(&db);
+    repos.sessions().save(&session()).unwrap();
+    repos.runs().save(&json!({"id":"run","sessionId":"s","status":"completed","agentInstanceId":"a"})).unwrap();
+    repos.events().append(&json!({"schemaVersion":1,"eventId":"tool","sessionId":"s","runId":"run","projectId":"p","sequence":1,"timestamp":now_iso(),"type":"tool.finished","payload":{"callId":"write-call","toolName":"write","success":true}})).unwrap();
+    let entries=vec![json!({"nativeId":"part:file","timestamp":"2026-11-16T07:06:08.456Z","payload":{"callId":"write-call","path":"D:/项目/动画.svg","changeType":"modified","fileSnapshot":{"after":"<svg/>"}}})];
+    let native=NativeHistoryRepository::new(&db);
+    let first=native.commit_file_activities(&session(),&entries).unwrap();
+    assert_eq!(first.len(),1);
+    assert_eq!(first[0]["type"],"file.changed");
+    assert_eq!(first[0]["runId"],"run");
+    assert_eq!(first[0]["timestamp"],"2026-11-16T07:06:08.456Z");
+    assert!(native.commit_file_activities(&session(),&entries).unwrap().is_empty());
+    assert!(repos.sessions().messages("s").unwrap().is_empty());
+    assert_eq!(repos.runs().get("run").unwrap().unwrap()["status"],"completed");
+    assert!(native.get("s").unwrap().is_none());
+}
+
+#[test]
 fn redundant_path_blocks_do_not_change_native_identity_but_account_and_resolution_order_still_do() {
     let separator = path_separator().to_string();
     let mut request = AdapterStartRequest {

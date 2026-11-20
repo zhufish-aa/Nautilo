@@ -18,6 +18,17 @@ impl TaskGraph {
     }
 
     pub fn create(&self, project_run_id: &str, planned: &[Value], waiting_approval: bool) -> CoreResult<Vec<Value>> {
+        let tasks = Self::materialize(project_run_id, planned, waiting_approval);
+        let mut db = self.db.lock().unwrap();
+        let tx = db.raw.transaction().map_err(crate::database::connection::db_fail)?;
+        for task in &tasks {
+            Repositories::new(&tx).tasks().save(task)?;
+        }
+        tx.commit().map_err(crate::database::connection::db_fail)?;
+        Ok(tasks)
+    }
+
+    pub(crate) fn materialize(project_run_id: &str, planned: &[Value], waiting_approval: bool) -> Vec<Value> {
         let now = now_iso();
         let mut tasks = vec![];
         for (index, item) in planned.iter().enumerate() {
@@ -40,18 +51,17 @@ impl TaskGraph {
             task.insert("status".to_string(), json!(status));
             task.insert("attempt".to_string(), json!(1));
             task.insert("priority".to_string(), json!(index));
-            task.insert("createdAt".to_string(), json!(now_iso()));
-            task.insert("updatedAt".to_string(), json!(now_iso()));
-            let task = Value::Object(task);
-            Repositories::new(&self.db.lock().unwrap().raw).tasks().save(&task)?;
-            tasks.push(task);
+            task.insert("createdAt".to_string(), json!(now));
+            task.insert("updatedAt".to_string(), json!(now));
+            tasks.push(Value::Object(task));
         }
-        Ok(tasks)
+        tasks
     }
 
     pub fn release_approval(&self, project_run_id: &str) -> CoreResult<Vec<Value>> {
         let tasks = Repositories::new(&self.db.lock().unwrap().raw).tasks().list(project_run_id)?;
         for task in &tasks {
+            if task["workflowRunId"].is_string() { continue; }
             if task.get("status").and_then(Value::as_str) != Some("waiting_approval") {
                 continue;
             }
@@ -64,6 +74,7 @@ impl TaskGraph {
     pub fn refresh(&self, project_run_id: &str) -> CoreResult<Vec<Value>> {
         let tasks = Repositories::new(&self.db.lock().unwrap().raw).tasks().list(project_run_id)?;
         for task in &tasks {
+            if task["workflowRunId"].is_string() { continue; }
             if task.get("status").and_then(Value::as_str) != Some("blocked_dependency") {
                 continue;
             }
@@ -92,7 +103,7 @@ impl TaskGraph {
         let mut ready: Vec<Value> = self
             .refresh(project_run_id)?
             .into_iter()
-            .filter(|task| task.get("status").and_then(Value::as_str) == Some("ready"))
+            .filter(|task| !task["workflowRunId"].is_string() && task.get("status").and_then(Value::as_str) == Some("ready"))
             .collect();
         ready.sort_by_key(|task| task.get("priority").and_then(Value::as_i64).unwrap_or(0));
         Ok(ready)
@@ -116,7 +127,13 @@ impl TaskGraph {
         updated.insert("status".to_string(), json!(status));
         updated.insert("updatedAt".to_string(), json!(now_iso()));
         let updated = Value::Object(updated);
-        Repositories::new(&self.db.lock().unwrap().raw).tasks().save(&updated)?;
+        let db = self.db.lock().unwrap();
+        let repos = Repositories::new(&db.raw);
+        let id = task.get("id").and_then(Value::as_str).unwrap_or("");
+        if repos.tasks().get(id)?.is_some_and(|stored| stored["workflowRunId"].is_string()) {
+            return Err(crate::errors::invalid("taskId", "This task is owned by a workflow; use its execution controls"));
+        }
+        repos.tasks().save(&updated)?;
         Ok(updated)
     }
 
@@ -127,6 +144,7 @@ impl TaskGraph {
         while changed {
             changed = false;
             for task in &tasks {
+                if task["workflowRunId"].is_string() { continue; }
                 let id = task.get("id").and_then(Value::as_str).unwrap_or("");
                 if cancelled.contains(id) || task.get("status").and_then(Value::as_str) == Some("completed") {
                     continue;
@@ -145,6 +163,7 @@ impl TaskGraph {
             }
         }
         for task in &tasks {
+            if task["workflowRunId"].is_string() { continue; }
             let id = task.get("id").and_then(Value::as_str).unwrap_or("");
             let status = task.get("status").and_then(Value::as_str).unwrap_or("");
             if id != failed_task_id && cancelled.contains(id) && !["completed", "cancelled"].contains(&status) {

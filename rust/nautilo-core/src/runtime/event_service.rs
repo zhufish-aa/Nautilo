@@ -10,6 +10,7 @@ use std::io::Write;
 
 use crate::database::Database;
 use crate::errors::{CoreError, CoreResult, ErrorCode};
+use crate::runtime::security::redaction_service::RedactionSnapshot;
 use crate::runtime::security::RedactionService;
 use crate::database::Repositories;
 
@@ -28,27 +29,19 @@ pub struct EventService {
     pending_deltas: Arc<Mutex<(HashMap<String, Value>, bool)>>,
 }
 
-impl EventService {
-    pub fn publish_committed(&self,events:&[Value]) {
-        for event in events {
-            publish_browser_run(event);
-            self.flush_pending_deltas(event["sessionId"].as_str());
-            let _=self.sender.send(event.clone());
-        }
-    }
-    pub fn new(db: Arc<Mutex<Database>>, redaction: RedactionService) -> Self {
-        let (sender, _) = broadcast::channel(1024);
-        Self { db, redaction, sender, pending_deltas: Arc::new(Mutex::new((HashMap::new(), false))) }
-    }
+/// Prepares redacted envelopes inside a transaction without accessing storage.
+pub(crate) struct SessionEventBuilder {
+    redaction: RedactionSnapshot,
+}
 
-    /// appendForSession: builds, persists, and fans out a runtime event.
-    pub fn append_for_session(
+impl SessionEventBuilder {
+    pub(crate) fn prepare_for_session(
         &self,
         session: &Value,
         context: &Value,
         event_type: &str,
         payload: Value,
-    ) -> CoreResult<Value> {
+    ) -> Value {
         let session_id = session.get("id").and_then(Value::as_str).unwrap_or("");
         let mut event = Map::new();
         event.insert("schemaVersion".to_string(), json!(1));
@@ -66,7 +59,38 @@ impl EventService {
         if context["background"] == true { event.insert("background".into(), json!(true)); }
         event.insert("timestamp".to_string(), json!(now_iso()));
         event.insert("payload".to_string(), self.redaction.value(&payload));
-        let mut event = Value::Object(event);
+        Value::Object(event)
+    }
+}
+
+impl EventService {
+    pub fn publish_committed(&self,events:&[Value]) {
+        for event in events {
+            publish_browser_run(event);
+            self.flush_pending_deltas(event["sessionId"].as_str());
+            let _=self.sender.send(event.clone());
+        }
+    }
+    pub fn new(db: Arc<Mutex<Database>>, redaction: RedactionService) -> Self {
+        let (sender, _) = broadcast::channel(1024);
+        Self { db, redaction, sender, pending_deltas: Arc::new(Mutex::new((HashMap::new(), false))) }
+    }
+
+    /// Take the credential snapshot before acquiring a database write guard.
+    pub(crate) fn session_event_builder(&self) -> SessionEventBuilder {
+        SessionEventBuilder { redaction: self.redaction.snapshot() }
+    }
+
+    /// appendForSession: builds, persists, and fans out a runtime event.
+    pub fn append_for_session(
+        &self,
+        session: &Value,
+        context: &Value,
+        event_type: &str,
+        payload: Value,
+    ) -> CoreResult<Value> {
+        let session_id = session.get("id").and_then(Value::as_str).unwrap_or("");
+        let mut event = self.session_event_builder().prepare_for_session(session, context, event_type, payload);
         {
             let db = self.db.lock().unwrap();
             // Allocates + inserts under one IMMEDIATE transaction and fills in

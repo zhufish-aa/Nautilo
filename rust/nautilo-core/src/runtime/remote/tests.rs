@@ -38,12 +38,27 @@ fn mobile_connection_switch_preserves_revision_until_identity_changes() {
     assert_eq!(same["connectionId"],Value::Null);
 }
 
-struct Fixture {
-    service: Arc<RemoteService>,
+pub(super) struct Fixture {
+    pub(super) service: Arc<RemoteService>,
     _router: Arc<Router>,
-    directory: PathBuf,
-    calls: Arc<AtomicUsize>,
-    inputs: Arc<Mutex<Vec<Value>>>,
+    pub(super) directory: PathBuf,
+    pub(super) calls: Arc<AtomicUsize>,
+    pub(super) inputs: Arc<Mutex<Vec<Value>>>,
+}
+
+#[tokio::test]
+async fn relay_catalog_is_read_only_and_does_not_probe_on_dropdown_open() {
+    let fixture = Fixture::new().await;
+    let before = fixture.service.settings().unwrap();
+    let endpoint = fixture.addr().id;
+    let result = fixture.service.relays(json!({"urls":["https://203.0.113.20"]})).await.unwrap();
+    let nodes = result["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 5);
+    assert!(nodes.iter().all(|node| node.get("measuredAt").is_none()));
+    assert_eq!(nodes[4]["source"], "custom");
+    assert_eq!(fixture.addr().id, endpoint, "Viewing nodes must not replace the paired endpoint");
+    assert_eq!(serde_json::to_value(fixture.service.settings().unwrap()).unwrap(), serde_json::to_value(before).unwrap());
+    assert!(fixture.service.relays(json!({"urls":["a","b","c","d","e"]})).await.is_err());
 }
 
 #[tokio::test]
@@ -115,7 +130,7 @@ async fn legacy_direct_setting_migrates_to_cross_network_direct_and_control_has_
     fixture.shutdown().await;
 }
 impl Fixture {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let directory =
             std::env::temp_dir().join(format!("nautilo-remote-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -162,7 +177,35 @@ impl Fixture {
         router.register("provider.catalog", |_| async { Ok(json!([{"providerId":"test-harness","modeDiscovery":true,"permissionModes":[{"value":"workspace-write"},{"value":"read-only"}]}])) });
         router.register("provider.modes", |_| async { Ok(json!({"defaultMode":"standard","modes":[{"id":"standard","name":"Standard"},{"id":"custom-plugin-mode","name":"Custom plugin mode"},{"id":"broken-mode","broken":"not installed"}]})) });
         router.register("run.list", |_| async { Ok(json!([])) });
+        router.register("slashCommand.list", |_| async { Ok(json!([
+            {"id":"client-compact","name":"/compact","execution":"client"},
+            {"id":"native-compact","name":"/compact","execution":"provider","providerCommand":"compact"}
+        ])) });
+        let compact_calls = calls.clone();
+        let compact_inputs = inputs.clone();
+        router.register("slashCommand.execute", move |input| {
+            let count = compact_calls.clone();
+            let received = compact_inputs.clone();
+            async move {
+                received.lock().unwrap().push(input);
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"completed":true}))
+            }
+        });
         router.register("interaction.list", |_| async { Ok(json!([])) });
+        for method in ["orchestration.start", "orchestration.cancel"] {
+            let received = inputs.clone();
+            let count = calls.clone();
+            router.register(method, move |mut input| {
+                let received = received.clone(); let count = count.clone();
+                async move {
+                    input["_method"] = json!(method);
+                    received.lock().unwrap().push(input);
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({"projectRun":{"id":"team-run"}}))
+                }
+            });
+        }
         router.register("approval.list", |_| async { Ok(json!([{"id":"ours","sessionId":"session"},{"id":"other","sessionId":"another-session"}])) });
         let router = Arc::new(router);
         service.start(&router).await;
@@ -176,7 +219,7 @@ impl Fixture {
             inputs,
         }
     }
-    fn addr(&self) -> iroh::EndpointAddr {
+    pub(super) fn addr(&self) -> iroh::EndpointAddr {
         self.service
             .state
             .lock()
@@ -186,7 +229,7 @@ impl Fixture {
             .unwrap()
             .addr()
     }
-    fn invitation(&self) -> Value {
+    pub(super) fn invitation(&self) -> Value {
         let invitation = self.service.invite().unwrap();
         let payload = invitation["uri"]
             .as_str()
@@ -196,7 +239,7 @@ impl Fixture {
             .unwrap();
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap()
     }
-    async fn shutdown(self) {
+    pub(super) async fn shutdown(self) {
         self.service.close().await;
         let path = self.directory.clone();
         drop(self);
@@ -242,6 +285,29 @@ async fn snapshot_and_modes_are_authenticated_and_keep_provider_options() {
 }
 
 #[tokio::test]
+async fn mobile_context_compaction_uses_the_native_command_and_replays_its_receipt() {
+    let fixture = Fixture::new().await;
+    let invitation = fixture.invitation();
+    let client = Endpoint::bind(presets::Minimal).await.unwrap();
+    let connection = client.connect(fixture.addr(), ALPN).await.unwrap();
+    let params = json!({"sessionId":"session"});
+    assert_eq!(rpc(&connection,"session.compact",params.clone()).await["error"]["code"],"DEVICE_NOT_AUTHORIZED");
+    rpc(&connection,"pair",json!({"name":"Phone","token":invitation["token"]})).await;
+    fixture.service.approve(json!({"deviceId":client.id().to_string()})).unwrap();
+    let snapshot = rpc(&connection,"session.snapshot",params.clone()).await;
+    assert_eq!(snapshot["data"]["compactCommand"]["id"],"native-compact");
+    let id = uuid::Uuid::new_v4().to_string();
+    let first = call(&connection,&id,"session.compact",params.clone()).await;
+    let replay = call(&connection,&id,"session.compact",params).await;
+    assert_eq!(first["ok"],true,"{first}");
+    assert_eq!(replay,first);
+    assert_eq!(fixture.calls.load(Ordering::SeqCst),1);
+    assert_eq!(fixture.inputs.lock().unwrap()[0],json!({"sessionId":"session","commandId":"native-compact"}));
+    client.close().await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn phone_uploads_travel_over_authenticated_rpc_into_native_message_attachments() {
     use base64::engine::general_purpose::STANDARD;
     let fixture = Fixture::new().await;
@@ -271,7 +337,7 @@ async fn phone_uploads_travel_over_authenticated_rpc_into_native_message_attachm
     client.close().await;
     fixture.shutdown().await;
 }
-async fn call(connection: &Connection, id: &str, method: &str, params: Value) -> Value {
+pub(super) async fn call(connection: &Connection, id: &str, method: &str, params: Value) -> Value {
     let (mut send, mut recv) = connection.open_bi().await.unwrap();
     send.write_all(
         &serde_json::to_vec(&json!({"v":1,"id":id,"method":method,"params":params})).unwrap(),
@@ -285,7 +351,7 @@ async fn call(connection: &Connection, id: &str, method: &str, params: Value) ->
         .unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
-async fn rpc(connection: &Connection, method: &str, params: Value) -> Value {
+pub(super) async fn rpc(connection: &Connection, method: &str, params: Value) -> Value {
     call(
         connection,
         &uuid::Uuid::new_v4().to_string(),
@@ -595,15 +661,21 @@ async fn mobile_project_creation_browses_unicode_directories_and_rejects_existin
 }
 
 #[tokio::test]
-async fn mobile_creation_enables_the_selected_cross_harness_account_before_sending() {
+async fn mobile_create_and_switch_use_the_desktop_account_gateways() {
     let fixture = Fixture::new().await;
     {
         let db = Database::open(&fixture.directory.join("test.sqlite")).unwrap();
         let repos = Repositories::new(&db.raw);
-        for provider in ["deepseek", "opencode", "codex"] {
+        for provider in ["deepseek", "opencode", "codex", "antigravity"] {
             repos.agents().save(&json!({"id":provider,"providerId":provider,"displayName":provider,"enabled":true}), "2026-01-01").unwrap();
         }
-        repos.runtime_connections().save(&json!({"id":"selected-account","name":"Account","kind":"login","harness":"codex","enabled":true,"revision":7}), "2026-01-01").unwrap();
+        for provider in ["codex", "claude-code", "opencode", "antigravity", "unsupported"] {
+            let id = format!("account-{provider}");
+            repos.runtime_connections().save(&json!({"id":id,"name":id,"kind":"login","harness":provider,
+                "enabled":true,"revision":7}), "2026-01-01").unwrap();
+        }
+        repos.sessions().save(&json!({"id":"session","projectId":"project","memberId":"deepseek",
+            "agentInstanceId":"deepseek","connectionId":"account-codex","connectionRevision":7})).unwrap();
     }
     let order = Arc::new(Mutex::new(Vec::<String>::new()));
     let mut router = (*fixture._router).clone();
@@ -613,7 +685,7 @@ async fn mobile_creation_enables_the_selected_cross_harness_account_before_sendi
         async move {
             assert!(input.get("_mobileAccountRoute").is_none());
             assert_eq!(input["connectionRevision"], 7);
-            created.lock().unwrap().push(format!("create:{}", input["agentInstanceId"].as_str().unwrap()));
+            created.lock().unwrap().push(format!("create:{}:{}", input["agentInstanceId"].as_str().unwrap(), input["connectionId"].as_str().unwrap()));
             Ok(input)
         }
     });
@@ -621,9 +693,28 @@ async fn mobile_creation_enables_the_selected_cross_harness_account_before_sendi
     router.register("connection.gateway", move |input| {
         let routed = routed.clone();
         async move {
-            assert_eq!(input, json!({"connectionId":"selected-account","enabled":true}));
-            routed.lock().unwrap().push("gateway:selected-account".into());
+            assert_eq!(input["enabled"], true);
+            routed.lock().unwrap().push(format!("gateway:{}", input["connectionId"].as_str().unwrap()));
             Ok(json!({}))
+        }
+    });
+    router.register("connection.models", |input| async move {
+        assert_eq!(input, json!({"connectionId":"account-antigravity"}));
+        Ok(json!({"models":[{"id":"gemini-3.8-flash","reasoningEfforts":["high"]}]}))
+    });
+    let switched = order.clone();
+    router.register("session.upsert", move |input| {
+        let switched = switched.clone();
+        async move {
+            assert_eq!(input["id"], "session");
+            assert_eq!(input["agentInstanceId"], "deepseek");
+            assert_eq!(input["connectionId"], "account-antigravity");
+            assert_eq!(input["model"], "gemini-3.8-flash");
+            assert_eq!(input["confirmConnectionChange"], true);
+            assert!(input.get("connectionRevision").is_none());
+            assert!(input.get("_mobileAccountRoute").is_none());
+            switched.lock().unwrap().push("switch:deepseek:account-antigravity".into());
+            Ok(input)
         }
     });
     let router = Arc::new(router);
@@ -633,12 +724,30 @@ async fn mobile_creation_enables_the_selected_cross_harness_account_before_sendi
     let connection = client.connect(fixture.addr(), ALPN).await.unwrap();
     rpc(&connection, "pair", json!({"name":"Phone","token":invitation["token"]})).await;
     fixture.service.approve(json!({"deviceId":client.id().to_string()})).unwrap();
-    for provider in ["deepseek", "opencode", "codex"] {
-        let response = rpc(&connection, "session.create", json!({"projectId":"project","agentInstanceId":provider,"connectionId":"selected-account"})).await;
+    for (provider, source) in [
+        ("deepseek", "codex"), ("deepseek", "claude-code"), ("deepseek", "opencode"),
+        ("deepseek", "antigravity"), ("opencode", "codex"), ("codex", "codex"), ("antigravity", "antigravity"),
+    ] {
+        let response = rpc(&connection, "session.create", json!({"projectId":"project","agentInstanceId":provider,"connectionId":format!("account-{source}")})).await;
         assert_eq!(response["ok"], true, "{response}");
         assert_eq!(response["data"]["agentInstanceId"], provider);
     }
-    assert_eq!(*order.lock().unwrap(), vec!["create:deepseek", "gateway:selected-account", "create:opencode", "gateway:selected-account", "create:codex"]);
+    for (provider, source) in [("deepseek", "unsupported"), ("antigravity", "codex")] {
+        let response = rpc(&connection, "session.create", json!({"projectId":"project","agentInstanceId":provider,"connectionId":format!("account-{source}")})).await;
+        assert_eq!(response["error"]["code"], "CONNECTION_NOT_AVAILABLE", "{response}");
+    }
+    let response = rpc(&connection, "session.configure", json!({"sessionId":"session","connectionId":"account-antigravity",
+        "model":"gemini-3.8-flash","reasoningEffort":"high","confirmConnectionChange":true})).await;
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(*order.lock().unwrap(), vec![
+        "create:deepseek:account-codex", "gateway:account-codex",
+        "create:deepseek:account-claude-code", "gateway:account-claude-code",
+        "create:deepseek:account-opencode", "gateway:account-opencode",
+        "create:deepseek:account-antigravity", "gateway:account-antigravity",
+        "create:opencode:account-codex", "gateway:account-codex",
+        "create:codex:account-codex", "create:antigravity:account-antigravity",
+        "switch:deepseek:account-antigravity", "gateway:account-antigravity",
+    ]);
     connection.close(0u32.into(), b"done");
     client.close().await;
     fixture.shutdown().await;

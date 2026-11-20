@@ -1,0 +1,25 @@
+.relay-picker { min-width: 0; display: grid; gap: 8px; }
+.relay-picker-label { display: flex; align-items: center; justify-content: space-between; color: var(--ink); font-size: 13px; font-weight: 550; }
+.relay-picker-label .ui-button { height: 28px; padding-inline: 9px; color: var(--ink); font-size: 12px; }
+.relay-picker-trigger { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 46px; padding: 10px 13px; border: 1px solid var(--line-strong, var(--line)); border-radius: 10px; background: var(--card); color: var(--ink); font: inherit; text-align: left; cursor: pointer; transition: border-color 160ms, box-shadow 160ms; }
+.relay-picker-trigger:hover { border-color: color-mix(in srgb, var(--ink) 40%, var(--line)); }
+.relay-picker-trigger:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.relay-picker-trigger:disabled { opacity: .6; cursor: default; }
+.relay-trigger-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
+.relay-picker-menu { z-index: 70; min-width: var(--radix-select-trigger-width); max-width: calc(100vw - 32px); max-height: min(440px, var(--radix-select-content-available-height)); overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); box-shadow: 0 8px 32px #00000016, 0 2px 6px #00000009; font-family: inherit; }
+.relay-picker-item { position: relative; display: flex; align-items: center; gap: 11px; min-height: 40px; padding: 9px 32px 9px 10px; border-radius: 8px; outline: none; font-size: 13px; font-weight: 500; cursor: pointer; user-select: none; }
+.relay-picker-item[data-highlighted] { background: color-mix(in srgb, var(--ink) 6%, var(--card)); }
+.relay-picker-item[data-state="checked"] { background: color-mix(in srgb, var(--ink) 5%, var(--card)); font-weight: 600; }
+.relay-check { position: absolute; right: 9px; }
+.relay-node-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.relay-node-copy > span:last-child { color: var(--ink-2); font-size: 11px; font-weight: 450; }
+.relay-picker-separator { margin: 5px 10px; height: 1px; background: var(--line); }
+.relay-latency { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; flex-shrink: 0; font-size: 12px; font-weight: 550; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.relay-latency[data-quality="good"] { color: #19816b; }
+.relay-picker-footnote { padding: 10px 10px 5px; color: var(--ink-2); font-size: 11px; font-weight: 500; }
+.relay-custom-urls { display: grid; gap: 8px; margin-top: 8px; color: var(--ink); font-size: 12px; font-weight: 500; }
+.relay-custom-probe { display: flex; align-items: center; gap: 12px; padding-inline: 2px; overflow-wrap: anywhere; }
+.relay-picker-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 18px; color: var(--ink-2); font-size: 12px; line-height: 1.7; }
+.relay-picker-meta summary { cursor: pointer; color: var(--ink); }
+.relay-picker-meta details[open] { flex-basis: 100%; }
+.relay-picker-meta p { margin: 7px 0 0; max-width: 680px; }

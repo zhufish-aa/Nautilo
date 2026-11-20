@@ -19,7 +19,15 @@ pub(super) fn failure(id: &str, code: &str, message: &str) -> Value {
 fn success(id: &str, value: Value) -> Value {
     json!({"v":1,"id":id,"ok":true,"data":value})
 }
-fn request_failure(id: &str, error: &anyhow::Error) -> Value {
+pub(super) fn request_failure(id: &str, error: &anyhow::Error) -> Value {
+    let disk_full = error.chain().any(|cause| {
+        cause.downcast_ref::<rusqlite::Error>().is_some_and(|error| matches!(error,
+            rusqlite::Error::SqliteFailure(inner, _) if inner.code == rusqlite::ErrorCode::DiskFull)) ||
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::StorageFull)
+    });
+    if disk_full {
+        return failure(id, "DESKTOP_DISK_FULL", "The computer disk is full. Free disk space and retry.");
+    }
     if let Some(core) = error.downcast_ref::<crate::errors::CoreError>() {
         return failure(id, &core.0.code, &core.to_string());
     }
@@ -43,6 +51,9 @@ fn mutation(method: &str) -> bool {
             | "session.configure"
             | "session.send"
             | "session.followUp"
+            | "session.compact"
+            | "session.team.cancel"
+            | "session.team.retry"
             | "run.cancel"
             | "interaction.respond"
             | "approval.resolve"
@@ -139,7 +150,7 @@ impl RemoteService {
                 json!({"protocol":1,"epoch":self.repo.epoch()?,"device":device,"name":self.settings()?.device_name,
                 "system":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION"),
                 "endpoint":self.state.lock().unwrap().endpoint.as_ref().map(Endpoint::addr),
-                "capabilities":["projects.list","project.browse","project.create","project.files","file.preview","session.options","session.catalog","session.modes","sessions.list","session.history","session.create","session.details","session.snapshot","session.models","session.configure","session.workspace","events.wait","session.send","session.followUp","attachment.upload","attachment.read","run.list","run.cancel","interaction.list","interaction.respond","approval.list","approval.resolve","approval.scopes"]}),
+                "capabilities":["projects.list","project.browse","project.create","project.files","file.preview","session.options","session.catalog","session.modes","sessions.list","session.history","session.create","session.details","session.snapshot","session.models","session.configure","session.workspace","session.compact","session.team","session.team.cancel","session.team.retry","events.wait","session.send","session.followUp","attachment.upload","attachment.read","run.list","run.cancel","interaction.list","interaction.respond","approval.list","approval.resolve","approval.scopes"]}),
             ));
         }
         if method == "projects.list" {
@@ -161,7 +172,7 @@ impl RemoteService {
             let limit = params["limit"].as_u64().unwrap_or(100).clamp(1, 200) as usize;
             let total = all.as_array().map_or(0, Vec::len);
             let sessions=all.as_array().into_iter().flatten().skip(offset).take(limit).map(|s|json!({"id":s["id"],"title":s["title"],"status":s["status"],
-                "projectId":s["projectId"],"agentInstanceId":s["agentInstanceId"],"createdAt":s["createdAt"],"lastMessageAt":s["lastMessageAt"]})).collect::<Vec<_>>();
+                "projectId":s["projectId"],"agentInstanceId":s["agentInstanceId"],"createdAt":s["createdAt"],"lastMessageAt":s["lastMessageAt"],"teamId":s["teamId"],"parentSessionId":s["parentSessionId"]})).collect::<Vec<_>>();
             return Ok(success(
                 &request.id,
                 json!({"sessions":sessions,"total":total,"nextOffset":if offset+limit<total {Some(offset+limit)}else{None}}),
@@ -224,13 +235,27 @@ impl RemoteService {
                     self.dispatch("approval.list", json!({"status":"pending"}))
                 )?;
                 let approvals = approvals.as_array().into_iter().flatten().filter(|a| a["sessionId"] == session || a["runId"].as_str().and_then(|id|self.repo.run_session(id).ok()).as_deref() == Some(session.as_str())).cloned().collect::<Vec<_>>();
-                return Ok(success(&request.id, json!({"details":details,"runs":runs,"interactions":interactions,"approvals":approvals})));
+                // Optional command metadata must not hold up conversation hydration.
+                let compact = self.mobile_compact_command(&session).await.unwrap_or(None);
+                return Ok(success(&request.id, json!({"details":details,"runs":runs,"interactions":interactions,"approvals":approvals,"compactCommand":compact})));
+            }
+            "session.compact" => {
+                let command = self.mobile_compact_command(&session).await?
+                    .ok_or_else(||anyhow::anyhow!("COMPACT_NOT_AVAILABLE"))?;
+                json!({"sessionId":session,"commandId":command["id"]})
             }
             "session.models" => {
                 return Ok(success(&request.id, self.mobile_models(&session).await?))
             }
             "session.workspace" => {
+                self.dispatch("terminal.status",json!({"sessionId":session,"retrySync":true})).await?;
                 return Ok(success(&request.id, self.repo.workspace_changes(&session)?))
+            }
+            "session.team" => return Ok(success(&request.id, self.repo.mobile_team_tasks(&session)?)),
+            "session.team.cancel" => json!({"projectRunId":self.repo.mobile_team_run_id(&session)?}),
+            "session.team.retry" => {
+                let task_id = params["taskId"].as_str().filter(|id| !id.is_empty()).ok_or_else(|| anyhow::anyhow!("INVALID_TASK_ID"))?;
+                json!({"projectRunId":self.repo.mobile_team_run_id(&session)?,"taskId":task_id})
             }
             "session.configure" => self.mobile_configuration(&session, params).await?,
             "session.create" => {
@@ -370,8 +395,14 @@ impl RemoteService {
         let message_id = input.get("messageId").cloned();
         let dispatch_method = if method == "session.configure" {
             "session.upsert"
+        } else if method == "session.compact" {
+            "slashCommand.execute"
         } else if method == "project.create" {
             "project.add"
+        } else if method == "session.team.cancel" {
+            "orchestration.cancel"
+        } else if method == "session.team.retry" {
+            "orchestration.retryTask"
         } else {
             method
         };
@@ -385,7 +416,14 @@ impl RemoteService {
                 Err(error) => Err(error),
             }
         } else {
-            let result = self.dispatch(dispatch_method, input).await;
+            let result = if method == "session.send" {
+                match self.repo.mobile_team_start(&session, &input) {
+                    Ok(Some(start)) => self.dispatch("orchestration.start", start).await
+                        .map(|value| json!({"accepted":true,"projectRunId":value["projectRun"]["id"]})),
+                    Ok(None) => self.dispatch(dispatch_method, input).await,
+                    Err(error) => Err(error),
+                }
+            } else { self.dispatch(dispatch_method, input).await };
             if result.is_ok() {
                 if let Some(id) = route {
                     // The phone explicitly selected this identity, like the desktop connection picker.

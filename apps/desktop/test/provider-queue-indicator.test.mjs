@@ -8,7 +8,7 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import * as jsx from 'react/jsx-runtime';
 const source=readFileSync(new URL('../src/renderer/src/features/sessions/RunActivityIndicator.tsx',import.meta.url),'utf8');
 const exports={};let locale='en';
-vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,{exports,require:name=>name==='react'?React:name==='react/jsx-runtime'?jsx:name==='lucide-react'?{Loader2:()=>null}:{useI18n:()=>({locale})}});
+vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,{exports,require:name=>name==='react'?React:name==='react/jsx-runtime'?jsx:name==='lucide-react'?{Activity:()=>null}:{useI18n:()=>({locale})}});
 const render=(phase,status='running')=>renderToStaticMarkup(React.createElement(exports.RunActivityIndicator,{lifecycle:{status,startedAt:'2026-01-01'},events:[{id:'q',timestamp:'2026-01-02',data:{kind:'activity',phase}}]}));
 test('shared provider queue is visible and does not pretend to be approval or reasoning',()=>{
  const html=render('provider_queued');assert(html.includes('Agent busy · queued'));assert(html.includes('role="status"'));assert(!html.includes('approval'));assert(!html.includes('Thinking'));assert(html.includes('aria-hidden="true"'));
@@ -29,7 +29,17 @@ test('Claude waiting for its first reasoning/text event has a thinking indicator
  locale='en';
 });
 test('completed tool and reasoning rows do not hide the next model wait',()=>{
- for(const event of [progress('tool_activity',{status:'done',toolName:'Read'}),progress('command',{status:'done'}),progress('reasoning',{streaming:false})])assert(renderEvents([event]).includes('Thinking'));
+ for(const event of [progress('tool_activity',{status:'done',toolName:'Read'}),progress('command',{status:'done'}),progress('reasoning',{streaming:false})]){
+  const html=renderEvents([event]);
+  assert.match(html,/Thinking…/);
+  assert.match(html,/conversation-activity-pulse/);
+  assert.doesNotMatch(html,/data-activity-mark/);
+ }
+});
+test('approval wait keeps its label visible without running effects',()=>{
+ const html=renderEvents([],{status:'waiting_approval'});
+ assert.match(html,/Waiting for your approval/);
+ assert.doesNotMatch(html,/conversation-activity-pulse|data-activity-mark/);
 });
 test('live rows including grouped tools do not duplicate the indicator, and replies keep it hidden',()=>{
  for(const event of [progress('tool_activity',{status:'running'}),progress('reasoning',{streaming:true}),progress('message',{sender:'agent',streaming:true}),progress('message',{sender:'agent',streaming:false})])assert.equal(renderEvents([event]),'');

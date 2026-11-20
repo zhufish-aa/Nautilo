@@ -36,10 +36,10 @@ switch its composition: choose a different mode in a new conversation.
 
 ## Connections and resources
 
-The selected API connection is added to the existing pi-ai adapter with Cordis'
-`noSave` runtime update. Other native provider routes are retained; neither the
-profile nor native credential files are overwritten. The generated overlay
-stores only a fresh environment credential reference, not its key.
+The selected connection is added to the existing pi-ai adapter with Cordis'
+volatile update. Its model selection is recorded on the native session, so a
+temporary route cannot become the profile's default. Other native provider routes
+are retained. The generated overlay stores an environment credential reference.
 Native resources remain loaded. Enabled Nautilo skills and MCP servers are
 additional providers; host delegation tools use the SDK's reverse tool channel.
 

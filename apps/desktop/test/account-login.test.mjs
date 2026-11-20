@@ -8,11 +8,14 @@ import ts from 'typescript';
 const require = createRequire(import.meta.url);
 const source = await readFile(new URL('../src/main/account-login.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const openCodeSource = await readFile(new URL('../src/main/opencode-login.ts', import.meta.url), 'utf8');
+const openCodeModule = { exports: {} };
+new Function('require', 'module', 'exports', ts.transpileModule(openCodeSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText)(require, openCodeModule, openCodeModule.exports);
 function load() {
   const handlers = {}, children = [], calls = [];
   const imports = { './account-profile': { prepareAccountProfile: async () => ({ profileId: 'managed', directory: '/managed' }) }, electron: { ipcMain: { handle: (name, fn) => { handlers[name] = fn; } } }, 'node:fs/promises': { mkdir: async () => {}, realpath: async (path) => path }, 'node:child_process': { spawn: (...args) => { calls.push(args); const child = new EventEmitter(); child.kill = () => { child.killed = true; }; children.push(child); return child; } } };
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', compiled)((name) => name === './antigravity-login' ? { authenticateAntigravity: () => Promise.reject(new Error('not exercised here')) } : imports[name] ?? require(name), module, module.exports);
+  new Function('require', 'module', 'exports', compiled)((name) => name === './opencode-login' ? openCodeModule.exports : name === './antigravity-login' ? { authenticateAntigravity: () => Promise.reject(new Error('not exercised here')) } : imports[name] ?? require(name), module, module.exports);
   module.exports.registerAccountLoginHandlers();
   return { ...module.exports, handlers, children, calls };
 }
@@ -82,4 +85,42 @@ test('Antigravity sign-in uses official ACP without spoofing an isolated keyring
   assert.deepEqual(invocation.args,['acp']);
   for (const key of ['CODEX_HOME','CLAUDE_CONFIG_DIR','GEMINI_API_KEY','GOOGLE_API_KEY','AGY_ADC_AUTH']) assert.equal(invocation.env[key],undefined);
   if(process.env.USERPROFILE) assert.equal(invocation.env.USERPROFILE,process.env.USERPROFILE);
+});
+
+test('OpenCode uses native Console device login and a private native data/state root', () => {
+  const invocation = load().loginInvocation({ ...input, providerId:'opencode', executable:process.execPath });
+  assert.deepEqual(invocation.args,['console','login']);
+  assert.equal(invocation.env.XDG_DATA_HOME,require('node:path').join(input.directory,'data'));
+  assert.equal(invocation.env.XDG_STATE_HOME,require('node:path').join(input.directory,'state'));
+  assert.equal(invocation.env.OPENCODE_API_KEY,undefined);
+  assert.equal(invocation.env.OPENCODE_AUTH_CONTENT,undefined);
+});
+
+for (const output of ['Authorization denied','Device code expired','Done']) test(`OpenCode does not mistake zero exit for login success: ${output}`, async () => {
+  const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+  const completed = openCodeModule.exports.authenticateOpenCode(child,()=>{});
+  child.stdout.emit('data',output); child.emit('close',0);
+  await assert.rejects(completed,/denied|expired|did not confirm/);
+});
+
+test('OpenCode waits for persisted-account success and process close, and surfaces the device prompt', async () => {
+  const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+  const progress=[]; let done=false;
+  const completed = openCodeModule.exports.authenticateOpenCode(child,reason=>progress.push(reason)).then(()=>{done=true;});
+  child.stdout.emit('data','\x1b[32mGo to: https://opencode.ai/console/device\nEnter code: ABCD-EFGH\x1b[0m\n');
+  assert.match(progress.at(-1),/ABCD-EFGH/);
+  child.stdout.emit('data','Logged in '); child.stdout.emit('data','as fixture@example.invalid\n');
+  await Promise.resolve(); assert.equal(done,false);
+  child.emit('close',0); await completed; assert.equal(done,true);
+});
+
+test('OpenCode login handler keeps its directory locked and lets cancellation win over late success', async () => {
+  const f=load();const value={...input,profileId:'opencode-job',providerId:'opencode',executable:process.execPath};
+  assert.deepEqual(await f.handlers['account:login-start'](event(),value),{ok:true});
+  assert.equal(f.calls[0][2].stdio,'pipe');
+  f.handlers['account:login-cancel']({},value.profileId);
+  assert.equal((await f.handlers['account:login-start'](event(),{...value,profileId:'other-opencode'})).ok,false);
+  f.children[0].emit('exit',0);f.children[0].emit('close',0);
+  await Promise.resolve();
+  assert.equal(f.handlers['account:login-status']({},value.profileId).state,'cancelled');
 });

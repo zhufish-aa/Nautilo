@@ -1,20 +1,36 @@
 import { useId, useState, type ComponentProps } from "react";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { Check, ChevronRight, CircleAlert, Square } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import type { ConversationTurn } from "../../lib/conversation-timeline";
 import { TimelineEventView } from "./Timeline";
+import { workflowTool } from "./WorkflowToolActivity";
 
-export function ConversationTurnView({ turn, ...actions }: { turn: ConversationTurn } & Omit<ComponentProps<typeof TimelineEventView>, "event">): JSX.Element {
+/** Important interactions and the answer keep their slot when process rows fold. */
+export function turnEventAlwaysVisible(turn: ConversationTurn, event: ConversationTurn["events"][number]): boolean {
+  return event === turn.result || event.data.kind === "error" || event.data.kind === "approval" || event.data.kind === "workflow_plan" ||
+    event.data.kind === "task_update" || event.data.kind === "tool_activity" && !!event.data.subagent ||
+    event.data.kind === "activity" && event.data.phase === "stopped";
+}
+
+export function isTurnTraceStep(event?: ConversationTurn["events"][number]): boolean {
+  const data = event?.data;
+  return data?.kind === "reasoning" || data?.kind === "command"
+    || (data?.kind === "tool_activity" && !data.subagent && (data.toolName === "run_code" || !!data.codeExecution || !!workflowTool(data.toolName)));
+}
+
+export function ConversationTurnView({ turn, summaryOnly = false, expanded: controlledExpanded, onToggle, ...actions }: {
+  turn: ConversationTurn; summaryOnly?: boolean; expanded?: boolean; onToggle?: () => void;
+} & Omit<ComponentProps<typeof TimelineEventView>, "event">): JSX.Element {
   const { locale } = useI18n();
   const zh = locale === "zh-CN";
   const regionId = useId();
   const [expansion, setExpansion] = useState({ completed: turn.completed, open: !turn.completed });
-  const expanded = expansion.completed === turn.completed ? expansion.open : !turn.completed;
+  const expanded = controlledExpanded ?? (expansion.completed === turn.completed ? expansion.open : !turn.completed);
   const stopped = turn.events.some(event => event.data.kind === "activity" && event.data.phase === "stopped");
   const failed = turn.events.some(event => !event.background && event.data.kind === "error");
-  const notices = turn.events.filter((event) => event.data.kind === "error" || event.data.kind === "approval" || event.data.kind === "activity" && event.data.phase === "stopped");
-  const dispatches = turn.events.filter((event) => event.data.kind === "task_update" || event.data.kind === "tool_activity" && event.data.subagent);
-  const process = turn.events.filter((event) => event !== turn.result && !notices.includes(event) && !dispatches.includes(event));
+  const notices = new Set(turn.events.filter((event) => event.data.kind === "error" || event.data.kind === "approval" || event.data.kind === "workflow_plan" || event.data.kind === "activity" && event.data.phase === "stopped"));
+  const dispatches = new Set(turn.events.filter((event) => event.data.kind === "task_update" || event.data.kind === "tool_activity" && event.data.subagent));
+  const process = turn.events.filter((event) => event !== turn.result && !notices.has(event) && !dispatches.has(event));
   const author = turn.events.find((event) => event.data.kind === "message" && event.data.sender === "agent");
   const name = author?.data.kind === "message" ? author.data.authorName ?? "Nautilo" : "Nautilo";
   const duration = turn.durationMs === undefined ? undefined : formatDuration(turn.durationMs, zh);
@@ -22,31 +38,40 @@ export function ConversationTurnView({ turn, ...actions }: { turn: ConversationT
     ? stopped ? (zh ? "已停止" : "Stopped") : failed ? (zh ? "未完成" : "Failed") : (zh ? "已完成" : "Completed")
     : zh ? "执行中" : "In progress";
   const label = `${status}${turn.completed && duration ? (zh ? `，用时 ${duration}` : ` in ${duration}`) : ""}`;
+  const tone = !turn.completed ? "running" : stopped ? "stopped" : failed ? "failed" : "completed";
   const summary = <>
-    {!turn.completed && <Loader2 size={13} className="animate-spin" aria-hidden />}
+    <span className={`conversation-step-icon conversation-turn-indicator${tone === "running" ? " conversation-activity-pulse" : ""}`} aria-hidden>
+      {tone === "completed" ? <Check size={12} strokeWidth={2.2}/> : tone === "stopped" ? <Square size={10}/>
+        : tone === "failed" ? <CircleAlert size={12}/> : null}
+    </span>
     <span>{label}</span>
-    {process.length > 0 && <ChevronDown size={12} className={expanded ? "rotate-180" : undefined} aria-hidden />}
+    {process.length > 0 && <ChevronRight size={12} className="conversation-turn-chevron" aria-hidden />}
   </>;
 
-  return <article className="conversation-turn" aria-label={name}>
+  return <article className="conversation-turn" aria-label={name} data-status={tone}>
     <header className="conversation-turn-summary">
       {process.length > 0 ?
-      <button type="button" className="conversation-process-toggle" aria-expanded={expanded} aria-controls={regionId}
+      <button type="button" className="conversation-process-toggle" aria-expanded={expanded} aria-controls={summaryOnly ? undefined : regionId}
         title={expanded ? (zh ? "收起过程" : "Collapse activity") : (zh ? "展开过程" : "Show activity")}
-        onClick={() => setExpansion({ completed: turn.completed, open: !expanded })}>
+        onClick={onToggle ?? (() => setExpansion({ completed: turn.completed, open: !expanded }))}>
         {summary}
       </button> : <div className="conversation-process-label">{summary}</div>}
     </header>
-    <div id={regionId} className="conversation-turn-body conversation-process">
-      {turn.events.map((event) => {
+    {!summaryOnly && <div id={regionId} className="conversation-turn-body conversation-process">
+      {turn.events.map((event, index) => {
         // Collapse process rows in place. Delegations, notices and the reply
         // keep their chronological slot and React identity across updates.
-        const visible = expanded || event === turn.result || notices.includes(event) || dispatches.includes(event);
-        return <div key={event.id} hidden={!visible} data-event-kind={event.data.kind} className={event === turn.result ? "conversation-result" : undefined}>
+        const visible = expanded || event === turn.result || notices.has(event) || dispatches.has(event);
+        const trace = expanded && isTurnTraceStep(event);
+        return <div key={event.id} hidden={!visible} data-event-kind={event.data.kind}
+          className={event === turn.result ? "conversation-result" : trace ? "conversation-process-row" : undefined}
+          data-trace-step={trace || undefined}
+          data-trace-prev={trace && isTurnTraceStep(turn.events[index - 1]) || undefined}
+          data-trace-next={trace && isTurnTraceStep(turn.events[index + 1]) || undefined}>
           {visible && <TimelineEventView event={event} {...actions} showAuthor={false} />}
         </div>;
       })}
-    </div>
+    </div>}
   </article>;
 }
 

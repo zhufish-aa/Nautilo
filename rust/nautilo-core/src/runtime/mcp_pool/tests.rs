@@ -24,6 +24,53 @@ fn initialize(capabilities: Value) -> Value {
 }
 
 #[tokio::test]
+async fn three_turns_share_one_pid_and_handshake_but_isolate_changed_identity() {
+    let pool = McpPool::start().unwrap();
+    let dir = std::env::temp_dir().join(format!("nautilo-mcp-reuse-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    let file = dir.join("fixture.mjs");
+    std::fs::write(&file, include_str!("test-server.mjs")).unwrap();
+    let spec = json!({"name":"quality-fixture","transport":"stdio","command":"node","args":[file],"cwd":dir,"env":{"QUALITY_AUTH":"first-secret"}});
+    let mut original_pid = Value::Null;
+    for turn in 0..3 {
+        let binding = pool.binding(&spec, "").unwrap();
+        pool.prewarm(&spec, "");
+        let start = std::time::Instant::now();
+        let (mut reader, mut writer) = connect(&pool, &spec).await;
+        send(&mut writer, initialize(json!({}))).await;
+        assert_eq!(read(&mut reader).await["result"]["protocolVersion"], "2025-06-18");
+        send(&mut writer, json!({"id":2,"method":"tools/call","params":{"name":"echo","arguments":{"turn":turn}}})).await;
+        let reply = read(&mut reader).await;
+        let body: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        if turn == 0 { original_pid = body["pid"].clone(); }
+        assert_eq!(body["pid"], original_pid);
+        let observed = pool.observations(&[binding]);
+        let counters = &observed["servers"][0]["processes"][0];
+        assert_eq!(counters["initializations"], 1);
+        assert_eq!(counters["handshakeHits"], turn);
+        assert_eq!(counters["connections"], turn + 1);
+        assert_eq!(counters["reused"], turn > 0);
+        assert!(counters["initializeMs"].is_u64());
+        assert!(!observed.to_string().contains("secret"));
+        eprintln!("MCP turn={} elapsed_ms={} observation={}", turn + 1, start.elapsed().as_millis(), observed);
+    }
+    for (key, value) in [("cwd", json!(dir.join("other"))), ("env", json!({"QUALITY_AUTH":"second-secret"}))] {
+        let mut different = spec.clone(); different[key] = value;
+        let binding = pool.binding(&different, "").unwrap();
+        let (mut reader, mut writer) = connect(&pool, &different).await;
+        send(&mut writer, initialize(json!({}))).await;
+        read(&mut reader).await;
+        send(&mut writer, json!({"id":2,"method":"tools/call","params":{"name":"echo"}})).await;
+        let reply = read(&mut reader).await;
+        let body: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_ne!(body["pid"], original_pid, "changed {key} must isolate the native server");
+        assert_eq!(pool.observations(&[binding])["servers"][0]["processes"][0]["reused"], false);
+    }
+    pool.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn shared_process_isolates_ids_progress_cancellation_and_native_callbacks() {
     let pool = McpPool::start().unwrap();
     let file = std::env::temp_dir().join(format!("nautilo-mcp-{}.mjs", uuid::Uuid::new_v4()));

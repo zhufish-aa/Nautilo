@@ -1,13 +1,21 @@
-import { useLayoutEffect, useRef } from "react";
-import { animate, useReducedMotion } from "framer-motion";
+import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { animate } from "framer-motion";
 import { useSettingsStore } from "../stores/settings";
 
 export const UI_EASE_OUT = [0.23, 1, 0.32, 1] as const;
 const easing = "cubic-bezier(0.23, 1, 0.32, 1)";
 export const UI_SPRING = { type:"spring" as const, duration:0.5, bounce:0.2 };
 
+const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
+const readSystemReducedMotion = () => typeof window !== "undefined" && !!window.matchMedia?.(reducedMotionQuery).matches;
+function subscribeSystemReducedMotion(update: () => void) {
+  const media = window.matchMedia?.(reducedMotionQuery);
+  media?.addEventListener?.("change", update);
+  return () => media?.removeEventListener?.("change", update);
+}
+
 export function useUiReducedMotion(): boolean {
-  const systemReduced = useReducedMotion();
+  const systemReduced = useSyncExternalStore(subscribeSystemReducedMotion, readSystemReducedMotion, () => false);
   const appReduced = useSettingsStore(state => state.reduceMotion);
   return Boolean(systemReduced || appReduced);
 }

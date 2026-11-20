@@ -3,10 +3,11 @@
 //! in RunService.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
+use crate::application::workflow_service::WorkflowService;
 
 use crate::database::{Database, Repositories};
 use crate::domain::can_transition_project_run;
@@ -26,6 +27,10 @@ use crate::runtime::orchestration::task_graph::TaskGraph;
 use crate::runtime::run_service::{RunContext, RunService};
 use crate::runtime::security::ApprovalService;
 
+mod task_retry;
+mod workflow_dispatch;
+pub(crate) mod workflow_plan;
+
 fn invalid_plan(details: &[(&str, Value)]) -> CoreError {
     let mut map = Map::new();
     for (key, value) in details {
@@ -40,6 +45,7 @@ pub struct OrchestrationService {
     events: Arc<EventService>,
     git_workflows: Option<Arc<GitWorkflowService>>,
     approvals: Arc<ApprovalService>,
+    workflows: OnceLock<Weak<WorkflowService>>,
     active: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
@@ -51,7 +57,15 @@ impl OrchestrationService {
         git_workflows: Option<Arc<GitWorkflowService>>,
         approvals: Arc<ApprovalService>,
     ) -> Arc<Self> {
-        Arc::new(Self { db, runs, events, git_workflows, approvals, active: Arc::new(Mutex::new(HashMap::new())) })
+        Arc::new(Self { db, runs, events, git_workflows, approvals, workflows: OnceLock::new(), active: Arc::new(Mutex::new(HashMap::new())) })
+    }
+
+    pub(crate) fn set_workflows(&self, workflows: &Arc<WorkflowService>) {
+        let _ = self.workflows.set(Arc::downgrade(workflows));
+    }
+
+    fn workflows(&self) -> Option<Arc<WorkflowService>> {
+        self.workflows.get().and_then(Weak::upgrade)
     }
 
     fn members(&self) -> MemberRouter {
@@ -163,6 +177,8 @@ impl OrchestrationService {
         let project_run = self.require_project_run(project_run_id)?;
         let planner_decision = project_run.get("plannerDecision").cloned();
         let valid = project_run.get("status").and_then(Value::as_str) == Some("waiting_user")
+            && project_run["pendingApprovalId"].is_string();
+        let legacy = valid
             && project_run.get("pendingApprovalId").is_some()
             && planner_decision.as_ref().and_then(|d| d.get("mode")).and_then(Value::as_str).is_some()
             && planner_decision.as_ref().and_then(|d| d.get("mode")).and_then(Value::as_str) != Some("direct");
@@ -173,6 +189,21 @@ impl OrchestrationService {
         }
         let main_session = self.require_main_session(&project_run)?;
         let pending_id = project_run.get("pendingApprovalId").and_then(Value::as_str).unwrap_or("");
+        if let Some(workflows) = self.workflows() {
+            let approval = Repositories::new(&self.db.lock().unwrap().raw).approvals().get(pending_id)?;
+            if let Some(workflow_id) = approval.as_ref().and_then(|record| record["workflowRunId"].as_str()) {
+                self.approvals.resolve(pending_id, if approved { "approved" } else { "rejected" }, &json!(scope))?;
+                workflows.apply_workflow_approval(workflow_id, pending_id, approved)?;
+                let _ = self.events.append_for_session(
+                    &main_session, &json!({"projectRunId":project_run_id}), "approval.resolved",
+                    json!({"approvalId":pending_id,"decision":if approved { "approved" } else { "rejected" },"scope":scope}),
+                );
+                return self.require_project_run(project_run_id);
+            }
+        }
+        if !legacy {
+            return Err(invalid_plan(&[("projectRunId", json!(project_run_id))]));
+        }
         self.approvals.resolve(pending_id, if approved { "approved" } else { "rejected" }, &json!(scope))?;
         let _ = self.events.append_for_session(
             &main_session,
@@ -232,6 +263,12 @@ impl OrchestrationService {
         }
         let main_session = self.require_main_session(&project_run)?;
         let merge_approval_id = project_run.get("mergeApprovalId").and_then(Value::as_str).unwrap_or("");
+        if let Some(workflow_id) = project_run["workflowFinalizerId"].as_str() {
+            if let Some(workflows) = self.workflows() {
+                workflows.control(&json!({"runId":workflow_id,"action":if approved {"approve_merge"} else {"reject_merge"}}))?;
+                return self.require_project_run(project_run_id);
+            }
+        }
         self.approvals.resolve(merge_approval_id, if approved { "approved" } else { "rejected" }, &json!(scope))?;
         let _ = self.events.append_for_session(
             &main_session,
@@ -263,6 +300,27 @@ impl OrchestrationService {
 
     pub async fn cancel(&self, project_run_id: &str) -> CoreResult<Value> {
         let project_run = self.require_project_run(project_run_id)?;
+        let main_session = self.require_main_session(&project_run)?;
+        if let Some(workflows) = self.workflows() {
+            // Fence new dispatch before asking in-flight native workers to stop.
+            let status = project_run["status"].as_str().unwrap_or("");
+            if !["completed", "failed", "cancelled"].contains(&status) {
+                let mut stopped = project_run.clone();
+                stopped["status"] = json!("cancelled");
+                stopped.as_object_mut().unwrap().remove("pendingApprovalId");
+                stopped.as_object_mut().unwrap().remove("mergeApprovalId");
+                self.save_project_run(&stopped)?;
+            }
+            workflows.cancel_project_graphs(project_run_id)?;
+        }
+        let tasks = Repositories::new(&self.db.lock().unwrap().raw).tasks().list(project_run_id)?;
+        for task in tasks {
+            if task["workflowRunId"].is_string() { continue; }
+            let task_status = task.get("status").and_then(Value::as_str).unwrap_or("");
+            if !["completed", "failed", "cancelled"].contains(&task_status) {
+                self.update_task(&main_session, &task, "cancelled", None)?;
+            }
+        }
         self.runs.cancel_project_run(project_run_id).await?;
         // Stopping an already terminal run is a no-op: clients must be able to
         // "stop" a stale UI without tripping the transition guard.
@@ -270,13 +328,8 @@ impl OrchestrationService {
         if ["completed", "failed", "cancelled"].contains(&status) {
             return Ok(project_run);
         }
-        let main_session = self.require_main_session(&project_run)?;
-        let tasks = Repositories::new(&self.db.lock().unwrap().raw).tasks().list(project_run_id)?;
-        for task in tasks {
-            let task_status = task.get("status").and_then(Value::as_str).unwrap_or("");
-            if !["completed", "cancelled"].contains(&task_status) {
-                self.update_task(&main_session, &task, "cancelled", None)?;
-            }
+        if self.workflows().is_some() {
+            return self.require_project_run(project_run_id);
         }
         let mut updated = self.require_project_run(project_run_id)?.as_object().cloned().unwrap_or_default();
         updated.insert("status".to_string(), json!("cancelled"));
@@ -302,6 +355,9 @@ impl OrchestrationService {
             return Err(CoreError::details(ErrorCode::RecoveryNotAvailable, details));
         }
         let replacement = if mode == "replace" { Some(self.members().resolve(&team, member_id, None)?) } else { None };
+        if let Some(workflows) = self.workflows() {
+            workflows.cancel_project_graphs(project_run_id)?;
+        }
         let main_session = if mode == "resume" {
             let mut updated = previous_session.as_object().cloned().unwrap_or_default();
             updated.insert("status".to_string(), json!("idle"));
@@ -313,6 +369,7 @@ impl OrchestrationService {
         Repositories::new(&self.db.lock().unwrap().raw).sessions().save(&main_session)?;
         let tasks = Repositories::new(&self.db.lock().unwrap().raw).tasks().list(project_run_id)?;
         for task in tasks {
+            if task["workflowRunId"].is_string() { continue; }
             let task_status = task.get("status").and_then(Value::as_str).unwrap_or("");
             if !["completed", "cancelled"].contains(&task_status) {
                 let mut updated = task.as_object().cloned().unwrap_or_default();
@@ -324,6 +381,7 @@ impl OrchestrationService {
             }
         }
         let mut recovered = project_run.as_object().cloned().unwrap_or_default();
+        recovered.remove("workflowFinalizerId");
         recovered.insert("mainMemberId".to_string(), json!(member_id));
         recovered.insert(
             "mainAgentInstanceId".to_string(),
@@ -371,7 +429,9 @@ impl OrchestrationService {
     }
 
     /// Invoked by provider-native runtime tools; never asks for routing first.
-    pub async fn invoke_runtime_tool(self: &Arc<Self>, session_id: &str, tool_name: &str, input: Value) -> anyhow::Result<Value> {
+    pub async fn invoke_runtime_tool(self: &Arc<Self>, session_id: &str, invoking_run_id: Option<&str>, call: &Value) -> anyhow::Result<Value> {
+        let tool_name = call["name"].as_str().unwrap_or("");
+        let input = &call["arguments"];
         let result: CoreResult<Value> = async {
             let main_session = Repositories::new(&self.db.lock().unwrap().raw)
                 .sessions()
@@ -397,8 +457,11 @@ impl OrchestrationService {
                 return Err(CoreError::details(ErrorCode::PlanDelegationNotAllowed, details));
             }
             let team = self.require_team(main_session.get("teamId").and_then(Value::as_str).unwrap_or(""))?;
+            if let Some(workflows) = self.workflows() {
+                return self.start_runtime_workflow(&workflows, &project_run, &main_session, &team, invoking_run_id, call);
+            }
             let decisions = self.decisions();
-            let decision = RuntimeToolDecisionBuilder::new(&decisions).build(tool_name, &input, &team)?;
+            let decision = RuntimeToolDecisionBuilder::new(&decisions).build(tool_name, input, &team)?;
             let mode = decision.get("mode").and_then(Value::as_str).unwrap_or("");
             let planned: Vec<Value> = if mode == "delegate" {
                 vec![decision.get("task").cloned().unwrap_or(Value::Null)]
@@ -501,7 +564,8 @@ impl OrchestrationService {
                 "content": json!({
                     "accepted": false,
                     "code": error.0.code,
-                    "message": error.0.message
+                    "message": error.0.message,
+                    "details": error.0.details
                 }).to_string()
             })),
         }
@@ -590,7 +654,8 @@ impl OrchestrationService {
         let completion = self.runs.wait_completion(&run_id).await;
         self.assert_completed(completion.as_ref(), "main Agent turn")?;
         let task_count = Repositories::new(&self.db.lock().unwrap().raw).tasks().list(project_run_id)?.len();
-        if task_count == 0 {
+        let running_graph = !crate::database::workflows::project_graphs(&self.db.lock().unwrap().raw, project_run_id)?.is_empty();
+        if task_count == 0 && !running_graph {
             self.finish_run(project_run_id, &main_session).await?;
         }
         Ok(())
@@ -684,6 +749,14 @@ impl OrchestrationService {
             "rationale": decision.get("rationale").cloned().unwrap_or(Value::Null),
             "taskIds": task_ids
         }));
+        if mode != "direct" {
+            if let Some(workflows) = self.workflows() {
+                let invoking_run_id = completion_run["id"].as_str();
+                let request_id = format!("planner:{}", invoking_run_id.unwrap_or(project_run_id));
+                self.start_decision_workflow(&workflows, &project_run, &team, &decision, &request_id, invoking_run_id, None, true)?;
+                return Ok(());
+            }
+        }
         let mut updated = project_run.as_object().cloned().unwrap_or_default();
         updated.insert("plannerDecision".to_string(), decision.clone());
         updated.insert("updatedAt".to_string(), json!(now_iso()));
@@ -1042,8 +1115,14 @@ impl OrchestrationService {
         on_dispatched: impl FnOnce(Value),
     ) -> anyhow::Result<()> {
         let mut task = task.clone();
+        let task_cancelled = || Repositories::new(&self.db.lock().unwrap().raw).tasks()
+            .get(task["id"].as_str().unwrap_or("")).ok().flatten()
+            .is_some_and(|value| value["status"] == "cancelled");
+        if task_cancelled() { return Ok(()); }
         if self.git_workflows.is_some() && task.get("workspacePath").is_none() {
-            task = self.git_workflows.as_ref().unwrap().initialize_task(project_run, &task).await?;
+            let initialized = self.git_workflows.as_ref().unwrap().initialize_task(project_run, &task).await?;
+            if task_cancelled() { return Ok(()); }
+            task = initialized;
             Repositories::new(&self.db.lock().unwrap().raw).tasks().save(&task)?;
         }
         let assigned = self.members().resolve(
@@ -1113,6 +1192,9 @@ impl OrchestrationService {
             "runId": run_id
         }));
         let completion = self.runs.wait_completion(&run_id).await;
+        if Repositories::new(&self.db.lock().unwrap().raw).tasks()
+            .get(task["id"].as_str().unwrap_or("")).ok().flatten()
+            .is_some_and(|value| value["status"] == "cancelled") { return Ok(()); }
         let run_status = completion
             .as_ref()
             .and_then(|c| c.run.get("status"))

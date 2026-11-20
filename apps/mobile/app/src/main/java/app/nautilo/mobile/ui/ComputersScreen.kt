@@ -59,6 +59,7 @@ import app.nautilo.mobile.data.Host
                         Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                             InfoRow("系统", state.system.let { when(it) { "macos" -> "macOS"; "windows" -> "Windows"; "linux" -> "Linux"; else -> "—" } })
                             InfoRow("连接", if (state.connected) when(state.path) { "direct" -> "P2P 直连"; "relay" -> "加密中继"; "mixed" -> "直连 / 中继"; else -> "端到端加密" } else "未连接")
+                            if (state.connected && state.networkHint.isNotEmpty()) InfoRow("网络出口", "系统默认网络（VPN）")
                             state.latency?.let { InfoRow("往返延迟", "$it ms") }
                             InfoRow("工作区", "全部项目 · ${state.projects.size} 个")
                         }

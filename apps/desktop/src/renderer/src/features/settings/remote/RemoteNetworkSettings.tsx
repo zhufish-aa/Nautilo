@@ -3,6 +3,7 @@ import { ChevronDown, Globe2 } from "lucide-react";
 import { Button } from "../../../components/ui/Button";
 import { Switch } from "../../../components/ui/Switch";
 import { relaySettingsError } from "./remote-network-settings";
+import { RelayNodeSelect } from "./RelayNodeSelect";
 
 export function RemoteNetworkSettings({
   settings,
@@ -59,11 +60,10 @@ export function RemoteNetworkSettings({
             <option value="lan">{zh ? "局域网离线 · 关闭互联网辅助" : "Offline LAN · no Internet assistance"}</option>
           </select>
         </label>
-        {(settings.relayMode === "custom" || settings.relayMode === "direct" || settings.relayMode === "local") && (
+        {settings.relayMode === "custom" && <RelayNodeSelect urls={settings.relayUrls} zh={zh} disabled={busy} onChange={relayUrls => update({ relayUrls })} />}
+        {(settings.relayMode === "direct" || settings.relayMode === "local") && (
           <label className="remote-full-width">
-            {zh
-              ? settings.relayMode === "custom" ? "自定义中继地址（可选，留空使用公共节点）" : "打洞辅助节点（可选，留空使用公共节点）"
-              : settings.relayMode === "custom" ? "Custom relay URLs (optional; public nodes when blank)" : "Rendezvous nodes (optional)"}
+            {zh ? "打洞辅助节点（可选，留空使用公共节点）" : "Rendezvous nodes (optional)"}
             <textarea
               value={settings.relayUrls.join("\n")}
               onChange={(e) =>
@@ -94,8 +94,8 @@ export function RemoteNetworkSettings({
         {settings.relayMode === "custom" && (
           <p className="remote-network-note">
             {zh
-              ? "通过中继传输，跳过直连尝试。留空使用公共节点，也可以指定兼容的 Iroh 中继；设备卡片显示传输方式和延迟。"
-              : "Uses relay transport without direct attempts. Leave blank for public nodes or specify compatible Iroh relays; devices show the transport and latency."}
+              ? "通过所选中继传输，跳过直连尝试。设备卡片显示手机与电脑之间的实际连接延迟。"
+              : "Uses the selected relay without direct attempts. Device cards show the actual phone-to-PC connection latency."}
           </p>
         )}
         <div className="remote-awake">

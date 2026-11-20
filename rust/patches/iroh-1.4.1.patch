@@ -1,22 +1,60 @@
---- a/src/endpoint/connection.rs
-+++ b/src/endpoint/connection.rs
-@@ -1063,6 +1063,13 @@ impl<T: ConnectionState> Connection<T> {
-         self.inner.stats()
+--- a/src/endpoint.rs
++++ b/src/endpoint.rs
+@@ -1469,6 +1469,35 @@
+             .collect()
      }
  
++    /// Probes RFC 5389 STUN on each bound UDP socket of the server's IP family.
++    /// Returns (local socket, observed external socket) pairs. Does not advertise
++    /// results automatically; applications must expire them and avoid reporting
++    /// a successful path until QUIC connectivity has actually been verified.
++    #[cfg(not(wasm_browser))]
++    pub async fn probe_stun(&self, server: SocketAddr, timeout: std::time::Duration) -> Vec<(SocketAddr, SocketAddr)> {
++        if self.is_closed() { return Vec::new(); }
++        let mut probes = tokio::task::JoinSet::new();
++        for probe in &self.inner.stun_probes {
++            let Ok(local) = probe.local_addr() else { continue };
++            if local.is_ipv4() != server.is_ipv4() { continue; }
++            let probe = probe.clone();
++            probes.spawn(async move { probe.discover(server, timeout).await.map(|mapped| (local, mapped)) });
++        }
++        let mut result = Vec::new();
++        while let Some(outcome) = probes.join_next().await {
++            if let Ok(Ok(mapping)) = outcome { result.push(mapping); }
++        }
++        result
++    }
++
++    /// Bind the endpoint's UDP sockets to an Android Network. This leaves the
++    /// HTTP relay/discovery route and the process default network untouched.
++    #[cfg(target_os = "android")]
++    pub fn bind_android_network(&self, handle: u64) -> std::io::Result<()> {
++        for probe in &self.inner.stun_probes { probe.bind_android_network(handle)?; }
++        Ok(())
++    }
++
+     // # Methods for less common getters.
+     //
+     // Partially they return things passed into the builder.
+--- a/src/endpoint/connection.rs
++++ b/src/endpoint/connection.rs
+@@ -1061,6 +1061,13 @@
+     #[inline]
+     pub fn stats(&self) -> ConnectionStats {
+         self.inner.stats()
++    }
++
 +    /// Returns peer IP candidates received through QUIC NAT traversal control.
 +    /// This is diagnostic metadata, not a list of verified working paths.
 +    #[cfg(feature = "unstable-net-report")]
 +    pub fn remote_nat_candidates(&self) -> Option<Vec<std::net::SocketAddr>> {
 +        self.inner.get_remote_nat_traversal_addresses().ok()
-+    }
-+
+     }
+ 
      /// Current state of the congestion control algorithm, for debugging purposes.
-     #[inline]
-     pub fn congestion_state(&self, path_id: PathId) -> Option<Box<dyn Controller>> {
 --- a/src/endpoint/quic.rs
 +++ b/src/endpoint/quic.rs
-@@ -150,6 +150,26 @@ impl QuicTransportConfig {
+@@ -150,6 +150,26 @@
  }
  
  impl QuicTransportConfigBuilder {
@@ -45,7 +83,7 @@
          let mut cfg = noq::TransportConfig::default();
 --- a/src/net_report.rs
 +++ b/src/net_report.rs
-@@ -855,7 +855,10 @@ async fn run_probe_v4(
+@@ -855,7 +855,10 @@
          latency: conn.rtt(PathId::ZERO).unwrap_or_default(),
      };
  
@@ -57,7 +95,7 @@
      let endpoint = relay.url.clone();
      let handle = task::spawn(shutdown_token.run_until_cancelled_owned({
          let conn = conn.clone();
-@@ -921,7 +924,8 @@ async fn run_probe_v6(
+@@ -921,7 +924,8 @@
          latency: conn.rtt(PathId::ZERO).unwrap_or_default(),
      };
  
@@ -67,3 +105,234 @@
      let endpoint = relay.url.clone();
      let handle = task::spawn(shutdown_token.run_until_cancelled_owned({
          let observer = observer.clone();
+--- a/src/socket.rs
++++ b/src/socket.rs
+@@ -93,6 +93,8 @@
+ pub(crate) mod mapped_addrs;
+ pub(crate) mod remote_map;
+ pub(crate) mod transports;
++#[cfg(not(wasm_browser))]
++pub(crate) mod stun;
+ 
+ use self::mapped_addrs::{EndpointIdMappedAddr, MappedAddr};
+ pub use self::metrics::Metrics;
+@@ -334,6 +336,8 @@
+ /// possible.
+ #[derive(Debug)]
+ pub(crate) struct Socket {
++    #[cfg(not(wasm_browser))]
++    pub(crate) stun_probes: Vec<stun::Probe>,
+     /// Read-only view of the per-remote `RemoteStateActor` inboxes.
+     ///
+     /// Lets callers send to an existing `RemoteStateActor` without going through
+@@ -985,6 +989,8 @@
+         let home_relay_watch = transports.home_relay_watch();
+ 
+         let sock = Arc::new(Socket {
++            #[cfg(not(wasm_browser))]
++            stun_probes: transports.stun_probes(),
+             remote_actors: remote_map.senders(),
+             shutdown: shutdown_state,
+             ipv6_reported,
+--- /dev/null
++++ b/src/socket/stun.rs
+@@ -0,0 +1,142 @@
++//! Bounded RFC 5389 discovery on the very same sockets used for QUIC.
++//! A mapping from another socket is not a usable hole-punching candidate.
++use netwatch::UdpSocket;
++use std::{
++    collections::HashMap,
++    io,
++    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
++    sync::{Arc, Mutex},
++    time::Duration,
++};
++use tokio::sync::oneshot;
++
++const COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
++type Pending = HashMap<[u8; 12], (SocketAddr, oneshot::Sender<SocketAddr>)>;
++
++#[derive(Clone, Debug)]
++pub(crate) struct Probe {
++    socket: Arc<UdpSocket>,
++    pending: Arc<Mutex<Pending>>,
++}
++
++impl Probe {
++    pub(crate) fn new(socket: Arc<UdpSocket>) -> Self {
++        Self {
++            socket,
++            pending: Arc::new(Mutex::new(HashMap::new())),
++        }
++    }
++    pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
++        self.socket.local_addr()
++    }
++
++    #[cfg(target_os = "android")]
++    pub(crate) fn bind_android_network(&self, handle: u64) -> io::Result<()> {
++        self.socket.bind_android_network(handle)
++    }
++
++    pub(crate) async fn discover(
++        &self,
++        server: SocketAddr,
++        timeout: Duration,
++    ) -> io::Result<SocketAddr> {
++        let id: [u8; 12] = rand::random();
++        let (tx, mut rx) = oneshot::channel();
++        {
++            let mut pending = self.pending.lock().unwrap();
++            if pending.len() >= 16 {
++                return Err(io::Error::other("too many STUN probes"));
++            }
++            pending.insert(id, (server, tx));
++        }
++        struct Cleanup<'a>(&'a Mutex<Pending>, [u8; 12]);
++        impl Drop for Cleanup<'_> {
++            fn drop(&mut self) {
++                self.0.lock().unwrap().remove(&self.1);
++            }
++        }
++        let _cleanup = Cleanup(&self.pending, id);
++        let mut request = [0u8; 20];
++        request[1] = 1; // Binding request, no attributes.
++        request[4..8].copy_from_slice(&COOKIE);
++        request[8..20].copy_from_slice(&id);
++        let deadline = tokio::time::Instant::now() + timeout.min(Duration::from_secs(5));
++        for delay in [250, 500, 1000, 2000] {
++            tokio::time::timeout_at(deadline, self.socket.send_to(&request, server))
++                .await
++                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "STUN send timed out"))??;
++            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
++            if remaining.is_zero() {
++                break;
++            }
++            match tokio::time::timeout(remaining.min(Duration::from_millis(delay)), &mut rx).await {
++                Ok(Ok(addr)) => return Ok(addr),
++                Ok(Err(_)) => return Err(io::Error::other("STUN probe closed")),
++                Err(_) => (),
++            }
++        }
++        Err(io::Error::new(
++            io::ErrorKind::TimedOut,
++            "STUN binding timed out",
++        ))
++    }
++
++    /// Called by the normal UDP receiver; never runs a second competing reader.
++    pub(crate) fn accept(&self, server: SocketAddr, packet: &[u8]) -> bool {
++        if packet.len() < 20 || packet[..2] != [1, 1] || packet[4..8] != COOKIE {
++            return false;
++        }
++        let id: [u8; 12] = packet[8..20].try_into().unwrap();
++        let mut pending = self.pending.lock().unwrap();
++        let Some((expected, _)) = pending.get(&id) else {
++            return false;
++        };
++        if expected.ip().to_canonical() != server.ip().to_canonical()
++            || expected.port() != server.port()
++        {
++            return false;
++        }
++        let Some(addr) = mapped_address(packet) else {
++            return false;
++        };
++        if let Some((_, tx)) = pending.remove(&id) {
++            let _ = tx.send(addr);
++        }
++        true
++    }
++}
++
++fn mapped_address(packet: &[u8]) -> Option<SocketAddr> {
++    let end =
++        20usize.checked_add(u16::from_be_bytes(packet.get(2..4)?.try_into().ok()?) as usize)?;
++    if end > packet.len() || end % 4 != 0 {
++        return None;
++    }
++    let mut at = 20;
++    while at + 4 <= end {
++        let kind = u16::from_be_bytes(packet[at..at + 2].try_into().ok()?);
++        let len = u16::from_be_bytes(packet[at + 2..at + 4].try_into().ok()?) as usize;
++        let value = packet
++            .get(at + 4..at + 4 + len)
++            .filter(|_| at + 4 + len <= end)?;
++        if kind == 0x0020 && len >= 8 && value[0] == 0 {
++            let port = u16::from_be_bytes(value[2..4].try_into().ok()?) ^ 0x2112;
++            let ip = match (value[1], len) {
++                (1, 8) => IpAddr::V4(Ipv4Addr::from(std::array::from_fn::<_, 4, _>(|i| {
++                    value[4 + i] ^ COOKIE[i]
++                }))),
++                (2, 20) => IpAddr::V6(Ipv6Addr::from(std::array::from_fn::<_, 16, _>(|i| {
++                    value[4 + i] ^ packet[4 + i]
++                }))),
++                _ => return None,
++            }
++            .to_canonical();
++            if port == 0 || ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
++                return None;
++            }
++            return Some(SocketAddr::new(ip, port));
++        }
++        at += 4 + (len + 3) / 4 * 4;
++    }
++    None
++}
+--- a/src/socket/transports.rs
++++ b/src/socket/transports.rs
+@@ -184,6 +184,11 @@
+ }
+ 
+ impl Transports {
++    #[cfg(not(wasm_browser))]
++    pub(crate) fn stun_probes(&self) -> Vec<crate::socket::stun::Probe> {
++        self.ip.iter().map(|transport| transport.stun_probe()).collect()
++    }
++
+     /// Binds the  transports.
+     pub(crate) fn bind(
+         configs: &[TransportConfig],
+--- a/src/socket/transports/ip.rs
++++ b/src/socket/transports/ip.rs
+@@ -20,6 +20,7 @@
+ pub(crate) struct IpTransport {
+     config: Config,
+     socket: Arc<UdpSocket>,
++    stun: crate::socket::stun::Probe,
+     local_addr: Watchable<SocketAddr>,
+     metrics: Arc<SocketMetrics>,
+ }
+@@ -180,9 +181,11 @@
+         // TODO: update when UdpSocket under the hood rebinds automatically
+         let local_addr = Watchable::new(local_addr);
+ 
++        let socket = Arc::new(socket);
+         Ok(Self {
+             config,
+-            socket: Arc::new(socket),
++            stun: crate::socket::stun::Probe::new(socket.clone()),
++            socket,
+             local_addr,
+             metrics,
+         })
+@@ -208,6 +211,10 @@
+                 for i in 0..n {
+                     let meta = &mut metas[i];
+                     let recv_info = &mut recv_infos[i];
++                    if self.stun.accept(meta.addr, &bufs[i][..meta.len]) {
++                        // Clear QUIC's fixed bit, just as other non-QUIC packets.
++                        bufs[i][0] = 0;
++                    }
+                     if meta.addr.is_ipv4() {
+                         // The AsyncUdpSocket is an AF_INET6 socket and needs to show this
+                         // as coming from an IPv4-mapped IPv6 addresses, since Noq will
+@@ -233,6 +240,8 @@
+     pub(super) fn local_addr_watch(&self) -> n0_watcher::Direct<SocketAddr> {
+         self.local_addr.watch()
+     }
++
++    pub(super) fn stun_probe(&self) -> crate::socket::stun::Probe { self.stun.clone() }
+ 
+     pub(super) fn max_transmit_segments(&self) -> NonZeroUsize {
+         self.socket.max_gso_segments()

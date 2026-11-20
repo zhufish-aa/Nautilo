@@ -35,6 +35,8 @@ const TERMINAL_RUN_STATUSES: [&str; 5] = ["completed", "failed", "timed_out", "c
 mod session_events;
 #[path = "native_history.rs"]
 mod native_history;
+#[path = "native_file_history.rs"]
+mod native_file_history;
 
 pub struct RunCompletion {
     pub run: Value,
@@ -42,9 +44,11 @@ pub struct RunCompletion {
     pub final_message: Option<String>,
 }
 
+type CancelTurn = Box<dyn FnOnce() -> crate::adapters::BoxFuture<()> + Send>;
+
 struct ActiveRun {
     session_id: String,
-    cancel: Box<dyn FnOnce() -> crate::adapters::BoxFuture<()> + Send>,
+    cancel: Arc<tokio::sync::Mutex<Option<CancelTurn>>>,
     steer: Option<Arc<dyn Fn(String) -> crate::adapters::BoxFuture<CoreResult<()>> + Send + Sync>>,
     project_run_id: Option<String>,
 }
@@ -66,6 +70,8 @@ pub struct RunContext {
     pub queue_key: Option<String>,
     pub user_message_id: Option<String>,
     pub request_id: Option<String>,
+    pub workflow: Option<Value>,
+    pub workflow_reference: Option<Value>,
 }
 
 pub struct RunService {
@@ -127,15 +133,18 @@ impl RunService {
     pub async fn close_mcp_pool(&self) {
         if let Some(pool) = self.mcp_pool.get() { pool.close().await; }
     }
-    fn pool_mcp_request(&self, request: &mut AdapterStartRequest) {
-        let Some(pool) = self.mcp_pool.get() else { return };
+    fn pool_mcp_request(&self, request: &mut AdapterStartRequest) -> Vec<crate::runtime::mcp_pool::Binding> {
+        let Some(pool) = self.mcp_pool.get() else { return Vec::new() };
+        let mut bindings = Vec::new();
         request.env.get_or_insert_with(HashMap::new).extend(pool.environment());
         if let Some(servers) = &mut request.mcp_servers {
             for server in servers {
+                if let Some(binding) = pool.binding(server, &request.cwd) { bindings.push(binding); }
                 pool.prewarm(server, &request.cwd);
                 *server = pool.bind(server, &request.cwd);
             }
         }
+        bindings
     }
     pub async fn generate_session_title(&self, session_id: &str) -> CoreResult<Value> {
         let gate = {
@@ -244,6 +253,23 @@ impl RunService {
         descriptor["nativeContextVersion"].as_str().is_some_and(|version|session["providerContextVersion"].as_str()!=Some(version))
     }
 
+    // The workflow service calls this after persisting a valid submission for
+    // this run. Keep the turn reserved until its adapter finishes stopping.
+    pub(crate) fn finish_submitted_workflow_turn(self: &Arc<Self>, run_id: &str) {
+        let (turn, session_id) = {
+            let active = self.active.lock().unwrap();
+            let Some(run) = active.get(run_id) else { return };
+            (run.cancel.clone(), run.session_id.clone())
+        };
+        let Ok(mut stopping) = turn.try_lock_owned() else { return };
+        let Some(cancel) = stopping.take() else { return };
+        let service = self.clone_handle();
+        tokio::spawn(async move {
+            tokio::join!(cancel(), service.account_gateways.cancel_session(&session_id));
+            drop(stopping);
+        });
+    }
+
     pub async fn cancel(&self, run_id: &str) -> CoreResult<()> {
         run_log::run_event(run_id, "cancel_request", json!({}));
         let active = self.active.lock().unwrap().remove(run_id);
@@ -277,7 +303,12 @@ impl RunService {
         if let Some(interactions) = self.interactions.read().unwrap().clone() {
             interactions.cancel_for_run(run_id);
         }
-        (active.cancel)().await;
+        {
+            let mut stopping = active.cancel.lock().await;
+            if let Some(cancel) = stopping.take() {
+                cancel().await;
+            }
+        }
         let latest = Repositories::new(&self.db.lock().unwrap().raw).runs().get(run_id)?.or(existing);
         if let Some(latest) = latest {
             let mut updated = latest.as_object().cloned().unwrap_or_default();
@@ -395,6 +426,12 @@ impl RunService {
 
     /// Withdraws a queued (not yet started) turn by its queue key.
     pub fn session_busy(&self, session_id: &str) -> bool { self.session_queue.busy(session_id) }
+    pub fn run_active(&self, run_id: &str) -> bool { self.active.lock().unwrap().contains_key(run_id) }
+    pub fn workflow_capabilities(&self, agent:&Value)->CoreResult<Value> {
+        let adapter=self.adapters.get(agent["providerId"].as_str().unwrap_or(""))?;
+        let capabilities=adapter.capabilities();
+        Ok(json!({"nativeResume":capabilities.native_resume,"structuredOutput":capabilities.structured_output,"textOutput":capabilities.text_output,"nativeExperience":adapter.native_capabilities(agent)}))
+    }
 
     pub fn cancel_queued(&self, session_id: &str, key: &str) -> bool {
         let cancelled=self.session_queue.cancel_pending(session_id, key);
@@ -630,7 +667,9 @@ impl RunService {
         run.insert("mode".to_string(), json!("headless_structured"));
         run.insert("status".to_string(), json!("starting"));
         run.insert("startedAt".to_string(), json!(started_at));
-        let run = Value::Object(run);
+        let mut run = Value::Object(run);
+        if let Some(workflow)=&context.workflow { run["workflow"]=workflow.clone(); }
+        if let Some(key)=&context.queue_key { run["queueKey"]=json!(key); }
         Repositories::new(&self.db.lock().unwrap().raw).runs().save(&run)?;
         if let Some(id)=&context.request_id{self.request_logs.attach(id,&run);}
         let mut audit_record = Map::new();
@@ -664,7 +703,7 @@ impl RunService {
             None
         } else {
             self.runtime_tool_provider.read().unwrap().as_ref().and_then(|provider| {
-                provider.for_run(session, &json!({ "projectRunId": context.project_run_id, "taskId": context.task_id }), agent)
+                provider.for_run(session, &json!({ "projectRunId": context.project_run_id, "taskId": context.task_id, "workflow":context.workflow,"workflowReference":context.workflow_reference,"runId":run_id,"messageKind":context.message_kind }), agent)
             })
         };
         let image_generation = if provider_command { None } else {
@@ -739,6 +778,17 @@ impl RunService {
                 self.fail_run(&run, session, &error, provider_command)?;
                 return Err(error);
             }
+            if let Some(model) = request.model.as_deref().filter(|model| run["model"].as_str() != Some(*model)) {
+                run["model"] = json!(model);
+                let db = self.db.lock().unwrap();
+                let records = Repositories::new(&db.raw).runs();
+                if let Some(mut saved) = records.get(&run_id)? {
+                    saved["model"] = run["model"].clone();
+                    records.save(&saved)?;
+                }
+                drop(db);
+                if let Some(id) = &context.request_id { self.request_logs.attach(id, &run); }
+            }
             request.env.get_or_insert_with(HashMap::new).insert("NAUTILO_MCP_PARENT_OVERRIDES".into(),mcp_environment.to_string());
         } else if let Some(connection) = bound_connection.as_ref().filter(|c| c["kind"] == "login") {
             if let Err(error) = crate::runtime::account_auth::check_native_login(connection, &request).await {
@@ -747,13 +797,19 @@ impl RunService {
             }
         }
         request.env.get_or_insert_with(HashMap::new).insert("NAUTILO_MCP_SCOPE".into(),json!({"connectionId":session["connectionId"],"revision":session["connectionRevision"]}).to_string());
-        self.pool_mcp_request(&mut request);
-        if let Some(id)=&context.request_id {self.request_logs.supplied(id,request.runtime_tools.as_ref(),request.mcp_servers.as_ref());}
+        let mcp_bindings = self.pool_mcp_request(&mut request);
+        if let Some(id)=&context.request_id {
+            if let Some(pool) = self.mcp_pool.get() { self.request_logs.mcp(id, pool, mcp_bindings); }
+            self.request_logs.supplied(id,request.runtime_tools.as_ref(),request.mcp_servers.as_ref());
+        }
 
         if !provider_command {
             let is_git = diff_collector::is_git_workspace(&request.cwd).await;
             if !is_git && project.as_ref().and_then(|p| p.get("nonGitDiffMode")).and_then(Value::as_str) != Some("off") {
-                if let Ok(snapshot) = capture_workspace_snapshot(&request.cwd) {
+                // A baseline must precede the CLI launch, but scanning a non-Git
+                // workspace must not occupy a Tokio worker handling IPC/streams.
+                let snapshot_cwd = request.cwd.clone();
+                if let Ok(Ok(snapshot)) = tokio::task::spawn_blocking(move || capture_workspace_snapshot(&snapshot_cwd)).await {
                     self.workspace_baselines.lock().unwrap().insert(run_id.clone(), snapshot);
                 }
             }
@@ -795,10 +851,11 @@ impl RunService {
         };
         let (events, cancel, steer, _write) = adapter_run.into_parts();
         let image_generation_cleanup = image_generation.clone();
-        let cancel: Box<dyn FnOnce() -> crate::adapters::BoxFuture<()> + Send> = Box::new(move || {
+        let cancel: CancelTurn = Box::new(move || {
             if let Some(executor) = image_generation { (executor.cancel)(); }
             cancel()
         });
+        let cancel = Arc::new(tokio::sync::Mutex::new(Some(cancel)));
         context.runtime_tool_version = if context.runtime_tool_version.is_some() {
             context.runtime_tool_version
         } else if !provider_command {
@@ -815,9 +872,18 @@ impl RunService {
         let consume_context = context.clone();
         let consume_run_id = run_id.clone();
         let consume_request_id = context.request_id.clone();
+        self.active.lock().unwrap().insert(
+            run_id.clone(),
+            ActiveRun {
+                session_id: session.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                cancel: cancel.clone(),
+                steer,
+                project_run_id: context.project_run_id.clone(),
+            },
+        );
         tokio::spawn(async move {
             let completion = consume_service
-                .consume(&consume_run, &consume_session, events, consume_context, background_handoff)
+                .consume(&consume_run, &consume_session, events, consume_context, background_handoff, cancel)
                 .await;
             if let Some(id)=&consume_request_id {
                 consume_service.request_logs.finish(id,completion.run["status"].as_str().unwrap_or("failed"),completion.run["failureCode"].as_str(),completion.failure_detail.as_deref());
@@ -836,15 +902,6 @@ impl RunService {
             let title_session = consume_session["id"].as_str().unwrap_or("").to_string();
             tokio::spawn(async move { let _ = service.generate_session_title(&title_session).await; });
         });
-        self.active.lock().unwrap().insert(
-            run_id.clone(),
-            ActiveRun {
-                session_id: session.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-                cancel,
-                steer,
-                project_run_id: context.project_run_id.clone(),
-            },
-        );
         Ok((run_id, completion_receiver))
     }
 
@@ -949,11 +1006,12 @@ impl RunService {
         mut adapter_events: tokio::sync::mpsc::UnboundedReceiver<AdapterEvent>,
         context: RunContext,
         background_handoff: session_events::ForegroundHandoff,
+        turn: Arc<tokio::sync::Mutex<Option<CancelTurn>>>,
     ) -> RunCompletionSnapshot {
         let mut messages: Vec<Value> = vec![];
         let mut provider_error: Option<String> = None;
         let provider_command = context.presentation.as_deref() == Some("provider_command");
-        let mut saw_exit = false;
+        let mut exit = None;
         let consume_run_id = run.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         run_log::run_event(&consume_run_id, "consume_enter", json!({}));
         while let Some(event) = adapter_events.recv().await {
@@ -961,11 +1019,22 @@ impl RunService {
                 provider_error = Some(self.redaction.text(message));
             }
             if matches!(event, AdapterEvent::Exit { .. }) {
-                saw_exit = true;
+                exit = Some(event);
+                continue;
             }
             if let Some(message) = self.persist(run, session, &event, &context) {
                 messages.push(message);
             }
+        }
+        // A taken cancel handle marks an intentional stop. The lock also
+        // waits for native and account transports before the session is reused.
+        let interrupted = turn.lock().await.is_none();
+        let saw_exit = exit.is_some();
+        if let Some(mut event) = exit {
+            if interrupted {
+                if let AdapterEvent::Exit { exit_code, .. } = &mut event { *exit_code = Some(0); }
+            }
+            self.persist(run, session, &event, &context);
         }
         // An interrupt or transport failure may close a stream before its
         // final message frame. Commit already-visible main-agent text first.
@@ -1482,7 +1551,7 @@ impl RunService {
                 }
                 None
             }
-            AdapterEvent::File { path, change_type, additions, deletions, diff, .. } => {
+            AdapterEvent::File { path, change_type, additions, deletions, diff, snapshot, raw } => {
                 let change_type = normalize_change_type(change_type.as_deref());
                 self.touched_files
                     .lock()
@@ -1498,7 +1567,9 @@ impl RunService {
                     "changeType": change_type,
                     "additions": additions.map(Value::from).or(derived.0.map(Value::from)).unwrap_or(Value::Null),
                     "deletions": deletions.map(Value::from).or(derived.1.map(Value::from)).unwrap_or(Value::Null),
-                    "diff": diff.as_ref().map(|d| self.redaction.text(d)).map(Value::String).unwrap_or(Value::Null)
+                    "diff": diff.as_ref().map(|d| self.redaction.text(d)).map(Value::String).unwrap_or(Value::Null),
+                    "fileSnapshot":snapshot.as_ref().map(|snapshot|self.redaction.value(snapshot)),
+                    "callId":raw.as_ref().and_then(|raw|raw.pointer("/part/callID")).and_then(Value::as_str)
                 }));
                 None
             }

@@ -60,7 +60,7 @@ export function loginProfileDirectory(instance: AgentInstance): string | undefin
   if (typeof raw !== "string" || !raw.trim() || !isAbsolute(raw.trim()) || /[\r\n\0]/.test(raw)) {
     throw new CoreError("IPC_INVALID_REQUEST", { field: "loginProfileDirectory", reason: "Use an absolute account configuration directory" });
   }
-  if (!["codex", "claude-code"].includes(instance.providerId)) {
+  if (!["codex", "claude-code", "opencode"].includes(instance.providerId)) {
     throw new CoreError("IPC_INVALID_REQUEST", { field: "loginProfileDirectory", reason: "This harness does not support isolated login profiles" });
   }
   if (instance.providerOptions?.baseUrl || instance.baseArgs.length || instance.profile) {
@@ -75,6 +75,12 @@ export function isolateLoginProfile(instance: AgentInstance, environment: Record
   const directory = loginProfileDirectory(instance);
   if (!directory) return environment;
   const isolated = { ...environment };
+  if (instance.providerId === "opencode") {
+    for (const key of Object.keys(isolated)) if (/^(XDG_DATA_HOME|XDG_STATE_HOME|OPENCODE_AUTH_CONTENT|OPENCODE_API_KEY)$/i.test(key)) delete isolated[key];
+    isolated.XDG_DATA_HOME = join(directory, "data");
+    isolated.XDG_STATE_HOME = join(directory, "state");
+    return isolated;
+  }
   for (const key of Object.keys(isolated)) {
     if (/^(OPENAI_|CODEX_|ANTHROPIC_|CLAUDE_CODE_(OAUTH|API|USE_|SESSION_ACCESS)|CLAUDE_CONFIG_DIR$|AGENTHUB_API_KEY$)/i.test(key)) delete isolated[key];
   }

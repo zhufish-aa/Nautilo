@@ -26,7 +26,7 @@ class DesktopPresentationParityTest {
         assertEquals(expected.optBoolean("truncated"), actual.truncated)
     }
     @Test fun reasoningPreviewsMatchPc() = fixture.objects("previews").forEach { case ->
-        assertEquals(case.text("expected"), reasoningPreview(case.text("text"), case.optBoolean("streaming")))
+        assertEquals(case.text("expected"), reasoningPreview(case.text("text")))
     }
     @Test fun backgroundReceiptsAndCancellationArePresentedLikePc() = fixture.objects("outputs").forEach { case ->
         val expected = case.getJSONObject("expected")

@@ -135,7 +135,7 @@ fn parse_status(raw: &str) -> anyhow::Result<Value> {
         if xy.len() != 2 {
             anyhow::bail!("Git 文件状态无效");
         }
-        state["changes"].as_array_mut().unwrap().push(json!({"path":name,"originalPath":original,"indexStatus":&xy[..1],"worktreeStatus":&xy[1..],"untracked":kind==b'?',"conflict":kind==b'u',"submodule":sub.starts_with('S'),"directory":directory}));
+        state["changes"].as_array_mut().unwrap().push(json!({"path":name,"originalPath":original,"indexStatus":&xy[..1],"worktreeStatus":&xy[1..],"untracked":kind==b'?',"conflict":kind==b'u',"submodule":sub.starts_with('S'),"directory":directory,"version":format!("{:x}",Sha256::digest(record.as_bytes()))}));
     }
     Ok(state)
 }
@@ -259,23 +259,28 @@ impl SourceControl {
         digest.update(raw.as_bytes());
         // Porcelain can stay identical while an already modified file is edited
         // again. Include worktree revisions so preview caches cannot reuse it.
-        for change in state["changes"].as_array().unwrap() {
-            let name = change["path"].as_str().unwrap();
+        for change in state["changes"].as_array_mut().unwrap() {
+            let name = change["path"].as_str().unwrap().to_string();
+            let mut file_digest = Sha256::new();
+            file_digest.update(change["version"].as_str().unwrap_or(""));
             digest.update(b"\0worktree\0");
             digest.update(name.as_bytes());
-            match std::fs::symlink_metadata(Path::new(root).join(name)) {
+            match std::fs::symlink_metadata(Path::new(root).join(&name)) {
                 Ok(info) => {
                     digest.update(info.len().to_le_bytes());
+                    file_digest.update(info.len().to_le_bytes());
                     for time in [info.modified(), info.created()] {
                         if let Ok(time) = time {
                             if let Ok(time) = time.duration_since(std::time::UNIX_EPOCH) {
                                 digest.update(time.as_nanos().to_le_bytes());
+                                file_digest.update(time.as_nanos().to_le_bytes());
                             }
                         }
                     }
                 }
-                Err(error) => digest.update(format!("{:?}", error.kind()).as_bytes()),
+                Err(error) => { let kind=format!("{:?}",error.kind());digest.update(kind.as_bytes());file_digest.update(kind.as_bytes()); },
             }
+            change["version"] = json!(format!("{:x}",file_digest.finalize()));
         }
         match std::fs::File::open(index_path.trim()) {
             Ok(mut file) => {

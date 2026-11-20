@@ -15,6 +15,7 @@ import { importClipboardAttachment, prepareAttachmentPaths } from "./attachment-
 import { registerInteractionHandlers } from "./desktop-interactions";
 import { registerProviderUpdateHandlers } from "./provider-updates";
 import { RemoteBackground } from "./remote-background";
+import { protectWindowDrafts, registerDraftCloseHandlers } from "./window-drafts";
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 function traceStartup(phase: string): void {
@@ -36,7 +37,7 @@ if (configuredUserDataPath) {
 }
 // A local preview has no Vite URL, but still uses workspace resources.
 const appIcon = app.isPackaged
-  ? join(process.resourcesPath, "app", "resources", "nautilo-icon.png")
+  ? join(app.getAppPath(), "resources", "nautilo-icon-512.png")
   : join(__dirname, "../../resources/nautilo-icon-512.png");
 const taskBrowser = new TaskBrowser();
 taskBrowser.trackRuns(true);
@@ -84,6 +85,7 @@ function applyContentSecurityPolicy(): void {
 }
 
 function registerIpcHandlers(): void {
+  registerDraftCloseHandlers();
   // Whitelisted shell-level IPC only. Business APIs are served by the Core
   // Daemon gateway (backend scope) and are intentionally not bridged here.
   ipcMain.handle("app:get-info", () => ({
@@ -239,6 +241,7 @@ function createMainWindow(): BrowserWindow {
 
   workbenchWindow = win;
   remoteBackground.attach(win);
+  protectWindowDrafts(win);
   win.once("closed", () => { if (workbenchWindow === win) workbenchWindow = undefined; });
   trackWindowState(win);
   taskBrowser.attachWindow(win);

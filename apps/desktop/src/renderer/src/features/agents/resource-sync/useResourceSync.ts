@@ -68,8 +68,11 @@ export function useResourceSync(open: boolean, kind: "mcp" | "skill") {
       const history = await requestCore<ResourceSyncPlan[]>("resource.history");
       if (version === generation.current) setHistory(history);
     } catch (e) {
-      if (version === generation.current)
-        setError(e instanceof Error ? e.message : String(e));
+      if (version === generation.current) {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(message);
+        if (/conflict|changed after preview/i.test(message)) setPlan(current => current ? { ...current, state: "conflict" } : current);
+      }
     } finally {
       if (version === generation.current) setBusy(false);
     }

@@ -6,6 +6,15 @@ type Row = Record<string, unknown>;
 export class ProjectRunRepository {
   constructor(private readonly db: DatabaseSync) {}
 
+  hasActiveWorkflow(id: string): boolean {
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM workflow_runs WHERE
+        (status IN ('running', 'paused', 'finalizing') OR pending_actions > 0)
+        AND COALESCE(json_extract(data, '$.taskProjection.projectRunId'), json_extract(data, '$.workspace.context.adoptedProjectRunId')) = ?
+      LIMIT 1
+    `).get(id));
+  }
+
   save(projectRun: ProjectRun): void {
     this.db.prepare(`
       INSERT INTO project_runs(id, project_id, data, updated_at)

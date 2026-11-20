@@ -130,6 +130,7 @@ export class CoreDaemon {
     this.plugins = new PluginService(dataDir, this.adapters);
     this.recovery.recoverInterrupted();
     this.gateway.setObserver((request, response) => {
+      if (request.method.startsWith("composerDraft.")) return;
       if (["scm.status", "scm.diff", "terminal.list", "terminal.read", "terminal.write", "terminal.resize", "terminal.status", "agent.runtimeCapabilities"].includes(request.method)) return;
       this.audit.ipc(
         request.method,

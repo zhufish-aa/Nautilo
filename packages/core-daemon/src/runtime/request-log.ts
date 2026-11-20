@@ -104,6 +104,8 @@ export class RequestLogService {
           reused: typeof raw.reused === "boolean" ? raw.reused : undefined,
           pid: typeof raw.pid === "number" ? raw.pid : undefined,
           attachMs: typeof raw.attachMs === "number" ? raw.attachMs : undefined,
+          reason: runtimeReason(raw.reason),
+          transport: typeof raw.transport === "string" && /^[a-z0-9_-]{1,32}$/.test(raw.transport) ? raw.transport : undefined,
           ...(startup && ["prepareMs", "bootstrapMs", "sessionOpenMs"].every(key => typeof startup[key] === "number" && Number.isFinite(startup[key]) && Number(startup[key]) >= 0)
             ? { startupTimings: { prepareMs: Number(startup.prepareMs), bootstrapMs: Number(startup.bootstrapMs), sessionOpenMs: Number(startup.sessionOpenMs) } } : {}),
         };
@@ -190,13 +192,17 @@ export class RequestLogService {
         this.finish(r.row.id, "cancelled");
   }
   inventory(sessionId: string): SessionToolInventory {
-    const r = this.db.requestLogs.page({ sessionId, limit: 1 }).items[0];
+    const latest = this.db.requestLogs.page({ sessionId, limit: 1 }).items[0];
+    const current = this.db.sessions.get(sessionId);
+    const r = current && latest && latest.agentInstanceId === current.agentInstanceId &&
+      (latest.connectionId ?? null) === (current.connectionId ?? null) &&
+      (latest.connectionRevision ?? null) === (current.connectionRevision ?? null) ? latest : undefined;
     const tools = new Map<string, "native" | "observed" | "supplied">(),
       servers = new Map<string, SessionToolInventory["servers"][number]>();
     for (const [list, evidence] of [
       [r?.suppliedTools, "supplied"],
-      [r?.observedTools, "observed"],
       [r?.nativeTools, "native"],
+      [r?.observedTools, "observed"],
     ] as const)
       for (const name of list ?? []) tools.set(name, evidence);
     for (const name of r?.suppliedServers ?? [])
@@ -206,12 +212,20 @@ export class RequestLogService {
     return {
       sessionId,
       requestId: r?.id,
+      runId: r?.runId,
+      connectionId: current?.connectionId,
+      connectionRevision: current?.connectionRevision,
+      providerId: r?.providerId,
+      requestCreatedAt: r?.createdAt,
       checkedAt: new Date().toISOString(),
       nativeReported: !!r?.nativeTools,
       tools: [...tools].map(([name, evidence]) => ({ name, evidence })),
       servers: [...servers.values()],
     };
   }
+}
+function runtimeReason(value: unknown): string | undefined {
+  return typeof value === "string" && ["resident", "first_use", "configuration_changed", "session_changed", "process_exited", "transport_recovery", "protocol_single_use"].includes(value) ? value : undefined;
 }
 function names(value: unknown): string[] {
   return Array.isArray(value)

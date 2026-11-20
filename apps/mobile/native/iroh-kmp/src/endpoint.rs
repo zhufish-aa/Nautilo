@@ -68,6 +68,16 @@ impl IrohEndpoint {
                 .build());
         let inner = builder.bind().await.map_err(IrohError::msg)?;
 
+        #[cfg(target_os = "android")]
+        {
+            if let Err(error) = crate::direct_network::bind_network(&inner) {
+                inner.close().await;
+                return Err(IrohError::msg(format!("NETWORK_SOCKET_UNAVAILABLE: {error}")));
+            }
+            inner.network_change().await;
+            crate::direct_network::start(inner.clone());
+        }
+
         if warm_up_online {
             // Bring discovery/relays up in the background so we're reachable without
             // waiting for the first `my_ticket` call (mirrors the old transport).
@@ -232,6 +242,12 @@ impl IrohEndpoint {
     /// `ConnectivityManager` callbacks, which iroh can't observe on its own).
     #[uniffi::method(async_runtime = "tokio")]
     pub async fn network_change(&self) {
+        #[cfg(target_os = "android")]
+        if crate::direct_network::bind_network(&self.inner).is_err() {
+            // Retain the endpoint; discovery retries the route. A temporary
+            // Android network failure must not erase session connectivity.
+            return;
+        }
         self.inner.network_change().await;
     }
 

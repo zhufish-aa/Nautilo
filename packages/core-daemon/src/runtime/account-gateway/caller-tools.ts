@@ -15,6 +15,11 @@ type PendingResult = {
 export class CallerTools {
   private readonly pending = new Map<string, PendingResult>();
 
+  get hasPending(): boolean { return this.pending.size > 0; }
+  ownsResults(messages: Json[]): boolean {
+    return messages.some(message => message.role === "tool" && this.pending.has(message.tool_call_id));
+  }
+
   cancel(): void {
     for (const pending of this.pending.values())
       pending.reject(Error("Account relay cancelled"));

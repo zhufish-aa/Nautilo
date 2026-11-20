@@ -12,7 +12,7 @@ import { AsyncQueue } from "../../adapters/async-queue.js";
 import { Database } from "../../database/index.js";
 import { JsonRepository } from "../../database/json-repository.js";
 import { CredentialService } from "../security/credential-service.js";
-import { EnvironmentPolicyService } from "../security/environment-policy.js";
+import { EnvironmentPolicyService, providerEnvironmentPassthrough } from "../security/environment-policy.js";
 import {
   applyConnection,
   connectionEnvironment,
@@ -34,9 +34,21 @@ type Checkpoint = {
   nativeSessionId?: string;
   hashes: string[];
   tools?: string;
+  routeId?: string;
+  model?: string;
+  localSessionId?: string;
+  reusable?: boolean;
+  lastAssistant?: string;
 };
 const hash = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const assistantMatches = (message: Json | undefined, expected: string | undefined) => {
+  if (!message || expected === undefined || message.role !== "assistant" || message.tool_calls?.length) return false;
+  const content = Array.isArray(message.content)
+    ? message.content.every((part: Json) => part.type === "text") && message.content.map((part: Json) => part.text).join("")
+    : message.content ?? "";
+  return content === expected;
+};
 
 export class NativeRelay {
   url = "";
@@ -51,6 +63,13 @@ export class NativeRelay {
   private signature?: string;
   private handling = false;
   private template!: AdapterStartRequest;
+  private readonly conversations: NativeRelay[] = [];
+  private model?: string;
+  private lastAssistant?: string;
+  private reusable = true;
+  private usedAt = Date.now();
+  private inflightHashes?: string[];
+  private inflightSignature?: string;
   private readonly records: JsonRepository<Checkpoint>;
 
   private constructor(
@@ -58,6 +77,7 @@ export class NativeRelay {
     private readonly adapters: AdapterRegistry,
     private readonly account: RuntimeConnection,
     private readonly identity: string,
+    private readonly routeId = identity,
   ) {
     this.records = new JsonRepository(
       db.connection.raw,
@@ -67,6 +87,9 @@ export class NativeRelay {
     this.nativeId = saved?.nativeSessionId;
     this.hashes = saved?.hashes ?? [];
     this.signature = saved?.tools;
+    this.model = saved?.model;
+    this.lastAssistant = saved?.lastAssistant;
+    this.reusable = saved?.reusable !== false;
   }
 
   static async open(
@@ -86,6 +109,11 @@ export class NativeRelay {
       identity,
       outer,
     );
+    for (const saved of relay.records.list().filter(saved => (saved.routeId === identity || saved.id === identity) && saved.nativeSessionId && saved.reusable !== false).slice(0,8)) {
+      const child = new NativeRelay(db, adapters, account, saved.id, identity);
+      child.template = { ...relay.template, localSessionId: saved.localSessionId ?? `relay-${saved.id}` };
+      relay.conversations.push(child);
+    }
     relay.server = createServer((req, res) => {
       void relay.handle(req, res).catch((error) => respondError(res, error));
     });
@@ -119,12 +147,28 @@ export class NativeRelay {
     await checkNativeAccountLogin(this.account, this.template);
   }
 
+  async configureModels(outer: AdapterStartRequest): Promise<void> {
+    if (this.account.harness !== "opencode" || !outer.model) return;
+    const catalog = await this.adapters.listModels(this.template.instance, { env: this.template.env });
+    const discovered = catalog.models.find(model => model.id === outer.model);
+    if (!discovered) return;
+    const models = [...(outer.instance.models ?? [])];
+    const index = models.findIndex(model => model.id === outer.model);
+    if (index < 0) models.push(discovered);
+    else models[index] = { ...discovered, ...models[index] };
+    outer.instance = { ...outer.instance, models };
+  }
+
   async cancel(): Promise<void> {
+    await Promise.all(this.conversations.map(child => child.cancel()));
+    if (!this.active && !this.handling) return;
+    this.reusable = false;
     this.callerTools.cancel();
     this.output?.push({ error: "Account relay cancelled" });
     this.output?.close();
     await this.active?.cancel();
     this.finishTurn();
+    this.checkpoint();
   }
 
   private authorized(req: IncomingMessage): void {
@@ -173,6 +217,46 @@ export class NativeRelay {
         "GATEWAY_ROUTE_NOT_FOUND",
         "Use the Chat Completions endpoint",
       );
+    const body = await readRequest(req);
+    const child = this.selectConversation(body);
+    try { await child.complete(body, res); }
+    finally { this.pruneConversations(); }
+  }
+
+  private selectConversation(body: Json): NativeRelay {
+    const hashes = body.messages.map(hash);
+    const signature = hash(body.tools ?? []);
+    const model = body.model ?? this.template.model;
+    for (const child of [...this.conversations].reverse()) {
+      if (child.handling || !child.reusable || (child.model && child.model !== model)) continue;
+      const prefix = child.inflightHashes ?? child.hashes;
+      if ((child.inflightSignature ?? child.signature) !== signature || prefix.length > hashes.length || prefix.some((old,index)=>old !== hashes[index])) continue;
+      const pending = !!child.active && child.callerTools.ownsResults(body.messages);
+      const next = !child.active && child.nativeId && this.adapters.get(this.account.harness!).resume
+        && assistantMatches(body.messages[prefix.length], child.lastAssistant)
+        && body.messages.slice(prefix.length).some((message: Json)=>message.role !== "assistant" && message.role !== "tool");
+      if (!pending && !next) continue;
+      child.template = { ...this.template, localSessionId: child.template.localSessionId };
+      return child;
+    }
+    const identity = `${this.identity}:request:${randomUUID()}`;
+    const child = new NativeRelay(this.db,this.adapters,this.account,identity,this.identity);
+    child.template = { ...this.template, localSessionId: `relay-${identity}` };
+    child.model = model;
+    this.conversations.push(child);
+    return child;
+  }
+
+  private pruneConversations(): void {
+    let idle = 0;
+    for (let i = this.conversations.length-1; i >= 0; i--) {
+      const child = this.conversations[i];
+      if (child.handling || child.active || child.callerTools.hasPending) continue;
+      if (++idle > 8 || !child.reusable || Date.now()-child.usedAt > 3_600_000) this.conversations.splice(i,1);
+    }
+  }
+
+  private async complete(body: Json, res: ServerResponse): Promise<void> {
     if (this.handling)
       throw new RelayError(
         409,
@@ -185,7 +269,6 @@ export class NativeRelay {
     };
     res.once("close", onClose);
     try {
-      const body = await readRequest(req);
       if (this.active) {
         if (!this.callerTools.deliver(body.messages))
           throw new RelayError(
@@ -193,6 +276,8 @@ export class NativeRelay {
             "TOOL_RESULTS_REQUIRED",
             "Return pending tool results before starting another turn",
           );
+        this.inflightHashes = body.messages.map(hash);
+        this.inflightSignature = hash(body.tools ?? []);
       } else this.startTurn(body);
       const frames = this.frames!;
       await writeCompletion(
@@ -200,10 +285,22 @@ export class NativeRelay {
         body,
         () => frames.next(),
         () => this.cancel(),
-        () => this.finishTurn(),
+        content => {
+          this.hashes = this.inflightHashes ?? this.hashes;
+          this.signature = this.inflightSignature ?? this.signature;
+          this.lastAssistant = content;
+          this.finishTurn();
+          this.checkpoint();
+        },
       );
+    } catch (error) {
+      this.reusable = false;
+      await this.cancel();
+      this.checkpoint();
+      throw error;
     } finally {
       this.handling = false;
+      this.usedAt = Date.now();
       res.off("close", onClose);
     }
   }
@@ -215,26 +312,10 @@ export class NativeRelay {
   } {
     const messages = body.messages as Json[];
     const hashes = messages.map(hash);
-    if (
-      this.hashes.length > hashes.length ||
-      this.hashes.some((old, index) => old !== hashes[index])
-    ) {
-      throw new RelayError(
-        409,
-        "NATIVE_CONVERSATION_DIVERGED",
-        "Start an explicit new chat for a different caller history",
-      );
-    }
     const signature = hash(body.tools ?? []);
-    if (this.signature && this.signature !== signature)
-      throw new RelayError(
-        409,
-        "NATIVE_TOOLS_CHANGED",
-        "Start a new chat after changing the caller tool set",
-      );
     const input = messages
       .slice(this.hashes.length)
-      .filter((message) => !["assistant", "tool"].includes(message.role));
+      .filter((message) => !this.nativeId || !["assistant", "tool"].includes(message.role));
     if (!input.length)
       throw new RelayError(400, "NO_NEW_INPUT", "No new caller input");
     if (
@@ -255,13 +336,15 @@ export class NativeRelay {
 
   private startTurn(body: Json): void {
     const { input, hashes, signature } = this.prepareInput(body);
+    this.inflightHashes = hashes;
+    this.inflightSignature = signature;
     const output = new AsyncQueue<Json>();
     const request: AdapterStartRequest = {
       ...this.template,
       model: body.model ?? this.template.model,
       reasoningEffort: body.reasoning_effort ?? this.template.reasoningEffort,
       prompt:
-        "You provide the model for a separate harness. Preserve the supplied message roles. " +
+        "You handle a model request for a separate harness. Preserve every supplied message role, assistant tool call and tool result. Do not execute historical calls again. " +
         "Use the corresponding nautilo_relay_N tool for caller tools, then wait for its real result. " +
         `The outer harness executes those tools.\n${JSON.stringify(input)}`,
       ...this.callerTools.bind(body.tools ?? [], output),
@@ -281,10 +364,6 @@ export class NativeRelay {
     this.frames = output[Symbol.asyncIterator]();
     void forwardNativeEvents(run, output, nativeId => {
       this.nativeId = nativeId;
-    }, () => {
-      this.hashes = hashes;
-      this.signature = signature;
-      this.checkpoint();
     }, message => {
       return isAccountAuthenticationError(message)
         ? `AGENT_NOT_AUTHENTICATED ${accountLoginRequired(this.account).message}`
@@ -296,6 +375,8 @@ export class NativeRelay {
     this.active = undefined;
     this.frames = undefined;
     this.output = undefined;
+    this.inflightHashes = undefined;
+    this.inflightSignature = undefined;
   }
   private checkpoint(): void {
     this.records.save(
@@ -304,6 +385,11 @@ export class NativeRelay {
         nativeSessionId: this.nativeId,
         hashes: this.hashes,
         tools: this.signature,
+        routeId: this.routeId,
+        model: this.model,
+        lastAssistant: this.lastAssistant,
+        localSessionId: this.template.localSessionId,
+        reusable: this.reusable,
       },
       new Date().toISOString(),
     );
@@ -344,7 +430,7 @@ function accountRequest(
     env: connectionEnvironment(
       account,
       instance,
-      new EnvironmentPolicyService().build(undefined),
+      new EnvironmentPolicyService().build(undefined, providerEnvironmentPassthrough(instance, process.env, adapter.descriptor)),
       credentials,
       adapter.descriptor,
     ),

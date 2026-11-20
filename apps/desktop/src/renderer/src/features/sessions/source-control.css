@@ -221,3 +221,7 @@
 .scm-draft-recovery { display: flex; flex: 1; flex-direction: column; gap: 10px; min-height: 0; padding: 14px; }
 .scm-draft-recovery>p { color: var(--ink-2); font-size: 12px; }
 .scm-draft-recovery>textarea { flex: 1; min-height: 100px; width: 100%; resize: none; padding: 10px; border: 1px solid var(--line); border-radius: 6px; outline: none; background: var(--card); color: var(--ink); font: 12px/20px "Cascadia Code", Consolas, monospace; }
+.scm-file-list { display: flex; flex-direction: column; overflow: hidden; }
+.scm-change-groups { flex: 1; min-height: 0; overflow-y: auto; }
+.scm-retained-drafts { flex-shrink: 0; max-height: 30%; overflow-y: auto; }
+.scm-pending-file { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--ink-2); }

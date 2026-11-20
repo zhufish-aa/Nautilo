@@ -1,6 +1,6 @@
 //! Native adapter events projected into caller-visible stream frames.
 use super::{stream_delta, Route};
-use crate::adapters::{AdapterEvent, AdapterRun};
+use crate::adapters::{AdapterEvent, AdapterRun, AdapterStartRequest};
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, watch};
@@ -11,8 +11,10 @@ impl Route {
         mut run: AdapterRun,
         tx: mpsc::UnboundedSender<Value>,
         mut cancelled: watch::Receiver<bool>,
+        mut replay: Option<AdapterStartRequest>,
     ) {
         let mut seen = HashMap::<String, String>::new();
+        let mut stderr=String::new();
         loop {
             let event = tokio::select! {
                 _ = cancelled.changed() => {
@@ -77,6 +79,21 @@ impl Route {
                     }}));
                 }
                 Some(AdapterEvent::Error { message }) => {
+                    // Port of subscriptionBridge.start's missing saved-session
+                    // fallback. Only before output/tool execution, and only a
+                    // native resume refusal; provider/auth errors are preserved.
+                    let missing=format!("{stderr}\n{message}").to_ascii_lowercase();
+                    if seen.is_empty() && self.pending.lock().unwrap().is_empty()
+                        && ["no conversation found with session id","session not found","unknown session id"].iter().any(|needle|missing.contains(needle)) {
+                        if let Some(request)=replay.take() {
+                            run.cancel().await;
+                            *self.native_id.lock().unwrap()=None;
+                            match self.adapter.start(request) {
+                                Ok(fresh)=>{run=fresh;stderr.clear();continue;},
+                                Err(error)=>{let _=tx.send(json!({"error":error.to_string()}));break;}
+                            }
+                        }
+                    }
                     let _ = tx.send(json!({"error": message}));
                     run.cancel().await;
                     break;
@@ -95,6 +112,10 @@ impl Route {
                     let _ = tx
                         .send(json!({"error": "Native account stream ended without a completion"}));
                     break;
+                }
+                Some(AdapterEvent::Raw{stream,text}) if stream=="stderr"=> {
+                    stderr.push_str(&text);
+                    if stderr.len()>8192 {stderr=stderr.chars().rev().take(4096).collect::<String>().chars().rev().collect();}
                 }
                 _ => {}
             }

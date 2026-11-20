@@ -38,7 +38,7 @@ function addSources(directory) {
     else if (/\.(rs|toml)$|Cargo\.lock$/.test(entry.name)) fingerprint.update(file.slice(root.length)).update(readFileSync(file));
   }
 }
-for (const dir of [source, join(root,'rust/vendor/generated/iroh-1.4.1'), join(root,'rust/vendor/generated/noq-proto-1.4.0')]) addSources(dir);
+for (const dir of [source, join(root,'rust/vendor/generated/iroh-1.4.1'), join(root,'rust/vendor/generated/noq-proto-1.4.0'), join(root,'rust/vendor/generated/netwatch-0.19.3')]) addSources(dir);
 const version = spawnSync('rustc', ['--version'], { env, encoding: 'utf8', windowsHide: true });
 if (version.status !== 0) throw new Error('Rust toolchain is required to build the mobile transport');
 fingerprint.update(version.stdout);
@@ -87,7 +87,9 @@ run(jar, ['xf',upstream,...entries], { cwd: stage });
 for (const [abi,target] of abis) {
   const library = join(cache,'target',target,'release/libiroh_kmp.so');
   const symbols = spawnSync(join(llvm,isWindows ? 'llvm-nm.exe' : 'llvm-nm'), ['--dynamic','--defined-only',library], { env, encoding:'utf8', windowsHide:true });
-  if (symbols.status !== 0 || !symbols.stdout.includes('Java_app_nautilo_mobile_transport_DirectTransportPolicy_setEnabledNative')) throw new Error(`${abi}: native direct policy is missing`);
+  if (symbols.status !== 0 || !symbols.stdout.includes('Java_app_nautilo_mobile_transport_DirectTransportPolicy_setEnabledNative') ||
+    !symbols.stdout.includes('Java_app_nautilo_mobile_transport_DirectNetworkRoute_configureNative') ||
+    !symbols.stdout.includes('Java_app_nautilo_mobile_transport_DirectNetworkRoute_usingDefaultNative')) throw new Error(`${abi}: native direct policy or network route is missing`);
   const destination = join(stage,'jni',abi);
   mkdirSync(destination,{recursive:true}); copyFileSync(library,join(destination,'libiroh_kmp.so'));
 }

@@ -68,9 +68,13 @@ async fn main() -> anyhow::Result<()> {
     // matching the TS startup order.
     let daemon = application::core_daemon::Daemon::new(data_dir).await?;
     let router = std::sync::Arc::new(daemon.router());
-    daemon.remote.start(&router).await;
 
     let (gateway, accept_task) = ipc_gateway::Gateway::start(socket_path, token_path, (*router).clone())?;
+    // Remote discovery may wait for network readiness. Keep local desktop IPC
+    // available while remote initialization proceeds with the same router.
+    let remote = daemon.remote.clone();
+    let remote_router = router.clone();
+    tokio::spawn(async move { remote.start(&remote_router).await; });
     println!(
         "{}",
         json!({

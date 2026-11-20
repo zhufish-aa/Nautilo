@@ -52,14 +52,15 @@ data class Project(val id: String, val name: String, val root: String = "")
 data class Conversation(
     val id: String, val projectId: String, val title: String, val status: String,
     val updatedAt: String, val model: String = "", val effort: String = "", val provider: String = "", val agentId: String = "", val connectionId: String = "",
-    val permissionMode: String = "", val agentMode: String = "", val modeLocked: Boolean = false
+    val permissionMode: String = "", val agentMode: String = "", val modeLocked: Boolean = false,
+    val teamId: String = "", val teamName: String = "", val parentSessionId: String = ""
 ) {
     companion object {
         fun decode(v: JSONObject) = Conversation(v.getString("id"), v.text("projectId"), v.text("title", "新会话"), v.text("status"),
-            v.text("lastMessageAt", v.text("createdAt")), v.text("model"), v.text("reasoningEffort"), v.text("providerName"), v.text("agentInstanceId"), v.text("connectionId"), v.text("permissionMode"), v.text("agentMode"), v.optBoolean("modeLocked"))
+            v.text("lastMessageAt", v.text("createdAt")), v.text("model"), v.text("reasoningEffort"), v.text("providerName"), v.text("agentInstanceId"), v.text("connectionId"), v.text("permissionMode"), v.text("agentMode"), v.optBoolean("modeLocked"), v.text("teamId"), v.text("teamName"), v.text("parentSessionId"))
     }
 }
-data class ChatMessage(val id: String, val sender: String, val text: String, val time: String, val delivery: String = "sent", val runId: String = "", val sequence: Long = 0, val attachmentNames: List<String> = emptyList(), val viewId: String = id, val attachments: List<ChatAttachment> = emptyList())
+data class ChatMessage(val id: String, val sender: String, val text: String, val time: String, val delivery: String = "sent", val runId: String = "", val sequence: Long = 0, val attachmentNames: List<String> = emptyList(), val viewId: String = id, val attachments: List<ChatAttachment> = emptyList(), val kind: String = "chat", val taskId: String = "")
 fun running(status: String) = status.isNotBlank() && status !in listOf("completed", "failed", "cancelled", "crashed", "timed_out", "idle")
 data class RunInfo(val id: String, val status: String, val startedAt: String, val endedAt: String) {
     companion object {
@@ -85,13 +86,13 @@ data class PendingCommand(val id: String, val hostId: String, val sessionId: Str
 }
 
 class RemoteFailure(val code: String, message: String) : Exception(message)
-fun RemoteFailure.isTransportFailure() = code in setOf("DIRECT_CONNECTION_UNAVAILABLE", "DIRECT_PATH_LOST", "PEER_CONNECTION_TIMEOUT", "TRANSPORT_POLICY_TIMEOUT", "TRANSPORT_START_TIMEOUT", "REMOTE_RESPONSE_TIMEOUT", "DESKTOP_TRANSPORT_UPDATE_REQUIRED", "MOBILE_TRANSPORT_UPDATE_REQUIRED")
-fun Throwable.isConnectionFailure() = this !is RemoteFailure || (isTransportFailure() && code != "REMOTE_RESPONSE_TIMEOUT") || code in setOf("DEVICE_NOT_AUTHORIZED", "REMOTE_DISABLED")
+fun RemoteFailure.isTransportFailure() = code in setOf("REMOTE_SYNC_TIMEOUT", "CONNECTION_HEALTH_TIMEOUT", "VPN_ROUTE_RESTRICTED", "DIRECT_NETWORK_UNAVAILABLE", "DIRECT_CONNECTION_UNAVAILABLE", "DIRECT_PATH_LOST", "PEER_CONNECTION_TIMEOUT", "TRANSPORT_POLICY_TIMEOUT", "TRANSPORT_START_TIMEOUT", "REMOTE_RESPONSE_TIMEOUT", "DESKTOP_TRANSPORT_UPDATE_REQUIRED", "MOBILE_TRANSPORT_UPDATE_REQUIRED")
+fun Throwable.isConnectionFailure() = this !is RemoteFailure || (isTransportFailure() && code !in setOf("REMOTE_SYNC_TIMEOUT", "REMOTE_RESPONSE_TIMEOUT")) || code in setOf("DEVICE_NOT_AUTHORIZED", "REMOTE_DISABLED")
 fun readableError(error: Throwable): String = when ((error as? RemoteFailure)?.code) {
-    "DIRECT_CONNECTION_UNAVAILABLE", "DIRECT_PATH_LOST" -> error.message.orEmpty()
+    "VPN_ROUTE_RESTRICTED", "DIRECT_NETWORK_UNAVAILABLE", "DIRECT_CONNECTION_UNAVAILABLE", "DIRECT_PATH_LOST" -> error.message.orEmpty()
     "DESKTOP_TRANSPORT_UPDATE_REQUIRED" -> "请更新电脑端以启用跨网直连协议"
     "MOBILE_TRANSPORT_UPDATE_REQUIRED" -> "请安装支持跨网直连的新版手机端"
-    "PEER_CONNECTION_TIMEOUT", "TRANSPORT_POLICY_TIMEOUT", "TRANSPORT_START_TIMEOUT", "REMOTE_RESPONSE_TIMEOUT" -> error.message.orEmpty()
+    "REMOTE_SYNC_TIMEOUT", "CONNECTION_HEALTH_TIMEOUT", "PEER_CONNECTION_TIMEOUT", "TRANSPORT_POLICY_TIMEOUT", "TRANSPORT_START_TIMEOUT", "REMOTE_RESPONSE_TIMEOUT" -> error.message.orEmpty()
     "DEVICE_NOT_AUTHORIZED" -> "这台手机的授权已失效，请重新配对"
     "INVITATION_EXPIRED", "PAIRING_EXPIRED" -> "配对已过期，请重新扫码"
     "REMOTE_DISABLED" -> "电脑端已关闭远程连接"
@@ -105,10 +106,15 @@ fun readableError(error: Throwable): String = when ((error as? RemoteFailure)?.c
     "CONNECTION_NOT_AVAILABLE", "HARNESS_NOT_AVAILABLE" -> "所选账号或 Harness 不可用，请检查电脑端配置"
     "CONNECTION_CHANGE_REQUIRES_CONFIRMATION" -> "请确认更换连接对当前会话上下文的影响"
     "MODEL_NOT_AVAILABLE" -> "此连接中没有所选模型，请刷新模型列表后重选"
+    "COMPACT_NOT_AVAILABLE" -> "当前 Harness 未提供原生上下文压缩"
     "INVALID_REASONING_EFFORT" -> "所选模型不支持这个推理强度，请重新选择"
     "HARNESS_MODE_LOCKED" -> "原生会话已开始，切换 Harness 模式请新建会话"
     "INVALID_HARNESS_MODE", "INVALID_PERMISSION_MODE" -> "此 Harness 不支持这个模式，请刷新后重选"
     "INVALID_APPROVAL_SCOPE" -> "请选择有效的授权范围"
+    "INVALID_TEAM", "TEAM_NOT_AVAILABLE" -> "所选团队已不存在，请刷新团队列表"
+    "TEAM_HAS_NO_MEMBERS" -> "此团队没有已启用的成员，请在电脑端配置"
+    "TEAM_RUN_NOT_AVAILABLE" -> "此会话尚未开始团队任务"
+    "DESKTOP_DISK_FULL" -> "电脑磁盘空间不足，无法保存请求。请清理电脑磁盘后重试。"
     "ATTACHMENT_TOO_LARGE", "ATTACHMENT_CHUNK_TOO_LARGE" -> "附件过大，每个文件最多 20 MB"
     "ATTACHMENT_STORAGE_FULL" -> "电脑端附件存储空间不足，请清理后重试"
     "ATTACHMENTS_REQUIRE_IDLE" -> "请在当前轮结束后发送附件"

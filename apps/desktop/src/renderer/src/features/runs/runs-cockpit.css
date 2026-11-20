@@ -16,6 +16,13 @@
 .cockpit-search input { background: none; outline: 0; min-width: 0; width: 100%; font-size: 13px; color: var(--ink); }
 .cockpit-grid { display: grid; grid-template-columns: minmax(0, 1fr) 316px; gap: 34px; margin-top: 28px; }
 .cockpit-primary { min-width: 0; }
+.cockpit-grid[data-single="true"] { grid-template-columns: minmax(0, 1fr); }
+.run-cockpit { max-width: 1720px; margin-inline: auto; }
+.cockpit-grid[data-single="true"] .cockpit-history-head, .cockpit-grid[data-single="true"] .cockpit-history-row { grid-template-columns: minmax(200px, 1fr) 180px 190px 18px; }
+.cockpit-run-card { transition: box-shadow 180ms, border-color 180ms; }
+.cockpit-run-card:hover { border-color: var(--ink-3); box-shadow: 0 8px 24px #00000007; }
+@media (prefers-reduced-motion: no-preference) { .cockpit-run-head i { animation: cockpit-breathe 2.2s ease-in-out infinite; } }
+@keyframes cockpit-breathe { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--ink) 8%, transparent); } }
 .cockpit-section { margin-top: 30px; }
 .cockpit-section-heading { display: flex; align-items: center; gap: 9px; margin-bottom: 16px; }
 .cockpit-section-heading h2 { font-size: 15px; font-weight: 550; letter-spacing: -.2px; }
@@ -64,6 +71,7 @@
 .cockpit-pagination > div { display: flex; align-items: center; gap: 14px; }
 .cockpit-pagination button { border: 1px solid var(--line); padding: 5px 12px; border-radius: 7px; background: var(--card); }
 .cockpit-pagination button:disabled { opacity: .4; cursor: default; }
+@media (max-width: 680px) { .cockpit-grid[data-single="true"] .cockpit-history-head, .cockpit-grid[data-single="true"] .cockpit-history-row { grid-template-columns: minmax(0, 1fr) 90px 16px; gap: 8px; } }
 @media (max-width: 1350px) { .run-cockpit { padding: 28px; } .cockpit-grid { grid-template-columns: minmax(0, 1fr) 250px; gap: 24px; } }
 @media (max-width: 1150px) { .cockpit-running-grid { grid-template-columns: 1fr; } }
 @media (max-width: 1000px) { .cockpit-grid { grid-template-columns: 1fr; } .cockpit-recent { padding-left: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; } .cockpit-recent .cockpit-section-heading { grid-column: 1/-1; } .cockpit-filterbar { flex-wrap: wrap; } }
