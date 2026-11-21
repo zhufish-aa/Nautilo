@@ -21,6 +21,7 @@ const runMessages = [
   ["主 Agent 派发任务", "Lead agent assigns work"],
   ["两个 Agent 并行执行", "Two agents are working in parallel"],
   ["汇合两路结果", "Joining both results"],
+  ["独立复核改动与测试", "Reviewing the code and tests"],
   ["将结果交回主会话", "Returning results to the conversation"],
   ["执行完成 · 结果已回到主会话", "Run complete · Results returned to the conversation"],
 ];
@@ -98,6 +99,11 @@ for (const [index, tab] of tabs.entries()) {
     tabs[next].focus();
   });
 }
+document.querySelector("[data-open-workflow]").addEventListener("click", () => {
+  const tab = document.getElementById("workflow-tab");
+  selectTab(tab);
+  tab.focus({ preventScroll: true });
+});
 
 function paintRun(step) {
   runStep = step;
@@ -106,7 +112,7 @@ function paintRun(step) {
     node.dataset.run = index < step ? "done" : index === step ? "active" : "idle";
   }
   renderRun();
-  if (step < 4) runTimer = setTimeout(() => paintRun(step + 1), 850);
+  if (step + 2 < runMessages.length) runTimer = setTimeout(() => paintRun(step + 1), 850);
 }
 playButton.addEventListener("click", () => {
   clearTimeout(runTimer);
