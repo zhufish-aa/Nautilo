@@ -18,6 +18,10 @@ const workflowNodes = Array.from(document.querySelectorAll(".flow-node"));
 const workflowStatus = document.getElementById("workflow-status");
 const playButton = document.getElementById("play-workflow");
 const playLabel = playButton.querySelector("[data-en]");
+const playGlyph = playButton.firstElementChild;
+const runPosition = document.getElementById("run-position");
+const runStops = document.querySelectorAll("[data-run-stop]");
+const runEvidence = document.querySelectorAll(".run-evidence > article");
 const runMessages = [
   ["等待播放", "Ready to preview"],
   ["主 Agent 派发任务", "Lead agent assigns work"],
@@ -56,8 +60,26 @@ function render() {
 
 function renderRun() {
   const english = root.lang === "en";
-  workflowStatus.textContent = runMessages[runStep + 1][english ? 1 : 0];
-  if (runStep >= 0) playLabel.textContent = english ? "Replay run" : "重新播放";
+  const finished = runStep === Number(runPosition.max);
+  const playing = runTimer !== undefined;
+  const message = runMessages[runStep + 1][english ? 1 : 0];
+  workflowStatus.textContent = message;
+  runPosition.value = Math.max(0, runStep);
+  runPosition.setAttribute("aria-valuetext", message);
+
+  playGlyph.textContent = playing ? "Ⅱ" : "▷";
+  if (playing) playLabel.textContent = english ? "Pause" : "暂停";
+  else if (finished) playLabel.textContent = english ? "Replay run" : "重新播放";
+  else if (runStep >= 0) playLabel.textContent = english ? "Resume" : "继续播放";
+  else playLabel.textContent = english ? "Play run" : "播放执行";
+
+  for (const [index, stop] of runStops.entries()) {
+    if (index === runStep) stop.setAttribute("aria-current", "step");
+    else stop.removeAttribute("aria-current");
+  }
+  for (const [index, evidence] of runEvidence.entries()) {
+    evidence.hidden = index !== runStep + 1;
+  }
 }
 
 const preference = new URLSearchParams(location.search).get("lang") || localStorage.getItem("nautilo-site-language");
@@ -97,6 +119,7 @@ themeButton.addEventListener("click", () => {
 
 const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
 function selectTab(tab) {
+  if (tab.id !== "workflow-tab" && runTimer !== undefined) stopRun();
   for (const item of tabs) {
     const active = item === tab;
     item.setAttribute("aria-selected", String(active));
@@ -128,120 +151,107 @@ function paintRun(step) {
   runStep = step;
   for (const node of workflowNodes) {
     const index = Number(node.dataset.step);
-    node.dataset.run = index < step ? "done" : index === step ? "active" : "idle";
+    const active = index === step;
+    node.dataset.run = index < step ? "done" : active ? "active" : "idle";
+    node.setAttribute("aria-pressed", String(active));
   }
   renderRun();
-  if (step + 2 < runMessages.length) runTimer = setTimeout(() => paintRun(step + 1), 850);
 }
-playButton.addEventListener("click", () => {
+
+function stopRun() {
   clearTimeout(runTimer);
-  paintRun(0);
+  runTimer = undefined;
+  renderRun();
+}
+
+function playRun(step) {
+  const lastStep = Number(runPosition.max);
+  runTimer = step === lastStep ? undefined : setTimeout(() => playRun(step + 1), 1400);
+  paintRun(step);
+}
+
+function seekRun(step) {
+  clearTimeout(runTimer);
+  runTimer = undefined;
+  paintRun(step);
+}
+
+playButton.addEventListener("click", () => {
+  if (runTimer !== undefined) {
+    stopRun();
+    return;
+  }
+  playRun(runStep < 0 || runStep === Number(runPosition.max) ? 0 : runStep);
+});
+runPosition.addEventListener("input", () => seekRun(Number(runPosition.value)));
+for (const [index, stop] of runStops.entries()) {
+  stop.addEventListener("click", () => seekRun(index));
+}
+for (const node of workflowNodes) {
+  node.setAttribute("aria-pressed", "false");
+  node.addEventListener("click", () => seekRun(Number(node.dataset.step)));
+}
+
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const engraving = document.getElementById("engraving");
+const engravingDetail = engraving.querySelector(".engraving-detail");
+const engravingTexture = engravingDetail.querySelector("img");
+const engravingToggle = document.querySelector(".engraving-toggle");
+let engravingFrame;
+
+function placeDetail(x, y) {
+  const zoom = 1.62;
+  const radius = engravingDetail.clientWidth / 2;
+  const left = Math.max(0, Math.min(engraving.clientWidth - radius * 2, x - radius));
+  const top = Math.max(0, Math.min(engraving.clientHeight - radius * 2, y - radius));
+  engravingTexture.style.width = engraving.clientWidth * zoom + "px";
+  engravingTexture.style.height = engraving.clientHeight * zoom + "px";
+  engravingTexture.style.transform = `translate3d(${radius - x * zoom}px, ${radius - y * zoom}px, 0)`;
+  engravingDetail.style.transform = `translate3d(${left}px, ${top}px, 0)`;
+  engravingDetail.setAttribute("data-visible", "");
+}
+
+function moveDetail(event) {
+  cancelAnimationFrame(engravingFrame);
+  engravingFrame = requestAnimationFrame(() => {
+    const rect = engraving.getBoundingClientRect();
+    placeDetail(event.clientX - rect.left, event.clientY - rect.top);
+  });
+}
+
+function hideDetail() {
+  cancelAnimationFrame(engravingFrame);
+  engravingDetail.removeAttribute("data-visible");
+}
+
+engravingToggle.hidden = false;
+engravingToggle.addEventListener("click", () => {
+  const enabled = engravingToggle.getAttribute("aria-pressed") !== "true";
+  engravingToggle.setAttribute("aria-pressed", String(enabled));
+  if (enabled) placeDetail(engraving.clientWidth * .47, engraving.clientHeight * .51);
+  else hideDetail();
+});
+engraving.addEventListener("pointermove", event => {
+  if (event.pointerType === "mouse" && !reducedMotion.matches) moveDetail(event);
+});
+engraving.addEventListener("pointerdown", event => {
+  if (engravingToggle.getAttribute("aria-pressed") === "true") moveDetail(event);
+});
+engraving.addEventListener("pointerleave", () => {
+  if (engravingToggle.getAttribute("aria-pressed") !== "true") hideDetail();
+});
+window.addEventListener("resize", () => {
+  if (engravingToggle.getAttribute("aria-pressed") === "true") {
+    placeDetail(engraving.clientWidth * .47, engraving.clientHeight * .51);
+  } else hideDetail();
+});
+reducedMotion.addEventListener("change", () => {
+  if (engravingToggle.getAttribute("aria-pressed") !== "true") hideDetail();
 });
 
 const gitDemo = document.querySelector(".git-specimen");
-const gitFrames = gitDemo.querySelectorAll(".code-line, .git-result > span");
+const gitFrames = gitDemo.querySelectorAll(".code-removed, .code-added, .git-result > span");
 const gitReplay = gitDemo.querySelector(".git-replay");
-const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-
-function setupShellMotion() {
-  if (!CSS.supports("offset-path", 'path("M 0 0 L 1 1")')) return;
-
-  // The path coordinates follow the 1536 × 1024 engraving.
-  const plate = document.querySelector(".hero-plate");
-  const art = plate.querySelector(".hero-art");
-  const replay = plate.querySelector(".hero-replay");
-  const overlay = document.createElement("div");
-  const map = document.createElement("div");
-  const canvas = document.createElement("canvas");
-  const junction = document.createElement("span");
-  canvas.width = 1536;
-  canvas.height = 1024;
-  const context = canvas.getContext("2d");
-  if (!context) return;
-  overlay.className = "hero-traces";
-  overlay.setAttribute("aria-hidden", "true");
-  map.className = "hero-trace-map";
-  junction.className = "hero-junction";
-  overlay.append(map);
-  map.append(canvas, junction);
-  art.after(overlay);
-
-  const routes = [
-    { stage: "conversation", color: "--flow-lead", delay: 250, duration: 780,
-      path: "M 206 345 C 260 298 325 273 383 278 C 437 280 470 307 483 340 C 523 333 558 358 594 391" },
-    { stage: "plan", color: "--flow-join", delay: 1030, duration: 1010,
-      path: "M 594 391 C 610 377 601 363 582 359 C 587 336 568 312 548 302 C 593 293 627 264 623 212 C 619 156 566 93 498 73 C 681 12 824 112 850 271 C 855 299 856 320 883 324" },
-    { stage: "plan", color: "--flow-explore", delay: 1030, duration: 1010,
-      path: "M 594 391 C 568 399 559 414 542 424 C 501 451 508 509 534 539 C 614 603 738 568 797 505 C 834 459 850 379 883 324" },
-    { stage: "review", color: "--flow-return", delay: 2040, duration: 900,
-      path: "M 883 324 C 958 305 990 266 1092 247 C 1192 226 1298 250 1360 302 C 1397 347 1366 493 1326 586" },
-  ].map(route => {
-    const tracer = document.createElement("span");
-    tracer.className = "hero-trace";
-    tracer.style.setProperty("--trace-color", `var(${route.color})`);
-    tracer.style.offsetPath = `path("${route.path}")`;
-    map.append(tracer);
-    return { ...route, tracer, shape: new Path2D(route.path) };
-  });
-
-  const resize = new ResizeObserver(() => {
-    map.style.transform = `scale(${plate.clientWidth / canvas.width})`;
-  });
-  resize.observe(plate);
-  const stop = () => {
-    for (const animation of overlay.getAnimations({ subtree: true })) animation.cancel();
-  };
-  const play = (stage) => {
-    if (reducedMotion.matches || !art.naturalWidth) return;
-    intro.disconnect();
-    stop();
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.lineCap = "round";
-    context.lineWidth = 3;
-    context.globalAlpha = .44;
-    const colors = getComputedStyle(root);
-    let end = 0;
-    for (const route of routes) {
-      if (stage && route.stage !== stage) continue;
-      const delay = stage ? 0 : route.delay;
-      context.strokeStyle = colors.getPropertyValue(route.color).trim();
-      context.stroke(route.shape);
-      route.tracer.animate(
-        [{ offsetDistance: "0%", opacity: 0 }, { opacity: 1, offset: .14 }, { opacity: 1, offset: .85 }, { offsetDistance: "100%", opacity: 0 }],
-        { delay, duration: route.duration, easing: "linear" },
-      );
-      if (route.stage === "review") {
-        junction.animate([{ transform: "scale(.92)", opacity: .85 }, { transform: "scale(2)", opacity: 0 }],
-          { delay, duration: 450, easing: colors.getPropertyValue("--ease").trim() });
-      }
-      end = Math.max(end, delay + route.duration);
-    }
-    canvas.animate([{ opacity: 0 }, { opacity: 1, offset: .18 }, { opacity: 1, offset: .82 }, { opacity: 0 }],
-      { duration: end + 220, easing: "linear" });
-  };
-  const intro = new IntersectionObserver(([entry]) => {
-    if (!entry.isIntersecting) return;
-    intro.disconnect();
-    play();
-  }, { threshold: .5 });
-  if (art.complete) intro.observe(plate);
-  else art.addEventListener("load", () => intro.observe(plate), { once: true });
-  const finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
-  for (const link of plate.querySelectorAll(".hero-map a")) {
-    link.addEventListener("pointerenter", (event) => {
-      if (finePointer.matches && event.pointerType === "mouse") play(link.dataset.stage);
-    });
-    link.addEventListener("focus", () => {
-      if (link.matches(":focus-visible")) play(link.dataset.stage);
-    });
-  }
-  replay.hidden = false;
-  replay.addEventListener("click", () => play());
-  themeButton.addEventListener("click", stop);
-  reducedMotion.addEventListener("change", stop);
-}
-
-setupShellMotion();
 
 function stopGitDemo() {
   for (const frame of gitFrames) {
@@ -249,56 +259,50 @@ function stopGitDemo() {
   }
 }
 
-function playGitDemo() {
+gitReplay.hidden = false;
+gitReplay.addEventListener("click", () => {
   stopGitDemo();
+  gitDemo.querySelector('[value="diff"]').checked = true;
   if (reducedMotion.matches) return;
   const easing = getComputedStyle(root).getPropertyValue("--ease").trim();
-  let delay = 0;
-  for (const frame of gitFrames) {
+  for (const [index, frame] of gitFrames.entries()) {
     frame.animate(
-      [{ opacity: .08, transform: "translateX(-4px)" }, { opacity: 1, transform: "translateX(0)" }],
-      { duration: 250, delay, easing, fill: "backwards" },
+      [{ opacity: 0, transform: "translateX(-5px)" }, { opacity: 1, transform: "translateX(0)" }],
+      { duration: 260, delay: [0, 260, 650, 1000][index], easing, fill: "backwards" },
     );
-    delay += frame.matches(".code-removed, .git-command") ? 250 : 85;
+  }
+});
+gitDemo.querySelector(".patch-modes").addEventListener("change", stopGitDemo);
+reducedMotion.addEventListener("change", stopGitDemo);
+
+const mobileScene = document.querySelector(".mobile-visual");
+const mobileReplay = mobileScene.querySelector(".mobile-replay");
+const mobileFrames = [
+  mobileScene.querySelector(".phone-bubble"),
+  mobileScene.querySelector(".mobile-incoming"),
+  mobileScene.querySelector(".mobile-desktop-review"),
+  mobileScene.querySelector(".phone-answer"),
+];
+
+function stopMobileReplay() {
+  for (const frame of mobileFrames) {
+    for (const animation of frame.getAnimations()) animation.cancel();
   }
 }
 
-const gitObserver = new IntersectionObserver(([entry]) => {
-  if (!entry.isIntersecting) return;
-  gitObserver.disconnect();
-  playGitDemo();
-}, { threshold: .08 });
-gitObserver.observe(gitDemo.querySelector(".git-code"));
-gitReplay.hidden = false;
-gitReplay.addEventListener("click", () => {
-  gitObserver.disconnect();
-  playGitDemo();
-});
-reducedMotion.addEventListener("change", stopGitDemo);
-
-const revealTargets = document.querySelectorAll("[data-reveal], .specimen-state i, .mobile-visual figcaption .connection-dot");
-const revealObserver = new IntersectionObserver(entries => {
-  for (const { target, isIntersecting } of entries) {
-    if (!isIntersecting) continue;
-    revealObserver.unobserve(target);
-    if (reducedMotion.matches) continue;
-    if (target.hasAttribute("data-reveal")) {
-      target.animate(
-        [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "translateY(0)" }],
-        { duration: 500, easing: getComputedStyle(root).getPropertyValue("--ease").trim() },
-      );
-    } else {
-      target.animate([{ opacity: 1 }, { opacity: .62 }, { opacity: 1 }], { duration: 1500, iterations: 3 });
-    }
-  }
-}, { threshold: .08 });
-for (const target of revealTargets) revealObserver.observe(target);
-reducedMotion.addEventListener("change", () => {
-  if (!reducedMotion.matches) return;
-  for (const target of revealTargets) {
-    for (const animation of target.getAnimations()) animation.cancel();
+mobileReplay.hidden = false;
+mobileReplay.addEventListener("click", () => {
+  stopMobileReplay();
+  if (reducedMotion.matches) return;
+  const easing = getComputedStyle(root).getPropertyValue("--ease").trim();
+  for (const [index, frame] of mobileFrames.entries()) {
+    frame.animate(
+      [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "translateY(0)" }],
+      { duration: 260, delay: index * 350, easing, fill: "backwards" },
+    );
   }
 });
+reducedMotion.addEventListener("change", stopMobileReplay);
 
 const installers = {
   windows: /-win-x64\.exe$/i,

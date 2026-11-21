@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Nautilo 是本地编程工作台。把 Codex、Claude Code、OpenCode 等编程 Agent 接入同一个工作台。">
-  <meta name="theme-color" content="#090a0d">
+  <meta name="theme-color" content="#100f0e">
   <meta property="og:title" content="Nautilo · 多 Agent 编程工作台">
   <meta property="og:description" content="在一个本地工作台管理编程 Agent、组织团队和查看代码变更。">
   <title>Nautilo · 多 Agent 编程工作台</title>
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="preload" href="bodoni-moda-wordmark.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="site.css?v=shell-motion">
-  <script defer src="site.js?v=shell-motion"></script>
+  <link rel="stylesheet" href="site.css?v=engraving-study">
+  <script defer src="site.js?v=engraving-study"></script>
 </head>
 <body id="top">
   <a class="skip-link" href="#main" data-en="Skip to content">跳到正文</a>
@@ -60,20 +60,23 @@
             <span>Windows · macOS · Linux</span>
           </a>
         </div>
-        <div class="hero-plate">
-          <img class="hero-art" src="nautilus-engraving.webp" alt="" width="1536" height="1024" fetchpriority="high">
-          <nav class="hero-map" aria-label="螺壳图中的示例导览" data-aria-en="Sample walkthrough on the shell engraving">
-            <a href="#preview" data-open-session data-stage="conversation" data-en="Conversation">会话</a>
-            <a href="#workflow" data-stage="plan" data-en="Plan">分工</a>
-            <a href="#workspace" data-stage="review" data-en="Code review">验收</a>
-          </nav>
-          <button class="hero-replay" type="button" hidden>
-            <span class="hero-replay-icon" aria-hidden="true"></span><span data-en="Replay animation">重播动效</span>
-          </button>
-        </div>
+        <figure class="hero-plate">
+          <div class="engraving" id="engraving">
+            <img class="hero-art" src="nautilus-engraving.webp" alt="" width="1536" height="1024" fetchpriority="high">
+            <div class="engraving-detail" aria-hidden="true">
+              <img src="nautilus-engraving.webp" alt="" width="1536" height="1024">
+            </div>
+          </div>
+          <figcaption class="plate-caption">
+            <span data-en="Nautilus cross section">鹦鹉螺剖面</span>
+            <button class="engraving-toggle" type="button" aria-pressed="false" hidden>
+              <span class="engraving-icon" aria-hidden="true"></span><span data-en="Inspect the engraving">近看刻纹</span>
+            </button>
+          </figcaption>
+        </figure>
       </section>
 
-      <section class="shell preview" id="preview" aria-label="工作台预览" data-aria-en="Workbench preview" data-reveal>
+      <section class="shell preview" id="preview" aria-label="工作台预览" data-aria-en="Workbench preview">
         <div class="case-heading">
           <div>
             <span class="section-label" data-en="Sample project · lantern-web">示例项目 · lantern-web</span>
@@ -136,6 +139,7 @@
               <div class="demo-followup">
                 <span class="branch-icon" aria-hidden="true">⑂</span>
                 <code>fix/restore-draft</code>
+                <a class="text-link demo-run-link" href="#preview" data-open-workflow><span data-en="Follow the run">查看执行过程</span><span aria-hidden="true">→</span></a>
                 <a class="text-link" href="#workspace"><span data-en="Review the patch">查看补丁</span><span aria-hidden="true">↓</span></a>
               </div>
             </div>
@@ -161,20 +165,73 @@
               <button type="button" id="play-workflow" class="play-button"><span aria-hidden="true">▷</span><span data-en="Play run">播放执行</span></button>
             </div>
             <div class="workflow-canvas" id="workflow-canvas">
-              <div class="flow-node flow-start" data-step="0"><span class="flow-symbol" aria-hidden="true">◎</span><span><strong data-en="Lead agent">主 Agent</strong><small data-en="Assign work">派发任务</small></span></div>
-              <div class="flow-node flow-agent flow-code" data-step="1"><span class="flow-icon"><img src="harness/codex.png" alt="" width="17" height="17"></span><span><strong data-en="Find the cause">定位问题</strong><small>Codex</small></span></div>
-              <div class="flow-node flow-agent flow-repro" data-step="1"><span class="flow-icon"><img src="harness/opencode.png" alt="" width="17" height="17"></span><span><strong data-en="Reproduce bug">复现问题</strong><small>OpenCode</small></span></div>
-              <div class="flow-node flow-join" data-step="2"><span class="flow-symbol" aria-hidden="true">◇</span><span><strong data-en="Join results">汇合结果</strong><small data-en="Wait for both">等待两路</small></span></div>
-              <div class="flow-node flow-review" data-step="3"><span class="flow-icon"><img src="harness/claude-code.png" alt="" width="17" height="17"></span><span><strong data-en="Review the fix">独立复核</strong><small>Claude Code</small></span></div>
-              <div class="flow-node flow-end" data-step="4"><span class="flow-symbol" aria-hidden="true">↵</span><span><strong data-en="Return to chat">交回主会话</strong><small data-en="Report results">汇报结果</small></span></div>
+              <button type="button" class="flow-node flow-start" data-step="0"><span class="flow-symbol" aria-hidden="true">◎</span><span><strong data-en="Lead agent">主 Agent</strong><small data-en="Assign work">派发任务</small></span></button>
+              <button type="button" class="flow-node flow-agent flow-code" data-step="1"><span class="flow-icon"><img src="harness/codex.png" alt="" width="17" height="17"></span><span><strong data-en="Find the cause">定位问题</strong><small>Codex</small></span></button>
+              <button type="button" class="flow-node flow-agent flow-repro" data-step="1"><span class="flow-icon"><img src="harness/opencode.png" alt="" width="17" height="17"></span><span><strong data-en="Reproduce bug">复现问题</strong><small>OpenCode</small></span></button>
+              <button type="button" class="flow-node flow-join" data-step="2"><span class="flow-symbol" aria-hidden="true">◇</span><span><strong data-en="Join results">汇合结果</strong><small data-en="Wait for both">等待两路</small></span></button>
+              <button type="button" class="flow-node flow-review" data-step="3"><span class="flow-icon"><img src="harness/claude-code.png" alt="" width="17" height="17"></span><span><strong data-en="Review the fix">独立复核</strong><small>Claude Code</small></span></button>
+              <button type="button" class="flow-node flow-end" data-step="4"><span class="flow-symbol" aria-hidden="true">↵</span><span><strong data-en="Return to chat">交回主会话</strong><small data-en="Report results">汇报结果</small></span></button>
             </div>
-            <div class="workflow-status" id="workflow-status" role="status" data-en="Ready to preview">等待播放</div>
+            <div class="run-inspector">
+              <section class="run-controls" aria-labelledby="run-title">
+                <div class="run-controls-top">
+                  <label id="run-title" for="run-position" data-en="Run timeline">执行进度</label>
+                  <span id="workflow-status" role="status" data-en="Ready to preview">等待播放</span>
+                </div>
+                <input id="run-position" type="range" min="0" max="5" value="0" aria-describedby="workflow-status">
+                <div class="run-stops">
+                  <button type="button" data-run-stop="0" data-en="Assign">派发</button>
+                  <button type="button" data-run-stop="1" data-en="Parallel">并行</button>
+                  <button type="button" data-run-stop="2" data-en="Join">汇合</button>
+                  <button type="button" data-run-stop="3" data-en="Review">复核</button>
+                  <button type="button" data-run-stop="4" data-en="Return">交回</button>
+                  <button type="button" data-run-stop="5" data-en="Done">完成</button>
+                </div>
+              </section>
+              <section class="run-evidence" aria-label="当前步骤详情" data-aria-en="Current step details">
+                <article>
+                  <h3 data-en="See what each agent did">看清每个 Agent 做了什么</h3>
+                  <p data-en="Play the sample run, or drag the timeline to inspect a step.">播放示例，或拖动进度条查看某一步的任务和证据。</p>
+                </article>
+                <article hidden>
+                  <h3 data-en="Codex · Lead agent">Codex · 主 Agent</h3>
+                  <p data-en="Split the task into two independent checks: read the restore code and reproduce the failure.">把任务分成两路。一路读草稿恢复代码，一路复现草稿丢失。</p>
+                  <a class="text-link" href="#workflow" data-en="Read the assignments">查看分工和提示词</a>
+                </article>
+                <article hidden>
+                  <h3 data-en="Two agents, two pieces of evidence">两路并行，各自提交证据</h3>
+                  <dl class="evidence-list">
+                    <div><dt>Codex</dt><dd><code>rg "restoreDraft" src/</code></dd></div>
+                    <div><dt>OpenCode</dt><dd data-en="Reopening replaces the saved draft with an empty one.">重新打开会话，已有草稿被空白覆盖。</dd></div>
+                  </dl>
+                </article>
+                <article hidden>
+                  <h3 data-en="Both results point to the same order">两路证据指向同一个顺序问题</h3>
+                  <p data-en="The session clears the draft before loading storage. Restore the saved draft before listening for changes.">会话先清空草稿，再读本地存档。改为先恢复草稿，再监听输入。</p>
+                </article>
+                <article hidden>
+                  <h3 data-en="Claude Code · Independent review">Claude Code · 独立复核</h3>
+                  <p data-en="Verify the draft is still editable after reopening the session.">验证重新打开会话后，恢复的草稿还能继续编辑。</p>
+                  <p class="evidence-command"><code>pnpm test draft-restore</code> <span class="added" data-en="Passed">通过</span></p>
+                </article>
+                <article hidden>
+                  <h3 data-en="Send the evidence back to the conversation">把改动和证据交回主会话</h3>
+                  <p data-en="The lead agent receives the patch, test output, and the cause of the regression.">主 Agent 收到补丁、测试输出，以及丢草稿的原因。</p>
+                  <a class="text-link" href="#session-preview" data-open-session data-en="Read the conversation">回到主会话</a>
+                </article>
+                <article hidden>
+                  <h3 data-en="Two files changed · Tests passed">两个文件有改动，测试已通过</h3>
+                  <p data-en="Inspect the exact line change before deciding whether to merge it.">合并前，可以核对到底改了哪一行。</p>
+                  <a class="text-link" href="#workspace" data-en="Inspect the patch">核对 Git 补丁</a>
+                </article>
+              </section>
+            </div>
           </div>
         </div>
       </section>
     </div>
 
-    <section class="shell harness-strip" aria-labelledby="harness-title" data-reveal>
+    <section class="shell harness-strip" aria-labelledby="harness-title">
       <h2 id="harness-title" data-en="Connect the tools you already use">接入你已经在用的 Harness</h2>
       <ul class="harness-list">
         <li><img src="harness/codex.png" alt="" width="23" height="23">Codex</li>
@@ -186,7 +243,7 @@
       </ul>
     </section>
 
-    <section class="shell showcase workflow-showcase" id="workflow" aria-labelledby="workflow-title" data-reveal>
+    <section class="shell showcase workflow-showcase" id="workflow" aria-labelledby="workflow-title">
       <div class="section-copy">
         <span class="section-label" data-en="Team workflows · Development preview">团队工作流 · 开发版预览</span>
         <h2 id="workflow-title" data-en="Review the plan before the run.">先审计划，再开工。</h2>
@@ -198,9 +255,9 @@
           <span class="reference-chip" data-en="@ Draft recovery and review">@ 草稿恢复与复核</span>
           <h3 data-en="Restore drafts when reopening a session">会话重新打开时恢复草稿</h3>
           <ul class="plan-list">
-            <li><img src="harness/codex.png" alt="" width="25" height="25"><span><strong data-en="Trace the restore path">定位草稿读取顺序</strong><small>Codex</small></span><span class="plan-phase" data-en="Parallel">并行</span></li>
-            <li><img src="harness/opencode.png" alt="" width="25" height="25"><span><strong data-en="Reproduce the regression">复现丢草稿的问题</strong><small>OpenCode</small></span><span class="plan-phase" data-en="Parallel">并行</span></li>
-            <li><img src="harness/claude-code.png" alt="" width="25" height="25"><span><strong data-en="Review the fix and tests">复核改动与回归测试</strong><small>Claude Code</small></span><span class="plan-phase" data-en="After both">两路汇合后</span></li>
+            <li><details><summary><img src="harness/codex.png" alt="" width="25" height="25"><span><strong data-en="Trace the restore path">定位草稿读取顺序</strong><small>Codex</small></span><span class="plan-phase" data-en="Parallel">并行</span><span class="plan-chevron" aria-hidden="true">›</span></summary><p class="plan-prompt" data-en="Trace reopenSession to local storage and identify the write that clears the saved draft.">从 reopenSession 追到本地存档读取，说明哪一步抢先写入了空草稿。</p></details></li>
+            <li><details><summary><img src="harness/opencode.png" alt="" width="25" height="25"><span><strong data-en="Reproduce the regression">复现丢草稿的问题</strong><small>OpenCode</small></span><span class="plan-phase" data-en="Parallel">并行</span><span class="plan-chevron" aria-hidden="true">›</span></summary><p class="plan-prompt" data-en="Enter a draft, switch sessions, and reopen it. Record when the content disappears.">写一段草稿后切换会话，重新打开确认内容是否还在。记录触发条件。</p></details></li>
+            <li><details><summary><img src="harness/claude-code.png" alt="" width="25" height="25"><span><strong data-en="Review the fix and tests">复核改动与回归测试</strong><small>Claude Code</small></span><span class="plan-phase" data-en="After both">两路汇合后</span><span class="plan-chevron" aria-hidden="true">›</span></summary><p class="plan-prompt" data-en="Review the restore order, run the regression test, and check that the draft remains editable.">核对恢复和监听的顺序，运行回归测试，并检查恢复后还能继续编辑。</p></details></li>
           </ul>
           <div class="plan-footer"><span data-en="3 agent nodes · Approval required">3 个 Agent 节点 · 审批后执行</span></div>
         </div>
@@ -217,10 +274,10 @@
     </section>
 
     <section class="feature-band" id="workspace" aria-labelledby="workspace-title">
-      <div class="shell showcase showcase-reverse" data-reveal>
+      <div class="shell showcase showcase-reverse">
         <div class="section-copy">
           <span class="section-label" data-en="Git workspace">Git 工作区</span>
-          <h2 id="workspace-title" data-en="Review Git changes alongside the conversation.">在会话旁审查 Git 改动</h2>
+          <h2 id="workspace-title"><span data-en="Review the patch">在会话旁</span><span data-en="alongside the conversation.">审查 Git 改动</span></h2>
           <p data-en="Inspect file diffs alongside the conversation. Give delegated tasks separate worktrees, then review their results before merging.">边看会话边核对文件差异。派发给不同成员的任务可以各用一个 Git worktree，最后由你决定合并哪些改动。</p>
           <ul class="feature-points">
             <li data-en="Compare the working copy, staged changes, and commits.">分别查看工作区、暂存区和提交记录。</li>
@@ -230,7 +287,14 @@
         </div>
         <figure class="specimen git-specimen">
           <div class="specimen-bar"><span><span class="git-branch" aria-hidden="true">⑂</span> fix/restore-draft</span><span class="specimen-meta" data-en="Working tree">工作区更改</span></div>
-          <div class="git-file"><span>src/session/<strong>draft-store.ts</strong></span><span class="diff-count"><span class="added">+1</span> <span class="removed">−1</span></span></div>
+          <div class="git-file">
+            <span class="file-name"><span>src/session/</span><strong>draft-store.ts</strong></span>
+            <fieldset class="patch-modes" aria-label="补丁视图" data-aria-en="Patch view">
+              <label><input type="radio" name="patch-view" value="before"><span data-en="Before">修改前</span></label>
+              <label><input type="radio" name="patch-view" value="after"><span data-en="After">修改后</span></label>
+              <label><input type="radio" name="patch-view" value="diff" checked><span data-en="Diff">差异</span></label>
+            </fieldset>
+          </div>
           <div class="git-code" role="group" aria-label="代码改动示例" data-aria-en="Sample code diff">
             <div class="git-hunk"><code>@@ -38,4 +38,4 @@</code></div>
             <div class="code-line"><span>38</span><code><b class="syntax-keyword">async function</b> <b class="syntax-call">reopenSession</b>() {</code></div>
@@ -245,48 +309,61 @@
           </div>
           <figcaption class="git-caption">
             <span data-en="Sample patch · Draft recovery">示例补丁 · 草稿恢复</span>
-            <button class="git-replay" type="button" aria-label="重播代码演示" data-aria-en="Replay the code demo" hidden>
-              <span aria-hidden="true">↻</span><span data-en="Replay">重播</span>
+            <button class="git-replay" type="button" aria-label="播放补丁演示" data-aria-en="Play the patch walkthrough" hidden>
+              <span aria-hidden="true">▷</span><span data-en="Play patch">播放补丁</span>
             </button>
           </figcaption>
         </figure>
       </div>
     </section>
 
-    <section class="shell showcase mobile-showcase" id="mobile" aria-labelledby="mobile-title" data-reveal>
-      <div class="section-copy">
-        <span class="section-label" data-en="Android companion · Build from source">Android 配套客户端 · 源码构建</span>
-        <h2 id="mobile-title" data-en="Your computer runs the task. Your phone keeps you in the loop.">电脑继续跑，手机接着看。</h2>
-        <p data-en="Pair your phone with Nautilo on your computer. Keep up with sessions and code changes, send follow-ups, and respond when an agent needs your approval.">手机和电脑配对之后，离开桌面也能看会话、查文件改动、接着发消息。Agent 需要你审批时，可以直接在手机上处理。</p>
-        <p class="section-note" data-en="The desktop must stay online. The companion APK is built from source.">使用时电脑需要保持在线。Android APK 目前从源码构建。</p>
-        <a class="text-link" href="https://github.com/zhufish-aa/Nautilo/blob/master/apps/mobile/README.md"><span data-en="Get the Android setup guide">查看 Android 构建与配对指南</span><span aria-hidden="true">↗</span></a>
+    <section class="mobile-band" id="mobile" aria-labelledby="mobile-title">
+      <div class="shell showcase mobile-showcase">
+        <div class="section-copy">
+          <span class="section-label" data-en="Android companion · Build from source">Android 配套客户端 · 源码构建</span>
+          <h2 id="mobile-title" data-en="Your computer runs the task. Your phone keeps you in the loop.">电脑继续跑，手机接着看。</h2>
+          <p data-en="Pair your phone with Nautilo on your computer. Keep up with sessions and code changes, send follow-ups, and respond when an agent needs your approval.">手机和电脑配对之后，离开桌面也能看会话、查文件改动、接着发消息。Agent 需要你审批时，可以直接在手机上处理。</p>
+          <p class="section-note" data-en="The desktop must stay online. The companion APK is built from source.">使用时电脑需要保持在线。Android APK 目前从源码构建。</p>
+          <a class="text-link" href="https://github.com/zhufish-aa/Nautilo/blob/master/apps/mobile/README.md"><span data-en="Get the Android setup guide">查看 Android 构建与配对指南</span><span aria-hidden="true">↗</span></a>
+        </div>
+        <figure class="mobile-visual">
+          <div class="mobile-desktop">
+            <div class="mobile-desktop-bar"><img src="mark.svg" alt="" width="18" height="18"> Nautilo <span class="connection-dot" aria-hidden="true"></span></div>
+            <div class="mobile-desktop-thread">
+              <p class="section-label" data-en="Desktop session · lantern-web">桌面会话 · lantern-web</p>
+              <strong data-en="Fix disappearing drafts">修复草稿丢失</strong>
+              <div class="mobile-incoming">
+                <p class="mobile-desktop-message" data-en="Did the regression test pass?">回归测试通过了吗？</p>
+                <span class="mobile-desktop-source" data-en="Sent from Android">来自 Android</span>
+              </div>
+              <div class="mobile-desktop-review">
+                <span class="added" aria-hidden="true">✓</span>
+                <div><strong data-en="Draft recovery verified">草稿恢复已验证</strong><code>pnpm test draft-restore</code></div>
+              </div>
+            </div>
+          </div>
+          <div class="phone">
+            <div class="phone-top"><span>10:24</span><span class="phone-sensors" aria-hidden="true"></span><span class="phone-battery" aria-hidden="true"></span></div>
+            <div class="phone-title"><span aria-hidden="true">‹</span><strong data-en="Fix disappearing drafts">修复草稿丢失</strong><span aria-hidden="true">···</span></div>
+            <div class="phone-chat">
+              <p class="phone-bubble" data-en="Did the regression test pass?">回归测试通过了吗？</p>
+              <div class="phone-answer">
+                <p class="phone-status"><span aria-hidden="true">✓</span><span data-en="Completed">已完成</span></p>
+                <p data-en="It passed. Reopening the session now restores the draft, and the test checks that it stays editable.">已通过。重新打开会话后，草稿会恢复。回归测试也检查了恢复后还能继续编辑。</p>
+                <div class="phone-diff"><span data-en="Changes">文件变更</span><span class="diff-count"><span class="added">+25</span> <span class="removed">−1</span></span></div>
+              </div>
+            </div>
+            <div class="phone-compose"><span data-en="Send a message">发送消息</span><b aria-hidden="true">↑</b></div>
+          </div>
+          <figcaption>
+            <span class="mobile-connection"><span class="connection-dot" aria-hidden="true"></span><span data-en="Connected to desktop">已连接到电脑</span><strong>lantern-web</strong></span>
+            <button class="mobile-replay" type="button" hidden><span aria-hidden="true">▷</span><span data-en="Play handoff">演示接续</span></button>
+          </figcaption>
+        </figure>
       </div>
-      <figure class="mobile-visual">
-        <div class="mobile-desktop">
-          <div class="mobile-desktop-bar"><img src="mark.svg" alt="" width="18" height="18"> Nautilo <span class="connection-dot" aria-hidden="true"></span></div>
-          <div class="mobile-desktop-thread">
-            <p class="section-label" data-en="Desktop session · lantern-web">桌面会话 · lantern-web</p>
-            <strong data-en="Fix disappearing drafts">修复草稿丢失</strong>
-            <p class="mobile-desktop-message" data-en="Did the regression test pass?">回归测试通过了吗？</p>
-            <span class="mobile-desktop-source" data-en="Sent from Android">来自 Android</span>
-          </div>
-        </div>
-        <div class="phone">
-          <div class="phone-top"><span>10:24</span><span class="phone-sensors" aria-hidden="true"></span><span class="phone-battery" aria-hidden="true"></span></div>
-          <div class="phone-title"><span aria-hidden="true">‹</span><strong data-en="Fix disappearing drafts">修复草稿丢失</strong><span aria-hidden="true">···</span></div>
-          <div class="phone-chat">
-            <p class="phone-bubble" data-en="Did the regression test pass?">回归测试通过了吗？</p>
-            <p class="phone-status"><span aria-hidden="true">✓</span><span data-en="Completed">已完成</span></p>
-            <p data-en="It passed. Reopening the session now restores the draft, and the test checks that it stays editable.">已通过。重新打开会话后，草稿会恢复。回归测试也检查了恢复后还能继续编辑。</p>
-            <div class="phone-diff"><span data-en="Changes">文件变更</span><span class="diff-count"><span class="added">+25</span> <span class="removed">−1</span></span></div>
-          </div>
-          <div class="phone-compose"><span data-en="Send a message">发送消息</span><b aria-hidden="true">↑</b></div>
-        </div>
-        <figcaption><span class="connection-dot" aria-hidden="true"></span><span data-en="Connected to desktop">已连接到电脑</span><strong>lantern-web</strong></figcaption>
-      </figure>
     </section>
 
-    <div class="shell getting-started" data-reveal>
+    <div class="shell getting-started">
       <section class="guide" id="guide" aria-labelledby="guide-title">
         <div class="section-copy guide-copy">
           <h2 id="guide-title" data-en="Quick start">快速上手</h2>
@@ -320,9 +397,9 @@
     </div>
 
     <section class="shell" id="download" aria-labelledby="download-title">
-      <div class="download-section" data-reveal>
+      <div class="download-section">
         <div class="download-intro">
-          <h2 id="download-title" data-en="Get Nautilo">下载 Nautilo</h2>
+          <h2 id="download-title"><span data-en="Download">下载</span><span class="download-name">Nautilo</span></h2>
           <p data-en="Pick a build for your desktop.">按系统选择安装包。</p>
           <a href="https://github.com/zhufish-aa/Nautilo/releases" class="subtle-link"><span data-en="All releases">全部版本</span> <span class="external" aria-hidden="true">↗</span></a>
         </div>
