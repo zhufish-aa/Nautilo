@@ -143,6 +143,106 @@ const gitFrames = gitDemo.querySelectorAll(".code-line, .git-result > span");
 const gitReplay = gitDemo.querySelector(".git-replay");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
+function setupShellMotion() {
+  if (!CSS.supports("offset-path", 'path("M 0 0 L 1 1")')) return;
+
+  // The path coordinates follow the 1536 × 1024 engraving.
+  const plate = document.querySelector(".hero-plate");
+  const art = plate.querySelector(".hero-art");
+  const replay = plate.querySelector(".hero-replay");
+  const overlay = document.createElement("div");
+  const map = document.createElement("div");
+  const canvas = document.createElement("canvas");
+  const junction = document.createElement("span");
+  canvas.width = 1536;
+  canvas.height = 1024;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  overlay.className = "hero-traces";
+  overlay.setAttribute("aria-hidden", "true");
+  map.className = "hero-trace-map";
+  junction.className = "hero-junction";
+  overlay.append(map);
+  map.append(canvas, junction);
+  art.after(overlay);
+
+  const routes = [
+    { stage: "conversation", color: "--flow-lead", delay: 250, duration: 780,
+      path: "M 206 345 C 260 298 325 273 383 278 C 437 280 470 307 483 340 C 523 333 558 358 594 391" },
+    { stage: "plan", color: "--flow-join", delay: 1030, duration: 1010,
+      path: "M 594 391 C 610 377 601 363 582 359 C 587 336 568 312 548 302 C 593 293 627 264 623 212 C 619 156 566 93 498 73 C 681 12 824 112 850 271 C 855 299 856 320 883 324" },
+    { stage: "plan", color: "--flow-explore", delay: 1030, duration: 1010,
+      path: "M 594 391 C 568 399 559 414 542 424 C 501 451 508 509 534 539 C 614 603 738 568 797 505 C 834 459 850 379 883 324" },
+    { stage: "review", color: "--flow-return", delay: 2040, duration: 900,
+      path: "M 883 324 C 958 305 990 266 1092 247 C 1192 226 1298 250 1360 302 C 1397 347 1366 493 1326 586" },
+  ].map(route => {
+    const tracer = document.createElement("span");
+    tracer.className = "hero-trace";
+    tracer.style.setProperty("--trace-color", `var(${route.color})`);
+    tracer.style.offsetPath = `path("${route.path}")`;
+    map.append(tracer);
+    return { ...route, tracer, shape: new Path2D(route.path) };
+  });
+
+  const resize = new ResizeObserver(() => {
+    map.style.transform = `scale(${plate.clientWidth / canvas.width})`;
+  });
+  resize.observe(plate);
+  const stop = () => {
+    for (const animation of overlay.getAnimations({ subtree: true })) animation.cancel();
+  };
+  const play = (stage) => {
+    if (reducedMotion.matches || !art.naturalWidth) return;
+    intro.disconnect();
+    stop();
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.lineCap = "round";
+    context.lineWidth = 3;
+    context.globalAlpha = .44;
+    const colors = getComputedStyle(root);
+    let end = 0;
+    for (const route of routes) {
+      if (stage && route.stage !== stage) continue;
+      const delay = stage ? 0 : route.delay;
+      context.strokeStyle = colors.getPropertyValue(route.color).trim();
+      context.stroke(route.shape);
+      route.tracer.animate(
+        [{ offsetDistance: "0%", opacity: 0 }, { opacity: 1, offset: .14 }, { opacity: 1, offset: .85 }, { offsetDistance: "100%", opacity: 0 }],
+        { delay, duration: route.duration, easing: "linear" },
+      );
+      if (route.stage === "review") {
+        junction.animate([{ transform: "scale(.92)", opacity: .85 }, { transform: "scale(2)", opacity: 0 }],
+          { delay, duration: 450, easing: colors.getPropertyValue("--ease").trim() });
+      }
+      end = Math.max(end, delay + route.duration);
+    }
+    canvas.animate([{ opacity: 0 }, { opacity: 1, offset: .18 }, { opacity: 1, offset: .82 }, { opacity: 0 }],
+      { duration: end + 220, easing: "linear" });
+  };
+  const intro = new IntersectionObserver(([entry]) => {
+    if (!entry.isIntersecting) return;
+    intro.disconnect();
+    play();
+  }, { threshold: .5 });
+  if (art.complete) intro.observe(plate);
+  else art.addEventListener("load", () => intro.observe(plate), { once: true });
+  const finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
+  for (const link of plate.querySelectorAll(".hero-map a")) {
+    link.addEventListener("pointerenter", (event) => {
+      if (finePointer.matches && event.pointerType === "mouse") play(link.dataset.stage);
+    });
+    link.addEventListener("focus", () => {
+      if (link.matches(":focus-visible")) play(link.dataset.stage);
+    });
+  }
+  replay.hidden = false;
+  replay.addEventListener("click", () => play());
+  themeButton.addEventListener("click", stop);
+  reducedMotion.addEventListener("change", stop);
+}
+
+setupShellMotion();
+
 function stopGitDemo() {
   for (const frame of gitFrames) {
     for (const animation of frame.getAnimations()) animation.cancel();
@@ -163,9 +263,42 @@ function playGitDemo() {
   }
 }
 
+const gitObserver = new IntersectionObserver(([entry]) => {
+  if (!entry.isIntersecting) return;
+  gitObserver.disconnect();
+  playGitDemo();
+}, { threshold: .08 });
+gitObserver.observe(gitDemo.querySelector(".git-code"));
 gitReplay.hidden = false;
-gitReplay.addEventListener("click", playGitDemo);
+gitReplay.addEventListener("click", () => {
+  gitObserver.disconnect();
+  playGitDemo();
+});
 reducedMotion.addEventListener("change", stopGitDemo);
+
+const revealTargets = document.querySelectorAll("[data-reveal], .specimen-state i, .mobile-visual figcaption .connection-dot");
+const revealObserver = new IntersectionObserver(entries => {
+  for (const { target, isIntersecting } of entries) {
+    if (!isIntersecting) continue;
+    revealObserver.unobserve(target);
+    if (reducedMotion.matches) continue;
+    if (target.hasAttribute("data-reveal")) {
+      target.animate(
+        [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "translateY(0)" }],
+        { duration: 500, easing: getComputedStyle(root).getPropertyValue("--ease").trim() },
+      );
+    } else {
+      target.animate([{ opacity: 1 }, { opacity: .62 }, { opacity: 1 }], { duration: 1500, iterations: 3 });
+    }
+  }
+}, { threshold: .08 });
+for (const target of revealTargets) revealObserver.observe(target);
+reducedMotion.addEventListener("change", () => {
+  if (!reducedMotion.matches) return;
+  for (const target of revealTargets) {
+    for (const animation of target.getAnimations()) animation.cancel();
+  }
+});
 
 const installers = {
   windows: /-win-x64\.exe$/i,
