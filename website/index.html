@@ -9,8 +9,8 @@
   <meta property="og:description" content="在一个本地工作台管理编程 Agent、组织团队和查看代码变更。">
   <title>Nautilo · 多 Agent 编程工作台</title>
   <link rel="icon" href="mark.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="site.css">
-  <script defer src="site.js"></script>
+  <link rel="stylesheet" href="site.css?v=motion">
+  <script defer src="site.js?v=motion"></script>
 </head>
 <body id="top">
   <a class="skip-link" href="#main" data-en="Skip to content">跳到正文</a>
@@ -39,19 +39,18 @@
       <section class="shell hero" aria-labelledby="headline">
         <img class="hero-art" src="nautilo-spiral.webp" alt="" width="1536" height="1024" fetchpriority="high">
         <div class="hero-content">
-          <p class="hero-label" data-en="Local coding workspace">本地多 Agent 编程工作台</p>
           <h1 id="headline">
-            <span data-en="Bring your coding">把编程 Agent</span>
-            <span data-en="agents together.">组织成一支团队。</span>
+            <span data-en="A local workspace">编程 Agent 的</span>
+            <span data-en="for coding agents.">本地工作台</span>
           </h1>
-          <p class="hero-copy" data-en="Use Codex, Claude Code, and OpenCode in the same workspace. Delegate tasks in parallel and review the code before it lands.">在同一个工作台使用 Codex、Claude Code 和 OpenCode。并行派发任务，亲自审查每一份改动。</p>
+          <p class="hero-copy" data-en="Connect Codex, Claude Code, and OpenCode. Assign tasks in a local project and review tool output and Git diffs alongside the conversation.">接入 Codex、Claude Code 和 OpenCode。在本地项目里分派任务，边看会话边核对工具输出和 Git 改动。</p>
           <div class="hero-actions">
             <a class="button button-primary" id="primary-download" href="#download">
               <span class="download-icon" aria-hidden="true">↓</span>
               <span id="primary-label" data-en="Download Nautilo">下载 Nautilo</span>
             </a>
             <a class="button button-secondary" href="#preview">
-              <span data-en="Explore the workbench">体验工作台</span><span class="external" aria-hidden="true">↓</span>
+              <span data-en="View the workbench">查看工作台</span><span class="external" aria-hidden="true">↓</span>
             </a>
           </div>
           <a class="release-note" href="https://github.com/zhufish-aa/Nautilo/releases/latest">
@@ -192,7 +191,7 @@
       <div class="shell showcase showcase-reverse">
         <div class="section-copy">
           <span class="section-label" data-en="Git workspace">Git 工作区</span>
-          <h2 id="workspace-title" data-en="See exactly what goes into Git.">每一处改动，看清再提交。</h2>
+          <h2 id="workspace-title" data-en="Review Git changes alongside the conversation.">在会话旁审查 Git 改动</h2>
           <p data-en="Inspect file diffs alongside the conversation. Give delegated tasks separate worktrees, then review their results before merging.">边看会话边核对文件差异。派发给不同成员的任务可以各用一个 Git worktree，最后由你决定合并哪些改动。</p>
           <ul class="feature-points">
             <li data-en="Compare the working copy, staged changes, and commits.">分别查看工作区、暂存区和提交记录。</li>
@@ -211,8 +210,16 @@
             <div class="code-line"><span>40</span><code>  watchDraft(sessionId);</code></div>
             <div class="code-line"><span>41</span><code>}</code></div>
           </div>
-          <div class="git-result"><span><span class="added" aria-hidden="true">✓</span> <code>pnpm test draft-restore</code></span><span data-en="Tests passed">测试通过</span></div>
-          <figcaption data-en="Example of a file diff and a verification result">单个文件的差异和验收结果示例</figcaption>
+          <div class="git-result">
+            <span class="git-command"><span aria-hidden="true">$</span> <code>pnpm test draft-restore</code></span>
+            <span class="git-passed"><span aria-hidden="true">✓</span><span data-en="Tests passed">测试通过</span></span>
+          </div>
+          <figcaption class="git-caption">
+            <span data-en="Sample patch · Draft recovery">示例补丁 · 草稿恢复</span>
+            <button class="git-replay" type="button" aria-label="重播代码演示" data-aria-en="Replay the code demo" hidden>
+              <span aria-hidden="true">↻</span><span data-en="Replay">重播</span>
+            </button>
+          </figcaption>
         </figure>
       </div>
     </section>

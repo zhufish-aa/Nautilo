@@ -80,7 +80,6 @@ h1, h2, h3, p { margin: 0; }
   pointer-events: none;
 }
 [data-theme="light"] .hero-art { filter: invert(1) grayscale(.83); opacity: .76; mix-blend-mode: multiply; }
-.hero-label { color: var(--ink-3); font-size: 13px; font-weight: 530; margin-bottom: 19px; }
 .hero h1 { font-size: clamp(42px, 5.36vw, 79px); line-height: 1.09; font-weight: 640; letter-spacing: -0.05em; }
 :lang(zh-CN) .hero h1, :lang(zh-CN) .section-copy h2 { letter-spacing: -0.027em; }
 .hero h1 span { display: block; }
@@ -292,6 +291,27 @@ h1, h2, h3, p { margin: 0; }
 .code-removed { background: color-mix(in srgb, var(--danger) 9%, var(--canvas)); color: var(--danger); }
 .git-result { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 11px 17px; color: var(--ink-3); font-size: 11px; }
 .git-result code { color: var(--ink-2); }
+.git-passed { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); white-space: nowrap; }
+.specimen .git-caption { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; padding-block: 5px; }
+.git-replay {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 7px;
+  border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--ink-2); font-size: 11px;
+}
+.git-replay span:first-child { font-size: 15px; line-height: 1; }
+.git-replay:hover { border-color: var(--line); background: var(--panel); color: var(--ink); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero-content { animation: hero-entry 500ms var(--ease) both; }
+  .hero-art { animation: hero-art-entry 780ms var(--ease) both; }
+}
+@keyframes hero-entry {
+  from { opacity: .84; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes hero-art-entry {
+  from { scale: 1.035; }
+  to { scale: 1; }
+}
 
 .mobile-visual {
   position: relative; display: grid; place-items: center; min-height: 409px; margin: 0; padding: 26px 22px;
@@ -373,7 +393,6 @@ h1, h2, h3, p { margin: 0; }
   .hero { min-height: 0; padding: 42px 0 40px; }
   .hero-content { padding-top: clamp(102px, 25vw, 180px); }
   .hero-art { top: -28px; right: -14%; width: min(107%, 640px); transform: none; mask-image: radial-gradient(ellipse 60% 52% at 68% 39%, black 14%, transparent 88%); }
-  .hero-label { margin-bottom: 11px; }
   .hero h1 { font-size: clamp(35px, 7.6vw, 53px); }
   .hero-copy { max-width: 410px; margin-top: 16px; }
   .hero-actions { margin-top: 22px; }
@@ -446,4 +465,5 @@ h1, h2, h3, p { margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after { transition: none !important; }
+  .git-replay { display: none; }
 }

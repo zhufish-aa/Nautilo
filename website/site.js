@@ -119,6 +119,44 @@ playButton.addEventListener("click", () => {
   paintRun(0);
 });
 
+const gitDemo = document.querySelector(".git-specimen");
+const gitFrames = gitDemo.querySelectorAll(".code-line, .git-result > span");
+const gitReplay = gitDemo.querySelector(".git-replay");
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+function stopGitDemo() {
+  for (const frame of gitFrames) {
+    for (const animation of frame.getAnimations()) animation.cancel();
+  }
+}
+
+function playGitDemo() {
+  stopGitDemo();
+  if (reducedMotion.matches) return;
+  const easing = getComputedStyle(root).getPropertyValue("--ease").trim();
+  let delay = 0;
+  for (const frame of gitFrames) {
+    frame.animate(
+      [{ opacity: .08, transform: "translateX(-4px)" }, { opacity: 1, transform: "translateX(0)" }],
+      { duration: 250, delay, easing, fill: "backwards" },
+    );
+    delay += frame.matches(".code-removed, .git-command") ? 250 : 85;
+  }
+}
+
+const gitObserver = new IntersectionObserver(([entry]) => {
+  if (!entry.isIntersecting) return;
+  gitObserver.disconnect();
+  playGitDemo();
+}, { threshold: .08 });
+gitObserver.observe(gitDemo.querySelector(".git-code"));
+gitReplay.hidden = false;
+gitReplay.addEventListener("click", () => {
+  gitObserver.disconnect();
+  playGitDemo();
+});
+reducedMotion.addEventListener("change", stopGitDemo);
+
 const installers = {
   windows: /-win-x64\.exe$/i,
   "mac-arm": /-mac-arm64\.dmg$/i,
