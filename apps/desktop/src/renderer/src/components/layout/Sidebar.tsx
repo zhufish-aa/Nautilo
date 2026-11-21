@@ -141,7 +141,7 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
   return (
     <>
       <nav id="workspace-sidebar" aria-label={t("nav.section")} hidden={collapsed}
-        className={cn("sidebar-rail relative z-20 min-w-0 shrink-0 flex-col border-r border-line/70 bg-panel", collapsed ? "hidden" : "flex w-[232px] max-[1100px]:w-[208px] max-[760px]:w-[184px]")}>
+        className={cn("sidebar-rail relative z-20 min-w-0 shrink-0 flex-col", collapsed ? "hidden" : "flex")}>
         <div className="sidebar-brand-row">
           <div className="sidebar-wordmark"><NautiloMark /><div><strong>Nautilo</strong><span>{zh ? "本地 Agent 工作台" : "Local agent workspace"}</span></div></div>
           {onCollapse && <button id="sidebar-collapse" type="button" onClick={onCollapse} aria-label={zh ? "收起侧栏" : "Collapse sidebar"} title={zh ? "收起侧栏" : "Collapse sidebar"} aria-expanded="true" aria-controls="workspace-sidebar"

@@ -1,9 +1,5 @@
 @import "./workflow-tokens.css";
 
-:root:not(.dark) .app-shell[data-workflow-surface="true"] #workspace-sidebar {
-  background: var(--wf-surface-rail);
-  border-color: var(--wf-border);
-}
 .workflows-route-surface { background: var(--wf-surface-canvas); }
 
 .workflow-studio {

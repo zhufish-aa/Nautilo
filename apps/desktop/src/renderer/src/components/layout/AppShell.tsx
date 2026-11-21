@@ -62,7 +62,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const isWorkflows = location.pathname === "/workflows";
 
   return (
-    <div className="app-shell flex h-screen flex-col overflow-hidden bg-canvas text-ink" data-workflow-surface={isWorkflows || undefined}>
+    <div className="app-shell flex h-screen flex-col overflow-hidden text-ink">
       <a
         href="#main-content"
         className="sr-only z-50 rounded-lg bg-accent px-3 py-2 text-sm text-on-accent focus:not-sr-only focus:absolute focus:top-2 focus:left-2"
@@ -80,23 +80,25 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
             {!collapsed&&<ResizeHandle label="调整侧栏宽度" value={sidebarWidth.width} min={180} max={480} onChange={sidebarWidth.resize} onCommit={sidebarWidth.save} reset={280}/>}
           </div>
         )}
-        <main
-          id="main-content"
-          data-sidebar-collapsed={collapsed && !isSettings ? "true" : undefined}
-          tabIndex={-1}
-          className={cn("workspace-main relative min-w-0 flex-1 outline-none", fullBleed || isSettings || isAssistant ? "overflow-hidden" : "overflow-y-auto")}
-        >
-          {collapsed && !isSettings && <button id="sidebar-expand" type="button" onClick={() => { toggleSidebar(false); requestAnimationFrame(() => document.getElementById("sidebar-collapse")?.focus()); }} aria-label="展开侧栏" title="展开侧栏" className="absolute left-3 top-3 z-30 rounded-lg bg-canvas p-2 text-ink-2 hover:bg-panel focus-visible:ring-2 focus-visible:ring-accent"><PanelLeftOpen className="h-4 w-4" /></button>}
-          {/* One mounted workspace for /sessions and the legacy /work URL. */}
-          <div className={cn("relative h-full overflow-hidden", !fullBleed && "hidden")} aria-hidden={!fullBleed}>
-            <SessionsPage active={fullBleed} />
-          </div>
-          {isSettings || isAssistant ? children : !fullBleed ? (
-            <div className={cn(isRuns ? "runs-route-surface min-h-full w-full" : isWorkflows ? "workflows-route-surface min-h-full w-full px-6 py-5" : "mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
-              <PageTransition transitionKey={location.pathname}>{children}</PageTransition>
+        <div className="workspace-stage flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <main
+            id="main-content"
+            data-sidebar-collapsed={collapsed && !isSettings ? "true" : undefined}
+            tabIndex={-1}
+            className={cn("workspace-main relative min-w-0 flex-1 outline-none", fullBleed || isSettings || isAssistant ? "overflow-hidden" : "overflow-y-auto")}
+          >
+            {collapsed && !isSettings && <button id="sidebar-expand" type="button" onClick={() => { toggleSidebar(false); requestAnimationFrame(() => document.getElementById("sidebar-collapse")?.focus()); }} aria-label="展开侧栏" title="展开侧栏" className="absolute left-3 top-3 z-30 rounded-lg bg-canvas p-2 text-ink-2 hover:bg-panel focus-visible:ring-2 focus-visible:ring-accent"><PanelLeftOpen className="h-4 w-4" /></button>}
+            {/* One mounted workspace for /sessions and the legacy /work URL. */}
+            <div className={cn("relative h-full overflow-hidden", !fullBleed && "hidden")} aria-hidden={!fullBleed}>
+              <SessionsPage active={fullBleed} />
             </div>
-          ) : null}
-        </main>
+            {isSettings || isAssistant ? children : !fullBleed ? (
+              <div className={cn(isRuns ? "runs-route-surface min-h-full w-full" : isWorkflows ? "min-h-full w-full px-6 py-5" : "mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
+                <PageTransition transitionKey={location.pathname}>{children}</PageTransition>
+              </div>
+            ) : null}
+          </main>
+        </div>
       </div>
     </div>
   );
