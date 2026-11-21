@@ -1,3 +1,12 @@
+@font-face {
+  font-family: "Bodoni Moda";
+  src: url("bodoni-moda-wordmark.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  unicode-range: U+4e, U+61, U+69, U+6c, U+6f, U+74-75;
+}
+
 :root {
   color-scheme: dark;
   --canvas: #090a0d;
@@ -13,8 +22,6 @@
   --band: #0d0e12;
   --stage: #111319;
   --accent: #3564df;
-  --accent-hover: #3d6be4;
-  --on-accent: #fff;
   --ok: #4ade80;
   --danger: #f87171;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -37,7 +44,6 @@
   --band: #f2f3f5;
   --stage: #edeef1;
   --accent: #2958d6;
-  --accent-hover: #2249b5;
   --ok: #15803d;
   --danger: #dc2626;
 }
@@ -72,27 +78,26 @@ h1, h2, h3, p { margin: 0; }
 [data-theme="light"] .theme-icon::after { width: 5px; height: 5px; top: 2.5px; right: 2.5px; background: currentColor; }
 
 .hero-stage { overflow: clip; }
-.hero { position: relative; isolation: isolate; display: flex; align-items: center; min-height: 540px; padding: 65px 0 73px; }
-.hero-content { position: relative; }
+.hero { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); align-items: center; gap: clamp(22px, 4vw, 60px); padding: 46px 0 44px; }
+.hero-content { position: relative; min-width: 0; }
+.hero-plate { position: relative; overflow: hidden; aspect-ratio: 6 / 5; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .hero-art {
-  position: absolute; z-index: -1; top: 50%; right: -13%; width: min(81%, 1050px); height: auto; transform: translateY(-49%);
-  mask-image: radial-gradient(ellipse 66% 68% at 66% 47%, black 30%, transparent 80%);
-  pointer-events: none;
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; object-position: 66% 50%;
 }
-[data-theme="light"] .hero-art { filter: invert(1) grayscale(.83); opacity: .76; mix-blend-mode: multiply; }
-.hero h1 { font-size: clamp(42px, 5.36vw, 79px); line-height: 1.09; font-weight: 640; letter-spacing: -0.05em; }
-:lang(zh-CN) .hero h1, :lang(zh-CN) .section-copy h2 { letter-spacing: -0.027em; }
-.hero h1 span { display: block; }
-.hero h1 span + span { color: color-mix(in srgb, var(--ink) 77%, var(--ink-2)); }
-.hero-copy { max-width: 420px; margin: 25px 0 0; color: var(--ink-2); font-size: clamp(16px, 1.4vw, 17px); line-height: 1.7; }
-.hero-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 27px; }
+[data-theme="light"] .hero-art { filter: invert(1) grayscale(1); opacity: .89; mix-blend-mode: multiply; }
+.hero-name { display: block; margin-left: -.032em; font: 500 clamp(83px, 12.5vw, 174px)/.87 "Bodoni Moda", "Bodoni MT", Didot, Georgia, serif; letter-spacing: -.052em; }
+.hero-description { display: block; margin-top: 28px; font-size: clamp(20px, 2.2vw, 30px); line-height: 1.24; font-weight: 530; letter-spacing: -.035em; text-wrap: balance; }
+:lang(zh-CN) .hero-description, :lang(zh-CN) .section-copy h2 { letter-spacing: -0.027em; }
+.hero-copy { max-width: 410px; margin: 14px 0 0; color: var(--ink-2); font-size: clamp(15px, 1.4vw, 17px); line-height: 1.67; }
+.hero-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 24px; }
 .button {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   min-height: 46px; padding: 0 16px; border: 1px solid transparent; border-radius: 8px;
   font-size: 14px; font-weight: 600; transition: border-color 180ms var(--ease);
 }
-.button-primary { background: var(--accent); color: var(--on-accent); }
-.button-primary:hover { background: var(--accent-hover); }
+.button-primary { background: var(--ink); color: var(--canvas); }
+.button-primary:hover { background: color-mix(in srgb, var(--ink) 90%, var(--canvas)); }
 .button-secondary { background: var(--panel); border-color: var(--line); }
 .button-secondary:hover { border-color: var(--line-strong); background: var(--card); }
 .download-icon { font-size: 20px; line-height: 1; }
@@ -103,7 +108,7 @@ h1, h2, h3, p { margin: 0; }
 [data-theme="light"] img[src="harness/opencode.png"] { filter: invert(1); }
 
 .preview { position: relative; scroll-margin-top: 24px; }
-.product-window { overflow: hidden; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 16px; }
+.product-window { overflow: hidden; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 12px; }
 .window-top {
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px;
   min-height: 55px; padding: 0 18px; border-bottom: 1px solid var(--line);
@@ -377,8 +382,9 @@ h1, h2, h3, p { margin: 0; }
 .footer > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 18px; font-size: 13px; }
 
 @media (max-width: 1000px) {
-  .hero { min-height: 475px; }
-  .hero-art { right: -18%; width: 86%; }
+  .hero { padding-block: 40px; }
+  .hero-name { font-size: min(12.8vw, 126px); }
+  .hero-plate { aspect-ratio: 5 / 6; }
   .demo-context { display: none; }
   .session-layout { grid-template-columns: 23% minmax(0, 1fr); }
 }
@@ -390,12 +396,13 @@ h1, h2, h3, p { margin: 0; }
   .nav-links .external { display: none; }
   .nav-controls { padding-left: 4px; }
   .nav-links > .nav-preview { display: none; }
-  .hero { min-height: 0; padding: 42px 0 40px; }
-  .hero-content { padding-top: clamp(102px, 25vw, 180px); }
-  .hero-art { top: -28px; right: -14%; width: min(107%, 640px); transform: none; mask-image: radial-gradient(ellipse 60% 52% at 68% 39%, black 14%, transparent 88%); }
-  .hero h1 { font-size: clamp(35px, 7.6vw, 53px); }
-  .hero-copy { max-width: 410px; margin-top: 16px; }
-  .hero-actions { margin-top: 22px; }
+  .hero { grid-template-columns: minmax(0, 1fr); gap: 23px; padding-block: 34px 24px; }
+  .hero-name { font-size: clamp(91px, 21vw, 151px); }
+  .hero-description { margin-top: 16px; }
+  .hero-copy { margin-top: 10px; }
+  .hero-actions { margin-top: 18px; }
+  .hero-plate { aspect-ratio: 1.92; max-height: 260px; }
+  .hero-art { object-position: 68% 47%; }
   .harness-strip { margin-top: 20px; }
   .harness-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px 5px; }
   .harness-list li { flex-direction: column; gap: 5px; font-size: 11px; }

@@ -9,7 +9,8 @@
   <meta property="og:description" content="在一个本地工作台管理编程 Agent、组织团队和查看代码变更。">
   <title>Nautilo · 多 Agent 编程工作台</title>
   <link rel="icon" href="mark.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="site.css?v=motion">
+  <link rel="preload" href="bodoni-moda-wordmark.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="site.css?v=poster">
   <script defer src="site.js?v=motion"></script>
 </head>
 <body id="top">
@@ -37,11 +38,10 @@
   <main id="main">
     <div class="hero-stage">
       <section class="shell hero" aria-labelledby="headline">
-        <img class="hero-art" src="nautilo-spiral.webp" alt="" width="1536" height="1024" fetchpriority="high">
         <div class="hero-content">
           <h1 id="headline">
-            <span data-en="A local workspace">编程 Agent 的</span>
-            <span data-en="for coding agents.">本地工作台</span>
+            <span class="hero-name">Nautilo</span>
+            <span class="hero-description" data-en="A local workspace for coding agents">编程 Agent 的本地工作台</span>
           </h1>
           <p class="hero-copy" data-en="Connect Codex, Claude Code, and OpenCode. Assign tasks in a local project and review tool output and Git diffs alongside the conversation.">接入 Codex、Claude Code 和 OpenCode。在本地项目里分派任务，边看会话边核对工具输出和 Git 改动。</p>
           <div class="hero-actions">
@@ -58,6 +58,9 @@
             <span class="release-divider" aria-hidden="true"></span>
             <span>Windows · macOS · Linux</span>
           </a>
+        </div>
+        <div class="hero-plate" aria-hidden="true">
+          <img class="hero-art" src="nautilo-spiral.webp" alt="" width="1536" height="1024" fetchpriority="high">
         </div>
       </section>
 
