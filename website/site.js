@@ -115,11 +115,13 @@ for (const [index, tab] of tabs.entries()) {
   });
 }
 for (const [selector, id] of [["[data-open-session]", "session-tab"], ["[data-open-workflow]", "workflow-tab"]]) {
-  document.querySelector(selector).addEventListener("click", () => {
-    const tab = document.getElementById(id);
-    selectTab(tab);
-    tab.focus({ preventScroll: true });
-  });
+  for (const link of document.querySelectorAll(selector)) {
+    link.addEventListener("click", () => {
+      const tab = document.getElementById(id);
+      selectTab(tab);
+      tab.focus({ preventScroll: true });
+    });
+  }
 }
 
 function paintRun(step) {
