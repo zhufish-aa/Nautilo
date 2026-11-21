@@ -5,10 +5,12 @@ const releaseVersion = document.getElementById("release-version");
 const primaryDownload = document.getElementById("primary-download");
 const primaryLabel = document.getElementById("primary-label");
 const platform = navigator.userAgentData?.platform || navigator.userAgent;
-const primaryAsset = /Android|iPhone|iPad/i.test(navigator.userAgent) ? null
+const desktopPlatform = /Android|iPhone|iPad/i.test(navigator.userAgent) ? null
   : /Win/i.test(platform) ? "windows"
   : /Linux/i.test(platform) ? "linux"
+  : /Mac/i.test(platform) ? "mac"
   : null;
+const primaryAsset = desktopPlatform === "mac" ? null : desktopPlatform;
 
 const translations = Array.from(document.querySelectorAll("[data-en]"), element => [element, element.textContent]);
 const accessibleLabels = Array.from(document.querySelectorAll("[data-aria-en]"), element => [element, element.getAttribute("aria-label")]);
@@ -63,6 +65,19 @@ root.lang = preference === "en" ? "en" : "zh-CN";
 root.dataset.theme = localStorage.getItem("nautilo-site-theme") === "light" ? "light" : "dark";
 render();
 
+const header = document.querySelector(".site-header");
+function updateHeader() {
+  header.toggleAttribute("data-scrolled", window.scrollY > 16);
+}
+updateHeader();
+window.addEventListener("scroll", updateHeader, { passive: true });
+
+if (desktopPlatform) {
+  const badge = document.getElementById("platform-current");
+  document.querySelector(`[data-platform="${desktopPlatform}"] strong`).append(badge);
+  badge.hidden = false;
+}
+
 languageButton.addEventListener("click", () => {
   root.lang = root.lang === "en" ? "zh-CN" : "en";
   localStorage.setItem("nautilo-site-language", root.lang);
@@ -99,11 +114,13 @@ for (const [index, tab] of tabs.entries()) {
     tabs[next].focus();
   });
 }
-document.querySelector("[data-open-workflow]").addEventListener("click", () => {
-  const tab = document.getElementById("workflow-tab");
-  selectTab(tab);
-  tab.focus({ preventScroll: true });
-});
+for (const [selector, id] of [["[data-open-session]", "session-tab"], ["[data-open-workflow]", "workflow-tab"]]) {
+  document.querySelector(selector).addEventListener("click", () => {
+    const tab = document.getElementById(id);
+    selectTab(tab);
+    tab.focus({ preventScroll: true });
+  });
+}
 
 function paintRun(step) {
   runStep = step;
@@ -156,6 +173,30 @@ gitReplay.addEventListener("click", () => {
   playGitDemo();
 });
 reducedMotion.addEventListener("change", stopGitDemo);
+
+const revealTargets = document.querySelectorAll("[data-reveal], .specimen-state i, .mobile-visual figcaption .connection-dot");
+const revealObserver = new IntersectionObserver(entries => {
+  for (const { target, isIntersecting } of entries) {
+    if (!isIntersecting) continue;
+    revealObserver.unobserve(target);
+    if (reducedMotion.matches) continue;
+    if (target.hasAttribute("data-reveal")) {
+      target.animate(
+        [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "translateY(0)" }],
+        { duration: 500, easing: getComputedStyle(root).getPropertyValue("--ease").trim() },
+      );
+    } else {
+      target.animate([{ opacity: 1 }, { opacity: .62 }, { opacity: 1 }], { duration: 1500, iterations: 3 });
+    }
+  }
+}, { threshold: .08 });
+for (const target of revealTargets) revealObserver.observe(target);
+reducedMotion.addEventListener("change", () => {
+  if (!reducedMotion.matches) return;
+  for (const target of revealTargets) {
+    for (const animation of target.getAnimations()) animation.cancel();
+  }
+});
 
 const installers = {
   windows: /-win-x64\.exe$/i,

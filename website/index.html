@@ -10,8 +10,8 @@
   <title>Nautilo · 多 Agent 编程工作台</title>
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="preload" href="bodoni-moda-wordmark.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="site.css?v=poster">
-  <script defer src="site.js?v=motion"></script>
+  <link rel="stylesheet" href="site.css?v=flagship">
+  <script defer src="site.js?v=flagship"></script>
 </head>
 <body id="top">
   <a class="skip-link" href="#main" data-en="Skip to content">跳到正文</a>
@@ -39,6 +39,7 @@
     <div class="hero-stage">
       <section class="shell hero" aria-labelledby="headline">
         <div class="hero-content">
+          <p class="hero-label"><span data-en="Local multi-agent coding workbench">本地多 Agent 编程工作台</span></p>
           <h1 id="headline">
             <span class="hero-name">Nautilo</span>
             <span class="hero-description" data-en="A local workspace for coding agents">编程 Agent 的本地工作台</span>
@@ -50,7 +51,7 @@
               <span id="primary-label" data-en="Download Nautilo">下载 Nautilo</span>
             </a>
             <a class="button button-secondary" href="#preview">
-              <span data-en="View the workbench">查看工作台</span><span class="external" aria-hidden="true">↓</span>
+              <span data-en="Explore the workbench">体验工作台</span><span class="cta-arrow" aria-hidden="true">→</span>
             </a>
           </div>
           <a class="release-note" href="https://github.com/zhufish-aa/Nautilo/releases/latest">
@@ -64,32 +65,43 @@
         </div>
       </section>
 
-      <section class="shell preview" id="preview" aria-label="工作台预览" data-aria-en="Workbench preview">
+      <section class="shell preview" id="preview" aria-label="工作台预览" data-aria-en="Workbench preview" data-reveal>
+        <div class="case-heading">
+          <div>
+            <span class="section-label" data-en="Sample project · lantern-web">示例项目 · lantern-web</span>
+            <h2 data-en="Fix disappearing drafts">修复草稿丢失</h2>
+          </div>
+          <nav class="case-nav" aria-label="示例导览" data-aria-en="Sample walkthrough">
+            <a href="#session-preview" data-open-session data-en="Conversation">会话</a>
+            <a href="#workflow" data-en="Plan">分工</a>
+            <a href="#workspace" data-en="Code review">验收</a>
+            <a href="#mobile" data-en="Android">手机</a>
+          </nav>
+        </div>
         <div class="product-window">
           <div class="window-top">
             <div class="window-brand"><img src="mark.svg" alt="" width="18" height="18"><span>Nautilo</span></div>
             <div class="preview-tabs" role="tablist" aria-label="界面预览" data-aria-en="Interface previews">
-              <button id="session-tab" type="button" role="tab" aria-selected="true" aria-controls="session-preview" data-en="Conversation">会话</button>
-              <button id="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflow-preview" tabindex="-1" data-en="Workflow">工作流</button>
+              <button id="session-tab" type="button" role="tab" aria-selected="true" aria-controls="session-preview" data-en="Conversation">会话工作台</button>
+              <button id="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflow-preview" tabindex="-1" data-en="Workflow">工作流预览</button>
             </div>
-            <span class="window-note" data-en="Sample project">示例项目</span>
+            <span class="window-note">lantern-web</span>
           </div>
 
           <div class="session-layout" id="session-preview" role="tabpanel" aria-labelledby="session-tab">
             <aside class="demo-sidebar" aria-label="示例会话列表" data-aria-en="Sample conversations">
-              <div class="demo-toolbar"><span aria-hidden="true">⌕</span><span data-en="Projects and sessions">项目与会话</span></div>
+              <p class="demo-caption" data-en="Projects">项目</p>
               <div class="demo-project"><span class="folder-icon" aria-hidden="true"></span> lantern-web</div>
               <p class="demo-caption" data-en="Sessions">会话</p>
-              <div class="demo-session is-current"><span class="session-tick" aria-hidden="true"></span><span data-en="Fix draft recovery">修复草稿恢复</span></div>
+              <div class="demo-session is-current"><span class="session-tick" aria-hidden="true"></span><span data-en="Fix disappearing drafts">修复草稿丢失</span></div>
               <div class="demo-session"><span class="session-tick" aria-hidden="true"></span><span data-en="Review login changes">检查登录改动</span></div>
               <div class="demo-session"><span class="session-tick" aria-hidden="true"></span><span data-en="Add a save regression test">补写保存回归测试</span></div>
               <div class="demo-project demo-project-secondary"><span class="folder-icon" aria-hidden="true"></span> lantern-docs</div>
               <div class="demo-session"><span class="session-tick" aria-hidden="true"></span><span data-en="Document offline drafts">更新离线草稿说明</span></div>
-              <div class="demo-branch"><span class="branch-icon" aria-hidden="true">⑂</span> fix/restore-draft</div>
             </aside>
             <div class="demo-thread">
               <div class="thread-heading">
-                <strong data-en="Fix draft recovery">修复草稿恢复</strong>
+                <strong data-en="Fix disappearing drafts">修复草稿丢失</strong>
                 <span class="demo-agent"><img src="harness/codex.png" alt="" width="13" height="13"> Codex</span>
               </div>
               <div class="thread-body">
@@ -113,7 +125,11 @@
                   </details>
                 </div>
               </div>
-              <div class="demo-composer"><span data-en="Send a follow-up…">继续提问…</span><span><img src="harness/codex.png" alt="" width="13" height="13"> Codex <b aria-hidden="true">↑</b></span></div>
+              <div class="demo-followup">
+                <span class="branch-icon" aria-hidden="true">⑂</span>
+                <code>fix/restore-draft</code>
+                <a class="text-link" href="#workspace"><span data-en="Review the patch">查看补丁</span><span aria-hidden="true">↓</span></a>
+              </div>
             </div>
             <aside class="demo-context" aria-label="示例项目详情" data-aria-en="Sample project details">
               <div class="demo-caption" data-en="Workspace">工作区</div>
@@ -138,10 +154,10 @@
             </div>
             <div class="workflow-canvas" id="workflow-canvas">
               <div class="flow-node flow-start" data-step="0"><span class="flow-symbol" aria-hidden="true">◎</span><span><strong data-en="Lead agent">主 Agent</strong><small data-en="Assign work">派发任务</small></span></div>
-              <div class="flow-node flow-agent flow-code" data-step="1"><img src="harness/codex.png" alt="" width="21" height="21"><span><strong data-en="Find the cause">定位问题</strong><small>Codex</small></span></div>
-              <div class="flow-node flow-agent flow-repro" data-step="1"><img src="harness/opencode.png" alt="" width="21" height="21"><span><strong data-en="Reproduce bug">复现问题</strong><small>OpenCode</small></span></div>
+              <div class="flow-node flow-agent flow-code" data-step="1"><span class="flow-icon"><img src="harness/codex.png" alt="" width="17" height="17"></span><span><strong data-en="Find the cause">定位问题</strong><small>Codex</small></span></div>
+              <div class="flow-node flow-agent flow-repro" data-step="1"><span class="flow-icon"><img src="harness/opencode.png" alt="" width="17" height="17"></span><span><strong data-en="Reproduce bug">复现问题</strong><small>OpenCode</small></span></div>
               <div class="flow-node flow-join" data-step="2"><span class="flow-symbol" aria-hidden="true">◇</span><span><strong data-en="Join results">汇合结果</strong><small data-en="Wait for both">等待两路</small></span></div>
-              <div class="flow-node flow-review" data-step="3"><img src="harness/claude-code.png" alt="" width="21" height="21"><span><strong data-en="Review the fix">独立复核</strong><small>Claude Code</small></span></div>
+              <div class="flow-node flow-review" data-step="3"><span class="flow-icon"><img src="harness/claude-code.png" alt="" width="17" height="17"></span><span><strong data-en="Review the fix">独立复核</strong><small>Claude Code</small></span></div>
               <div class="flow-node flow-end" data-step="4"><span class="flow-symbol" aria-hidden="true">↵</span><span><strong data-en="Return to chat">交回主会话</strong><small data-en="Report results">汇报结果</small></span></div>
             </div>
             <div class="workflow-status" id="workflow-status" role="status" data-en="Ready to preview">等待播放</div>
@@ -150,7 +166,7 @@
       </section>
     </div>
 
-    <section class="shell harness-strip" aria-labelledby="harness-title">
+    <section class="shell harness-strip" aria-labelledby="harness-title" data-reveal>
       <h2 id="harness-title" data-en="Connect the tools you already use">接入你已经在用的 Harness</h2>
       <ul class="harness-list">
         <li><img src="harness/codex.png" alt="" width="23" height="23">Codex</li>
@@ -162,36 +178,38 @@
       </ul>
     </section>
 
-    <section class="shell showcase" id="workflow" aria-labelledby="workflow-title">
+    <section class="shell showcase workflow-showcase" id="workflow" aria-labelledby="workflow-title" data-reveal>
       <div class="section-copy">
         <span class="section-label" data-en="Team workflows · Development preview">团队工作流 · 开发版预览</span>
         <h2 id="workflow-title" data-en="Review the plan before the run.">先审计划，再开工。</h2>
         <p data-en="Reference a saved workflow with @. The lead agent proposes who does what, and you can edit the plan or decline it before it runs.">在会话里用 @ 引用已保存的流程。主 Agent 拟定分工，你可以改每个节点的 Harness 和模型，也可以退回整份计划。</p>
-        <ol class="workflow-steps">
-          <li data-en="Define prompts, branches, and parallel tasks on the canvas.">在画布里定义节点提示词、分支与并行任务。</li>
-          <li data-en="Review the execution plan in the conversation.">在会话里审阅执行计划。</li>
-          <li data-en="Follow progress in the side panel and get results back in chat.">在侧栏查看执行进度，结果回到主会话。</li>
-        </ol>
-        <a class="text-link" href="#preview" data-open-workflow><span data-en="Try the workflow preview">试一下流程播放</span><span aria-hidden="true">↑</span></a>
       </div>
       <figure class="specimen plan-specimen">
         <div class="specimen-bar"><span data-en="Execution plan">执行计划</span><span class="specimen-state"><i aria-hidden="true"></i><span data-en="Awaiting review">等你审核</span></span></div>
         <div class="plan-content">
           <span class="reference-chip" data-en="@ Draft recovery and review">@ 草稿恢复与复核</span>
-          <h3 data-en="Restore drafts when reopening a session">恢复重新打开会话时的草稿</h3>
+          <h3 data-en="Restore drafts when reopening a session">会话重新打开时恢复草稿</h3>
           <ul class="plan-list">
             <li><img src="harness/codex.png" alt="" width="25" height="25"><span><strong data-en="Trace the restore path">定位草稿读取顺序</strong><small>Codex</small></span><span class="plan-phase" data-en="Parallel">并行</span></li>
             <li><img src="harness/opencode.png" alt="" width="25" height="25"><span><strong data-en="Reproduce the regression">复现丢草稿的问题</strong><small>OpenCode</small></span><span class="plan-phase" data-en="Parallel">并行</span></li>
             <li><img src="harness/claude-code.png" alt="" width="25" height="25"><span><strong data-en="Review the fix and tests">复核改动与回归测试</strong><small>Claude Code</small></span><span class="plan-phase" data-en="After both">两路汇合后</span></li>
           </ul>
-          <div class="plan-footer"><span data-en="3 agent nodes">3 个 Agent 节点</span><span data-en="Approve before running">审批后开始执行</span></div>
+          <div class="plan-footer"><span data-en="3 agent nodes · Approval required">3 个 Agent 节点 · 审批后执行</span></div>
         </div>
-        <figcaption data-en="Example of a plan proposed in the conversation">在会话中提交的执行计划示例</figcaption>
+        <figcaption class="plan-caption">
+          <span data-en="Plan proposed in chat">会话中的执行计划</span>
+          <a class="text-link" href="#preview" data-open-workflow><span data-en="Open run preview">看执行演示</span><span aria-hidden="true">↑</span></a>
+        </figcaption>
       </figure>
+      <ol class="workflow-steps">
+        <li><strong data-en="Edit the canvas">画布编排</strong><span data-en="Define prompts, branches, and parallel tasks.">定义节点提示词、分支与并行任务。</span></li>
+        <li><strong data-en="Review in chat">会话审批</strong><span data-en="Check assignments and change models before running.">开始前核对分工和模型。</span></li>
+        <li><strong data-en="Follow the run">跟踪执行</strong><span data-en="Follow the side panel and receive the result in chat.">在侧栏看进度，结果回到主会话。</span></li>
+      </ol>
     </section>
 
     <section class="feature-band" id="workspace" aria-labelledby="workspace-title">
-      <div class="shell showcase showcase-reverse">
+      <div class="shell showcase showcase-reverse" data-reveal>
         <div class="section-copy">
           <span class="section-label" data-en="Git workspace">Git 工作区</span>
           <h2 id="workspace-title" data-en="Review Git changes alongside the conversation.">在会话旁审查 Git 改动</h2>
@@ -207,10 +225,10 @@
           <div class="git-file"><span>src/session/<strong>draft-store.ts</strong></span><span class="diff-count"><span class="added">+1</span> <span class="removed">−1</span></span></div>
           <div class="git-code" role="group" aria-label="代码改动示例" data-aria-en="Sample code diff">
             <div class="git-hunk"><code>@@ -38,4 +38,4 @@</code></div>
-            <div class="code-line"><span>38</span><code>async function reopenSession() {</code></div>
-            <div class="code-line code-removed"><span>39</span><code>− resetDraft();</code></div>
-            <div class="code-line code-added"><span>39</span><code>+ await restoreDraft(sessionId);</code></div>
-            <div class="code-line"><span>40</span><code>  watchDraft(sessionId);</code></div>
+            <div class="code-line"><span>38</span><code><b class="syntax-keyword">async function</b> <b class="syntax-call">reopenSession</b>() {</code></div>
+            <div class="code-line code-removed"><span>39</span><code><span class="diff-mark">−</span>  resetDraft();</code></div>
+            <div class="code-line code-added"><span>39</span><code><span class="diff-mark">+</span>  await restoreDraft(sessionId);</code></div>
+            <div class="code-line"><span>40</span><code>  <b class="syntax-call">watchDraft</b>(sessionId);</code></div>
             <div class="code-line"><span>41</span><code>}</code></div>
           </div>
           <div class="git-result">
@@ -227,18 +245,27 @@
       </div>
     </section>
 
-    <section class="shell showcase mobile-showcase" id="mobile" aria-labelledby="mobile-title">
+    <section class="shell showcase mobile-showcase" id="mobile" aria-labelledby="mobile-title" data-reveal>
       <div class="section-copy">
         <span class="section-label" data-en="Android companion · Build from source">Android 配套客户端 · 源码构建</span>
         <h2 id="mobile-title" data-en="Your computer runs the task. Your phone keeps you in the loop.">电脑继续跑，手机接着看。</h2>
         <p data-en="Pair your phone with Nautilo on your computer. Keep up with sessions and code changes, send follow-ups, and respond when an agent needs your approval.">手机和电脑配对之后，离开桌面也能看会话、查文件改动、接着发消息。Agent 需要你审批时，可以直接在手机上处理。</p>
         <p class="section-note" data-en="The desktop must stay online. The companion APK is built from source.">使用时电脑需要保持在线。Android APK 目前从源码构建。</p>
-        <a class="text-link" href="https://github.com/zhufish-aa/Nautilo/blob/d5edb7c5959f964f3d0d91432b6bac632e5152c3/apps/mobile/README.md"><span data-en="Get the Android setup guide">查看 Android 构建与配对指南</span><span aria-hidden="true">↗</span></a>
+        <a class="text-link" href="https://github.com/zhufish-aa/Nautilo/blob/master/apps/mobile/README.md"><span data-en="Get the Android setup guide">查看 Android 构建与配对指南</span><span aria-hidden="true">↗</span></a>
       </div>
       <figure class="mobile-visual">
+        <div class="mobile-desktop">
+          <div class="mobile-desktop-bar"><img src="mark.svg" alt="" width="18" height="18"> Nautilo <span class="connection-dot" aria-hidden="true"></span></div>
+          <div class="mobile-desktop-thread">
+            <p class="section-label" data-en="Desktop session · lantern-web">桌面会话 · lantern-web</p>
+            <strong data-en="Fix disappearing drafts">修复草稿丢失</strong>
+            <p class="mobile-desktop-message" data-en="Did the regression test pass?">回归测试通过了吗？</p>
+            <span class="mobile-desktop-source" data-en="Sent from Android">来自 Android</span>
+          </div>
+        </div>
         <div class="phone">
-          <div class="phone-top"><span>9:41</span><span class="phone-sensors" aria-hidden="true"></span><span class="phone-battery" aria-hidden="true"></span></div>
-          <div class="phone-title"><span aria-hidden="true">‹</span><strong data-en="Fix draft recovery">修复草稿恢复</strong><span aria-hidden="true">···</span></div>
+          <div class="phone-top"><span>10:24</span><span class="phone-sensors" aria-hidden="true"></span><span class="phone-battery" aria-hidden="true"></span></div>
+          <div class="phone-title"><span aria-hidden="true">‹</span><strong data-en="Fix disappearing drafts">修复草稿丢失</strong><span aria-hidden="true">···</span></div>
           <div class="phone-chat">
             <p class="phone-bubble" data-en="Did the regression test pass?">回归测试通过了吗？</p>
             <p class="phone-status"><span aria-hidden="true">✓</span><span data-en="Completed">已完成</span></p>
@@ -251,51 +278,53 @@
       </figure>
     </section>
 
-    <section class="shell faq" aria-labelledby="faq-title">
-      <div class="section-copy">
-        <h2 id="faq-title" data-en="Before you install.">安装前常见问题</h2>
-      </div>
-      <div class="faq-list">
-        <details>
-          <summary><span data-en="Do I need a separate API key?">我需要另外准备 API 密钥吗？</span><span class="faq-toggle" aria-hidden="true"></span></summary>
-          <p data-en="You can use a supported CLI with its existing sign-in or configuration. If you want to use a separate API endpoint, configure it under Providers and accounts.">可以使用受支持的 CLI 上已有的登录账号或配置。想使用单独的 API 连接时，在「供应商与账号」里配置即可。</p>
-        </details>
-        <details>
-          <summary><span data-en="Where does my code run?">代码和命令在哪里执行？</span><span class="faq-toggle" aria-hidden="true"></span></summary>
-          <p data-en="The desktop app coordinates your local project and launches its CLI tools on your computer. Model requests use the provider configured for your session.">桌面端管理本地项目，CLI 工具和命令在你的电脑上执行。模型请求由会话选用的供应商处理。</p>
-        </details>
-        <details>
-          <summary><span data-en="What can I try in the workflow preview?">官网的工作流预览能体验什么？</span><span class="faq-toggle" aria-hidden="true"></span></summary>
-          <p data-en="The preview plays a sample run from assignment through parallel tasks, review, and return to chat. It uses a sample project, and the download section links to the current public release.">预览用一个示例任务演示派发、并行执行、复核和交回主会话的过程。下载区对应当前公开版本。</p>
-        </details>
-      </div>
-    </section>
+    <div class="shell getting-started" data-reveal>
+      <section class="guide" id="guide" aria-labelledby="guide-title">
+        <div class="section-copy guide-copy">
+          <h2 id="guide-title" data-en="Quick start">快速上手</h2>
+        </div>
+        <ol class="guide-steps">
+          <li><h3 data-en="Install Nautilo">安装 Nautilo</h3><p data-en="Download the desktop build for your operating system.">选对应的桌面安装包，启动 Nautilo。</p><a class="text-link" href="#download" data-en="Choose a build">选择安装包</a></li>
+          <li><h3 data-en="Connect an agent CLI">接入 Agent CLI</h3><p data-en="Use an installed CLI or add a provider plugin. Configure the model and permissions for your first session.">使用已安装的 CLI，或按插件指南添加 Harness，再选择模型和权限。</p><a class="text-link" href="https://github.com/zhufish-aa/Nautilo/blob/master/docs/provider-plugins.md" data-en="Provider plugin guide">Harness 插件指南</a></li>
+          <li><h3 data-en="Open a project">打开一个项目</h3><p data-en="Add a local directory, start a conversation, and inspect the tools and file changes as they appear.">选择本地目录并新建会话，边聊边看工具调用和文件改动。</p><a class="text-link" href="https://github.com/zhufish-aa/Nautilo#readme" data-en="Read the project docs">查看项目文档</a></li>
+        </ol>
+      </section>
 
-    <section class="shell guide" id="guide" aria-labelledby="guide-title">
-      <div class="section-copy guide-copy">
-        <span class="section-label" data-en="Quick start">快速上手</span>
-        <h2 id="guide-title" data-en="Start with a local project.">从一个本地项目开始。</h2>
-      </div>
-      <ol class="guide-steps">
-        <li><h3 data-en="Install Nautilo">安装 Nautilo</h3><p data-en="Download the desktop build for your operating system.">选对应的桌面安装包，启动 Nautilo。</p><a class="text-link" href="#download" data-en="Choose a build">选择安装包</a></li>
-        <li><h3 data-en="Connect an agent CLI">接入 Agent CLI</h3><p data-en="Use an installed CLI or add a provider plugin. Configure the model and permissions for your first session.">使用已安装的 CLI，或按插件指南添加 Harness，再选择模型和权限。</p><a class="text-link" href="https://github.com/zhufish-aa/Nautilo/blob/master/docs/provider-plugins.md" data-en="Provider plugin guide">Harness 插件指南</a></li>
-        <li><h3 data-en="Open a project">打开一个项目</h3><p data-en="Add a local directory, start a conversation, and inspect the tools and file changes as they appear.">选择本地目录并新建会话，边聊边看工具调用和文件改动。</p><a class="text-link" href="https://github.com/zhufish-aa/Nautilo#readme" data-en="Read the project docs">查看项目文档</a></li>
-      </ol>
-    </section>
+      <section class="faq" aria-labelledby="faq-title">
+        <div class="section-copy">
+          <h2 id="faq-title" data-en="Frequently asked questions">常见问题</h2>
+        </div>
+        <div class="faq-list">
+          <details>
+            <summary><span data-en="Do I need a separate API key?">我需要另外准备 API 密钥吗？</span><span class="faq-toggle" aria-hidden="true"></span></summary>
+            <p data-en="You can use a supported CLI with its existing sign-in or configuration. If you want to use a separate API endpoint, configure it under Providers and accounts.">可以使用受支持的 CLI 上已有的登录账号或配置。想使用单独的 API 连接时，在「供应商与账号」里配置即可。</p>
+          </details>
+          <details>
+            <summary><span data-en="Where does my code run?">代码和命令在哪里执行？</span><span class="faq-toggle" aria-hidden="true"></span></summary>
+            <p data-en="The desktop app coordinates your local project and launches its CLI tools on your computer. Model requests use the provider configured for your session.">桌面端管理本地项目，CLI 工具和命令在你的电脑上执行。模型请求由会话选用的供应商处理。</p>
+          </details>
+          <details>
+            <summary><span data-en="What can I try in the workflow preview?">官网的工作流预览能体验什么？</span><span class="faq-toggle" aria-hidden="true"></span></summary>
+            <p data-en="The preview plays a sample run from assignment through parallel tasks, review, and return to chat. It uses a sample project, and the download section links to the current public release.">预览用一个示例任务演示派发、并行执行、复核和交回主会话的过程。下载区对应当前公开版本。</p>
+          </details>
+        </div>
+      </section>
+    </div>
 
     <section class="shell" id="download" aria-labelledby="download-title">
-      <div class="download-section">
+      <div class="download-section" data-reveal>
         <div class="download-intro">
           <h2 id="download-title" data-en="Get Nautilo">下载 Nautilo</h2>
           <p data-en="Pick a build for your desktop.">按系统选择安装包。</p>
           <a href="https://github.com/zhufish-aa/Nautilo/releases" class="subtle-link"><span data-en="All releases">全部版本</span> <span class="external" aria-hidden="true">↗</span></a>
         </div>
         <ul class="platform-list">
-          <li><div><strong>Windows</strong><small>x64 · Installer</small></div><a class="platform-link" data-asset="windows" href="https://github.com/zhufish-aa/Nautilo/releases/latest" aria-label="下载 Windows x64" data-aria-en="Download Windows x64">↓</a></li>
-          <li><div><strong>macOS</strong><small>DMG · Apple Silicon / Intel</small></div><div class="platform-pair"><a data-asset="mac-arm" href="https://github.com/zhufish-aa/Nautilo/releases/latest">Apple Silicon <span aria-hidden="true">↓</span></a><a data-asset="mac-intel" href="https://github.com/zhufish-aa/Nautilo/releases/latest">Intel <span aria-hidden="true">↓</span></a></div></li>
-          <li><div><strong>Linux</strong><small>x86_64 · AppImage</small></div><a class="platform-link" data-asset="linux" href="https://github.com/zhufish-aa/Nautilo/releases/latest" aria-label="下载 Linux AppImage" data-aria-en="Download Linux AppImage">↓</a></li>
-          <li><div><strong>Android</strong><small data-en="Build and pairing guide">构建与配对指南</small></div><a class="platform-link" href="#mobile" aria-label="查看 Android 说明" data-aria-en="View Android setup">↑</a></li>
+          <li data-platform="windows"><div><strong>Windows</strong><small data-en="x64 · Installer">x64 安装包</small></div><a class="platform-link" data-asset="windows" href="https://github.com/zhufish-aa/Nautilo/releases/latest" aria-label="下载 Windows x64" data-aria-en="Download Windows x64"><span data-en="Download">下载</span><span class="asset-arrow" aria-hidden="true">↓</span></a></li>
+          <li data-platform="mac"><div><strong>macOS</strong><small>DMG · Apple Silicon / Intel</small></div><div class="platform-pair"><a data-asset="mac-arm" href="https://github.com/zhufish-aa/Nautilo/releases/latest">Apple Silicon <span class="asset-arrow" aria-hidden="true">↓</span></a><a data-asset="mac-intel" href="https://github.com/zhufish-aa/Nautilo/releases/latest">Intel <span class="asset-arrow" aria-hidden="true">↓</span></a></div></li>
+          <li data-platform="linux"><div><strong>Linux</strong><small>x86_64 · AppImage</small></div><a class="platform-link" data-asset="linux" href="https://github.com/zhufish-aa/Nautilo/releases/latest" aria-label="下载 Linux AppImage" data-aria-en="Download Linux AppImage"><span data-en="Download">下载</span><span class="asset-arrow" aria-hidden="true">↓</span></a></li>
+          <li><div><strong>Android</strong><small data-en="Build and pairing guide">构建与配对指南</small></div><a class="platform-link" href="https://github.com/zhufish-aa/Nautilo/blob/master/apps/mobile/README.md" data-en="View guide">查看指南</a></li>
         </ul>
+        <span class="platform-current" id="platform-current" data-en="This system" hidden>当前系统</span>
       </div>
     </section>
   </main>
