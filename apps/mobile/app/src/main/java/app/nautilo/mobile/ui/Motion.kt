@@ -12,6 +12,8 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -20,6 +22,7 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.border
@@ -39,6 +42,13 @@ import androidx.compose.ui.unit.dp
 
 internal val MotionEase = CubicBezierEasing(.22f, 1f, .36f, 1f)
 internal val LocalNautiloMotion = staticCompositionLocalOf { true }
+
+@Composable internal fun Modifier.springPress(pressed: Boolean): Modifier {
+    val scale = animateFloatAsState(if (pressed) .965f else 1f,
+        if (LocalNautiloMotion.current) spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium) else snap(),
+        label = "press-scale")
+    return graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+}
 
 /** One observer per theme, rather than one Android settings read per control. */
 @Composable internal fun ProvideNautiloMotion(content: @Composable () -> Unit) {
@@ -68,11 +78,11 @@ internal val LocalNautiloMotion = staticCompositionLocalOf { true }
 
 @Composable internal fun MotionPage(page: CreationPicker?, content: @Composable (CreationPicker?) -> Unit) {
     val motion = LocalNautiloMotion.current
-    AnimatedContent(targetState = page, modifier = Modifier.fillMaxWidth().height(422.dp), transitionSpec = {
+    AnimatedContent(targetState = page, modifier = Modifier.fillMaxWidth().height(500.dp), transitionSpec = {
         val direction = if (targetState == null) -1 else 1
         if (motion) {
-            slideInHorizontally(tween(240, easing = MotionEase)) { it * direction }
-                .togetherWith(slideOutHorizontally(tween(220, easing = MotionEase)) { -it * direction })
+            (slideInHorizontally(tween(240, easing = MotionEase)) { it * direction } + fadeIn(tween(180)))
+                .togetherWith(slideOutHorizontally(tween(220, easing = MotionEase)) { -it * direction } + fadeOut(tween(160)))
         } else fadeIn(tween(0)).togetherWith(fadeOut(tween(0)))
     }, label = "configuration-page") { current -> content(current) }
 }
@@ -110,22 +120,16 @@ internal val LocalNautiloMotion = staticCompositionLocalOf { true }
     }
 }
 
-@Composable internal fun HostSignal(online: Boolean, modifier: Modifier = Modifier) {
-    val green = MobilePalette.green
-    Box(modifier.size(14.dp), contentAlignment = Alignment.Center) {
-        if (online && LocalNautiloMotion.current) {
-            val wave = rememberInfiniteTransition(label = "host-signal")
-            for (phase in 0..1) {
-                val expansion = wave.animateFloat(0f, 1f,
-                    infiniteRepeatable(tween(2100, easing = MotionEase), initialStartOffset = androidx.compose.animation.core.StartOffset(phase * 720)),
-                    label = "host-wave")
-                Box(Modifier.size(7.dp).graphicsLayer {
-                    scaleX = 1f + expansion.value * 1.4f
-                    scaleY = scaleX
-                    alpha = .35f * (1f - expansion.value)
-                }.border(1.dp, green, CircleShape))
-            }
+@Composable internal fun SonarPulseDot(online: Boolean, modifier: Modifier = Modifier) {
+    val tone = if (online) Green else MobilePalette.muted
+    val wave = if (online && LocalNautiloMotion.current) rememberInfiniteTransition(label = "host-signal").animateFloat(
+        0f, 1f, infiniteRepeatable(tween(2200, easing = FastOutSlowInEasing)), label = "sonar-ring") else null
+    Canvas(modifier.size(18.dp)) {
+        val radius = 3.5.dp.toPx()
+        wave?.value?.let { progress ->
+            drawCircle(tone.copy(alpha = .65f * (1f - progress)), radius * (1f + 1.6f * progress),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx()))
         }
-        Dot(online)
+        drawCircle(tone, radius)
     }
 }

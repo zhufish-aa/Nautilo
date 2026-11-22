@@ -94,7 +94,7 @@ class ConfigurationWindowTest {
         val base = state().copy(host = Host("desktop", "Computer", json()), projects = listOf(Project("project", "Nautilo", "D:/Nautilo")))
         compose.setContent { NautiloTheme { ProjectsScreen(base, model, false, {}, {}) } }
         compose.onNodeWithTag("projects-create-project").performClick()
-        compose.onNodeWithText("新建项目", substring = false).assertIsDisplayed()
+        compose.onNode(hasText("新建项目") and hasAnyAncestor(hasTestTag("app-sheet"))).assertIsDisplayed()
         compose.onNodeWithText("已有目录").assertIsDisplayed()
         compose.onNodeWithText("新建文件夹").assertIsDisplayed()
         Mockito.verify(model).browse("", 0)
@@ -440,7 +440,7 @@ class ConfigurationWindowTest {
         }
         assertButtonWithinActualWindow("session-config-apply")
         val original = ShadowDialog.getLatestDialog()
-        compose.onNodeWithText("模型", substring = false).performClick()
+        compose.onNodeWithTag("config-model-picker").performClick()
         compose.onNodeWithTag("creation-choice-list").performScrollToNode(hasText("模型 20"))
         assertSame(original, ShadowDialog.getLatestDialog())
         compose.onNodeWithContentDescription("返回设置").performClick()
@@ -452,7 +452,7 @@ class ConfigurationWindowTest {
     @Test fun newSessionOverviewHasWorkingFooterInTheRealWindow() {
         var done = false
         compose.setContent { NautiloTheme { NSheet({}) {
-            NewConversationSettingsContent("DeepSeek Harness", "原生配置", "DeepSeek V4", "max", true,
+            SessionSettingsContent("DeepSeek Harness", "原生配置", "DeepSeek V4", "max", true,
                 efforts = listOf("low", "high", "max"), onEffortChange = {}, cancel = {}, done = { done = true }, choose = {})
         } } }
         assertButtonWithinActualWindow("new-config-cancel")

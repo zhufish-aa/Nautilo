@@ -7,6 +7,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -22,6 +23,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.nautilo.mobile.MobileViewModel
 import app.nautilo.mobile.Screen
@@ -32,9 +34,24 @@ import com.journeyapps.barcodescanner.ScanOptions
     val state by model.state.collectAsStateWithLifecycle()
     var pairSheet by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
+    var homeMenu by remember { mutableStateOf(false) }
     var showWorkflows by remember(state.host?.id, state.session?.id, state.screen) { mutableStateOf(false) }
     var link by remember { mutableStateOf("") }
     val context = LocalContext.current
+    val appearance = remember(context) { context.getSharedPreferences("appearance", android.content.Context.MODE_PRIVATE) }
+    var theme by remember(appearance) { mutableStateOf(appearance.getString("theme", "system") ?: "system") }
+    val dark = when (theme) {
+        "dark" -> true
+        "light" -> false
+        else -> isSystemInDarkTheme()
+    }
+    SideEffect {
+        (context as? android.app.Activity)?.window?.let { window ->
+            val bars = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+            bars.isAppearanceLightStatusBars = !dark
+            bars.isAppearanceLightNavigationBars = !dark
+        }
+    }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     LaunchedEffect(state.host?.id) {
         if (state.host != null && android.os.Build.VERSION.SDK_INT >= 33) {
@@ -50,7 +67,7 @@ import com.journeyapps.barcodescanner.ScanOptions
     val backTarget = when (state.screen) { Screen.FilePreview -> state.previewBack; Screen.ProjectFiles -> state.filesBack; Screen.FileDiff -> Screen.Workspace; Screen.Workspace, Screen.TeamTasks -> Screen.Chat; else -> Screen.Projects }
     val goBack = { if (state.screen == Screen.FilePreview) model.closeFilePreview() else model.navigate(backTarget) }
     BackHandler(state.screen != Screen.Projects) { goBack() }
-    NautiloTheme {
+    NautiloTheme(dark) {
         val motion = LocalNautiloMotion.current
         val palette = MobilePalette
         val projectList = rememberLazyListState()
@@ -62,10 +79,23 @@ import com.journeyapps.barcodescanner.ScanOptions
             .statusBarsPadding().navigationBarsPadding()) {
             if (state.screen != Screen.NewConversation) {
             Row(Modifier.fillMaxWidth().height(56.dp).background(palette.chrome).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                ActionIcon(if (state.screen == Screen.Projects) Icons.Outlined.Menu else Icons.Outlined.ArrowBack,
-                    if (state.screen == Screen.Projects) "电脑连接" else "返回") {
-                    if (state.screen == Screen.Projects) model.navigate(Screen.Computers)
-                    else goBack()
+                if (state.screen == Screen.Projects) Box {
+                    ActionIcon(Icons.Outlined.Menu, "菜单") { homeMenu = true }
+                    NMenu(expanded = homeMenu, onDismissRequest = { homeMenu = false }) {
+                        NMenuItem(text = { Text("电脑连接") }, onClick = { homeMenu = false; model.navigate(Screen.Computers) },
+                            leadingIcon = { Icon(Icons.Outlined.Computer, null) })
+                        NDivider()
+                        Text("外观", Modifier.padding(start = 14.dp, top = 8.dp, bottom = 3.dp), color = Secondary, fontSize = 12.sp)
+                        listOf("system" to "跟随系统", "light" to "浅色模式", "dark" to "深色模式").forEach { (value, label) ->
+                            NMenuItem(text = { Text(label) }, onClick = {
+                                theme = value
+                                appearance.edit().putString("theme", value).apply()
+                                homeMenu = false
+                            }, leadingIcon = { SelectionCheck(theme == value) })
+                        }
+                    }
+                } else {
+                    ActionIcon(Icons.Outlined.ArrowBack, "返回", click = goBack)
                 }
                 Column(Modifier.weight(1f).padding(start = 4.dp)) {
                     Text(when (state.screen) {
@@ -78,7 +108,9 @@ import com.journeyapps.barcodescanner.ScanOptions
                         Screen.NewConversation -> "新会话"
                         Screen.ProjectFiles -> state.fileProject?.name ?: "项目文件"
                         Screen.FilePreview -> state.filePreview.path.replace('\\','/').substringAfterLast('/')
-                    }, fontSize = if (state.screen in listOf(Screen.Projects, Screen.TeamTasks)) 20.sp else 18.sp,
+                    }, modifier = if (state.screen == Screen.Workspace) Modifier.fillMaxWidth() else Modifier,
+                        textAlign = if (state.screen == Screen.Workspace) TextAlign.Center else TextAlign.Start,
+                        fontSize = if (state.screen in listOf(Screen.Projects, Screen.TeamTasks)) 20.sp else 18.sp,
                         fontWeight = if (state.screen in listOf(Screen.Projects, Screen.TeamTasks)) FontWeight.SemiBold else FontWeight.Medium,
                         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 }
@@ -87,10 +119,6 @@ import com.journeyapps.barcodescanner.ScanOptions
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             NPanel({ menu = true }, Modifier.size(36.dp), shape = CircleShape, color = palette.inset) {
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.Search, "搜索会话", Modifier.size(18.dp), tint = Secondary) }
-                            }
-                            NPanel({ if (state.host == null) pairSheet = true else model.beginConversation() },
-                                Modifier.size(36.dp), shape = CircleShape, color = Selection) {
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.Add, "新建会话", Modifier.size(20.dp), tint = Accent) }
                             }
                         }
                     }

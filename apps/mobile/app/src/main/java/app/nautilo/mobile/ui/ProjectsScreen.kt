@@ -42,17 +42,35 @@ import app.nautilo.mobile.data.Conversation
     val counts = remember(state.host?.id) { mutableStateMapOf<String, Int>() }
     val palette = MobilePalette
     val motion = LocalNautiloMotion.current
-    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, 24.dp),
+    val start = { if (state.host == null) pair() else model.beginConversation() }
+    val voice = rememberVoiceInput {
+        model.beginConversation()
+        model.newDraft((model.state.value.newDraft + " " + it).trim())
+    }
+    Box(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, 86.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item("computer") {
             NPanel(onClick = { if (state.host == null) pair() else model.navigate(Screen.Computers) },
-                shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, Line), shadowElevation = if (palette.dark) 0.dp else 1.dp) {
+                shape = RoundedCornerShape(20.dp), border = BorderStroke(1.dp, palette.mirror), shadowElevation = if (palette.dark) 0.dp else 2.dp) {
                 Row(Modifier.fillMaxWidth().drawWithCache {
                     val glow = Brush.radialGradient(listOf(palette.green.copy(alpha = .09f), Color.Transparent),
                         center = Offset(size.width * .92f, 0f), radius = size.width * .49f)
+                    val step = 12.dp.toPx()
+                    val width = size.width
+                    val height = size.height
+                    val dots = buildList {
+                        for (row in 0 until (height / step).toInt()) for (column in 0 until (width / step).toInt()) {
+                            val point = Offset((column + .5f) * step, (row + .5f) * step)
+                            if (point.x > width / 2f) add(point)
+                        }
+                    }
                     onDrawBehind {
-                        if (state.connected && palette.dark) drawRect(glow)
-                        drawLine(palette.highlight, Offset(16.dp.toPx(), 1.dp.toPx()), Offset(size.width - 16.dp.toPx(), 1.dp.toPx()))
+                        if (state.connected) drawRect(glow)
+                        dots.forEach { point ->
+                            drawCircle(palette.dot.copy(alpha = palette.dot.alpha * (point.x / size.width - .5f) * 2),
+                                .8.dp.toPx(), point)
+                        }
                     }
                 }.padding(16.dp, 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Box(Modifier.size(40.dp).background(palette.inset, RoundedCornerShape(11.dp)), contentAlignment = Alignment.Center) {
@@ -62,18 +80,25 @@ import app.nautilo.mobile.data.Conversation
                         Text(state.host?.name ?: "连接我的电脑", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-.15).sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            HostSignal(state.connected)
+                            SonarPulseDot(state.connected)
                             Text(when {
                                 state.host == null -> "扫描配对码"
                                 state.connected -> "已连接 · ${state.projects.size} 个项目"
                                 state.connecting -> "正在连接"
                                 else -> "点此重新连接"
-                            }, fontSize = 12.sp, color = Secondary, modifier = Modifier.weight(1f, false), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (state.connected) state.latency?.let { Text("${it}ms", fontFamily = CodeFont, fontSize = 10.sp, color = Secondary, maxLines = 1) }
+                            }, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Secondary,
+                                modifier = Modifier.weight(1f, false), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                     if (state.connecting) NSpinner(Modifier.size(16.dp), strokeWidth = 1.6.dp, color = Accent)
-                    else Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp), tint = Secondary)
+                    else {
+                        if (state.connected) state.latency?.let { latency ->
+                            ConnectionMeter(latency)
+                            Text("${latency}ms", Modifier.background(palette.inset, CircleShape).padding(horizontal = 6.dp, vertical = 3.dp),
+                                fontFamily = CodeFont, fontSize = 11.sp, color = Ink, maxLines = 1)
+                        }
+                        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(15.dp), tint = Secondary)
+                    }
                 }
             }
         }
@@ -88,8 +113,11 @@ import app.nautilo.mobile.data.Conversation
                 Text("${state.projects.size}", Modifier.background(palette.inset, CircleShape).padding(horizontal = 7.dp, vertical = 2.dp),
                     color = Secondary, fontFamily = CodeFont, fontSize = 11.sp)
                 Spacer(Modifier.weight(1f))
-                if (state.host != null) NPanel({ newProject = true }, Modifier.size(36.dp).testTag("projects-create-project"), shape = CircleShape, color = Selection) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.Add, "新建项目", Modifier.size(18.dp), tint = Accent) }
+                if (state.host != null) NPanel({ newProject = true }, Modifier.height(28.dp).testTag("projects-create-project"), shape = CircleShape, color = Selection) {
+                    Row(Modifier.padding(horizontal = 9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Outlined.Add, null, Modifier.size(14.dp), tint = palette.brightAccent)
+                        Text("新建项目", color = palette.brightAccent, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
                 }
             }
         }
@@ -101,7 +129,7 @@ import app.nautilo.mobile.data.Conversation
                 val expanded = collapsed[project.id] != true || query.isNotBlank()
                 val limit = counts[project.id] ?: 5
                 val caret = animateFloatAsState(if (expanded) 180f else 0f, tween(if (motion) 200 else 0, easing = MotionEase), label = "project-caret")
-                NPanel(shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, Line), shadowElevation = if (palette.dark) 0.dp else 1.dp) {
+                NPanel(shape = RoundedCornerShape(18.dp), border = BorderStroke(1.dp, palette.mirror), shadowElevation = if (palette.dark) 0.dp else 2.dp) {
                     Column(Modifier.fillMaxWidth()) {
                         Row(Modifier.padding(start = 4.dp, end = 10.dp).heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
                             NPanel({ collapsed[project.id] = expanded }, Modifier.weight(1f), color = Color.Transparent) {
@@ -117,14 +145,13 @@ import app.nautilo.mobile.data.Conversation
                             NIconButton({ model.openProjectFiles(project.id) }, Modifier.size(36.dp).testTag("project-files:${project.id}")) {
                                 Icon(Icons.Outlined.AccountTree, "浏览 ${project.name} 文件", Modifier.size(17.dp), tint = Secondary)
                             }
-                            NPanel({ model.beginConversation(project.id) }, Modifier.size(28.dp).testTag("project-new-session:${project.id}"),
-                                shape = CircleShape, color = Selection) {
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.Add, "在 ${project.name} 新建会话", Modifier.size(16.dp), tint = Accent) }
+                            NIconButton({ model.beginConversation(project.id) }, Modifier.size(36.dp).testTag("project-new-session:${project.id}")) {
+                                Icon(Icons.Outlined.Edit, "在 ${project.name} 新建会话", Modifier.size(17.dp), tint = Accent)
                             }
                         }
                         AnimatedVisibility(expanded,
-                            enter = expandVertically(tween(if (motion) 260 else 0, easing = MotionEase)),
-                            exit = shrinkVertically(tween(if (motion) 260 else 0, easing = MotionEase))) {
+                            enter = expandVertically(if (motion) spring(dampingRatio = .85f) else snap()) + fadeIn(tween(if (motion) 160 else 0)),
+                            exit = shrinkVertically(tween(if (motion) 220 else 0, easing = MotionEase)) + fadeOut(tween(if (motion) 140 else 0))) {
                             Column(Modifier.animateContentSize(tween(if (motion) 260 else 0, easing = MotionEase))) {
                                 NDivider()
                                 if (sessions.isEmpty()) NTextButton(onClick = { model.beginConversation(project.id) }, Modifier.fillMaxWidth().height(40.dp)) {
@@ -132,7 +159,7 @@ import app.nautilo.mobile.data.Conversation
                                 }
                                 sessions.take(limit).forEachIndexed { index, session -> key(session.id) {
                                     if (index > 0) NDivider(Modifier.padding(horizontal = 16.dp))
-                                    MotionArrival(session.id, animate = true, distance = 5.dp, delayMs = (index % 5) * 22) {
+                                    MotionArrival(session.id, animate = true, distance = 6.dp, delayMs = (index % 5) * 35) {
                                         SessionListRow(session, state.session?.id == session.id) { model.openSession(session) }
                                     }
                                 } }
@@ -156,15 +183,52 @@ import app.nautilo.mobile.data.Conversation
                 action = { NTextButton({ if (state.host == null) pair() else newProject = true }) { Text(if (state.host == null) "连接电脑" else "新建项目") } })
         }
     }
+    NPanel(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 12.dp).height(56.dp),
+        color = palette.floating, shape = CircleShape, border = BorderStroke(1.dp, palette.mirror), shadowElevation = 6.dp) {
+        Row(Modifier.fillMaxSize().padding(start = 8.dp, end = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            NPanel(onClick = start, modifier = Modifier.weight(1f).fillMaxHeight(), shape = CircleShape, color = Color.Transparent) {
+                Row(Modifier.padding(start = 9.dp, end = 5.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(18.dp), tint = palette.brightAccent)
+                    Text("向 Nautilo 下达新任务…", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Ink,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            NIconButton(onClick = { if (state.host == null) pair() else voice() }, Modifier.size(40.dp)) {
+                Icon(Icons.Outlined.MicNone, "语音下达任务", Modifier.size(21.dp), tint = Secondary)
+            }
+            NFilledIconButton(onClick = start, modifier = Modifier.size(38.dp)) {
+                Icon(Icons.Outlined.ArrowUpward, "新建会话", Modifier.size(21.dp))
+            }
+        }
+    }
+    }
     if (newProject) NewProjectSheet(state, model, { newProject = false }) { newProject = false }
 }
 
 @Composable private fun SessionListRow(session: Conversation, selected: Boolean, open: () -> Unit) {
-    NPanel(open, Modifier.fillMaxWidth().heightIn(min = 44.dp), color = if (selected) Selection else Color.Transparent) {
+    NPanel(open, Modifier.fillMaxWidth().heightIn(min = 44.dp), color = if (selected) MobilePalette.inset else Color.Transparent,
+        shape = RoundedCornerShape(0.dp)) {
         Row(Modifier.padding(16.dp, 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            Text(session.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 14.sp, fontWeight = FontWeight.Normal)
+            Text(session.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ink)
             if (session.status in listOf("running", "waiting", "starting")) Dot(true)
             Text(shortTime(session.updatedAt), fontFamily = CodeFont, fontSize = 12.sp, color = Secondary)
+            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(14.dp), tint = Secondary)
+        }
+    }
+}
+
+@Composable private fun ConnectionMeter(latency: Long) {
+    val palette = MobilePalette
+    val bars = when {
+        latency < 60 -> 4
+        latency < 120 -> 3
+        latency < 240 -> 2
+        else -> 1
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {
+        repeat(4) { index ->
+            Box(Modifier.size(3.dp, (6 + index * 3).dp).background(if (index < bars) palette.mark else palette.divider, CircleShape))
         }
     }
 }

@@ -22,6 +22,7 @@ import app.nautilo.mobile.data.Host
 
 @Composable fun ComputersScreen(state: MobileState, model: MobileViewModel, pair: () -> Unit) {
     var remove by remember { mutableStateOf<Host?>(null) }
+    val palette = MobilePalette
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         if (state.pairing) item {
             NPanel(shape = RoundedCornerShape(20.dp), color = MobilePalette.card) {
@@ -40,11 +41,11 @@ import app.nautilo.mobile.data.Host
         }
         items(state.hosts, key = { it.id }) { host ->
             val current = host.id == state.host?.id
-            NPanel(shape = RoundedCornerShape(24.dp), color = MobilePalette.card, border = BorderStroke(1.dp, Line)) {
-                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            NPanel(shape = RoundedCornerShape(18.dp), color = palette.card, border = BorderStroke(1.dp, palette.mirror)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(48.dp).background(Selection.copy(alpha = .6f), RoundedCornerShape(15.dp)), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.DesktopWindows, null, Modifier.size(26.dp), tint = Accent)
+                        Box(Modifier.size(40.dp).background(Selection, RoundedCornerShape(11.dp)), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.DesktopWindows, null, Modifier.size(22.dp), tint = palette.brightAccent)
                         }
                         Column(Modifier.weight(1f).padding(start = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(host.name, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
@@ -55,14 +56,16 @@ import app.nautilo.mobile.data.Host
                         }
                         ActionIcon(Icons.Outlined.LinkOff, "移除配对") { remove = host }
                     }
-                    if (current) NPanel(shape = RoundedCornerShape(16.dp), color = MobilePalette.group) {
-                        Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    if (current) {
+                        NDivider()
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                             InfoRow("系统", state.system.let { when(it) { "macos" -> "macOS"; "windows" -> "Windows"; "linux" -> "Linux"; else -> "—" } })
                             InfoRow("连接", if (state.connected) when(state.path) { "direct" -> "P2P 直连"; "relay" -> "加密中继"; "mixed" -> "直连 / 中继"; else -> "端到端加密" } else "未连接")
                             if (state.connected && state.networkHint.isNotEmpty()) InfoRow("网络出口", "系统默认网络（VPN）")
                             state.latency?.let { InfoRow("往返延迟", "$it ms") }
                             InfoRow("工作区", "全部项目 · ${state.projects.size} 个")
                         }
+                        NDivider()
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         NTextButton(onClick = { if (current) model.retry() else model.selectHost(host) }) { Text(if (current) "重新连接" else "连接这台电脑") }
@@ -86,5 +89,8 @@ import app.nautilo.mobile.data.Host
 }
 
 @Composable private fun InfoRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth()) { Text(label, Modifier.width(84.dp), fontSize = 13.sp, color = Secondary); Text(value, fontSize = 13.sp) }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(label, Modifier.width(72.dp), fontSize = 13.sp, color = Secondary)
+        Text(value, Modifier.weight(1f), fontSize = 13.sp, color = Ink)
+    }
 }

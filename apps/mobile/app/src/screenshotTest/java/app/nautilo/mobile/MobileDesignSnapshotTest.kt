@@ -109,7 +109,9 @@ class MobileDesignSnapshotTest {
         newModels = listOf(json("id" to "gpt-6.1-sol", "displayName" to "GPT-6.1"))), "new-conversation")
 
     @Test fun projectsAndWorkspaceSurfacesInBothThemes() {
-        val base = state("").copy(host = Host("pc", "Nautilo PC", json()), latency = 28, sessions = listOf(state("").session!!),
+        val updateTime = java.time.LocalDate.now().atTime(21, 43).atZone(java.time.ZoneId.systemDefault()).toInstant().toString()
+        val base = state("").copy(host = Host("pc", "Nautilo PC", json()), latency = 28,
+            sessions = listOf(state("").session!!.copy(updatedAt = updateTime)),
             setup = json("agents" to org.json.JSONArray().put(json("id" to "codex", "name" to "Codex"))))
         for (dark in listOf(false, true)) {
             val theme = if (dark) "dark" else "light"
@@ -118,6 +120,25 @@ class MobileDesignSnapshotTest {
             render(base.copy(screen = Screen.NewConversation, newModels = listOf(json("id" to "gpt-6.1-sol", "displayName" to "GPT-6.1 Sol",
                 "reasoningEfforts" to org.json.JSONArray(listOf("low", "high", "max")), "defaultReasoningEffort" to "max"))), "new-conversation-$theme", dark, still = true)
         }
+    }
+
+    @Test fun sentMessageUsesReadableTextInBothThemes() {
+        val fixture = state("我会逐项核对接入情况，并列出还缺哪些能力。")
+        val conversation = fixture.copy(messages = listOf(
+            fixture.messages.first().copy(text = "你要看看还有没有什么缺失的，是不是完美接入"),
+            fixture.messages.last(),
+        ))
+        render(conversation, "sent-message-light", still = true)
+        render(conversation, "sent-message-dark", dark = true, still = true)
+    }
+
+    @Test fun computerDetailsHaveReadableValuesInBothThemes() {
+        val host = Host("pc", "Nautilo PC", json())
+        val connected = state("").copy(screen = Screen.Computers, host = host,
+            hosts = listOf(host, Host("laptop", "Nautilo Laptop", json())),
+            system = "windows", path = "direct", latency = 10)
+        render(connected, "computers-light", still = true)
+        render(connected, "computers-dark", dark = true, still = true)
     }
 
     @Test fun questionMatchesDesktopCard() = render(state("").copy(messages = emptyList(), runs = emptyList(),
@@ -271,7 +292,7 @@ class MobileDesignSnapshotTest {
                 NautiloTheme {
                     Box(Modifier.fillMaxSize().background(Color(0xFFEDEDED)).padding(bottom = 28.dp), contentAlignment = Alignment.BottomCenter) {
                         Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).background(Color.White, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).padding(top = 14.dp)) {
-                            NewConversationSettingsContent("DeepSeek Harness", "DeepSeek API", "DeepSeek V4", "max", true,
+                            SessionSettingsContent("DeepSeek Harness", "DeepSeek API", "DeepSeek V4", "max", true,
                                 efforts = listOf("low", "medium", "high", "max"), onEffortChange = {}, cancel = {}, done = {}, choose = {})
                         }
                     }

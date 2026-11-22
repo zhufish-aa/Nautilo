@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.Font
@@ -36,23 +37,25 @@ internal data class MobileColors(
     val pressed = Color(0xFF1D4ED8)
     val onPrimary = Color.White
     val green = Color(0xFF10B981)
-    val mark = if (dark) green else Color(0xFF047857)
+    val mark = if (dark) green else Color(0xFF059669)
     val amber = if (dark) Color(0xFFF59E0B) else Color(0xFF9A5805)
     val tint = accent.copy(alpha = if (dark) .13f else .085f)
     val chrome = canvas.copy(alpha = if (dark) .78f else .82f)
-    val floating = (if (dark) sheet else card).copy(alpha = if (dark) .84f else .90f)
-    val veil = Color.Black.copy(alpha = if (dark) .58f else .34f)
+    val floating = if (dark) Color(0xE6141924) else Color(0xEBFFFFFF)
+    val veil = (if (dark) Color.Black else Color(0xFF0F172A)).copy(alpha = if (dark) .62f else .32f)
     val highlight = if (dark) Color.White.copy(alpha = .05f) else Color.Transparent
     val dot = if (dark) Color.White.copy(alpha = .06f) else Color(0xFF0F172A).copy(alpha = .07f)
+    val mirror = Brush.verticalGradient(if (dark) listOf(Color.White.copy(alpha = .14f), Color.White.copy(alpha = .04f)) else listOf(divider, divider))
+    val brightAccent = if (dark) Color(0xFF60A5FA) else Color(0xFF1D4ED8)
 }
 
 internal val LightMobileColors = MobileColors(
-    Color(0xFFF4F5F8), Color.White, Color(0xFFECEFF4), Color.White, Color(0xFFF4F5F8),
-    Color(0xFF0F172A), Color(0xFF526176), Color(0xFF64748B), Color(0x0F0F172A), Color(0x1A0F172A),
+    Color(0xFFF1F4F9), Color.White, Color(0xFFE8EDF5), Color.White, Color(0xFFF1F4F9),
+    Color(0xFF0F172A), Color(0xFF475569), Color(0xFF64748B), Color(0x0F0F172A), Color(0x1A0F172A),
     Color(0xFF2563EB), Color(0xFFAE3843), dark = false,
 )
 private val DarkMobileColors = MobileColors(
-    Color(0xFF090B0E), Color(0xFF11141B), Color(0xFF0C0E13), Color(0xFF141821), Color(0xFF181C26),
+    Color(0xFF07090D), Color(0xFF11151E), Color(0xFF0A0D13), Color(0xFF11151E), Color(0xFF181C26),
     Color(0xFFF8FAFC), Color(0xFF94A3B8), Color(0xFF64748B), Color(0x12FFFFFF), Color(0x1AFFFFFF),
     Color(0xFF3B82F6), Color(0xFFF87171), dark = true,
 )
@@ -67,7 +70,7 @@ val Green: Color @Composable get() = MobilePalette.mark
 val Danger: Color @Composable get() = MobilePalette.danger
 @OptIn(ExperimentalTextApi::class)
 val UiFont = FontFamily(*listOf(400, 500, 600, 700).map { weight ->
-    Font(app.nautilo.mobile.R.font.noto_sans_sc, weight = FontWeight(weight), variationSettings = FontVariation.Settings(FontVariation.weight(weight)))
+    Font(app.nautilo.mobile.R.font.nautilo_text, weight = FontWeight(weight), variationSettings = FontVariation.Settings(FontVariation.weight(weight)))
 }.toTypedArray())
 @OptIn(ExperimentalTextApi::class)
 val CodeFont = FontFamily(Font(app.nautilo.mobile.R.font.jetbrains_mono, variationSettings = FontVariation.Settings(FontVariation.weight(400))))
@@ -83,8 +86,8 @@ val UiTypography = Typography(
     labelMedium = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 13.sp, fontWeight = FontWeight.Medium),
     labelSmall = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 12.sp)
 )
-@Composable fun NautiloTheme(content: @Composable () -> Unit) {
-    val colors = if (isSystemInDarkTheme()) DarkMobileColors else LightMobileColors
+@Composable fun NautiloTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+    val colors = if (dark) DarkMobileColors else LightMobileColors
     val scheme = (if (colors.dark) darkColorScheme() else lightColorScheme()).copy(
         primary = colors.primary, onPrimary = colors.onPrimary, secondary = colors.secondary,
         primaryContainer = colors.tint, onPrimaryContainer = colors.ink, secondaryContainer = colors.group, onSecondaryContainer = colors.ink,

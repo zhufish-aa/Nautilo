@@ -31,6 +31,8 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.pointer.pointerInput
@@ -58,13 +60,15 @@ import androidx.compose.ui.window.PopupProperties
     val active = pressed && onClick != null && enabled
     val surfaceColor = if (!active) color else if (color == colors.primary) colors.pressed
         else if (color.alpha == 0f) colors.tint else lerp(color, colors.ink, .06f)
-    val contentScale = animateFloatAsState(if (active && motion) if (shape == CircleShape) .94f else .985f else 1f,
-        tween(if (motion) 120 else 0, easing = MotionEase), label = "surface-press")
+    val haptics = LocalHapticFeedback.current
     var surface = modifier
-    if (onClick != null) surface = surface.clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+    if (onClick != null) surface = surface.clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button) {
+        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        onClick()
+    }
     CompositionLocalProvider(LocalContentColor provides contentColor) {
         Box(surface, propagateMinConstraints = true) {
-            var layer = Modifier.graphicsLayer { scaleX = contentScale.value; scaleY = contentScale.value }
+            var layer = Modifier.springPress(active && motion)
                 .shadow(shadowElevation, shape).clip(shape).background(surfaceColor)
             if (border != null) layer = layer.border(border, shape)
             Box(layer, propagateMinConstraints = true) { content() }
@@ -172,7 +176,7 @@ import androidx.compose.ui.window.PopupProperties
     val palette = MobilePalette
     val motion = LocalNautiloMotion.current
     val dismiss by rememberUpdatedState(onDismissRequest)
-    val blur = with(LocalDensity.current) { 6.dp.roundToPx() }
+    val blur = with(LocalDensity.current) { 10.dp.roundToPx() }
     // Compose 1.7's false branch ignores actual window measure specs and uses
     // screenHeightDp. Keep the normal measuring branch, with a full-size window.
     Dialog(onDismissRequest, properties = DialogProperties(usePlatformDefaultWidth = true, decorFitsSystemWindows = false)) {
@@ -193,12 +197,25 @@ import androidx.compose.ui.window.PopupProperties
         // Dialog.updateParameters runs after its children and restores WRAP_CONTENT.
         // Queue after that update on every recomposition, including picker changes.
         SideEffect { window?.decorView?.removeCallbacks(sizeWindow); window?.decorView?.post(sizeWindow) }
-        DisposableEffect(window, hostRoot, blur) {
+        DisposableEffect(window, hostRoot, blur, palette.dark) {
             // Set before the first draw, rather than in the posted size correction.
             window?.apply {
+                androidx.core.view.WindowCompat.setDecorFitsSystemWindows(this, false)
+                statusBarColor = android.graphics.Color.TRANSPARENT
+                navigationBarColor = android.graphics.Color.TRANSPARENT
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    isStatusBarContrastEnforced = false
+                    isNavigationBarContrastEnforced = false
+                }
+                val bars = androidx.core.view.WindowCompat.getInsetsController(this, decorView)
+                bars.isAppearanceLightStatusBars = !palette.dark
+                bars.isAppearanceLightNavigationBars = !palette.dark
                 setDimAmount(0f)
                 attributes = attributes.apply {
                     windowAnimations = 0
+                    if (android.os.Build.VERSION.SDK_INT >= 28) {
+                        layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
                     if (android.os.Build.VERSION.SDK_INT >= 31 && windowManager.isCrossWindowBlurEnabled) {
                         blurBehindRadius = blur
                         flags = flags or android.view.WindowManager.LayoutParams.FLAG_BLUR_BEHIND
@@ -228,7 +245,7 @@ import androidx.compose.ui.window.PopupProperties
             Box(Modifier.matchParentSize().graphicsLayer {
                 alpha = (entrance.value * 1.45f).coerceAtMost(1f) * (1f - drag / size.height.coerceAtLeast(1f)).coerceAtLeast(0f)
             }.background(palette.veil))
-            val safePadding = WindowInsets.safeDrawing.asPaddingValues()
+            val safePadding = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal).asPaddingValues()
             BoxWithConstraints(Modifier.fillMaxSize().padding(safePadding).consumeWindowInsets(safePadding), contentAlignment = Alignment.BottomCenter) {
                 val density = LocalDensity.current
                 val threshold = with(density) { 88.dp.toPx() }
@@ -250,9 +267,9 @@ import androidx.compose.ui.window.PopupProperties
                             // footer inside the safe area throughout the entrance.
                             transformOrigin = TransformOrigin(.5f, 1f)
                             scaleY = .94f + .06f * entrance.value
-                            translationY = drag
+                            translationY = drag + 12.dp.toPx() * (1f - entrance.value)
                         }
-                        .background(containerColor, shape).border(1.dp, palette.edge, shape)) {
+                        .background(containerColor, shape).border(1.dp, palette.mirror, shape).navigationBarsPadding().imePadding()) {
                         Box(Modifier.fillMaxWidth().height(30.dp).testTag("sheet-grab-handle")
                             .draggable(rememberDraggableState { delta -> drag = (drag + delta).coerceAtLeast(0f) },
                                 Orientation.Vertical, onDragStarted = { settle.stop() }, onDragStopped = { velocity ->
@@ -265,7 +282,7 @@ import androidx.compose.ui.window.PopupProperties
                                     if (close) dismiss()
                                     drag = 0f
                                 }), contentAlignment = Alignment.Center) {
-                            Box(Modifier.size(36.dp, 4.dp).background(palette.secondary.copy(alpha = .35f), CircleShape))
+                            Box(Modifier.size(38.dp, 4.dp).background(palette.secondary.copy(alpha = .35f), CircleShape))
                         }
                         content()
                     }

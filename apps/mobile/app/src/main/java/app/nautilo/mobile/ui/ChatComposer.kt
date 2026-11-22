@@ -2,6 +2,10 @@ package app.nautilo.mobile.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
@@ -11,8 +15,9 @@ import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -52,7 +57,7 @@ import kotlinx.coroutines.launch
 internal val ChatBackground: Color @Composable get() = MobilePalette.canvas
 internal val ComposerLine: Color @Composable get() = Line
 internal val ComposerSecondary: Color @Composable get() = Secondary
-private val ComposerSpring = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
+private enum class ComposerAction { Voice, Send, Loading, Stop }
 
 /** One field stays mounted while its surface expands on focus. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -115,32 +120,37 @@ private val ComposerSpring = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
         }
     }
     val hasContent = text.isNotBlank() || attachments.isNotEmpty()
-    val sendReady = animateFloatAsState(if (hasContent) 1f else 0f,
-        tween(if (motion) 220 else 0, easing = ComposerSpring), label = "composer-send-ready")
+    val action = when {
+        busy -> ComposerAction.Loading
+        hasContent -> ComposerAction.Send
+        onStop != null -> ComposerAction.Stop
+        else -> ComposerAction.Voice
+    }
     val primary: @Composable () -> Unit = {
         Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-            when {
-                busy -> {
-                    NSpinner(Modifier.size(38.dp), strokeWidth = 1.5.dp, color = Accent)
-                    Icon(Icons.Outlined.Stop, "正在创建会话", Modifier.size(17.dp), tint = Accent)
+            AnimatedContent(action, modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center, transitionSpec = {
+                if (motion) (scaleIn(spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium), initialScale = .74f) +
+                    fadeIn(tween(120))).togetherWith(scaleOut(tween(120), targetScale = .86f) + fadeOut(tween(90)))
+                else fadeIn(tween(0)).togetherWith(fadeOut(tween(0)))
+            }, label = "composer-action") { current ->
+                when (current) {
+                    ComposerAction.Loading -> Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+                        NSpinner(Modifier.fillMaxSize(), strokeWidth = 1.5.dp, color = Accent)
+                        Icon(Icons.Outlined.Stop, "正在创建会话", Modifier.size(17.dp), tint = Accent)
+                    }
+                    ComposerAction.Send -> NFilledIconButton(onClick = send, enabled = canSend && !attachmentBusy,
+                        modifier = Modifier.size(if (alwaysShowTools) 36.dp else 40.dp).testTag("composer-send"), shape = CircleShape,
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = palette.primary, contentColor = palette.onPrimary,
+                            disabledContainerColor = palette.inset, disabledContentColor = palette.muted)) {
+                        Icon(Icons.Outlined.ArrowUpward, "发送消息", Modifier.size(22.dp))
+                    }
+                    ComposerAction.Stop -> NFilledIconButton(onClick = { onStop?.invoke() }, enabled = enabled && onStop != null, modifier = Modifier.size(40.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = palette.tint, contentColor = Accent)) {
+                        NSpinner(Modifier.size(37.dp), strokeWidth = 1.5.dp, color = Accent)
+                        Icon(Icons.Outlined.Stop, "停止生成", Modifier.size(20.dp))
+                    }
+                    ComposerAction.Voice -> ComposerVoice(enabled, onVoice)
                 }
-                hasContent -> NFilledIconButton(onClick = send, enabled = canSend && !attachmentBusy,
-                    modifier = Modifier.size(40.dp).testTag("composer-send"), shape = CircleShape,
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = palette.primary, contentColor = palette.onPrimary,
-                        disabledContainerColor = palette.inset, disabledContentColor = palette.muted)) {
-                    Icon(Icons.Outlined.ArrowUpward, "发送消息", Modifier.size(22.dp).graphicsLayer {
-                        val progress = sendReady.value
-                        scaleX = .72f + .28f * progress
-                        scaleY = scaleX
-                        rotationZ = -32f * (1f - progress)
-                    })
-                }
-                onStop != null -> NFilledIconButton(onClick = onStop, enabled = enabled, modifier = Modifier.size(40.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = palette.tint, contentColor = Accent)) {
-                    NSpinner(Modifier.size(37.dp), strokeWidth = 1.5.dp, color = Accent)
-                    MotionSymbol("stop") { Icon(Icons.Outlined.Stop, "停止生成", Modifier.size(20.dp)) }
-                }
-                else -> ComposerVoice(enabled, onVoice)
             }
             if (motion) Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(20.dp).graphicsLayer {
                 val takeoff = (pulse.value * 2.5f).coerceIn(0f, 1f)
@@ -149,8 +159,8 @@ private val ComposerSpring = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
             }, tint = if (hasContent) palette.onPrimary else Accent)
         }
     }
-    NPanel(color = palette.card, shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(1.dp, if (focused) Accent.copy(alpha = .48f) else palette.edge),
+    NPanel(color = palette.card, shape = RoundedCornerShape(if (alwaysShowTools) 24.dp else 22.dp),
+        border = if (focused) BorderStroke(1.dp, Accent.copy(alpha = .48f)) else BorderStroke(1.dp, palette.mirror),
         shadowElevation = if (alwaysShowTools) 3.dp else 0.dp,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 6.dp, bottom = 10.dp)
             .testTag("chat-composer")
@@ -204,7 +214,7 @@ private val ComposerSpring = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
               }
             }
         }
-        if (motion) Box(Modifier.align(Alignment.TopCenter).fillMaxWidth(.38f).height(2.dp).graphicsLayer {
+        if (motion) Box(Modifier.align(Alignment.TopCenter).fillMaxWidth(.38f).height(1.5.dp).graphicsLayer {
             val progress = pulse.value
             alpha = kotlin.math.sin(progress * kotlin.math.PI).toFloat().coerceAtLeast(0f)
             translationX = size.width * (progress - .5f) * 2.6f

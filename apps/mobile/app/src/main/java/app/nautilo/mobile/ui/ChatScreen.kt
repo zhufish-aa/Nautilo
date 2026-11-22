@@ -124,7 +124,9 @@ import kotlinx.coroutines.launch
                         Icon(Icons.Outlined.InsertDriveFile, null, Modifier.size(16.dp), tint = ComposerSecondary)
                         Text(name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     } }
-                    if (message.text.isNotBlank() && !(message.attachments.isNotEmpty() && message.text == "请查看附件。")) Text(message.text, fontSize = 17.sp, lineHeight = 27.sp)
+                    if (message.text.isNotBlank() && !(message.attachments.isNotEmpty() && message.text == "请查看附件。")) {
+                        Text(message.text, color = Ink, fontSize = 17.sp, lineHeight = 27.sp)
+                    }
                 }
             }
         }
