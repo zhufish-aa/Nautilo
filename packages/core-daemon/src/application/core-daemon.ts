@@ -141,7 +141,7 @@ export class CoreDaemon {
     });
     registerIpcHandlers(this.gateway, this);
   }
-  health() { return { service: "core-daemon" as const, status: "ok" as const, version: "0.1.0", features: {sourceControl:1 as const,terminalTabs:1 as const} }; }
+  health() { return { service: "core-daemon" as const, status: "ok" as const, version: "0.1.0", features: {sourceControl:2 as const,terminalTabs:1 as const} }; }
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     const runsStopped = this.runs.stop();

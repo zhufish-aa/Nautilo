@@ -45,13 +45,14 @@ const descriptor: ProviderDescriptor = {
   nativeApiProtocol: "responses",
   connectionProtocolDiscovery: true,
   observeApiOutput: true,
-  envPassthrough: ["TRAE_CONFIG_FILE"],
+  envPassthrough: ["TRAE_CONFIG_FILE", "TRAE_HOME"],
   credentialEnv: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "DOUBAO_API_KEY"]
 };
 
 type TraeMode = "acp" | "cli";
 
 interface TraeBinary {
+  executable: string;
   mode: TraeMode;
   version: string;
   help: string;
@@ -159,7 +160,7 @@ class TraePluginAdapter implements AgentCliAdapter {
   async detect(instance: { executable: string; baseArgs?: string[] }): Promise<AdapterDetectionResult> {
     const executable = instance.executable || descriptor.defaultExecutable || "traecli";
     try {
-      const probed = await probeTraeBinary(executable, instance.baseArgs ?? []);
+      const probed = await selectedTraeBinary(instance);
       if (!probed) {
         return {
           installed: false,
@@ -170,7 +171,7 @@ class TraePluginAdapter implements AgentCliAdapter {
       return {
         installed: true,
         compatible: true,
-        executable,
+        executable: probed.executable,
         version: probed.version,
         help: probed.help.slice(0, 16_384),
         error: undefined
@@ -189,7 +190,7 @@ class TraePluginAdapter implements AgentCliAdapter {
   }
 
   async connectionProtocol(request: AdapterStartRequest): Promise<"responses" | "anthropic"> {
-    const binary = await probeTraeBinary(request.instance.executable || descriptor.defaultExecutable!, request.instance.baseArgs);
+    const binary = await selectedTraeBinary(request.instance);
     if (!binary) throw new Error("未找到可用的 Trae CLI");
     return modernCli(binary) ? "responses" : "anthropic";
   }
@@ -203,9 +204,13 @@ class TraePluginAdapter implements AgentCliAdapter {
 
     const events = async function* (): AsyncGenerator<AdapterEvent> {
       try {
-        const binary = await probeTraeBinary(request.instance.executable || descriptor.defaultExecutable || "traecli", request.instance.baseArgs);
+        const binary = await selectedTraeBinary(request.instance);
         if (cancelled) return;
         if (!binary) throw new Error("未找到可用的 Trae CLI（traecli 或 trae-cli）");
+        if (sessionId && sessionId.startsWith("nautilo-trae:") !== (binary.mode === "cli")) {
+          throw new Error("Trae session belongs to a different execution mode");
+        }
+        request = { ...request, instance: { ...request.instance, executable: binary.executable } };
         request = binary.mode === "cli" ? prepareOpenSourceConnection(request) : prepareConnection(request, modernCli(binary));
         if (binary.mode === "cli") {
           request = prepareOpenSourceRuntime(request, resume ? (request as AdapterResumeRequest).providerSessionId : undefined);
@@ -286,7 +291,14 @@ export async function probeTraeBinary(executable: string, baseArgs: string[] = [
     ? "acp"
     : /^\s*run(\s|,|$)/m.test(help.text) ? "cli" : undefined;
   if (!mode) return undefined;
-  return { mode, version: version.text.trim(), help: help.text };
+  return { executable, mode, version: version.text.trim(), help: help.text };
+}
+
+async function selectedTraeBinary(instance: { executable: string; baseArgs?: string[] }): Promise<TraeBinary | undefined> {
+  const executable = instance.executable || "trae-cli";
+  const args = instance.baseArgs ?? [];
+  return await probeTraeBinary(executable, args)
+    ?? (executable === "trae-cli" && args.length === 0 ? probeTraeBinary("traecli") : undefined);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -376,6 +388,21 @@ async function* acpRun(
       // The daemon coalesces delta buffers when a completed event carries no text.
       if (messageStreamed) yield { kind: "message", phase: "completed", messageId: state.messageId, text: "" };
       if (thinkingStreamed) yield { kind: "thinking", phase: "completed", messageId: state.thinkingId, text: "" };
+      const usage = asRecord(asRecord(event.result).usage);
+      const input = typeof usage.inputTokens === "number" ? usage.inputTokens : undefined;
+      const output = typeof usage.outputTokens === "number" ? usage.outputTokens : undefined;
+      const read = typeof usage.cachedReadTokens === "number" ? usage.cachedReadTokens : undefined;
+      const write = typeof usage.cachedWriteTokens === "number" ? usage.cachedWriteTokens : undefined;
+      if (input !== undefined || output !== undefined) {
+        const inclusive = input !== undefined && output !== undefined && read !== undefined
+          && usage.totalTokens === input + output && read <= input;
+        const exclusive = input !== undefined && output !== undefined && read !== undefined
+          && usage.totalTokens === input + output + read + (write ?? 0);
+        yield { kind: "usage", usageScope: "turn", inputTokens: input, outputTokens: output, cachedInputTokens: read,
+          cacheCreationInputTokens: exclusive ? write ?? 0 : write,
+          inputTokensIncludesCache: inclusive ? true : exclusive || (input !== undefined && read !== undefined && read > input) ? false : undefined,
+          reasoningOutputTokens: typeof usage.thoughtTokens === "number" ? usage.thoughtTokens : undefined, raw: usage };
+      }
       yield { kind: "status", phase: event.error ? "turn_failed" : "turn_completed" };
       hooks.setFinished();
       await handle.cancel();
@@ -655,6 +682,7 @@ export function parseTraeAcpUpdate(value: unknown, state: TraeAcpParseState): Ad
   if (update.sessionUpdate === "usage_update") {
     return [{
       kind: "usage",
+      usageScope: "context",
       contextUsed: typeof update.used === "number" ? update.used : undefined,
       contextWindow: typeof update.size === "number" ? update.size : undefined,
       raw: value
@@ -921,7 +949,7 @@ async function* plainRun(request: AdapterStartRequest | AdapterResumeRequest, se
           const frame = JSON.parse(line.slice("@nautilo-event:".length));
           if (frame.kind === "nautilo_ready") {bridgeReady=true;continue;}
           streamedMessage ||= frame.kind === "message";
-          streamedUsage ||= frame.kind === "usage";
+          streamedUsage ||= frame.kind === "usage" && frame.usageScope === "turn";
           yield frame as AdapterEvent;
         } else { stdout += line + "\n"; yield {kind:"raw",stream:"stdout",text:line+"\n"}; }
       }
@@ -935,13 +963,39 @@ async function* plainRun(request: AdapterStartRequest | AdapterResumeRequest, se
         if (request.env?.NAUTILO_TRAE_TRAJECTORY) {
           const trajectory = JSON.parse(readFileSync(request.env.NAUTILO_TRAE_TRAJECTORY, "utf8"));
           if (trajectory.success !== true) throw new Error("Trae Agent did not complete the task; check the configured model and execution result");
-          const interactions = (Array.isArray(trajectory.llm_interactions) ? trajectory.llm_interactions : []) as { response?: { content?: string; usage?: { input_tokens?: number; output_tokens?: number } } }[];
-          const answer = trajectory.final_result || [...interactions].reverse().find(item => item.response?.content)?.response?.content;
+          const interactions: RecordValue[] = (Array.isArray(trajectory.llm_interactions) ? trajectory.llm_interactions : []).map(asRecord);
+          const finalResponse = [...interactions].reverse().find(item => asRecord(item.response).content);
+          const answer = trajectory.final_result || asRecord(finalResponse?.response).content;
           if (typeof answer !== "string" || !answer.trim()) throw new Error("Trae Agent returned no assistant response");
           if (!streamedMessage) yield { kind: "message", phase: "completed", text: answer };
-          if (!streamedUsage) yield { kind: "usage", usageScope: "turn", inputTokensIncludesCache: false,
-            inputTokens: interactions.reduce((sum, item) => sum + (item.response?.usage?.input_tokens ?? 0), 0),
-            outputTokens: interactions.reduce((sum, item) => sum + (item.response?.usage?.output_tokens ?? 0), 0) };
+          if (!streamedUsage) {
+            const counters = interactions.flatMap(item => {
+              const usage = asRecord(asRecord(item.response).usage);
+              const input = typeof usage.input_tokens === "number" ? usage.input_tokens : undefined;
+              const output = typeof usage.output_tokens === "number" ? usage.output_tokens : undefined;
+              if (input === undefined && output === undefined) return [];
+              const read = typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : undefined;
+              const write = typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : undefined;
+              const uncached = item.provider === "anthropic" ? input
+                : item.provider === "openai" && input !== undefined && read !== undefined && input >= read ? input - read : undefined;
+              return [{ inputTokens: uncached, cachedInputTokens: read, cacheCreationInputTokens: write, outputTokens: output }];
+            });
+            const last = counters.at(-1);
+            if (last) {
+              const { inputTokens, cachedInputTokens, cacheCreationInputTokens } = last;
+              if (inputTokens !== undefined && cachedInputTokens !== undefined && cacheCreationInputTokens !== undefined) {
+                yield { kind: "usage", usageScope: "context", ...last, inputTokensIncludesCache: false,
+                  contextUsed: inputTokens + cachedInputTokens + cacheCreationInputTokens };
+              }
+              const sum = (key: keyof typeof last) => counters.reduce<number | undefined>((total, item) => {
+                const count = item[key];
+                return total === undefined || count === undefined ? undefined : total + count;
+              }, 0);
+              yield { kind: "usage", usageScope: "turn", inputTokensIncludesCache: false,
+                inputTokens: sum("inputTokens"), cachedInputTokens: sum("cachedInputTokens"),
+                cacheCreationInputTokens: sum("cacheCreationInputTokens"), outputTokens: sum("outputTokens") };
+            }
+          }
         } else if (text) yield { kind: "message", phase: "completed", text };
         yield { kind: "status", phase: "turn_completed" };
       } else {

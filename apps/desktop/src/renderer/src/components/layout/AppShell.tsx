@@ -1,6 +1,5 @@
-import { useState, type ReactNode, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type ReactNode, type CSSProperties } from "react";
 import {ResizeHandle,useRememberedWidth} from "../ui/ResizeHandle";
-import { PanelLeftOpen } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
@@ -51,18 +50,32 @@ export function PageHeader({
 export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const { t } = useI18n();
   const location = useLocation();
+  const shell = useRef<HTMLDivElement>(null);
+  const [gitExpanded, setGitExpanded] = useState(false);
+  useEffect(() => {
+    const panel = gitExpanded && shell.current?.querySelector(".scm-drawer:not([hidden])");
+    if (!panel || !shell.current) return;
+    const observer = new MutationObserver(() => { if (!panel.isConnected) setGitExpanded(false); });
+    observer.observe(shell.current, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [gitExpanded]);
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem("nautilo.sidebar.collapsed") === "true"; } catch { return false; } });
+  const [assistantExpanded, setAssistantExpanded] = useState(false);
   const sidebarWidth=useRememberedWidth("nautilo.sidebar.width",window.innerWidth<=780?180:window.innerWidth<=1100?240:280,180,480);
   const toggleSidebar = (value: boolean): void => { setCollapsed(value); try { localStorage.setItem("nautilo.sidebar.collapsed", String(value)); } catch { /* Storage can be disabled. */ } };
   // The chat-first workbench uses the full width/height; other pages stay centered.
   const fullBleed = location.pathname === "/work" || location.pathname === "/sessions" || location.pathname.startsWith("/sessions/");
   const isAssistant = location.pathname === "/assistant";
+  const iconRail = isAssistant ? !assistantExpanded : collapsed;
+  useEffect(() => {
+    if (!isAssistant) setAssistantExpanded(false);
+  }, [isAssistant]);
   const isSettings = location.pathname.startsWith("/settings");
   const isRuns = location.pathname === "/runs";
   const isWorkflows = location.pathname === "/workflows";
 
   return (
-    <div className="app-shell flex h-screen flex-col overflow-hidden text-ink">
+    <div ref={shell} className="app-shell flex h-screen flex-col overflow-hidden text-ink" data-git-sidebar-expanded={gitExpanded || undefined}>
       <a
         href="#main-content"
         className="sr-only z-50 rounded-lg bg-accent px-3 py-2 text-sm text-on-accent focus:not-sr-only focus:absolute focus:top-2 focus:left-2"
@@ -72,29 +85,33 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
       <TitleBar />
       <div className="relative z-10 flex min-h-0 flex-1">
         {!isSettings && (
-          <div className="sidebar-slot" data-collapsed={collapsed} style={{"--sidebar-width":`${sidebarWidth.width}px`,position:"relative",overflow:collapsed?"hidden":"visible",transition:"none"} as CSSProperties}>
-            <Sidebar collapsed={collapsed} onCollapse={() => {
-              toggleSidebar(true);
-              requestAnimationFrame(() => document.getElementById("sidebar-expand")?.focus());
+          <div className="sidebar-slot" data-icon-rail={iconRail || undefined} style={{"--sidebar-width":`${sidebarWidth.width}px`} as CSSProperties}>
+            <Sidebar onToggle={(expand) => {
+              if (isAssistant) {
+                setAssistantExpanded(expand);
+              } else if (window.innerWidth < 1560 && shell.current?.querySelector(".scm-drawer:not([hidden])")) {
+                setGitExpanded(expand);
+              } else {
+                toggleSidebar(!expand);
+              }
+              requestAnimationFrame(() => document.getElementById(expand ? "sidebar-collapse" : "sidebar-expand")?.focus());
             }} />
-            {!collapsed&&<ResizeHandle label="调整侧栏宽度" value={sidebarWidth.width} min={180} max={480} onChange={sidebarWidth.resize} onCommit={sidebarWidth.save} reset={280}/>}
+            <ResizeHandle label="调整侧栏宽度" value={sidebarWidth.width} min={180} max={480} onChange={sidebarWidth.resize} onCommit={sidebarWidth.save} reset={280}/>
           </div>
         )}
-        <div className="workspace-stage flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div className={cn("flex min-h-0 min-w-0 flex-1 overflow-hidden", !isSettings && "workspace-stage")}>
           <main
             id="main-content"
-            data-sidebar-collapsed={collapsed && !isSettings ? "true" : undefined}
             tabIndex={-1}
             className={cn("workspace-main relative min-w-0 flex-1 outline-none", fullBleed || isSettings || isAssistant ? "overflow-hidden" : "overflow-y-auto")}
           >
-            {collapsed && !isSettings && <button id="sidebar-expand" type="button" onClick={() => { toggleSidebar(false); requestAnimationFrame(() => document.getElementById("sidebar-collapse")?.focus()); }} aria-label="展开侧栏" title="展开侧栏" className="absolute left-3 top-3 z-30 rounded-lg bg-canvas p-2 text-ink-2 hover:bg-panel focus-visible:ring-2 focus-visible:ring-accent"><PanelLeftOpen className="h-4 w-4" /></button>}
             {/* One mounted workspace for /sessions and the legacy /work URL. */}
             <div className={cn("relative h-full overflow-hidden", !fullBleed && "hidden")} aria-hidden={!fullBleed}>
               <SessionsPage active={fullBleed} />
             </div>
             {isSettings || isAssistant ? children : !fullBleed ? (
-              <div className={cn(isRuns ? "runs-route-surface min-h-full w-full" : isWorkflows ? "min-h-full w-full px-6 py-5" : "mx-auto max-w-6xl px-7 py-7", collapsed && "pt-14")}>
-                <PageTransition transitionKey={location.pathname}>{children}</PageTransition>
+              <div className={isRuns ? "runs-route-surface min-h-full w-full" : isWorkflows ? "workflow-route h-full w-full" : cn("mx-auto px-7 py-7", /^\/teams(?:\/|$)/.test(location.pathname) ? "max-w-[1216px]" : "max-w-6xl")}>
+                <PageTransition className={isWorkflows ? "h-full" : undefined} transitionKey={location.pathname}>{children}</PageTransition>
               </div>
             ) : null}
           </main>

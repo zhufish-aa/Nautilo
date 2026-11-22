@@ -2,22 +2,17 @@
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: 7px;
+  justify-content: center;
   height: 32px;
-  padding-inline: 9px 7px;
+  width: 32px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--card);
   color: var(--ink-2);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
 }
 .session-workspace-trigger:hover,
 .session-workspace-trigger[data-state="open"] { background: var(--card-hover); color: var(--ink); border-color: var(--line-strong); }
 .session-workspace-trigger:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
-.session-workspace-chevron { color: var(--ink-3); }
-.session-workspace-trigger[data-state="open"] .session-workspace-chevron { transform: rotate(180deg); }
 
 .session-workspace-menu {
   z-index: 60;
@@ -101,12 +96,9 @@
 
 @container chat-column (max-width: 560px) {
   .workspace-conversation-header { column-gap: 8px; padding-inline-end: 14px; }
-  .session-workspace-trigger { width: 32px; justify-content: center; padding: 0; }
-  .session-workspace-trigger > span, .session-workspace-chevron { display: none; }
 }
 @media (prefers-reduced-motion: no-preference) {
   .session-workspace-menu[data-state="open"] { animation: session-workspace-appear 120ms var(--ease-out-ui); }
-  .session-workspace-chevron { transition: transform 120ms var(--ease-out-ui); }
 }
 @keyframes session-workspace-appear {
   from { opacity: 0; transform: translateY(-3px); }

@@ -56,6 +56,32 @@ function fixture(t){
   const service=new SourceControl();return{temp,root,service,write:(name,content)=>writeFileSync(join(root,name),content),commit:()=>{git(root,'add','-A');git(root,'commit','-m','fixture baseline');},async mutate(action,extra={}){const state=await service.status(root);return service.mutate(root,{action,token:state.token,...extra});}};
 }
 function editorConflict(t,binary=false){const f=fixture(t);f.write('file.txt',binary?Buffer.from([0,1,2]):'base\n');f.write('other.txt','unchanged\n');f.commit();git(f.root,'switch','-c','feature');f.write('file.txt',binary?Buffer.from([0,3,4]):'incoming\n');f.commit();git(f.root,'switch','main');f.write('file.txt',binary?Buffer.from([0,5,6]):'current\n');f.commit();assert.throws(()=>git(f.root,'merge','feature'));return f;}
+test('direct commit includes only selected files, including new files, and keeps unselected staged edits',async t=>{
+  const f=fixture(t);
+  f.write('keep.txt','staged\n');git(f.root,'add','keep.txt');
+  f.write('中文 [x].txt','first\n');
+  await f.mutate('commit',{message:'One file',paths:['中文 [x].txt']});
+  assert.equal(git(f.root,'show','HEAD:中文 [x].txt'),'first\n');
+  f.write('中文 [x].txt','working\n');
+  f.write('new.txt','new\n');f.write('unchecked.txt','unchecked\n');
+  await f.mutate('commit',{message:'Two files',paths:['中文 [x].txt','new.txt']});
+  assert.equal(git(f.root,'show','HEAD:中文 [x].txt'),'working\n');
+  assert.equal(git(f.root,'show','HEAD:new.txt'),'new\n');
+  assert.equal(git(f.root,'diff','--cached','--name-only').trim(),'keep.txt');
+  assert.match(git(f.root,'status','--short'),/\?\? unchecked.txt/);
+});
+test('failed direct commit keeps the new file untracked and preserves existing staged content',async t=>{
+  const f=fixture(t);
+  f.write('keep.txt','base\n');f.commit();
+  f.write('keep.txt','staged\n');git(f.root,'add','keep.txt');
+  f.write('new.txt','new\n');
+  writeFileSync(join(f.root,'.git','hooks','pre-commit'),'#!/bin/sh\necho rejected >&2\nexit 1\n',{mode:0o700});
+  const head=git(f.root,'rev-parse','HEAD');
+  await assert.rejects(f.mutate('commit',{message:'Rejected',paths:['new.txt']}),/rejected/);
+  assert.equal(git(f.root,'rev-parse','HEAD'),head);
+  assert.match(git(f.root,'status','--short'),/\?\? new.txt/);
+  assert.equal(git(f.root,'show',':keep.txt'),'staged\n');
+});
 test('conflict editor whole versions preserve the native symlink mode in the index',async t=>{
   const f=fixture(t);f.write('file.txt','base\n');f.commit();git(f.root,'config','core.symlinks','false');const base=git(f.root,'rev-parse','HEAD:file.txt').trim(),link=execFileSync('git',['-C',f.root,'hash-object','-w','--stdin'],{input:'target.txt',encoding:'utf8',windowsHide:true}).trim();execFileSync('git',['-C',f.root,'update-index','--index-info'],{input:`0 ${'0'.repeat(40)}\tfile.txt\n100644 ${base} 1\tfile.txt\n100644 ${base} 2\tfile.txt\n120000 ${link} 3\tfile.txt\n`,windowsHide:true});const file=await f.service.file(f.root,{path:'file.txt'});assert.equal(file.editable,false);const result=await f.service.save(f.root,{path:'file.txt',fileVersion:file.token,resolution:'theirs',stage:true});assert.equal(result.staged,true);assert.ok(git(f.root,'ls-files','--stage','--','file.txt').startsWith(`120000 ${link} 0\t`));assert.equal(readFileSync(join(f.root,'file.txt'),'utf8'),'target.txt');
 });

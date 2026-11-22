@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { imagePromptBlocks } from "../images.js";
 import type { ProcessEvent } from "../../process-runtime.js";
 import { ProcessRuntime } from "../../process-runtime.js";
@@ -6,7 +7,7 @@ import type { AdapterEvent, AdapterResumeRequest, AdapterRun, AdapterStartReques
 import { resolvePermissionMode } from "../permission-mode.js";
 import { parseKimiAcpUpdate, type KimiAcpParseState } from "./acp-events.js";
 import { KimiAcpTurnSegments } from "./acp-segments.js";
-import { readKimiSessionUsage } from "./session-usage.js";
+import { kimiWirePath, readKimiSessionUsage, readKimiWireTurn } from "./session-usage.js";
 import { startKimiRuntimeMcpBridge, type KimiRuntimeMcpBridge } from "./runtime-mcp-server.js";
 import { normalizeKimiPermissionInteraction } from "./interaction.js";
 import { KimiSubagentWireWatcher } from "./subagent-wire.js";
@@ -152,6 +153,9 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
       // Resume spawns a fresh CLI process whose mode/model reset to defaults
       // (the resume response carries configOptions too), so re-apply every time.
       await applyConfig(rpc, sessionId, sessionResponse, request);
+      const kimiHome = request.env?.KIMI_CODE_HOME;
+      const wirePath = await kimiWirePath(sessionId, kimiHome);
+      const wireOffset = wirePath ? (await stat(wirePath).catch(() => undefined))?.size : resume ? undefined : 0;
       yield { kind: "status", phase: "turn_started" };
       const prompt = rpc.requestWithId("session/prompt", { sessionId, prompt: imagePromptBlocks(request) });
       void prompt.promise.catch(() => undefined);
@@ -208,6 +212,11 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
         } else if (event.kind === "response" && event.id === prompt.id) {
           for (const childItem of await subagentWires.poll()) yield childItem;
           for (const completed of [...segments.flushMessage(), ...segments.flushThinking()]) yield completed;
+          if (wireOffset !== undefined) {
+            const path = wirePath ?? await kimiWirePath(sessionId, kimiHome);
+            const usage = path ? await readKimiWireTurn(path, wireOffset) : undefined;
+            if (usage) yield usage;
+          }
           if (!usageReceived && sessionId) {
             const configOptions = Array.isArray(sessionResponse.configOptions) ? sessionResponse.configOptions.map(record) : [];
             const modelOption = configOptions.find((option) => `${String(option.id ?? "")} ${String(option.name ?? "")}`.toLowerCase().includes("model"));
@@ -215,7 +224,8 @@ export function startKimiAcp(request: AdapterStartRequest | AdapterResumeRequest
             const selectedModel = request.model || String(modelOption?.currentValue ?? modelOption?.value ?? "");
             const selectedDefinition = modelValues.find((option) => String(option.value ?? option.id ?? "") === selectedModel);
             const contextWindow = Number(selectedDefinition?.contextWindow ?? selectedDefinition?.context_window ?? request.contextWindow);
-            const fallback = await readKimiSessionUsage(sessionId, Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : undefined);
+            const fallback = await readKimiSessionUsage(sessionId, Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : undefined,
+              kimiHome, selectedModel || undefined);
             if (fallback) yield fallback;
           }
           yield { kind: "status", phase: event.error ? "turn_failed" : "turn_completed" };

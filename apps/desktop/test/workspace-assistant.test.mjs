@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
-import { copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -14,7 +14,7 @@ const desktop = resolve(import.meta.dirname, "..");
 const bundle = await build({
   stdin: {
     contents:
-      'export * from "./src/main/assistant/workspace-assistant"; export * from "./src/main/assistant/context"; export * from "./src/main/core-daemon-client";',
+      'export * from "./src/main/assistant/workspace-assistant"; export * from "./src/main/assistant/context"; export * from "./src/main/assistant/automations"; export * from "./src/main/core-daemon-client";',
     resolveDir: desktop,
   },
   bundle: true,
@@ -23,7 +23,7 @@ const bundle = await build({
   write: false,
   logLevel: "silent",
 });
-const { WorkspaceAssistant, CoreDaemonClient, composeStep, modelContext } = await import(
+const { WorkspaceAssistant, AssistantAutomations, CoreDaemonClient, composeStep, modelContext, nextSchedule } = await import(
   "data:text/javascript;base64," + Buffer.from(bundle.outputFiles[0].contents).toString("base64")
 );
 const config = { connectionId: "router", model: "fixture-model", maxSteps: 8 };
@@ -36,10 +36,11 @@ function journal() {
     row.value = structuredClone(value);
     return { seq: row.seq };
   };
-  const records = ({ kind, limit = 24, query = "", after = 0, before = 0, oldest = false }) => {
+  const records = ({ kind, id, limit = 24, query = "", after = 0, before = 0, oldest = false }) => {
     const match = rows.filter(
       (r) =>
         r.kind === kind &&
+        (!id || r.id === id) &&
         r.seq > after &&
         (!before || r.seq < before) &&
         JSON.stringify(r.value).includes(query),
@@ -48,6 +49,319 @@ function journal() {
   };
   return { rows, save, records };
 }
+
+test("routing limits allow long work and summarize the last result when stopping", async (t) => {
+  for (const { name, limit, reads, repeated } of [
+    { name: "unlimited", limit: 0, reads: 135 },
+    { name: "explicit limit above 24", limit: 40, reads: 40 },
+    { name: "repeated result", limit: 0, reads: 3, repeated: true },
+  ]) {
+    await t.test(name, async () => {
+      const db = journal();
+      const finished = Promise.withResolvers();
+      let calls = 0;
+      let readCount = 0;
+      const assistant = new WorkspaceAssistant(async (method, input) => {
+        if (method === "assistant.records") return db.records(input);
+        if (method === "assistant.save") {
+          const saved = db.save(input);
+          if (input.kind === "turn" && !["running", "queued"].includes(input.value.status))
+            finished.resolve(input.value);
+          return saved;
+        }
+        if (method === "connection.list")
+          return [{ id: config.connectionId, kind: "api", enabled: true, models: [{ id: config.model, contextWindow: 200000 }] }];
+        if (method === "assistant.excerpts") {
+          readCount++;
+          return { items: [{ text: `result-${input.offset}` }] };
+        }
+        if (method === "assistant.modelStep") {
+          assert.ok(input.context.length <= 128, "a long turn must still fit the daemon input");
+          calls++;
+          if (calls <= reads) {
+            assert.ok(input.tools.length);
+            return { call: { name: "read_session", arguments: { sessionId: "worker", offset: repeated ? 0 : calls } } };
+          }
+          assert.equal(input.tools.length === 0, Boolean(limit || repeated));
+          assert.match(input.context.at(-1), new RegExp(`result-${repeated ? 0 : reads}`));
+          return { text: "Here is what I found.", inputTokens: 10, cacheReadTokens: repeated ? 0 : undefined };
+        }
+        throw Error(method);
+      }, () => {});
+      try {
+        await assert.rejects(assistant.configure({ ...config, maxSteps: -1 }), /0 或正整数/);
+        await assistant.configure({ ...config, maxSteps: limit });
+        assert.equal((await assistant.view()).settings.maxSteps, limit);
+        await assistant.submit("turn_" + randomUUID(), "Read the relevant messages");
+        const turn = await finished.promise;
+        assert.equal(readCount, reads);
+        assert.equal(calls, reads + 1);
+        assert.equal(turn.status, limit || repeated ? "stopped" : "done");
+        assert.equal(turn.usage.input, 10);
+        assert.equal(turn.usage.cached, repeated ? 0 : undefined);
+        assert.match(turn.reply, /Here is what I found\./);
+        if (limit) assert.match(turn.reply, /40 步/);
+        if (repeated) assert.match(turn.reply, /连续三次/);
+      } finally {
+        assistant.close();
+      }
+    });
+  }
+});
+
+test("the assistant dispatches a regular task and reports its real session result once", async () => {
+  const db = journal();
+  db.save({ kind: "settings", id: "settings", value: config });
+  const decisions = [
+    { call: { name: "send_task", arguments: { sessionId: "worker", task: "Review without editing" } } },
+    { text: "Assigned." },
+  ];
+  const settled = Promise.withResolvers();
+  const sends = [];
+  const session = { id: "worker", projectId: "p1", project: "Fixture", title: "Review", status: "idle" };
+  let projection = { status: "running" };
+  const assistant = new WorkspaceAssistant(async (method, input) => {
+    switch (method) {
+      case "assistant.records": return db.records(input);
+      case "assistant.save": {
+        const saved = db.save(input);
+        if (input.value.reply === "Assigned.") settled.resolve();
+        return saved;
+      }
+      case "assistant.sessions": return { items: [session] };
+      case "interaction.list": return [];
+      case "session.list": return [session];
+      case "session.send": sends.push(input); return { accepted: true, runId: "review" };
+      case "assistant.modelStep": return decisions.shift();
+      case "assistant.dispatches": return input.items.map(item => ({ ...projection, messageId: item.messageId }));
+      case "connection.list": return [{ id: config.connectionId, kind: "api", enabled: true, models: [{ id: config.model }] }];
+      default: throw Error(method);
+    }
+  }, () => {});
+  try {
+    await assistant.submit("turn_" + randomUUID(), "Review the current changes");
+    await settled.promise;
+    assert.equal(sends[0].text, "Review without editing");
+    assert.equal(sends[0].workflowRef, undefined);
+    projection = { status: "waiting_approval" };
+    await assistant.automation.tick();
+    assert.equal((await assistant.view()).dispatches[0].status, "waiting_approval");
+    projection = { status: "completed", result: "Two cases verified." };
+    await assistant.automation.tick();
+    await assistant.automation.tick();
+    const messages = db.records({ kind: "turn" }).map(row => row.value).filter(turn => !turn.text);
+    assert.equal(messages.length, 2);
+    assert.match(messages[0].reply, /Two cases verified/);
+    assert.equal(messages[0].source.sessionId, "worker");
+    assert.equal(db.records({ kind: "automation" })[0].value.tracking.length, 0);
+  } finally {
+    assistant.close();
+  }
+});
+
+test("an empty ordinary conversation can be created with the Harness's native setup", async () => {
+  const db = journal();
+  db.save({ kind: "settings", id: "settings", value: config });
+  const settled = Promise.withResolvers();
+  const sessions = [];
+  const decisions = [
+    { call: { name: "create_session", arguments: { projectId: "p1", harnessId: "worker", title: "New chat" } } },
+    { text: "Created." },
+  ];
+  const assistant = new WorkspaceAssistant(async (method, input) => {
+    switch (method) {
+      case "assistant.records": return db.records(input);
+      case "assistant.save": {
+        const saved = db.save(input);
+        if (input.value.reply === "Created.") settled.resolve(input.value);
+        return saved;
+      }
+      case "connection.list": return [{ id: config.connectionId, kind: "api", enabled: true, models: [{ id: config.model }] }];
+      case "project.list": return [{ id: "p1", name: "Fixture" }];
+      case "agent.list": return [{ id: "worker", enabled: true, providerOptions: { configurationKind: "harness" },
+        baseArgs: ["--profile"], profile: "native", displayName: "Harness" }];
+      case "session.upsert": sessions.push(input); return input;
+      case "assistant.modelStep": return decisions.shift();
+      default: throw Error(method);
+    }
+  }, () => {});
+  try {
+    await assistant.submit("turn_" + randomUUID(), "Open an empty conversation");
+    const turn = await settled.promise;
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].connectionId, undefined);
+    assert.equal(turn.receipts[0].task, "");
+    assert.equal(turn.receipts[0].delivery, "sent");
+    assert.equal(db.records({ kind: "automation" }).length, 0);
+  } finally {
+    assistant.close();
+  }
+});
+
+
+test("a missed scheduled occurrence is recovered once, and GitHub starts only newly opened PRs", async (t) => {
+  const db = journal();
+  const due = Date.now() - 5000;
+  const base = { title: "Review", task: "Review", sessionId: "s", nextAt: due, paused: false };
+  const once = { ...base, id: "clock", trigger: { type: "schedule", at: new Date(due).toISOString(), repeat: "once" } };
+  const github = { ...base, id: "git", cursor: 100, trigger: { type: "github", repository: "org/repo" } };
+  db.save({ kind: "automation", id: "automation", value: { tracking: [], topics: [], routines: [once, github] } });
+  t.mock.method(globalThis, "fetch", async url => {
+    assert.equal(url.origin + url.pathname, "https://api.github.com/repos/org/repo/pulls");
+    return { ok: true, json: async () => [
+      { number: 102, state: "open", title: "New change", html_url: "https://github.com/org/repo/pull/102" },
+      { number: 101, state: "closed" },
+      { number: 100, state: "open" },
+    ] };
+  });
+  const launches = [];
+  const core = async (method, input) => {
+    if (method === "assistant.records") return db.records(input);
+    if (method === "assistant.save") return db.save(input);
+    throw Error(method);
+  };
+  let worker;
+  const launch = async () => {
+    worker = new AssistantAutomations(core, () => config, async (routine, id, context) => {
+      launches.push({ routine: routine.id, id, context });
+      return launches.length;
+    }, async () => {}, () => {});
+    await worker.start();
+    await worker.tick();
+    await worker.routineCheck;
+  };
+  try {
+    await launch();
+    assert.deepEqual(launches.map(item => item.routine), ["clock", "git"]);
+    assert.match(launches[1].context, /#102/);
+    assert.equal((await worker.view()).routines[0].nextAt, null);
+    assert.equal((await worker.view()).routines[1].cursor, 102);
+    worker.close();
+    await launch();
+    assert.equal(launches.length, 2);
+    const daily = { ...once.trigger, repeat: "daily" };
+    assert.ok(nextSchedule(daily, Date.now() + 3 * 86400000) > Date.now());
+  } finally {
+    worker?.close();
+  }
+});
+
+test("a proactive topic sends a new assistant-only message with an evidenced source", async () => {
+  const db = journal();
+  const now = Date.now();
+  const askedAt = new Date(now - 3600000).toISOString();
+  const url = "https://project.example/releases/2";
+  db.save({ id: "automation", kind: "automation", value: { routines: [], tracking: [], topics: [
+    { topic: "project 2 release", turnId: "original", turnSeq: 7, askedAt, nextAt: now - 1 },
+  ] } });
+  const sent = [];
+  const worker = new AssistantAutomations(async (method, input) => {
+    if (method === "assistant.records") return db.records(input);
+    if (method === "assistant.save") return db.save(input);
+    if (method === "assistant.search") return { success: true, content: "Project 2 shipped.\n\nSources:\n- [Release](" + url + ")" };
+    if (method === "assistant.modelStep") return { text: JSON.stringify({
+      text: "Project 2 shipped.", url, publishedAt: new Date(now - 2000).toISOString(),
+    }) };
+    throw Error(method);
+  }, () => ({ ...config, proactiveTopics: true }), async () => 0, async turn => sent.push(turn), () => {});
+  try {
+    await worker.start();
+    await worker.tick();
+    await worker.topicCheck;
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].text, "");
+    assert.equal(sent[0].source.turnSeq, 7);
+    assert.ok(sent[0].reply.includes(url));
+    assert.equal((await worker.view()).topics.length, 0);
+  } finally {
+    worker.close();
+  }
+});
+
+test("an automation drafted in chat dispatches only after confirmation to the selected session", async () => {
+  const db = journal();
+  db.save({ kind: "settings", id: "settings", value: config });
+  const at = new Date(Date.now() + 86400000).toISOString();
+  const draft = { title: "Weekly review", sessionId: "s", task: "Review the new work", at, repeat: "weekly", type: "schedule" };
+  const decisions = [{ call: { name: "draft_automation", arguments: draft } }, { text: "Draft prepared." }];
+  const completed = Promise.withResolvers();
+  const sends = [];
+  const session = { id: "s", projectId: "p1", project: "Fixture", title: "Review", status: "idle" };
+  const assistant = new WorkspaceAssistant(async (method, input) => {
+    switch (method) {
+      case "assistant.records": return db.records(input);
+      case "assistant.save": {
+        const row = db.save(input);
+        if (input.value.reply === "Draft prepared.") completed.resolve(input.value);
+        return row;
+      }
+      case "connection.list": return [{ id: config.connectionId, kind: "api", enabled: true, models: [{ id: config.model }] }];
+      case "assistant.sessions": return { items: [session] };
+      case "interaction.list": return [];
+      case "assistant.modelStep": return decisions.shift();
+      case "session.list": return [session];
+      case "session.send": sends.push(input); return { runId: "new-task" };
+      default: throw Error(method);
+    }
+  }, () => {});
+  try {
+    const sourceTurnId = "turn_" + randomUUID();
+    await assistant.submit(sourceTurnId, "Review every week");
+    const { routineDraft } = await completed.promise;
+    assert.equal((await assistant.automations()).routines.length, 0);
+    assert.equal(sends.length, 0);
+    const action = { type: "save", data: routineDraft, sourceTurnId };
+    const configured = await assistant.automations(action);
+    assert.equal((await assistant.automations(action)).routines.length, 1);
+    const id = configured.routines[0].id;
+    await assistant.automations({ type: "run", id });
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].sessionId, "s");
+    assert.equal(sends[0].text, "Review the new work");
+    assert.equal(sends[0].workflowRef, undefined);
+    assert.equal((await assistant.automations({ type: "history", id })).history.length, 1);
+    assert.equal(db.records({ kind: "automation" })[0].value.tracking[0].receipt.runId, "new-task");
+  } finally {
+    assistant.close();
+  }
+});
+
+test("a manually opened session can be followed without dispatching new work", async () => {
+  const db = journal();
+  db.save({ kind: "settings", id: "settings", value: config });
+  const model = [
+    { call: { name: "watch_session", arguments: { sessionId: "worker" } } },
+    { text: "Following the session." },
+  ];
+  const finished = Promise.withResolvers();
+  const assistant = new WorkspaceAssistant(async (method, input) => {
+    if (method === "assistant.records") return db.records(input);
+    if (method === "assistant.save") {
+      const row = db.save(input);
+      if (input.value.reply === "Following the session.") finished.resolve();
+      return row;
+    }
+    if (method === "connection.list") return [{ id: config.connectionId, kind: "api", enabled: true, models: [{ id: config.model }] }];
+    if (method === "assistant.sessions") return { items: [{ id: "worker", title: "Manual review", project: "Fixture" }] };
+    if (method === "interaction.list") return [];
+    if (method === "run.list") return [{ id: "run-manual", status: "running" }];
+    if (method === "assistant.dispatches") return input.items.map(r => ({ messageId: r.messageId, status: "completed", result: "Done." }));
+    if (method === "assistant.modelStep") return model.shift();
+    throw Error("Unexpected operation " + method);
+  }, () => {});
+  try {
+    await assistant.submit("turn_" + randomUUID(), "Tell me when the manual review is done");
+    await finished.promise;
+    await assistant.automation.tick();
+    const { value: message } = db.records({ kind: "turn", limit: 1 })[0];
+    assert.match(message.reply, /Done\./);
+    assert.equal(message.source.sessionId, "worker");
+  } finally {
+    assistant.close();
+  }
+});
+
+
 function finishedTurn(text) {
   return { id: "turn_" + randomUUID(), at: now, text, status: "done", reply: "Confirmed.", receipts: [] };
 }
@@ -167,6 +481,7 @@ test(
           harnessId: "h1",
           connectionId: "c1",
           title: "Browser tests",
+          task: null,
         });
       },
       (result) => {
@@ -199,7 +514,7 @@ test(
             return saved;
           }
           case "connection.list":
-            return [{ id: config.connectionId, enabled: true, models: [{ id: config.model }] }];
+            return [{ id: config.connectionId, kind: "api", enabled: true, models: [{ id: config.model }] }];
           case "assistant.modelStep":
             return decisions.shift()(JSON.parse(input.context.at(-1)).observation?.result);
           case "assistant.sessions":
@@ -241,10 +556,21 @@ test(
   { skip: !process.env.NAUTILO_NATIVE_CORE, timeout: 85000 },
   async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "nautilo-assistant-integration-"));
+    let liveAssistant;
+    const wireDeltas = [];
+    const client = new CoreDaemonClient((id, text) => {
+      wireDeltas.push({ id, text });
+      liveAssistant?.receiveText(id, text);
+    });
+    t.after(async () => {
+      try {
+        await client.stop();
+      } finally {
+        await rm(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 });
+      }
+    });
     const workerDir = join(dir, "project");
     await mkdir(workerDir);
-    const native = join(dir, process.platform === "win32" ? "nautilo-core.exe" : "nautilo-core");
-    await copyFile(process.env.NAUTILO_NATIVE_CORE, native);
     const workerLog = join(dir, "worker.log");
     const fake = await readFile(
       resolve(desktop, "../../packages/core-daemon/test/fixtures/fake-codex-pool.cjs"),
@@ -339,22 +665,19 @@ test(
     const baseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
     // The native process and its worker inherit only the fixture's home and database paths.
     const fixtureEnv = {
-      AGENTHUB_CORE_PATH: native,
+      AGENTHUB_CORE_PATH: resolve(process.env.NAUTILO_NATIVE_CORE),
       AGENTHUB_NODE_PATH: process.execPath,
       USERPROFILE: dir,
       HOME: dir,
       APPDATA: dir,
       LOCALAPPDATA: dir,
+      TEMP: dir,
+      TMP: dir,
+      TMPDIR: dir,
       CODEX_HOME: dir,
       AGENTHUB_DEV_PLUGIN_DIR: join(dir, "empty-plugins"),
     };
     const saved = Object.fromEntries(Object.keys(fixtureEnv).map((k) => [k, process.env[k]]));
-    let liveAssistant;
-    const wireDeltas = [];
-    const client = new CoreDaemonClient((id, text) => {
-      wireDeltas.push({ id, text });
-      liveAssistant?.receiveText(id, text);
-    });
     try {
       Object.assign(process.env, fixtureEnv);
       await client.start(dir);
@@ -364,7 +687,6 @@ test(
         else process.env[k] = v;
       }
     }
-    t.after(() => client.stop());
     const core = (method, input) => client.request({ method, input });
     for (const protocol of ["responses", "chat", "anthropic"]) {
       const connectionId = protocol === "responses" ? "router" : protocol;
@@ -565,7 +887,7 @@ test(
       (body) => {
         const { observation } = JSON.parse(body.input.at(-1).content);
         assert.equal(observation.result.items[0].text, review);
-        for (const name of ["send_task", "create_session"])
+        for (const name of ["send_task"])
           assert.ok(body.tools.find((tool) => tool.name === name).parameters.required.includes("task"));
         return action("send_task", { sessionId: target, task: retest });
       },

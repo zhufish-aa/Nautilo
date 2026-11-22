@@ -6,7 +6,7 @@ import { buildKimiResumeArgs, buildKimiStartArgs } from "./commands.js";
 import { parseKimiJsonEvent } from "./events.js";
 import { discoverKimiModels } from "./models.js";
 import { startKimiAcp } from "./acp-run.js";
-import { prepareKimiConnection } from "./connection.js";
+import { prepareKimiConnection, usesKimiApiConnection } from "./connection.js";
 import { startAnthropicCompatProxy } from "../codex/anthropic-compat-proxy.js";
 import { randomUUID } from "node:crypto";
 
@@ -69,16 +69,16 @@ export class KimiCodeAdapter extends ProcessAdapter {
     return parseKimiJsonEvent(value);
   }
   override start(request: AdapterStartRequest): AdapterRun {
-    if (request.instance.providerOptions?.runtimeConnectionId && request.instance.providerOptions.apiType === "anthropic-messages") return this.anthropicRun(request, false);
+    if (usesKimiApiConnection(request.instance) && request.instance.providerOptions?.apiType === "anthropic-messages") return this.anthropicRun(request, false);
     request = { ...request, env: prepareKimiConnection(request) };
     // Older ACP servers require OAuth before considering custom-model keys.
     // Native prompt mode uses the selected API without borrowing that login.
-    return request.instance.providerOptions?.runtimeConnectionId || request.instance.baseArgs.length ? super.start({...request,prompt:promptWithImageFiles(request)}) : startKimiAcp(request, false);
+    return usesKimiApiConnection(request.instance) || request.instance.baseArgs.length ? super.start({...request,prompt:promptWithImageFiles(request)}) : startKimiAcp(request, false);
   }
   override resume(request: AdapterResumeRequest): AdapterRun {
-    if (request.instance.providerOptions?.runtimeConnectionId && request.instance.providerOptions.apiType === "anthropic-messages") return this.anthropicRun(request, true);
+    if (usesKimiApiConnection(request.instance) && request.instance.providerOptions?.apiType === "anthropic-messages") return this.anthropicRun(request, true);
     request = { ...request, env: prepareKimiConnection(request) };
-    return request.instance.providerOptions?.runtimeConnectionId || request.instance.baseArgs.length ? super.resume({...request,prompt:promptWithImageFiles(request)}) : startKimiAcp(request, true);
+    return usesKimiApiConnection(request.instance) || request.instance.baseArgs.length ? super.resume({...request,prompt:promptWithImageFiles(request)}) : startKimiAcp(request, true);
   }
   private anthropicRun(request: AdapterStartRequest | AdapterResumeRequest, resume: boolean): AdapterRun {
     let inner: AdapterRun | undefined, proxy: Awaited<ReturnType<typeof startAnthropicCompatProxy>> | undefined, cancelled=false;

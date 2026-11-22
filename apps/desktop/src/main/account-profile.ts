@@ -1,14 +1,34 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, lstat, writeFile, readdir, readFile, unlink } from "node:fs/promises";
+import { mkdir, lstat, writeFile, readdir, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { supportsAccountLogin } from "../shared/account-harnesses";
 const execute = promisify(execFile);
 const PENDING = ".nautilo-pending-login.json";
+const VERIFIED = ".nautilo-verified-login.json";
+const PROFILE_ID = /^account-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export interface PendingAccountProfile { profileId: string; providerId: string; directory: string; createdAt: number }
 function profileName(providerId: string, profileId: string): string {
-  if (!["codex", "claude-code", "antigravity", "opencode"].includes(providerId) || !/^account-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(profileId)) throw new Error("Invalid managed account profile");
+  if (!supportsAccountLogin(providerId) || !PROFILE_ID.test(profileId)) throw new Error("Invalid managed account profile");
   return `${providerId}-${profileId}`;
+}
+export async function recordAccountVerification(base: string, providerId: string, jobId: string, directory: string): Promise<void> {
+  const profileId = jobId.split(":", 1)[0];
+  if (!PROFILE_ID.test(profileId)) return;
+  const profiles = join(base, "account-profiles");
+  if (!(await lstat(profiles)).isDirectory()) return;
+  const root = await realpath(profiles);
+  const expected = join(root, profileName(providerId, profileId));
+  if (directory !== expected || !(await lstat(expected)).isDirectory()) return;
+  const temporary = join(expected, `${VERIFIED}.${randomUUID()}`);
+  await writeFile(temporary, JSON.stringify({ providerId, lastVerifiedAt: new Date().toISOString() }), { mode: 0o600, flag: "wx" });
+  try {
+    await rename(temporary, join(expected, VERIFIED));
+  } catch (error) {
+    await unlink(temporary);
+    throw error;
+  }
 }
 async function readPending(baseDirectory: string, providerId: string, profileId: string): Promise<PendingAccountProfile> {
   const directory = join(baseDirectory, "account-profiles", profileName(providerId, profileId));
@@ -27,8 +47,8 @@ export async function recoverableAccountProfiles(baseDirectory: string): Promise
   try { await protect(root); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   const result: PendingAccountProfile[] = [];
   for (const entry of (await readdir(root, { withFileTypes: true })).slice(0, 128)) {
-    const match = /^(codex|claude-code|antigravity|opencode)-(account-[0-9a-f-]+)$/i.exec(entry.name);
-    if (!match || !entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const match = /^(.+)-(account-[0-9a-f-]+)$/i.exec(entry.name);
+    if (!match || !supportsAccountLogin(match[1]) || !entry.isDirectory() || entry.isSymbolicLink()) continue;
     try { result.push(await readPending(baseDirectory, match[1], match[2])); } catch { /* Not a known pending record; never inspect auth files. */ }
   }
   return result.sort((a, b) => b.createdAt - a.createdAt);
@@ -62,7 +82,7 @@ async function protect(directory: string): Promise<void> {
 
 /** App-owned login/recovery metadata. Antigravity credentials remain in the official OS keyring. */
 export async function prepareAccountProfile(baseDirectory: string, providerId: string): Promise<{ profileId: string; directory: string }> {
-  if (!["codex", "claude-code", "antigravity", "opencode"].includes(providerId)) throw new Error("This harness does not support official account login");
+  if (!supportsAccountLogin(providerId)) throw new Error("This harness does not support official account login");
   if (!isAbsolute(baseDirectory)) throw new Error("Application data directory must be absolute");
   const root = join(baseDirectory, "account-profiles");
   await mkdir(root, { recursive: true, mode: 0o700 });

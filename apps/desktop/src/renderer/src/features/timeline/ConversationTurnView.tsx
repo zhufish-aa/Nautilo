@@ -7,14 +7,15 @@ import { workflowTool } from "./WorkflowToolActivity";
 
 /** Important interactions and the answer keep their slot when process rows fold. */
 export function turnEventAlwaysVisible(turn: ConversationTurn, event: ConversationTurn["events"][number]): boolean {
-  return event === turn.result || event.data.kind === "error" || event.data.kind === "approval" || event.data.kind === "workflow_plan" ||
-    event.data.kind === "task_update" || event.data.kind === "tool_activity" && !!event.data.subagent ||
-    event.data.kind === "activity" && event.data.phase === "stopped";
+  const data = event.data;
+  return event === turn.result || data.kind === "error" || data.kind === "approval" || data.kind === "workflow_plan" ||
+    data.kind === "task_update" || data.kind === "tool_activity" && !!data.subagent ||
+    data.kind === "activity" && data.phase === "stopped";
 }
 
 export function isTurnTraceStep(event?: ConversationTurn["events"][number]): boolean {
   const data = event?.data;
-  return data?.kind === "reasoning" || data?.kind === "command"
+  return data?.kind === "reasoning" || data?.kind === "command" || data?.kind === "file_change"
     || (data?.kind === "tool_activity" && !data.subagent && (data.toolName === "run_code" || !!data.codeExecution || !!workflowTool(data.toolName)));
 }
 
@@ -28,9 +29,7 @@ export function ConversationTurnView({ turn, summaryOnly = false, expanded: cont
   const expanded = controlledExpanded ?? (expansion.completed === turn.completed ? expansion.open : !turn.completed);
   const stopped = turn.events.some(event => event.data.kind === "activity" && event.data.phase === "stopped");
   const failed = turn.events.some(event => !event.background && event.data.kind === "error");
-  const notices = new Set(turn.events.filter((event) => event.data.kind === "error" || event.data.kind === "approval" || event.data.kind === "workflow_plan" || event.data.kind === "activity" && event.data.phase === "stopped"));
-  const dispatches = new Set(turn.events.filter((event) => event.data.kind === "task_update" || event.data.kind === "tool_activity" && event.data.subagent));
-  const process = turn.events.filter((event) => event !== turn.result && !notices.has(event) && !dispatches.has(event));
+  const process = turn.events.filter((event) => !turnEventAlwaysVisible(turn, event));
   const author = turn.events.find((event) => event.data.kind === "message" && event.data.sender === "agent");
   const name = author?.data.kind === "message" ? author.data.authorName ?? "Nautilo" : "Nautilo";
   const duration = turn.durationMs === undefined ? undefined : formatDuration(turn.durationMs, zh);
@@ -40,11 +39,13 @@ export function ConversationTurnView({ turn, summaryOnly = false, expanded: cont
   const label = `${status}${turn.completed && duration ? (zh ? `，用时 ${duration}` : ` in ${duration}`) : ""}`;
   const tone = !turn.completed ? "running" : stopped ? "stopped" : failed ? "failed" : "completed";
   const summary = <>
-    <span className={`conversation-step-icon conversation-turn-indicator${tone === "running" ? " conversation-activity-pulse" : ""}`} aria-hidden>
-      {tone === "completed" ? <Check size={12} strokeWidth={2.2}/> : tone === "stopped" ? <Square size={10}/>
-        : tone === "failed" ? <CircleAlert size={12}/> : null}
-    </span>
-    <span>{label}</span>
+    {tone === "running" ? <span className="conversation-wait-orbit" aria-hidden /> :
+      <span className="conversation-step-icon conversation-turn-indicator" aria-hidden>
+        {tone === "completed" ? <Check size={12} strokeWidth={2.2} /> : tone === "stopped" ? <Square size={10} /> : <CircleAlert size={12} />}
+      </span>}
+    {tone === "running" ? <span className="conversation-wait-label">
+      {label}<span className="conversation-wait-sheen" data-label={label} aria-hidden />
+    </span> : <span>{label}</span>}
     {process.length > 0 && <ChevronRight size={12} className="conversation-turn-chevron" aria-hidden />}
   </>;
 
@@ -61,7 +62,7 @@ export function ConversationTurnView({ turn, summaryOnly = false, expanded: cont
       {turn.events.map((event, index) => {
         // Collapse process rows in place. Delegations, notices and the reply
         // keep their chronological slot and React identity across updates.
-        const visible = expanded || event === turn.result || notices.has(event) || dispatches.has(event);
+        const visible = expanded || turnEventAlwaysVisible(turn, event);
         const trace = expanded && isTurnTraceStep(event);
         return <div key={event.id} hidden={!visible} data-event-kind={event.data.kind}
           className={event === turn.result ? "conversation-result" : trace ? "conversation-process-row" : undefined}

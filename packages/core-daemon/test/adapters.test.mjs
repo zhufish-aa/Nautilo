@@ -53,7 +53,7 @@ import {
   KimiSubagentWireWatcher,
   parseKimiSubagentWireLine,
   KimiAcpTurnSegments,
-  parseKimiWireContextUsed,
+  parseKimiWireContext,
   startCodexAppServer,
   executeCodexImageGeneration,
   executeOfficialWebSearch,
@@ -1114,7 +1114,9 @@ test("Kimi context usage falls back to the provider wire log when ACP omits usag
     JSON.stringify({ type: "llm.request", maxTokens: 977_500 }),
     JSON.stringify({ type: "usage.record", usage: { inputOther: 500, inputCacheRead: 22_000, inputCacheCreation: 0, output: 250 } })
   ].join("\n");
-  assert.equal(parseKimiWireContextUsed(wire, 1_000_000), 45_250);
+  assert.deepEqual(parseKimiWireContext(wire), { contextUsed: 22_750, cachedInputTokens: 22_000 });
+  assert.deepEqual(parseKimiWireContext(`${wire}\n{"type":"token_counting.turn_recorded","tokens":22800}`), { contextUsed: 22_800 });
+  assert.equal(parseKimiWireContext('{"type":"llm.request","maxTokens":977500}'), undefined);
 });
 
 test("Codex app-server model/list is normalized without hard-coded models", () => {
@@ -1280,8 +1282,8 @@ test("Claude runtime tools are injected as a headless MCP config", () => {
 test("Claude stream-json parser exposes session, commands, messages, tools, and usage", () => {
   const state = createClaudeParseState();
   const init = parseClaudeJsonEvent({ type: "system", subtype: "init", session_id: "sess-1", model: "claude-opus-4-8", slash_commands: ["/compact", "cost"] }, state);
-  assert.deepEqual(init[0], { kind: "session", providerSessionId: "sess-1", raw: { type: "system", subtype: "init", session_id: "sess-1", model: "claude-opus-4-8", slash_commands: ["/compact", "cost"] } });
-  assert.deepEqual(init[1].commands, [{ name: "compact", description: "compact" }, { name: "cost", description: "cost" }]);
+  assert.deepEqual(init.find(event => event.kind === "session"), { kind: "session", providerSessionId: "sess-1", raw: { type: "system", subtype: "init", session_id: "sess-1", model: "claude-opus-4-8", slash_commands: ["/compact", "cost"] } });
+  assert.deepEqual(init.find(event => event.kind === "commands").commands, [{ name: "compact", description: "compact" }, { name: "cost", description: "cost" }]);
 
   const assistant = parseClaudeJsonEvent({ type: "assistant", message: { id: "msg-1", content: [
     { type: "thinking", thinking: "inspect first" },
@@ -1321,14 +1323,13 @@ test("Claude stream-json parser exposes session, commands, messages, tools, and 
     usage: { input_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 100, output_tokens: 42 },
     modelUsage: { "claude-opus-4-8": { contextWindow: 200000 } } }, state);
   const usage = result.find((event) => event.kind === "usage");
-  // result.usage totals stay cumulative (throughput), but contextUsed keeps the
-  // latest single-request footprint instead of the session-wide cache sum.
+  // The cumulative result must leave the last request's context and cache intact.
   assert.equal(usage.inputTokens, 5);
   assert.equal(usage.cachedInputTokens, 900);
   assert.equal(usage.cacheCreationInputTokens, 100);
   assert.equal(usage.usageScope, "turn");
   assert.equal(usage.outputTokens, 42);
-  assert.equal(usage.contextUsed, 9512);
+  assert.equal(usage.contextUsed, undefined);
   assert.equal(usage.contextWindow, 200000);
   assert.ok(result.some((event) => event.kind === "status" && event.phase === "turn_completed"));
   assert.equal(state.toolNames.size, 0);

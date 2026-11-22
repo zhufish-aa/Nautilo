@@ -47,6 +47,7 @@ export default defineConfig({
     }
   },
   renderer: {
+    cacheDir: process.env.NAUTILO_DEV_STORAGE ? resolve(process.env.NAUTILO_DEV_STORAGE, "desktop-vite") : undefined,
     plugins: [react(), tailwindcss(), markdownEntitiesPlugin()],
     // Keep the public editor and its recovery service in one optimized graph.
     // Otherwise dev mode can instantiate a second Monaco service registry.

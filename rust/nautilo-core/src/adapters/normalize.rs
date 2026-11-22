@@ -17,6 +17,11 @@ pub fn normalize_json(value: &Value) -> Vec<AdapterEvent> {
         return vec![];
     }
     let event_type = value_of(value, &["type", "event", "kind"]).and_then(Value::as_str).unwrap_or("").to_string();
+    if event_type == "usage" && matches!(value["usageScope"].as_str(), Some("context" | "turn" | "session")) {
+        let mut event = value.clone();
+        event["kind"] = Value::String("usage".into());
+        return vec![crate::adapters::event_from_json(&event)];
+    }
     let text = value_of(value, &["text", "message", "content", "delta"]);
     let tool = value_of(value, &["tool", "tool_name", "name"]);
     let path = value_of(value, &["path", "file", "file_path"]);
@@ -65,5 +70,15 @@ pub fn normalize_json(value: &Value) -> Vec<AdapterEvent> {
         return vec![AdapterEvent::Message { text, phase: None, message_id: None, subagent_dispatch_id: None, raw: Some(value.clone()) }];
     }
     vec![]
+}
+
+#[test]
+fn custom_jsonl_keeps_explicit_usage_and_ignores_unknown_scope() {
+    use serde_json::json;
+    let events = normalize_json(&json!({"type":"usage","usageScope":"turn","inputTokens":35,"cachedInputTokens":20}));
+    assert!(matches!(events.as_slice(), [AdapterEvent::Usage {
+        input_tokens: Some(35), cached_input_tokens: Some(20), cache_creation_input_tokens: None, ..
+    }]));
+    assert!(normalize_json(&json!({"type":"usage","inputTokens":35})).is_empty());
 }
 

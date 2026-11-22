@@ -106,6 +106,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     if (!['hang', 'stubborn', 'no-interrupt-response', 'tool-after-interrupt', 'crash-controlled'].includes(prompt)) active.timer = setTimeout(finish, prompt === 'slow' ? 180 : 20);
     return;
   }
+  if (q.method === 'thread/goal/set') { result({goal:q.params}); return; }
   if (q.method === 'turn/interrupt') {
     if (active?.prompt !== 'no-interrupt-response') result({});
     if (active?.prompt === 'tool-after-interrupt') send({ id: 'after-cancel-tool', method: 'item/tool/call', params: { threadId: active.threadId, turnId: active.turnId, tool: 'must_not_run', arguments: {} } });

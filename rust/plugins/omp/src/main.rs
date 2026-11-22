@@ -377,14 +377,28 @@ struct OmpParseState {
     children: HashMap<String, OmpChildState>,
     pending_children: HashMap<String, Vec<Value>>,
     usage: agenthub_plugin_sdk::usage::TurnUsage,
-    message_sequence: u32,
-    current_message_id: Option<String>,
-    current_thinking_id: Option<String>,
-    streamed_text: bool,
-    streamed_thinking: bool,
+    messages: HashMap<String, OmpMessageState>,
     last_assistant_stop_reason: Option<String>,
     model_error: bool,
     tool_args: HashMap<String, (String, Value)>,
+}
+
+struct OmpMessageState {
+    id: String,
+    streamed_text: bool,
+    streamed_thinking: bool,
+}
+
+impl Default for OmpMessageState {
+    fn default() -> Self {
+        // RPC ids are unique only within one process. A resumed turn may start
+        // a new process while the daemon still remembers the earlier origin.
+        Self {
+            id: format!("omp-message-{}", uuid::Uuid::new_v4()),
+            streamed_text: false,
+            streamed_thinking: false,
+        }
+    }
 }
 
 struct OmpChildState {
@@ -488,40 +502,38 @@ fn tool_result_text(value: &Value) -> String {
 /// Maps an omp RPC event to zero or more Nautilo adapter events.
 fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
     let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    let rpc_message_id = value["messageId"].as_str().unwrap_or_default();
     match event_type {
         "subagent_lifecycle" | "subagent_event" => child_activity(value, state),
         "message_start" => {
-            let message = value.get("message").cloned().unwrap_or(Value::Null);
-            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            if value["message"]["role"] != "assistant" {
                 return vec![];
             }
-            state.message_sequence += 1;
-            state.current_message_id = Some(format!("omp-message-{}", state.message_sequence));
-            state.current_thinking_id = Some(format!("omp-thinking-{}", state.message_sequence));
-            state.streamed_text = false;
-            state.streamed_thinking = false;
+            state.messages.entry(rpc_message_id.into()).or_default();
             vec![]
         }
         "message_update" => {
-            let delta = value.get("assistantMessageEvent").cloned().unwrap_or(Value::Null);
+            let delta = &value["assistantMessageEvent"];
             match delta.get("type").and_then(Value::as_str) {
                 Some("text_delta") => {
-                    state.streamed_text = true;
+                    let message = state.messages.entry(rpc_message_id.into()).or_default();
+                    message.streamed_text = true;
                     vec![json!({
                         "kind": "message",
                         "text": delta.get("delta").and_then(Value::as_str).unwrap_or(""),
                         "phase": "delta",
-                        "messageId": state.current_message_id.clone().map(Value::String).unwrap_or(Value::Null),
+                        "messageId": message.id,
                         "raw": value
                     })]
                 }
                 Some("thinking_delta") => {
-                    state.streamed_thinking = true;
+                    let message = state.messages.entry(rpc_message_id.into()).or_default();
+                    message.streamed_thinking = true;
                     vec![json!({
                         "kind": "thinking",
                         "text": delta.get("delta").and_then(Value::as_str).unwrap_or(""),
                         "phase": "delta",
-                        "messageId": state.current_thinking_id.clone().map(Value::String).unwrap_or(Value::Null),
+                        "messageId": format!("{}:thinking", message.id),
                         "raw": value
                     })]
                 }
@@ -538,65 +550,61 @@ fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
             }
         }
         "message_end" => {
-            let message = value.get("message").cloned().unwrap_or(Value::Null);
-            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            let message = &value["message"];
+            if message["role"] != "assistant" {
                 return vec![];
             }
-            let content = message.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
+            let stream = state.messages.remove(rpc_message_id).unwrap_or_default();
+            let thinking_id = format!("{}:thinking", stream.id);
+            let content = message["content"].as_array().map(Vec::as_slice).unwrap_or_default();
             let stop_reason = message.get("stopReason").and_then(Value::as_str).map(str::to_string);
             state.last_assistant_stop_reason = stop_reason.clone();
             state.model_error = stop_reason.as_deref() == Some("error") || stop_reason.as_deref() == Some("aborted");
             let mut events = vec![];
-            if !state.streamed_text {
-                let text: String = content
-                    .iter()
-                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|part| part.get("text").and_then(Value::as_str))
-                    .collect();
-                if !text.is_empty() {
-                    events.push(json!({
-                        "kind": "message",
-                        "text": text,
-                        "phase": "delta",
-                        "messageId": state.current_message_id.clone().map(Value::String).unwrap_or(Value::Null),
-                        "raw": value
-                    }));
-                }
+            let text: String = content.iter()
+                .filter(|part| part["type"] == "text")
+                .filter_map(|part| part["text"].as_str()).collect();
+            let thinking: String = content.iter()
+                .filter(|part| part["type"] == "thinking")
+                .filter_map(|part| part["thinking"].as_str()).collect();
+            if !stream.streamed_thinking && !thinking.is_empty() {
+                events.push(json!({
+                    "kind": "thinking",
+                    "text": thinking,
+                    "phase": "delta",
+                    "messageId": thinking_id,
+                    "raw": value
+                }));
             }
-            let thinking: String = content
-                    .iter()
-                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("thinking"))
-                    .filter_map(|part| part.get("thinking").and_then(Value::as_str))
-                    .collect();
-            if !state.streamed_thinking {
-                if !thinking.is_empty() {
-                    events.push(json!({
-                        "kind": "thinking",
-                        "text": thinking,
-                        "phase": "delta",
-                        "messageId": state.current_thinking_id.clone().map(Value::String).unwrap_or(Value::Null),
-                        "raw": value
-                    }));
-                }
-            }
-            if state.streamed_thinking || content.iter().any(|part| part.get("type").and_then(Value::as_str) == Some("thinking")) {
+            if stream.streamed_thinking || !thinking.is_empty() {
                 events.push(json!({
                     "kind": "thinking",
                     "text": thinking,
                     "phase": "completed",
-                    "messageId": state.current_thinking_id.clone().map(Value::String).unwrap_or(Value::Null),
+                    "messageId": thinking_id,
+                    "raw": value
+                }));
+            }
+            if !stream.streamed_text && !text.is_empty() {
+                events.push(json!({
+                    "kind": "message",
+                    "text": text,
+                    "phase": "delta",
+                    "messageId": stream.id,
                     "raw": value
                 }));
             }
             events.push(json!({
                 "kind": "message",
-                "text": "",
+                "text": text,
                 "phase": "completed",
-                "messageId": state.current_message_id.clone().map(Value::String).unwrap_or(Value::Null),
+                "messageId": stream.id,
                 "raw": value
             }));
             let usage = message.get("usage").cloned().unwrap_or(Value::Null);
-            if usage.is_object() && !usage.as_object().is_none_or(|u| u.is_empty()) {
+            let measured = ["input", "output", "cacheRead", "cacheWrite"].iter()
+                .any(|key| usage[*key].as_u64().is_some_and(|count| count > 0));
+            if usage.is_object() && !usage.as_object().is_none_or(|u| u.is_empty()) && (!state.model_error || measured) {
                 events.push(json!({
                     "kind": "usage",
                     "usageScope": "context",
@@ -612,7 +620,7 @@ fn parse_omp_rpc_event(value: &Value, state: &mut OmpParseState) -> Vec<Value> {
                 }));
             }
             if let Some(usage) = events.iter().find(|event| event["kind"] == "usage").cloned() {
-                events.push(state.usage.update(&state.message_sequence.to_string(), &usage));
+                events.push(state.usage.update(&stream.id, &usage));
             }
             if state.model_error {
                 events.push(json!({
@@ -1116,7 +1124,7 @@ fn handle_rpc_value(
             }
             if value["id"]=="agenthub-commands" {let _=sender.send(json!({"kind":"commands","commands":value["data"]["commands"],"raw":value}));return Ok(true);}
             if value["id"]==prompt_id && value["success"]!=false && value["data"]["agentInvoked"]==false {
-                *settled=true;*terminal_status=true;let _=sender.send(json!({"kind":"message","phase":"completed","messageId":"omp-native-command","text":""}));let _=sender.send(json!({"kind":"status","phase":"turn_completed"}));return Ok(true);
+                *settled=true;*terminal_status=true;let _=sender.send(json!({"kind":"message","phase":"completed","messageId":run_id,"text":""}));let _=sender.send(json!({"kind":"status","phase":"turn_completed"}));return Ok(true);
             }
             let is_compact = value.get("id").and_then(Value::as_str) == Some(prompt_id)
                 && provider_command.as_deref() == Some("compact");
@@ -1138,7 +1146,7 @@ fn handle_rpc_value(
                 let _ = sender.send(json!({
                     "kind": "message",
                     "phase": "completed",
-                    "messageId": "omp-compact",
+                    "messageId": run_id,
                     "text": if nothing { "当前 omp 会话没有可压缩的旧内容，无需压缩。" } else { "omp 会话压缩完成。" },
                     "raw": value
                 }));
@@ -1197,9 +1205,9 @@ fn handle_rpc_value(
             Ok(true)
         }
         "available_commands_update" => {let _=sender.send(json!({"kind":"commands","commands":value["commands"],"raw":value}));Ok(true)},
-        "command_output" => {let _=sender.send(json!({"kind":"message","messageId":"omp-native-command","phase":"delta","text":value["text"].as_str().unwrap_or(""),"raw":value}));Ok(true)},
+        "command_output" => {let _=sender.send(json!({"kind":"message","messageId":run_id,"phase":"delta","text":value["text"].as_str().unwrap_or(""),"raw":value}));Ok(true)},
         "prompt_result" if value["id"]==prompt_id && value["agentInvoked"]==false => {
-            *settled=true;*terminal_status=true;let _=sender.send(json!({"kind":"message","phase":"completed","messageId":"omp-native-command","text":""}));let _=sender.send(json!({"kind":"status","phase":"turn_completed"}));Ok(true)
+            *settled=true;*terminal_status=true;let _=sender.send(json!({"kind":"message","phase":"completed","messageId":run_id,"text":""}));let _=sender.send(json!({"kind":"status","phase":"turn_completed"}));Ok(true)
         },
         "host_tool_call" => {
             let id = value.get("id").cloned().unwrap_or(Value::Null);
@@ -1300,9 +1308,42 @@ mod audit_tests {
         let delta=parse_omp_rpc_event(&json!({"type":"subagent_event","payload":{"id":"child","event":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"child thought"}}}}),&mut state);
         assert_eq!(delta[0]["subagentDispatchId"],"parent");
         assert!(delta[0]["messageId"].as_str().unwrap().starts_with("child:"));
-        assert_eq!(state.message_sequence,0);
+        assert!(state.messages.is_empty());
         let completed=parse_omp_rpc_event(&json!({"type":"subagent_lifecycle","payload":{"id":"child","parentToolCallId":"parent","agent":"scout","status":"completed"}}),&mut state);
         assert_eq!(completed[0]["input"]["agentsStates"]["child"]["status"],"completed");
+    }
+    #[test]
+    fn reused_rpc_message_id_does_not_reuse_a_previous_process_reply() {
+        let delta = json!({
+            "type": "message_update", "messageId": "1",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "reply"}
+        });
+        let before_stop = parse_omp_rpc_event(&delta, &mut OmpParseState::default());
+        let after_resume = parse_omp_rpc_event(&delta, &mut OmpParseState::default());
+        assert_ne!(before_stop[0]["messageId"], after_resume[0]["messageId"]);
+    }
+    #[test]
+    fn interleaved_replies_finish_with_their_own_ids_and_text() {
+        let mut state = OmpParseState::default();
+        let delta = |id, text| json!({
+            "type": "message_update", "messageId": id,
+            "assistantMessageEvent": {"type": "text_delta", "delta": text}
+        });
+        let end = |id, text| json!({
+            "type": "message_end", "messageId": id,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
+        });
+        let a = parse_omp_rpc_event(&delta("a", "first"), &mut state);
+        let b = parse_omp_rpc_event(&delta("b", "second"), &mut state);
+        let done_b = parse_omp_rpc_event(&end("b", "second reply"), &mut state);
+        let done_a = parse_omp_rpc_event(&end("a", "first reply"), &mut state);
+        assert_ne!(a[0]["messageId"], b[0]["messageId"]);
+        assert_eq!(done_b.len(), 1);
+        assert_eq!(done_a.len(), 1);
+        assert_eq!(done_b[0]["messageId"], b[0]["messageId"]);
+        assert_eq!(done_a[0]["messageId"], a[0]["messageId"]);
+        assert_eq!(done_a[0]["text"], "first reply");
+        assert!(state.messages.is_empty());
     }
     #[test]
     fn request_usage_keeps_cache_creation_and_correct_context_size() {

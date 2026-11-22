@@ -1,42 +1,100 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { useConversationSelection } from "../../lib/use-conversation-selection";
+import { useUiReducedMotion } from "../../lib/ui-motion";
 import { requestedWorkspaceFile } from "../../lib/workspace-state";
 import { WorkspacePreview } from "./WorkspacePreview";
-import { AgentPanel } from "./AgentPanel";
 import { NewConversation } from "./NewConversation";
 import { SessionWorkbench, type DrawerKind } from "./SessionWorkbench";
+import { composerEase, flashComposer } from "./composer-motion";
 
 export function SessionsPage({ active = true }: { active?: boolean }): JSX.Element {
   const { locale } = useI18n();
   const { session, openSession, loadingSession, missingSession, sessionLoadError, retrySession } = useConversationSelection(active);
+  const workspace = useRef<HTMLDivElement>(null);
+  const exitLayer = useRef<HTMLDivElement>(null);
+  const composerOrigin = useRef<{ sessionId: string; rect: DOMRect; focused: boolean; exit: HTMLElement[] }>();
+  const reducedMotion = useUiReducedMotion();
+  const openCreatedSession = (id: string): void => {
+    const page = workspace.current;
+    const composer = page?.querySelector(".composer-box");
+    if (page && composer) {
+      const bounds = page.getBoundingClientRect();
+      const exit = reducedMotion ? [] : Array.from(page.querySelectorAll<HTMLElement>(".new-conversation-backdrop, .new-conversation-welcome, .starter-launch"), element => {
+        const rect = element.getBoundingClientRect();
+        const copy = element.cloneNode(true) as HTMLElement;
+        copy.inert = true;
+        Object.assign(copy.style, { position: "absolute", left: `${rect.left - bounds.left}px`, top: `${rect.top - bounds.top}px`, width: `${rect.width}px`, margin: "0" });
+        if (element.classList.contains("new-conversation-backdrop")) {
+          // Keep the current light levels after the focused input unmounts.
+          copy.style.height = `${rect.height}px`;
+          for (const selector of [".new-conversation-skylight", ".new-conversation-spotlight"]) {
+            const previous = element.querySelector<HTMLElement>(selector);
+            const next = copy.querySelector<HTMLElement>(selector);
+            if (previous && next) next.style.opacity = getComputedStyle(previous).opacity;
+          }
+        }
+        return copy;
+      });
+      composerOrigin.current = { sessionId: id, rect: composer.getBoundingClientRect(), focused: composer.contains(document.activeElement), exit };
+    }
+    openSession(id);
+  };
+  useLayoutEffect(() => {
+    const origin = composerOrigin.current;
+    if (!origin || origin.sessionId !== session?.id) return;
+    composerOrigin.current = undefined;
+    const composer = workspace.current?.querySelector<HTMLElement>(".composer-box");
+    if (!composer || !active) return;
+    if (origin.focused) composer.querySelector("textarea")?.focus({ preventScroll: true });
+    if (reducedMotion || !composer.animate) return;
+    const rect = composer.getBoundingClientRect();
+    if (!rect.width || !origin.rect.width) return;
+    const layer = exitLayer.current;
+    const outgoing = origin.exit.map(element => {
+      const background = element.classList.contains("new-conversation-backdrop");
+      if (background) workspace.current?.prepend(element);
+      else layer?.append(element);
+      const fade = background ? element.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 260, easing: "ease-out", fill: "both" }) : element.animate([
+        { opacity: 1, transform: "translateY(0) scale(1)" },
+        { opacity: 0, transform: "translateY(-14px) scale(.98)" }
+      ], { duration: 180, easing: "ease-out", fill: "both" });
+      fade.onfinish = () => element.remove();
+      return fade;
+    });
+    flashComposer(composer, true);
+    const animation = composer.animate([
+      { transform: `translate(${origin.rect.left - rect.left}px, ${origin.rect.top - rect.top}px) scaleX(${origin.rect.width / rect.width})`, transformOrigin: "top left" },
+      { transform: "translate(0, 0) scaleX(1)", transformOrigin: "top left" }
+    ], { duration: 380, easing: composerEase });
+    return () => {
+      animation.cancel();
+      outgoing.forEach(fade => fade.cancel());
+      origin.exit.forEach(element => element.remove());
+    };
+  }, [session?.id, active, reducedMotion]);
   const [drawer, setDrawer] = useState<DrawerKind>(null);
   const [preview, setPreview] = useState<{ sessionId: string; path: string }>();
   const openPreview = useCallback((path: string): void => {
     if (!session) return;
     setDrawer(null);
-    setShowAgents(false);
     setPreview({ sessionId: session.id, path });
   }, [session?.id]);
-  const [showAgents, setShowAgents] = useState(false);
-  const closeButton = useRef<HTMLButtonElement>(null);
-  const agentsPanel = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLElement | null>(null);
-  const closeAgents = useCallback((): void => { setShowAgents(false); trigger.current?.focus(); }, []);
-  const toggleAgents = useCallback((): void => {
-    if (showAgents) { closeAgents(); return; }
-    trigger.current = document.activeElement as HTMLElement;
-    setPreview(undefined);
-    setShowAgents(true);
-  }, [showAgents, closeAgents]);
-  const teamId = session?.target.teamId;
+  const [showInspector, setShowInspector] = useState<boolean>();
+  const previewPath = requestedWorkspaceFile(preview, session?.id);
+  const inspectorOpen = !previewPath && (!drawer || drawer === "terminal" || drawer === "tools") && (showInspector ?? window.innerWidth >= 1500);
+  const toggleInspector = useCallback((): void => {
+    if (!inspectorOpen) {
+      setPreview(undefined);
+      setDrawer(current => current === "terminal" ? current : null);
+    }
+    setShowInspector(!inspectorOpen);
+  }, [inspectorOpen]);
   const openDrawer = useCallback((next: DrawerKind): void => {
     setPreview(undefined);
-    if (!teamId || next === "workflow") setShowAgents(false);
     setDrawer(next);
-  }, [teamId]);
+  }, []);
   const [params, setParams] = useSearchParams();
   useEffect(() => {
     const panel = params.get("panel");
@@ -46,22 +104,6 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
   },[active,session?.id,params,openDrawer,setParams]);
   const closeDrawer = useCallback((): void => setDrawer(null), []);
   const closePreview = useCallback((): void => setPreview(undefined), []);
-  useEffect(() => {
-    if (!showAgents || !active) return;
-    closeButton.current?.focus();
-    const escape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape" && !event.defaultPrevented) { setShowAgents(false); trigger.current?.focus(); }
-    };
-    const dismiss = (event: PointerEvent): void => {
-      if (session?.target.teamId || !(event.target instanceof Node)) return;
-      if (event.target instanceof Element && event.target.closest(".session-workspace-menu")) return;
-      if (!agentsPanel.current?.contains(event.target) && !trigger.current?.contains(event.target)) setShowAgents(false);
-    };
-    window.addEventListener("keydown", escape);
-    document.addEventListener("pointerdown", dismiss);
-    return () => { window.removeEventListener("keydown", escape); document.removeEventListener("pointerdown", dismiss); };
-  }, [showAgents, active, session?.target.teamId]);
-  const previewPath = requestedWorkspaceFile(preview, session?.id);
   if (loadingSession || sessionLoadError) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-ink-2">
     <p role={sessionLoadError ? "alert" : "status"}>{sessionLoadError
       ? (locale === "zh-CN" ? "暂时打不开这个会话" : "Could not open this conversation")
@@ -69,15 +111,15 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
     {sessionLoadError && <button type="button" onClick={retrySession} className="rounded-lg border border-line px-4 py-2 text-ink hover:bg-panel">{locale === "zh-CN" ? "重试" : "Retry"}</button>}
   </div>;
   if (missingSession) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-ink-2"><p>{locale === "zh-CN" ? "此会话不存在或已移除" : "This conversation is unavailable"}</p><a href="#/sessions?new=1" className="rounded-lg border border-line px-4 py-2 text-ink hover:bg-panel">{locale === "zh-CN" ? "新会话" : "New conversation"}</a></div>;
-  if (!session) return <NewConversation mode="code" onCreated={openSession} active={active} />;
   return (
-    <div className="relative flex h-full min-h-0">
-      <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden" aria-label={locale === "zh-CN" ? "对话" : "Conversation"}>
-        <SessionWorkbench sessionId={session.id} focusKey={params.get("focus") ?? undefined} active={active} drawer={drawer} onOpenDrawer={openDrawer} onCloseDrawer={closeDrawer} onOpenSession={openSession} onToggleAgents={toggleAgents} agentsOpen={showAgents} onOpenLocalFile={openPreview} />
-      </section>
+    <div ref={workspace} className="relative isolate flex h-full min-h-0">
+      {!session ? <NewConversation mode="code" onCreated={openCreatedSession} active={active} /> :
+      <section className="relative z-[1] flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden" aria-label={locale === "zh-CN" ? "对话" : "Conversation"}>
+        <SessionWorkbench sessionId={session.id} focusKey={params.get("focus") ?? undefined} active={active} drawer={drawer} onOpenDrawer={openDrawer} onCloseDrawer={closeDrawer} onOpenSession={openSession} onToggleInspector={toggleInspector} inspectorOpen={inspectorOpen} onOpenLocalFile={openPreview} />
+      </section>}
 
-      {previewPath && <WorkspacePreview key={session.id} sessionId={session.id} path={previewPath} onClose={closePreview} />}
-      {showAgents && <div ref={agentsPanel} id="session-agent-inspector" data-presentation={session.target.teamId ? "sidebar" : "popover"} role={session.target.teamId ? undefined : "dialog"} aria-label={locale === "zh-CN" ? "Agent 分配" : "Agent assignment"} className="agent-panel-overlay relative flex h-full shrink-0 flex-col"><button ref={closeButton} type="button" aria-label={locale === "zh-CN" ? "关闭 Agent 分配" : "Close agent assignment"} onClick={closeAgents} className="agent-panel-close"><X size={15} /></button><AgentPanel session={session} onOpenSession={openSession} /></div>}
+      {session && previewPath && <WorkspacePreview key={session.id} sessionId={session.id} path={previewPath} onClose={closePreview} />}
+      <div ref={exitLayer} className="new-conversation-exit" aria-hidden="true" />
     </div>
   );
 }

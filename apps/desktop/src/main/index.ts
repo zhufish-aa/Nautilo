@@ -1,12 +1,14 @@
 import { registerAccountLoginHandlers } from "./account-login";
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Notification, session, shell } from "electron";
 import { isAbsolute, join } from "node:path";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { registerPanelWindows } from "./panel-windows";
 import type { PanelTarget } from "../shared/panel-window";
+import type { UsageOverviewQuery, UsageSourceRow } from "@agenthub/schemas";
+import { buildUsageOverview } from "../shared/usage-overview";
 import { WorkspaceAssistant } from "./assistant/workspace-assistant";
 import type { CoreRequest } from "./assistant/context";
-import type { AssistantSettings } from "../shared/workspace-assistant";
+import type { AssistantAutomationAction, AssistantSettings } from "../shared/workspace-assistant";
 import { TaskBrowser } from "./task-browser";
 import { readWindowState, trackWindowState } from "./window-state";
 import { CoreDaemonClient } from "./core-daemon-client";
@@ -54,11 +56,25 @@ const remoteBackground = new RemoteBackground(appIcon,
       if (win.webContents.isLoadingMainFrame()) win.webContents.once("did-finish-load", navigate);
       else navigate();
     }
-  });
+  }, () => workspaceAssistant.keepRunning);
 const requestForAssistant: CoreRequest = (method, input) => coreDaemon.request({method,input}) as Promise<import("@agenthub/schemas").IpcRequestMap[typeof method]["output"]>;
 const workspaceAssistant = new WorkspaceAssistant(requestForAssistant, sessionId => {
+  remoteBackground.refreshTray();
   if (workbenchWindow && !workbenchWindow.isDestroyed()) workbenchWindow.webContents.send("assistant:changed",sessionId);
-},draft=>{if(workbenchWindow&&!workbenchWindow.isDestroyed())workbenchWindow.webContents.send("assistant:output",draft);});
+},draft=>{if(workbenchWindow&&!workbenchWindow.isDestroyed())workbenchWindow.webContents.send("assistant:output",draft);}, () => {
+  if (!Notification.isSupported() || workbenchWindow?.isFocused()) return;
+  const notice = new Notification({ title: "Nautilo", body: app.getLocale().startsWith("zh") ? "助手发来了一条消息" : "The assistant sent you a message" });
+  notice.once("click", () => {
+    const window = workbenchWindow && !workbenchWindow.isDestroyed() ? workbenchWindow : createMainWindow();
+    const navigate = () => void window.webContents.executeJavaScript('window.location.hash = "/assistant"');
+    if (window.webContents.isLoadingMainFrame()) window.webContents.once("did-finish-load", navigate);
+    else navigate();
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
+  notice.show();
+});
 let closeSessionPanels: ((id:string)=>void) | undefined;
 let cycleBrowserWindows: (() => void) | undefined;
 taskBrowser.setSessionCatalog(async () => {
@@ -100,6 +116,12 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("core:request", async (_event, request: { requestId?: string; method: string; input?: unknown }) => {
     const result = await coreDaemon.request(request);
+    const usage = request.method === "metrics.get" ? request.input as UsageOverviewQuery | undefined : undefined;
+    if (usage?.view === "usage") {
+      const rows = (result as { rows?: UsageSourceRow[] })?.rows;
+      if (!Array.isArray(rows)) throw new Error("The backend does not support usage overview yet");
+      return buildUsageOverview(rows, usage);
+    }
     if (request.method === "remote.configure") remoteBackground.apply(result as import("@agenthub/schemas").RemoteStatus);
     if (request.method === "session.delete") {
       for (const id of (result as {sessionIds?: string[]})?.sessionIds ?? []) { closeSessionPanels?.(id); taskBrowser.release(id); }
@@ -111,6 +133,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle("assistant:configure", (_event,settings:AssistantSettings) => workspaceAssistant.configure(settings));
   ipcMain.handle("assistant:submit", (_event,id:string,text:string) => workspaceAssistant.submit(id,text));
   ipcMain.handle("assistant:stop", (_event,id:string) => workspaceAssistant.stop(id));
+  ipcMain.handle("assistant:automations", (_event, action?: AssistantAutomationAction) => workspaceAssistant.automations(action));
 
   ipcMain.handle("window:minimize", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();

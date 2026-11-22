@@ -14,6 +14,9 @@ createInterface({input:process.stdin}).on('line',async line=>{
  if(v.method==='initialize'){result(v.id,{protocolVersion:1,agentCapabilities:{loadSession:true,sessionCapabilities:{resume:{}}},authMethods:[{id:'oauth-personal'}]});return;}
  if(['session/new','session/resume','session/load'].includes(v.method)){
   if(process.env.FIXTURE_AUTH==='required'){send({id:v.id,error:{code:-32000,message:'Authentication required'}});return;}
+  if(v.method==='session/resume' && v.params.sessionId==='requires-load'){
+   send({id:v.id,error:{code:-32603,message:'Failed to read session requires-load; retry, or load it with session/load'}});return;
+  }
   if(v.params.sessionId)sessionId=v.params.sessionId;
   if(v.method==='session/load')update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'HISTORY MUST NOT REPLAY'}});
   result(v.id,{sessionId,configOptions:options});return;

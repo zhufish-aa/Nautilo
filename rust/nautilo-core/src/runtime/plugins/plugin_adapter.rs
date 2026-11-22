@@ -454,6 +454,11 @@ impl AgentCliAdapter for PluginClient {
             .map_err(|error|CoreError::reason(ErrorCode::IpcInternalError,error.to_string()))
     }
 
+    async fn account_quota(&self, instance: &Value, context: &Value) -> CoreResult<Value> {
+        self.inner.call("accountQuota", json!({"instance": instance, "context": context})).await
+            .map_err(|error| CoreError::reason(ErrorCode::IpcInternalError, error.to_string()))
+    }
+
     async fn list_models(&self, instance: &Value, context: Option<&Value>) -> Option<CoreResult<Value>> {
         let input = json!({
             "instance": instance,

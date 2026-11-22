@@ -1,6 +1,10 @@
 //! Exact source snapshot; see the adjacent upstream notice and license.
 pub const FILES: &[(&str, &str)] = &[
     (
+        "quota.mjs",
+        include_str!("../../../../plugins/antigravity/resources/model-gateway/quota.mjs"),
+    ),
+    (
         "UPSTREAM.json",
         include_str!("../../../../plugins/antigravity/resources/model-gateway/UPSTREAM.json"),
     ),

@@ -41,6 +41,25 @@ async fn nested_repository_keeps_status_and_directory_preview_available() {
     assert_eq!(diff["previewReason"], "directory");
     assert_eq!(std::fs::read_to_string(fixture.root.join("nested/keep.txt")).unwrap(), "untouched");
 }
+#[tokio::test]
+async fn scoped_preview_preserves_a_staged_rename_and_its_original_content() {
+    let fixture = Fixture::new().await;
+    fixture.write("old [x].txt", "first line\nsecond line\n");
+    fixture.commit().await;
+    fixture.git(&["mv", "old [x].txt", "new [x].txt"]).await;
+    let service = SourceControl::default();
+    let input = json!({"path":"new [x].txt","source":"index"});
+
+    let diff = service.diff(fixture.cwd(), &input).await.unwrap();
+    assert_eq!(diff["before"], "first line\nsecond line\n");
+    assert_eq!(diff["after"], diff["before"]);
+    assert_eq!(diff["partialReason"], "rename");
+
+    fixture.git(&["config", "status.renames", "false"]).await;
+    let diff = service.diff(fixture.cwd(), &input).await.unwrap();
+    assert_eq!(diff["before"], "");
+    assert_eq!(diff["after"], "first line\nsecond line\n");
+}
 async fn editor_conflict(binary:bool)->Fixture{
     let fixture=Fixture::new().await;
     if binary{std::fs::write(fixture.root.join("file.txt"),[0,1,2]).unwrap();}else{fixture.write("file.txt","base\n");}fixture.write("other.txt","unchanged\n");fixture.commit().await;
@@ -395,6 +414,50 @@ fn porcelain_keeps_unicode_spaces_renames_and_unmerged_paths() {
     assert!(parse_status("2 R. N... 1 1 1 a a R100 new\0").is_err());
     assert!(path("../outside").is_err());
 }
+#[tokio::test]
+async fn selected_files_commit_directly_and_preserve_the_rest_of_the_index() {
+    let fixture = Fixture::new().await;
+    let service = SourceControl::default();
+    fixture.write("keep.txt", "staged\n");
+    fixture.git(&["add", "keep.txt"]).await;
+    fixture.write("中文 [x].txt", "first\n");
+    change(&service, &fixture, "commit", json!({"paths":["中文 [x].txt"],"message":"First selected file"})).await;
+    assert_eq!(fixture.git(&["show","HEAD:中文 [x].txt"]).await, "first\n");
+    assert_eq!(fixture.git(&["diff","--cached","--name-only"]).await, "keep.txt\n");
+    fixture.write("keep.txt", "unstaged version\n");
+    fixture.write("中文 [x].txt", "second\n");
+    fixture.write("new.txt", "new\n");
+    fixture.write("ignored-by-selection.txt", "untracked\n");
+    change(&service, &fixture, "commit", json!({"paths":["中文 [x].txt","new.txt"],"message":"Only the checked files"})).await;
+    assert_eq!(fixture.git(&["show","HEAD:中文 [x].txt"]).await, "second\n");
+    assert_eq!(fixture.git(&["show","HEAD:new.txt"]).await, "new\n");
+    assert_eq!(fixture.git(&["show",":keep.txt"]).await, "staged\n");
+    assert_eq!(fixture.git(&["diff","--cached","--name-only"]).await, "keep.txt\n");
+    assert!(fixture.git(&["status","--short"]).await.contains("?? ignored-by-selection.txt"));
+}
+
+#[tokio::test]
+async fn rejected_selected_commit_restores_new_files_without_replacing_other_staged_changes() {
+    let fixture = Fixture::new().await;
+    let service = SourceControl::default();
+    fixture.write("base.txt", "before\n");
+    fixture.commit().await;
+    fixture.write("base.txt", "staged\n");
+    fixture.git(&["add","base.txt"]).await;
+    fixture.write("new.txt", "new\n");
+    fixture.write(".git/hooks/pre-commit", "#!/bin/sh\necho rejected >&2\nexit 1\n");
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(fixture.root.join(".git/hooks/pre-commit"),std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let state=service.status(fixture.cwd()).await.unwrap();
+    let result=service.mutate(fixture.cwd(), &json!({"action":"commit","paths":["new.txt"],"token":state["token"],"message":"Rejected"})).await;
+    assert!(result.unwrap_err().to_string().contains("rejected"));
+    assert!(fixture.git(&["status","--short"]).await.contains("?? new.txt"));
+    assert_eq!(fixture.git(&["show",":base.txt"]).await, "staged\n");
+    assert_eq!(fixture.git(&["rev-parse","HEAD"]).await.trim(), state["head"].as_str().unwrap());
+}
+
 #[tokio::test]
 async fn staging_unborn_and_partial_files_commits_only_the_reviewed_index() {
     let fixture = Fixture::new().await;

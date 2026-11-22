@@ -1,0 +1,103 @@
+.composer {
+  --composer-fill: light-dark(var(--card), #0d0f14);
+  --composer-border: color-mix(in srgb, var(--ink) 9%, transparent);
+  --composer-focus: color-mix(in srgb, var(--glass-accent-blue) 48%, transparent);
+  --composer-ring: 0 0 0 3px color-mix(in srgb, var(--glass-accent-blue) 10%, transparent);
+  --composer-top-light: inset 0 1px color-mix(in srgb, var(--ink) 6%, transparent);
+  --composer-depth: 0 16px 48px light-dark(rgb(15 23 42 / .08), rgb(0 0 0 / .45));
+  --composer-action-idle: color-mix(in srgb, var(--ink) 5%, transparent);
+  --composer-action-muted: light-dark(var(--ink-3), #52525b);
+  --composer-stop-fill: color-mix(in srgb, var(--glass-accent-blue) 14%, var(--composer-fill));
+  --composer-stop-border: color-mix(in srgb, var(--glass-accent-blue) 35%, transparent);
+  --composer-spring: cubic-bezier(.34, 1.56, .64, 1);
+}
+
+.composer .composer-box {
+  max-width: var(--conversation-width);
+  border: 1px solid var(--composer-border);
+  border-radius: 16px;
+  background: var(--composer-fill);
+  box-shadow: var(--composer-top-light);
+}
+
+.new-conversation .composer .composer-box { box-shadow: var(--composer-top-light), var(--composer-depth); }
+.composer .composer-box:focus-within {
+  border-color: var(--composer-focus);
+  box-shadow: var(--composer-top-light), var(--composer-ring);
+}
+.new-conversation .composer .composer-box:focus-within {
+  box-shadow: var(--composer-top-light), var(--composer-depth), var(--composer-ring);
+}
+
+.composer-pulse {
+  position: absolute;
+  z-index: 1;
+  inset: -1px 14px auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--glass-accent-blue-bright), transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.composer-actions {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.composer .composer-actions :is(.composer-send, .composer-stop) {
+  position: relative;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--glass-action-blue);
+  color: var(--glass-action-ink);
+}
+.composer .composer-actions .composer-send:disabled {
+  background: var(--composer-action-idle);
+  color: var(--composer-action-muted);
+  opacity: 1;
+  cursor: not-allowed;
+}
+.composer .composer-actions .composer-send:not(:disabled):hover { background: var(--glass-accent-blue-bright); }
+.composer .composer-actions .composer-stop {
+  border-color: var(--composer-stop-border);
+  background: var(--composer-stop-fill);
+  color: var(--ink);
+}
+.composer .composer-actions .composer-stop:hover { border-color: var(--glass-accent-blue); }
+.composer-actions > button:focus-visible { outline: 2px solid var(--glass-accent-blue); outline-offset: 2px; }
+
+.composer-stop-arc { position: absolute; inset: -1px; width: 32px; height: 32px; color: var(--glass-accent-blue); pointer-events: none; }
+.composer-launch-arrow {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  left: 8px;
+  color: var(--glass-action-ink);
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-reduce-motion]) .composer :is(.composer-send-icon, .composer-plus-icon) { transition: transform 180ms var(--ease-out-ui); }
+  html:not([data-reduce-motion]) .composer-send:not(:disabled) { animation: composer-action-ready 220ms var(--composer-spring); }
+  html:not([data-reduce-motion]) .composer-stop-icon { animation: composer-stop-ready 220ms var(--composer-spring); }
+  html:not([data-reduce-motion]) .composer-send:disabled .composer-send-icon { animation: composer-action-ready 220ms var(--composer-spring); }
+  html:not([data-reduce-motion]) :is(.composer-stop-arc, .composer-pending-icon) { animation: composer-arc-turn 1s linear infinite; }
+  html:not([data-reduce-motion]) .composer-actions > button:active { transform: scale(.94); }
+  @media (hover: hover) and (pointer: fine) {
+    html:not([data-reduce-motion]) .composer-send:not(:disabled):hover .composer-send-icon { transform: translateY(-1.5px); }
+    html:not([data-reduce-motion]) .new-conversation .composer-add-trigger:not(:disabled):hover .composer-plus-icon { transform: rotate(90deg); }
+  }
+}
+
+@keyframes composer-action-ready { from { transform: scale(.93); } to { transform: scale(1); } }
+@keyframes composer-stop-ready { from { opacity: 0; transform: scale(.6); } to { opacity: 1; transform: scale(1); } }
+@keyframes composer-arc-turn { to { transform: rotate(360deg); } }

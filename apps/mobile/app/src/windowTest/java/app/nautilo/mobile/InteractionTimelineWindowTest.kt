@@ -7,6 +7,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import app.nautilo.mobile.data.*
 import app.nautilo.mobile.ui.*
 import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -68,5 +69,39 @@ class InteractionTimelineWindowTest {
         compose.onAllNodesWithTag("turn-part:activity:interaction:q").assertCountEquals(1)
         val after = compose.onNodeWithTag("turn-part:activity:interaction:q").fetchSemanticsNode().boundsInRoot.top
         assertEquals(before, after, 1f)
+    }
+
+    @Test fun ompApprovalKeepsItsOptionsAndFoldsTheLongPrompt() {
+        val prompt = "Allow tool: task Context: ${"Read a directory. ".repeat(30)}"
+        val approval = json("id" to "omp-approval", "providerId" to "omp", "kind" to "question", "status" to "pending",
+            "questions" to JSONArray().put(json("id" to "request", "question" to prompt,
+                "options" to JSONArray().put(json("label" to "Approve")).put(json("label" to "Deny")))))
+        val current = mutableStateOf(approval)
+        compose.setContent { NautiloTheme { InteractionCard(current.value, false, model) } }
+        compose.onNodeWithText("审批 · task").assertIsDisplayed()
+        compose.onNodeWithText(prompt).assertDoesNotExist()
+        compose.onNodeWithText("Approve").assertIsDisplayed()
+        compose.onNodeWithText("Deny").assertIsDisplayed()
+        compose.onNodeWithText("查看审批详情").performClick()
+        compose.onNodeWithText(prompt).assertIsDisplayed()
+        compose.onNodeWithText("查看审批详情").performClick()
+        compose.onNodeWithText("Deny").performClick()
+        compose.onNodeWithContentDescription("提交回答").assertIsEnabled()
+
+        compose.runOnUiThread {
+            current.value = JSONObject(approval.toString()).put("status", "resolved")
+                .put("response", json("answers" to json("request" to JSONArray().put("Deny"))))
+        }
+        compose.onNodeWithText("你的回答：Deny").assertIsDisplayed()
+        compose.onNodeWithText(prompt).assertDoesNotExist()
+    }
+
+    @Test fun ompCompatibilityNoticeShowsItsTextOnlyWhenExpanded() {
+        val text = "[billion-context-pi] Unsupported host: ${"extension diagnostic ".repeat(30)}"
+        val item = ActivityItem("omp-notify", "provider_ui", "Harness 通知", payload = json("method" to "notify", "text" to text))
+        compose.setContent { NautiloTheme { EventNotice(item) } }
+        compose.onNodeWithText(text).assertDoesNotExist()
+        compose.onNodeWithText("扩展兼容性提示 · billion-context-pi").performClick()
+        compose.onNodeWithText(text).assertIsDisplayed()
     }
 }

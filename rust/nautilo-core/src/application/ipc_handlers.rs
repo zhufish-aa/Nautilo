@@ -30,7 +30,7 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             result.map(|mut result|{if let Some(error)=result["error"].as_str(){let redacted=daemon.redaction.text(error);result["error"]=json!(redacted);}result}).map_err(|error|anyhow::Error::new(crate::errors::invalid("sourceControl",&daemon.redaction.text(&error.to_string()))))
         }});
     }
-    router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION, "features":{"sourceControl":1,"sourceControlHistory":1,"sourceControlHistoryPaging":1,"sourceControlEditing":1,"terminalTabs":1,"composerDrafts":1,"taskRetry":1,"workflows":1,"workflowPlans":1} })) });
+    router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION, "features":{"sourceControl":2,"sourceControlHistory":1,"sourceControlHistoryPaging":1,"sourceControlEditing":1,"terminalTabs":1,"composerDrafts":1,"taskRetry":1,"workflows":1,"workflowPlans":1} })) });
     reg(router,daemon,"workflow.templates",|d,_|d.workflows.list_templates());
     reg(router,daemon,"workflow.template",|d,input|d.workflows.get_template(&input));
     reg(router,daemon,"workflow.save",|d,input|d.workflows.save_template(&input));
@@ -115,6 +115,14 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
     reg(router, daemon, "assistant.save", |d, input| crate::database::assistant::save(&d.db.lock().unwrap().raw,&input));
     reg(router, daemon, "assistant.sessions", |d, input| crate::database::assistant::sessions(&d.db.lock().unwrap().raw,&input));
     reg(router, daemon, "assistant.excerpts", |d, input| crate::database::assistant::excerpts(&d.db.lock().unwrap().raw,&input));
+    reg(router, daemon, "assistant.dispatches", |d, input| crate::database::assistant::dispatches(&d.db.lock().unwrap().raw,&input));
+    {
+        let daemon = daemon.clone();
+        router.register("assistant.search", move |input| {
+            let daemon = daemon.clone();
+            async move { crate::runtime::assistant_model::search(&daemon, &input).await.map_err(anyhow::Error::new) }
+        });
+    }
     {
         let daemon = daemon.clone();
         router.register("assistant.modelStep", move |input| {
@@ -175,7 +183,11 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
     reg(router, daemon, "connection.list", |d, _| d.connections.list().map(Value::Array));
     reg(router, daemon, "connection.scanNative", |d, _| d.connection_imports.scan());
     reg(router, daemon, "connection.importNative", |d, input| d.connection_imports.import(&input));
-    reg(router, daemon, "connection.get", |d, input| d.connections.get(input["connectionId"].as_str().unwrap_or(""), input["revision"].as_u64()));
+    reg(router, daemon, "connection.get", |d, input| {
+        let id = input["connectionId"].as_str().unwrap_or("");
+        let revision = input["revision"].as_u64();
+        if input["includeUsage"] == true { d.connections.detail(id, revision) } else { d.connections.get(id, revision) }
+    });
     reg(router, daemon, "connection.gateway", |d, input| {
         let id = input["connectionId"].as_str().unwrap_or("");
         let enabled = input["enabled"].as_bool().ok_or_else(|| crate::errors::invalid("enabled", "Expected a boolean"))?;
@@ -189,6 +201,13 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         router.register("connection.models", move |input| {
             let daemon = daemon.clone();
             async move { daemon.connections.models(&input).await.map_err(anyhow::Error::new) }
+        });
+    }
+    {
+        let daemon = daemon.clone();
+        router.register("connection.quota", move |input| {
+            let daemon = daemon.clone();
+            async move { daemon.connections.quota(&input).await.map_err(anyhow::Error::new) }
         });
     }
 
@@ -276,6 +295,9 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             .map(Value::Array)
     });
     reg(router, daemon, "metrics.get", |d, input| {
+        if input["view"] == "usage" {
+            return crate::database::usage::read(&d.db.lock().unwrap().raw, &input);
+        }
         d.metrics.snapshot(input.get("projectId").and_then(Value::as_str))
     });
 

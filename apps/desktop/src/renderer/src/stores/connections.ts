@@ -1,10 +1,10 @@
 import { create } from "zustand";
-import type { ProviderModelCatalog, RuntimeConnection } from "@agenthub/domain";
+import type { ProviderModelCatalog, RuntimeConnection, RuntimeConnectionInput } from "@agenthub/domain";
 import { requestCore } from "../lib/bridge";
 import { withDefaultReasoning } from "../lib/model-reasoning";
 import { connectionModelCatalog, hasConfiguredConnectionModels } from "../lib/connection-models";
 
-export type ConnectionDraft = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential" | "accountGateway">;
+export type ConnectionDraft = RuntimeConnectionInput;
 interface ConnectionsState {
   connections: RuntimeConnection[];
   loading: boolean;
@@ -57,7 +57,9 @@ export const useConnectionsStore = create<ConnectionsState>((set, get) => ({
     const connection = await requestCore<RuntimeConnection>("connection.get", { connectionId, revision });
     if (revision === undefined) {
       loadGeneration++;
-      set((state) => ({ loading: false, connections: [...state.connections.filter((item) => item.id !== connectionId), connection] }));
+      set((state) => ({ loading: false, connections: state.connections.some(item => item.id === connectionId)
+        ? state.connections.map(item => item.id === connectionId && item.revision <= connection.revision ? connection : item)
+        : [...state.connections, connection] }));
     }
     return connection;
   },
@@ -87,7 +89,10 @@ export const useConnectionsStore = create<ConnectionsState>((set, get) => ({
     })).then(async (catalog) => {
       const connection = get().connections.find((item) => item.id === connectionId && item.revision === version) ?? await get().get(connectionId, version);
       const configured = new Set((connection.models ?? []).map((model) => model.id));
-      const result = { ...catalog, models: catalog.models.map((model) => configured.has(model.id) ? model : withDefaultReasoning(model)) };
+      const result = connection.kind === "login" ? catalog : {
+        ...catalog,
+        models: catalog.models.map((model) => configured.has(model.id) ? model : withDefaultReasoning(model)),
+      };
       // Explicit discovery returns the full catalog to the settings editor.
       // Chat and team selectors cache only models enabled in this revision.
       set((state) => ({ modelCatalogs: { ...state.modelCatalogs, [key]: connectionModelCatalog(connection, result) } }));

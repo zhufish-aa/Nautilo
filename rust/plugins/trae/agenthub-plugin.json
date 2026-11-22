@@ -14,6 +14,30 @@
     "defaultExecutable": "trae-cli",
     "nativeApiProtocol": "responses",
     "connectionProtocolDiscovery": true,
+    "observeApiOutput": true,
+    "nativeAccountQuota": true,
+    "permissionModes": [
+      {
+        "value": "inherit",
+        "name": { "zh-CN": "TRAE 原生配置", "en-US": "TRAE native configuration" },
+        "description": { "zh-CN": "沿用已选企业 CLI 配置档的权限设置。", "en-US": "Use the permission settings of the selected enterprise CLI profile." }
+      },
+      {
+        "value": "default",
+        "name": { "zh-CN": "请求批准", "en-US": "Request approval" },
+        "description": { "zh-CN": "允许工作区内操作，访问网络或编辑工作区外的文件时请求批准。", "en-US": "Allow workspace operations and request approval for network access or edits outside the workspace." }
+      },
+      {
+        "value": "auto",
+        "name": { "zh-CN": "自动审批", "en-US": "Auto review" },
+        "description": { "zh-CN": "保留工作区权限边界，由 TRAE 审核符合条件的审批请求。", "en-US": "Keep workspace restrictions and let TRAE review eligible approval requests." }
+      },
+      {
+        "value": "bypass_permissions",
+        "name": { "zh-CN": "完全访问权限", "en-US": "Full access" },
+        "description": { "zh-CN": "工作区外的编辑及网络访问无需询问，仍受企业策略约束。", "en-US": "Allow edits outside the workspace and network access without asking, subject to enterprise policy." }
+      }
+    ],
     "credentialEnv": [
       "OPENAI_API_KEY",
       "ANTHROPIC_API_KEY",
@@ -22,7 +46,13 @@
       "DOUBAO_API_KEY"
     ],
     "envPassthrough": [
-      "TRAE_CONFIG_FILE"
+      "TRAE_CONFIG_FILE",
+      "TRAE_HOME",
+      "TRAEX_HOME",
+      "TRAECLI_HOST",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY"
     ]
   }
 }

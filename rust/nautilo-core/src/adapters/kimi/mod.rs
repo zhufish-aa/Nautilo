@@ -510,7 +510,7 @@ impl AgentCliAdapter for KimiCodeAdapter {
         // Kimi's older ACP server requires an OAuth login even when a custom
         // model has its own credentials. Prompt mode honors the native config
         // directly, so an API connection must never fall back to that login.
-        if request.instance.pointer("/providerOptions/runtimeConnectionId").is_some() || !base_args(&request.instance).is_empty() {
+        if connection::uses_bound_api(&request.instance) || !base_args(&request.instance).is_empty() {
             request.prompt = crate::adapters::images::prompt_with_image_files(&request)
                 .map_err(|error|CoreError::reason(ErrorCode::RunStartFailed,error.to_string()))?;
             let args = build_kimi_start_args(&request.instance, &request.prompt, Some(&request));
@@ -523,7 +523,7 @@ impl AgentCliAdapter for KimiCodeAdapter {
         let observer=crate::adapters::api_stream_observer::ApiStreamObserver::prepare(&mut request.start)?;
         let proxy=connection::prepare_protocol(&mut request.start)?;
         connection::prepare(&request.start.instance, request.start.env.get_or_insert_with(HashMap::new))?;
-        if request.start.instance.pointer("/providerOptions/runtimeConnectionId").is_some() || !base_args(&request.start.instance).is_empty() {
+        if connection::uses_bound_api(&request.start.instance) || !base_args(&request.start.instance).is_empty() {
             request.start.prompt = crate::adapters::images::prompt_with_image_files(&request.start)
                 .map_err(|error|CoreError::reason(ErrorCode::RunStartFailed,error.to_string()))?;
             let args = build_kimi_resume_args(
@@ -552,7 +552,7 @@ impl AgentCliAdapter for KimiCodeAdapter {
 /// Native prompt mode for API connections and custom CLI invocations.
 fn start_simple(request: AdapterStartRequest, args: Vec<String>) -> CoreResult<AdapterRun> {
     let mut env = request.env.clone().unwrap_or_default();
-    if request.instance.pointer("/providerOptions/runtimeConnectionId").is_some() {
+    if connection::uses_bound_api(&request.instance) {
         if let Some(home) = env.get("KIMI_CODE_HOME") {
             agenthub_plugin_sdk::native_config::merge_mcp_file(&std::path::PathBuf::from(home).join("mcp.json"),
                 Some(&json!(request.mcp_servers.as_deref().unwrap_or(&[]))))

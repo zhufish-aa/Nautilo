@@ -13,7 +13,6 @@ export interface ClaudeParseState {
   /** content_block index → block type, so deltas can be attributed to text vs thinking. */
   streamBlocks: Map<number, string>;
   /** Latest single-request prompt size (input + cache tokens) — the real context footprint. */
-  lastContextUsed?: number;
   /** Sticky context window learned from result modelUsage. */
   contextWindow?: number;
 }
@@ -109,7 +108,6 @@ function parseAssistant(event: RecordValue, state: ClaudeParseState, raw: unknow
     const cacheCreationInputTokens = number(usage.cache_creation_input_tokens);
     if (inputTokens !== undefined || cachedInputTokens !== undefined || cacheCreationInputTokens !== undefined) {
       const contextUsed = (inputTokens ?? 0) + (cachedInputTokens ?? 0) + (cacheCreationInputTokens ?? 0);
-      state.lastContextUsed = contextUsed;
       events.push({
         kind: "usage",
         usageScope: "context",
@@ -176,7 +174,6 @@ function parseResult(event: RecordValue, state: ClaudeParseState, raw: unknown):
       cacheCreationInputTokens,
       inputTokensIncludesCache: false,
       outputTokens: number(usage.output_tokens),
-      contextUsed: state.lastContextUsed,
       contextWindow,
       raw
     });

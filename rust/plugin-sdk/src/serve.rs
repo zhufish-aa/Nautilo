@@ -160,6 +160,10 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                             Ok(protocol) => emit::response(id, protocol),
                             Err(error) => emit::failure(id, &error.to_string()),
                         },
+                        "accountQuota" => match plugin.account_quota(&input["instance"], &input["context"]).await {
+                            Ok(quota) => emit::response(id, quota),
+                            Err(error) => emit::failure(id, &error.to_string()),
+                        },
                         "listModels" => match plugin
                             // The host sends {instance, context} — unwrap them;
                             // passing the whole frame as the instance hid every

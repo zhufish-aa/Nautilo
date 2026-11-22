@@ -150,7 +150,7 @@ impl RemoteService {
                 json!({"protocol":1,"epoch":self.repo.epoch()?,"device":device,"name":self.settings()?.device_name,
                 "system":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION"),
                 "endpoint":self.state.lock().unwrap().endpoint.as_ref().map(Endpoint::addr),
-                "capabilities":["projects.list","project.browse","project.create","project.files","file.preview","session.options","session.catalog","session.modes","sessions.list","session.history","session.create","session.details","session.snapshot","session.models","session.configure","session.workspace","session.compact","session.team","session.team.cancel","session.team.retry","events.wait","session.send","session.followUp","attachment.upload","attachment.read","run.list","run.cancel","interaction.list","interaction.respond","approval.list","approval.resolve","approval.scopes"]}),
+                "capabilities":["projects.list","project.browse","project.create","project.files","file.preview","session.options","session.catalog","session.modes","sessions.list","session.history","session.create","session.details","session.snapshot","session.models","session.configure","session.workspace","session.compact","session.team","session.team.cancel","session.team.retry","session.workflows","events.wait","session.send","session.followUp","attachment.upload","attachment.read","run.list","run.cancel","interaction.list","interaction.respond","approval.list","approval.resolve","approval.scopes"]}),
             ));
         }
         if method == "projects.list" {
@@ -252,6 +252,23 @@ impl RemoteService {
                 return Ok(success(&request.id, self.repo.workspace_changes(&session)?))
             }
             "session.team" => return Ok(success(&request.id, self.repo.mobile_team_tasks(&session)?)),
+            "session.workflows" => {
+                if let Some(run_id) = params["runId"].as_str() {
+                    let run = self.dispatch("workflow.get", json!({"runId":run_id})).await?;
+                    if run["sessionId"] != session { bail!("WORKFLOW_NOT_IN_SESSION"); }
+                    let nodes = run["definition"]["nodes"].as_array();
+                    let instances = run["instances"].as_array().into_iter().flatten().rev().take(80).map(|node| {
+                        let name = nodes.and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node["nodeId"]))
+                            .and_then(|entry| entry["name"].as_str()).or_else(|| node["nodeId"].as_str());
+                        json!({"id":node["id"],"name":name,"status":node["status"],"attempt":node["attempt"]})
+                    }).collect::<Vec<_>>();
+                    return Ok(success(&request.id, json!({"name":run["definition"]["name"],"status":run["status"],"instances":instances})));
+                }
+                let listed = self.dispatch("workflow.list", json!({"sessionId":session})).await?;
+                let items = listed.as_array().into_iter().flatten().take(20).map(|run|
+                    json!({"id":run["id"],"name":run["name"],"status":run["status"],"updatedAt":run["updatedAt"]})).collect::<Vec<_>>();
+                return Ok(success(&request.id, json!({"items":items})));
+            }
             "session.team.cancel" => json!({"projectRunId":self.repo.mobile_team_run_id(&session)?}),
             "session.team.retry" => {
                 let task_id = params["taskId"].as_str().filter(|id| !id.is_empty()).ok_or_else(|| anyhow::anyhow!("INVALID_TASK_ID"))?;

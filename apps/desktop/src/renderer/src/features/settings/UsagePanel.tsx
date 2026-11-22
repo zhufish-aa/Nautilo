@@ -1,95 +1,196 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Activity, ArrowUpRight, Coins, Database, Info, RefreshCw, Search, ShieldCheck } from "lucide-react";
-import { Button } from "../../components/ui/Button";
+import { ArrowDown, ArrowUp, ArrowUpRight, ChevronRight, Info, RefreshCw, Search, X } from "lucide-react";
+import type { UsageOverviewPayload, UsageOverviewQuery, UsageSessionRow, UsageSourceRow } from "@agenthub/schemas";
 import { Tooltip } from "../../components/ui/Tooltip";
-import { getBridge } from "../../lib/bridge";
+import { requestCore, getBridge } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
-import { estimateSnapshot, snapshotTotal, type UsageTotals } from "../../lib/session-usage";
-import { useAgentsStore } from "../../stores/agents";
-import { useSessionsStore } from "../../stores/sessions";
-import { useUsageStore } from "../../stores/usage";
+import { buildUsageOverview } from "../../../../shared/usage-overview";
+import { harnessName, money, percent, splitLabel, TokenMix, tokens, UsageRanking, UsageTrend, type RankDimension } from "./UsageCharts";
 import { RequestLogsPanel } from "./RequestLogsPanel";
+import "./usage-overview.css";
 
-const number = (value: number | undefined) => value === undefined ? "—" : new Intl.NumberFormat("en-US", { maximumFractionDigits: 1, notation: value >= 100_000 ? "compact" : "standard" }).format(value);
-const money = (value: number | undefined) => value === undefined ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(value);
-const sum = (values: Array<number | undefined>) => { const known = values.filter((v): v is number => v !== undefined); return known.length ? known.reduce((a, b) => a + b, 0) : undefined; };
+const priceSettings = "/settings?section=accounts";
+const periods = ["24h", "7d", "30d", "all"] as const;
+const empty = buildUsageOverview([], { view: "usage" });
+type SortColumn = "totalTokens" | "costUsd" | "updatedAt";
 
 export function UsagePanel(): JSX.Element {
-  const zh=useI18n().locale==="zh-CN",[params,setParams]=useSearchParams();
-  const logs=params.get("tab")==="requests";
-  return <><div className="usage-view-tabs" role="tablist" aria-label={zh?"用量与日志":"Usage and logs"}>{[["usage",zh?"会话用量":"Session usage"],["requests",zh?"请求日志":"Request logs"]].map(([id,label])=><button type="button" role="tab" aria-selected={logs=== (id==="requests")} key={id} onClick={()=>{const next=new URLSearchParams(params);next.set("tab",id);setParams(next,{replace:true});}}>{label}</button>)}</div>{logs?<RequestLogsPanel sessionId={params.get("session")??undefined}/>:<UsageSummaryPanel/>}</>;
+  const zh = useI18n().locale === "zh-CN";
+  const [params, setParams] = useSearchParams();
+  const logs = params.get("tab") === "requests";
+  const sessionId = params.get("session") ?? undefined;
+  const tabs = <div className="usage-view-tabs" role="tablist" aria-label={zh ? "用量与费用" : "Usage and costs"}>
+    {[["usage", zh ? "会话汇总" : "Session usage"], ["requests", zh ? "请求日志" : "Request logs"]].map(([id, label]) =>
+      <button type="button" role="tab" aria-selected={logs === (id === "requests")} key={id}
+        onClick={() => setParams(previous => { const next = new URLSearchParams(previous); next.set("tab", id); return next; }, { replace: true })}>{label}</button>)}
+  </div>;
+  return <div className="usage-overview">{logs
+    ? <><div className="usage-toolbar">{tabs}</div><RequestLogsPanel sessionId={sessionId} /></>
+    : <UsageSummary tabs={tabs} sessionId={sessionId} clearSession={() => setParams(previous => {
+      const next = new URLSearchParams(previous); next.delete("session"); return next;
+    }, { replace: true })} zh={zh} />}</div>;
 }
 
-function UsageSummaryPanel(): JSX.Element {
-  const { locale } = useI18n();
-  const zh = locale === "zh-CN";
-  const [searchParams, setSearchParams] = useSearchParams();
-  const selectedSession = searchParams.get("session");
-  const sessions = useSessionsStore(state => state.sessions);
-  const instances = useAgentsStore(state => state.instances);
-  const { summaries, loading, errors, refreshedAt, refresh } = useUsageStore();
+function UsageSummary({ tabs, sessionId, clearSession, zh }: { tabs: JSX.Element; sessionId?: string; clearSession: () => void; zh: boolean }): JSX.Element {
   const [query, setQuery] = useState("");
-  const [visibleCount, setVisibleCount] = useState(50);
-  const canRead = !!getBridge();
-  const [provider, setProvider] = useState("");
+  const [period, setPeriod] = useState<typeof periods[number]>("all");
+  const [harness, setHarness] = useState("");
   const [includeChildren, setIncludeChildren] = useState(true);
+  const [sort, setSort] = useState<{ key: SortColumn; asc: boolean }>({ key: "updatedAt", asc: false });
+  const [drill, setDrill] = useState<{ dimension: RankDimension; id: string; label: string }>();
   const [expanded, setExpanded] = useState<string>();
-  const [refreshVersion, setRefreshVersion] = useState(0);
-  // Usage history is loaded only on this page, with bounded concurrency and no startup cost.
-  const sessionIds = sessions.map(session => session.id).sort().join("\n");
+  const [limit, setLimit] = useState(50);
+  const [revision, setRevision] = useState(0);
+  const [overview, setOverview] = useState<UsageOverviewPayload>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const canRead = !!getBridge();
   useEffect(() => {
     if (!canRead) return;
     let cancelled = false;
-    const queue = sessionIds.split("\n").filter(Boolean);
-    const worker = async () => { while (!cancelled && queue.length) { const id = queue.shift(); if (id) await refresh(id); } };
-    void Promise.all([worker(), worker(), worker()]);
-    return () => { cancelled = true; };
-  }, [sessionIds, refreshVersion, refresh, canRead]);
-  const rows = useMemo(() => sessions.map(session => {
-    const target = session.target;
-    const instance = target.type === "agent" ? instances.find(item => item.id === target.instanceId) : undefined;
-    const summary = summaries[session.id];
-    const estimates = summary?.snapshots.map(snapshot => {
-      // Only the price captured for that run can price its historical usage.
-      return estimateSnapshot(snapshot, snapshot.pricingSnapshot);
-    }) ?? [];
-    const fullyEstimated = estimates.length > 0 && estimates.every(value => value !== undefined);
-    return { session, instance, summary, estimate: fullyEstimated ? sum(estimates) : undefined };
-  }).filter(row => (!selectedSession || row.session.id === selectedSession) && (includeChildren || !row.session.parentSessionId) && (!provider || row.instance?.providerId === provider) && `${row.session.title} ${row.session.model ?? ""} ${row.instance?.displayName ?? ""}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => b.session.updatedAt.localeCompare(a.session.updatedAt)), [sessions, instances, summaries, query, provider, includeChildren, selectedSession]);
-  const known = rows.filter(row => row.summary?.totalTokens !== undefined);
-  const priced = rows.filter(row => row.estimate !== undefined);
-  const busy = sessions.some(session => loading[session.id]);
-  const failures = rows.filter(row => errors[row.session.id]);
-  const providerIds = [...new Set(instances.map(instance => instance.providerId))];
-  const cards = [
-    { icon: Database, title: zh ? "已记录 Token" : "Recorded tokens", value: number(sum(rows.map(row => row.summary?.totalTokens))), note: zh ? `${known.length} / ${rows.length} 个会话有用量数据` : `${known.length} / ${rows.length} sessions with usage` },
-    { icon: Coins, title: zh ? "等价 API 估算" : "Equivalent API estimate", value: money(sum(rows.map(row => row.estimate))), note: zh ? "按每轮记录价格 · 不是账单" : "Recorded run rates · not an invoice" },
-    { icon: ShieldCheck, title: zh ? "估算覆盖" : "Estimate coverage", value: `${priced.length} / ${rows.length}`, note: zh ? "未定价或缺失用量不按零费用计算" : "Unknown usage or rates never count as free" }
-  ];
-  return <div className="usage-dashboard">
-    <div className="usage-actions"><span className="usage-scope">{zh ? "全部时间" : "All time"}</span><div><Tooltip content={zh ? "费用口径：CLI 返回费用仅为供应商报告值，可能是标价折算；订阅实付金额不可得。等价 API 估算只对每轮已记录的完整价格生效，不代表账单。旧事件没有累计范围时保留为未知，避免把上下文快照重复相加。" : "Cost semantics: CLI costs are provider-reported values and may be list-price equivalents. Subscription charges are unavailable. API estimates require complete rates captured for each run; they are not invoices. Legacy events without an accounting scope remain unknown to prevent counting context snapshots twice."}><button type="button" className="usage-info-button"><Info size={15} aria-hidden />{zh ? "统计口径" : "Accounting"}</button></Tooltip><Button variant="outline" size="sm" onClick={() => setRefreshVersion(value => value + 1)} disabled={busy || !canRead}><RefreshCw size={14} className={busy ? "animate-spin" : ""} />{zh ? "刷新" : "Refresh"}</Button><Link to="/settings?section=accounts" className="inline-flex items-center gap-1 rounded-lg border border-line px-3 py-2 text-xs text-ink hover:bg-surface">{zh ? "价格设置" : "Set prices"}<ArrowUpRight size={14} /></Link></div></div>
-    {selectedSession && <button className="text-left text-xs text-accent hover:underline" onClick={() => { const next = new URLSearchParams(searchParams); next.delete("session"); setSearchParams(next, { replace: true }); }}>{zh ? "← 查看全部会话" : "← View all sessions"}</button>}
-    <div className="usage-filters">
-      <label className="usage-search"><Search size={15} className="text-muted" /><input aria-label={zh ? "搜索会话或模型" : "Search sessions or models"} placeholder={zh ? "搜索会话、模型、实例…" : "Search sessions, models, instances…"} value={query} onChange={event => setQuery(event.target.value)} className="w-full bg-transparent text-sm text-ink outline-none" /></label>
-      <select aria-label={zh ? "Agent 类型筛选" : "Agent harness filter"} className="rounded-lg border border-line bg-card px-3 py-2 text-sm text-ink" value={provider} onChange={event => setProvider(event.target.value)}><option value="">{zh ? "全部 Agent 类型" : "All agent harnesses"}</option>{providerIds.map(id => <option key={id} value={id}>{id}</option>)}</select>
-      <label className="usage-children-control"><input type="checkbox" checked={includeChildren} onChange={event => setIncludeChildren(event.target.checked)} />{zh ? "含子 Agent 会话" : "Include child sessions"}</label>
-    </div>
-    <div className="usage-summary-grid">{cards.map((card, index) => <section className="usage-summary-card" key={card.title}><div className="usage-summary-label"><span className="usage-summary-symbol"><card.icon size={18} aria-hidden /></span><h2>{card.title}</h2><Tooltip content={card.note}><button type="button" aria-label={card.note}><Info size={13} /></button></Tooltip></div><strong className="usage-summary-value">{card.value}</strong>{index === 0 && <span className="usage-summary-count">{known.length} / {rows.length} {zh ? "会话" : "sessions"}</span>}</section>)}</div>
+    setBusy(true);
+    setError(undefined);
+    const timer = window.setTimeout(() => {
+      const filters: UsageOverviewQuery = { view: "usage", sessionId, period, query, harness, includeChildren };
+      void requestCore<UsageOverviewPayload | { rows: UsageSourceRow[] }>("metrics.get", filters)
+        .then(result => {
+          if (cancelled) return;
+          // Electron aggregates before returning through its bridge. The other
+          // shell reaches the same daemon and uses the shared calculator.
+          const data = "summary" in result ? result : Array.isArray(result.rows) ? buildUsageOverview(result.rows, filters) : undefined;
+          if (!data) throw new Error("Usage overview requires the updated backend");
+          setOverview(data);
+        })
+        .catch(reason => { if (!cancelled) setError(String(reason instanceof Error ? reason.message : reason)); })
+        .finally(() => { if (!cancelled) setBusy(false); });
+    }, query ? 160 : 0);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [canRead, harness, includeChildren, period, query, revision, sessionId]);
 
-    {!canRead && <p role="status" className="text-xs text-muted">{zh ? "请在桌面应用中读取已保存的用量。" : "Open the desktop app to read persisted usage."}</p>}
-    {failures.length > 0 && <div role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-600">{zh ? `${failures.length} 个会话读取失败；已读取数据仍可查看，请刷新重试。` : `${failures.length} sessions could not be read. Available data is retained; refresh to retry.`}</div>}
-    <section className="usage-details">
-      <div className="usage-details-heading"><h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><Activity size={17} />{zh ? "会话明细" : "Session details"}</h2><span aria-live="polite" className="text-xs text-muted">{busy ? (zh ? "正在读取用量…" : "Loading usage…") : `${rows.length} ${zh ? "个会话" : "sessions"}`}</span></div>
-      <div className="overflow-x-auto"><table className="usage-table w-full min-w-[640px] text-left"><thead className="bg-surface/50 text-muted"><tr>{[zh ? "会话 / 当前模型" : "Session / current model", "Token", zh ? "CLI 报告 (USD)" : "CLI reported (USD)", zh ? "等价估算 (USD)" : "Equivalent estimate (USD)", zh ? "状态" : "Status"].map(label => <th key={label} className="px-4 py-3 font-medium">{label}</th>)}</tr></thead><tbody>{rows.slice(0, visibleCount).map(row => <UsageRow key={row.session.id} row={row} zh={zh} error={errors[row.session.id]} loading={loading[row.session.id]} loaded={!!refreshedAt[row.session.id]} expanded={expanded === row.session.id} onToggle={() => setExpanded(expanded === row.session.id ? undefined : row.session.id)} />)}</tbody></table></div>
-      {rows.length > visibleCount && <button type="button" onClick={() => setVisibleCount(count => count + 50)} className="w-full border-t border-line py-3 text-xs text-accent">{zh ? "加载更多会话" : "Show more sessions"}</button>}
-      {!rows.length && <div className="py-14 text-center text-sm text-muted">{sessions.length ? (zh ? "没有匹配的会话" : "No matching sessions") : (zh ? "还没有会话。开始对话后，用量会显示在这里。" : "No sessions yet. Usage appears here after a conversation.")}</div>}
+  const data = overview ?? empty;
+  const visible = useMemo(() => data.rows.filter(row => !drill || (
+    drill.dimension === "byProject" ? row.projectId === drill.id
+      : drill.dimension === "byHarness" ? row.harnesses.includes(drill.id) || (!drill.id && !row.harness)
+        : row.models.includes(drill.id) || (!drill.id && !row.models.length)
+  )).sort((a, b) => {
+    const left = a[sort.key], right = b[sort.key];
+    if (left === undefined || right === undefined) return left === right ? 0 : left === undefined ? 1 : -1;
+    const order = typeof left === "string" ? left.localeCompare(String(right)) : left - Number(right);
+    return order * (sort.asc ? 1 : -1);
+  }), [data.rows, drill, sort]);
+  const { summary } = data;
+  const costs = zh
+    ? "用量按实际运行时间统计。缓存写入归入未缓存输入。只有完整拆分的记录才进入彩色分段，灰段表示有总量但缺少拆分。累计快照的历史基线只进全部时间的总量，不分配到某天。自定义单价优先，参考价按标准文本 API，费用不代表订阅或实际账单。"
+    : "Usage is timed by real runs. Uncached input includes cache writes. Colors use complete splits; gray marks measured totals without a split. Undated cumulative baselines count only in all-time totals. Custom rates take priority. Estimates use standard text API rates and do not represent bills.";
+
+  return <>
+    <div className="usage-toolbar">
+      {tabs}
+      <div className="usage-actions">
+        <div className="usage-segments" aria-label={zh ? "时间范围" : "Date range"}>
+          {periods.map((key, i) => <button type="button" key={key} aria-pressed={period === key}
+            onClick={() => { setPeriod(key); setLimit(50); }}>{["24h", zh ? "7天" : "7 days", zh ? "30天" : "30 days", zh ? "全部" : "All"][i]}</button>)}
+        </div>
+        <Tooltip content={costs}><button type="button" aria-label={zh ? "统计口径" : "Accounting"}><Info size={14} /><span>{zh ? "统计口径" : "Accounting"}</span></button></Tooltip>
+        <button type="button" disabled={busy || !canRead} onClick={() => setRevision(r => r + 1)} aria-label={zh ? "刷新" : "Refresh"}>
+          <RefreshCw size={14} className={busy ? "motion-safe:animate-spin" : undefined} /><span>{zh ? "刷新" : "Refresh"}</span>
+        </button>
+        <Link to={priceSettings}>{zh ? "价格设置" : "Set prices"}<ArrowUpRight size={13} /></Link>
+      </div>
+    </div>
+    {(sessionId || data.unpricedModels > 0 || error || !canRead) && <div className="usage-notes">
+      {sessionId && <button type="button" onClick={clearSession}>{zh ? "← 查看全部会话" : "← View all sessions"}</button>}
+      {data.unpricedModels > 0 && <Link to={priceSettings}>{zh ? `${data.unpricedModels} 个模型的用量未匹配单价` : `${data.unpricedModels} models have usage without matching prices`} <ArrowUpRight size={12} /></Link>}
+      {error && <span role="status" title={error}>{zh ? "用量读取失败，请刷新或检查后端版本" : "Could not read usage. Refresh or check the backend version."}</span>}
+      {!canRead && <span role="status">{zh ? "请在桌面应用中读取用量" : "Open the desktop app to read usage"}</span>}
+    </div>}
+
+    <section className="usage-panel usage-kpis" aria-label={zh ? "核心指标" : "Usage summary"}>
+      <div><h2>{zh ? "已记录 Token" : "Recorded tokens"}</h2><strong>{tokens(overview ? summary.totalTokens ?? 0 : undefined)}</strong>
+        <TokenMix value={summary} zh={zh} />
+        <small title={splitLabel(summary, zh, true)}>{summary.hasBreakdown ? splitLabel(summary, zh) : `${summary.recordedSessions} / ${summary.totalSessions} ${zh ? "会话" : "sessions"}`}</small></div>
+      <div><h2>{zh ? "缓存效率" : "Cache efficiency"}</h2><strong className="usage-rate">{percent(summary.cacheHitRate)}</strong>
+        <small>{summary.cacheHitRate === undefined ? (zh ? "当前数据无缓存明细" : "No cache breakdown") : (zh ? `缓存命中 ${tokens(summary.cachedTokens)} Token` : `${tokens(summary.cachedTokens)} cached tokens`)}</small></div>
+      <div><h2>{zh ? "参考费用估算" : "Reference cost estimate"}</h2><strong>{money(overview ? summary.estimatedCostUsd ?? 0 : undefined)}</strong>
+        <small>{summary.pricedSessions > 0 ? (zh ? `已覆盖 ${summary.pricedSessions} / ${summary.recordedSessions} 已记录会话` : `${summary.pricedSessions} / ${summary.recordedSessions} recorded sessions priced`)
+          : <Link to={priceSettings}>{zh ? "配置单价" : "Configure rates"} <ArrowUpRight size={12} /></Link>}</small></div>
+      <div><h2>{zh ? "会话活跃度" : "Session activity"}</h2><strong>{summary.recordedSessions} <em>/ {summary.totalSessions} {zh ? "会话" : "sessions"}</em></strong>
+        <small>{zh ? `${summary.totalRequests} 轮运行` : `${summary.totalRequests} runs`}</small></div>
     </section>
-  </div>;
+
+    <div className="usage-charts">
+      <UsageTrend points={data.trendSeries} zh={zh} hourly={period === "24h"} />
+      <UsageRanking breakdowns={data.breakdowns} zh={zh} onSelect={(dimension, rank) => {
+        setDrill({ dimension, id: rank.id, label: (dimension === "byHarness" ? harnessName(rank.name) : rank.name) ?? (zh ? "未记录" : "Unknown") });
+        setLimit(50);
+      }} />
+    </div>
+
+    <section className="usage-panel usage-details">
+      <div className="usage-details-heading">
+        <h2>{zh ? "会话明细" : "Session details"} <small aria-live="polite">{visible.length}</small></h2>
+        <div className="usage-filters">
+          <label className="usage-search"><Search size={15} aria-hidden /><input aria-label={zh ? "搜索会话或模型" : "Search sessions or models"}
+            placeholder={zh ? "搜索会话、模型、项目…" : "Search sessions, models, projects…"} value={query}
+            onChange={event => { setQuery(event.target.value); setDrill(undefined); setLimit(50); }} /></label>
+          <select aria-label={zh ? "Agent 类型筛选" : "Agent harness filter"} value={harness}
+            onChange={event => { setHarness(event.target.value); setDrill(undefined); setLimit(50); }}>
+            <option value="">{zh ? "全部 Agent 类型" : "All agent harnesses"}</option>
+            {data.harnesses.map(id => <option key={id} value={id}>{harnessName(id)}</option>)}
+          </select>
+          <label className="usage-children-control"><input type="checkbox" checked={includeChildren} onChange={event => {
+            setIncludeChildren(event.target.checked); setLimit(50);
+          }} />{zh ? "含子 Agent 会话" : "Include child sessions"}</label>
+        </div>
+      </div>
+      {drill && <div className="usage-drill"><button type="button" onClick={() => setDrill(undefined)} title={zh ? "清除排行筛选" : "Clear breakdown filter"}>
+        {drill.label}<X size={12} /></button></div>}
+      <table className="usage-table">
+        <thead><tr>{([
+          [zh ? "会话 / 模型" : "Session / model"], [zh ? "Token 用量" : "Tokens", "totalTokens"], [zh ? "缓存率" : "Cache hit"],
+          [zh ? "费用 (USD)" : "Cost (USD)", "costUsd"], [zh ? "最近活跃" : "Last active", "updatedAt"], [zh ? "状态" : "Status"],
+        ] as [string, SortColumn?][]).map(([label, key]) =>
+          <th scope="col" key={label} aria-sort={key === sort.key ? sort.asc ? "ascending" : "descending" : undefined}
+            data-column={key ?? (label === (zh ? "缓存率" : "Cache hit") ? "cache" : undefined)}>
+            {key ? <button type="button" onClick={() => { setSort(current => ({ key, asc: key === current.key && !current.asc })); setLimit(50); }}>
+              {label}{key === sort.key && (sort.asc ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
+            </button> : label}</th>)}</tr></thead>
+        <tbody>{visible.slice(0, limit).map(row => <SessionRow key={row.sessionId} row={row} zh={zh} expanded={expanded === row.sessionId}
+          onToggle={() => setExpanded(expanded === row.sessionId ? undefined : row.sessionId)} />)}</tbody>
+      </table>
+      {!visible.length && <div className="usage-table-empty" role="status">{busy ? (zh ? "正在读取用量…" : "Loading usage…")
+        : (zh ? "没有匹配的会话" : "No matching sessions")}</div>}
+      {visible.length > limit && <button type="button" className="usage-more" onClick={() => setLimit(n => n + 50)}>{zh ? "加载更多会话" : "Show more sessions"}</button>}
+    </section>
+  </>;
 }
 
-function UsageRow({ row, zh, error, loading, loaded, expanded, onToggle }: { row: { session: { id: string; title: string; model?: string }; instance?: { displayName: string }; summary?: UsageTotals; estimate?: number }; zh: boolean; error?: string; loading?: boolean; loaded: boolean; expanded: boolean; onToggle: () => void }): JSX.Element {
-  const s = row.summary;
-  const partial = !!s && s.snapshots.some(snapshot => snapshotTotal(snapshot) === undefined);
-  return <><tr className="border-t border-line hover:bg-surface/40"><td className="max-w-[280px] px-4 py-3"><button onClick={onToggle} aria-expanded={expanded} className="block max-w-full truncate text-left font-medium text-ink hover:text-accent">{row.session.title || (zh ? "未命名会话" : "Untitled session")}</button><div className="mt-1 truncate text-[11px] text-muted">{row.instance?.displayName ?? "—"} · {row.session.model ?? (zh ? "默认模型" : "Default model")}</div></td><td className="px-4 py-3 tabular-nums text-ink">{number(s?.totalTokens)}{partial && <span className="ml-1 text-muted">*</span>}</td><td className="px-4 py-3 tabular-nums text-muted">{money(s?.reportedCost)}</td><td className="px-4 py-3 tabular-nums text-ink">{money(row.estimate)}</td><td className="px-4 py-3 text-muted"><span className="usage-row-status" data-state={error ? "error" : loading ? "loading" : !loaded ? "pending" : s?.totalTokens !== undefined ? "recorded" : "unavailable"}>{error ? (zh ? "读取失败" : "Read failed") : loading ? (zh ? "读取中" : "Loading") : !loaded ? (zh ? "待读取" : "Pending") : s?.totalTokens !== undefined ? (zh ? "已记录" : "Recorded") : (zh ? "不可得" : "Unavailable")}</span></td></tr>{expanded && <tr className="border-t border-line bg-surface/30"><td colSpan={5} className="px-4 py-4"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{[[zh ? "输入 (CLI 原值)" : "Input (CLI value)", s?.inputTokens], [zh ? "输出" : "Output", s?.outputTokens], [zh ? "缓存读取" : "Cache read", s?.cachedInputTokens], [zh ? "缓存写入" : "Cache write", s?.cacheCreationInputTokens]].map(([label, value]) => <div key={label as string}><div className="text-muted">{label}</div><div className="mt-1 font-medium tabular-nums text-ink">{number(value as number | undefined)}</div></div>)}</div><p className="mt-3 text-[11px] text-muted">{zh ? "— 表示未提供，不是零。输入是否包含缓存由 CLI 标记，Token 总量自动去重；思考 Token 已包含在输出中。* 表示仅汇总可得部分。" : "— means unavailable, not zero. Totals respect CLI cache semantics; reasoning is already included in output. * indicates a partial known total."}</p>{error && <p className="mt-2 text-amber-600">{error}</p>}</td></tr>}</>;
+function SessionRow({ row, zh, expanded, onToggle }: { row: UsageSessionRow; zh: boolean; expanded: boolean; onToggle: () => void }): JSX.Element {
+  const date = new Date(row.updatedAt);
+  const formatted = Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat(zh ? "zh-TW" : "en-US", {
+    month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(date) : "—";
+  const recorded = row.totalTokens !== undefined;
+  const model = row.currentModel ?? row.models.at(-1);
+  const context = [row.projectName, harnessName(row.harness), model].filter(Boolean).join(" · ");
+  const labels = zh ? { reported: "CLI 报告的已知费用", configured: "按自定义单价估算", reference: "按公开 API 参考价估算",
+    estimated: "运行记录中的估算费用", mixed: "合计已知的配置与参考估算" }
+    : { reported: "Known CLI-reported cost", configured: "Estimated from configured rates", reference: "Estimated from public API rates",
+      estimated: "Estimate recorded by runtime", mixed: "Known configured and reference estimates" };
+  return <><tr>
+    <td><button type="button" className="usage-session-title" onClick={onToggle} aria-expanded={expanded} title={row.title ?? undefined}>
+      <ChevronRight size={13} /><span>{row.title || (zh ? "未命名会话" : "Untitled session")}</span>
+    </button><div className="usage-session-meta" title={context}>{context}</div></td>
+    <td data-column="totalTokens"><span className="usage-token-number">{tokens(row.totalTokens)}</span><TokenMix value={row} zh={zh} /></td>
+    <td data-column="cache" data-hit={row.cacheHitRate !== undefined && row.cacheHitRate >= 70}>{percent(row.cacheHitRate)}</td>
+    <td data-column="costUsd" title={row.costSource ? labels[row.costSource] : undefined}>{money(row.costUsd)}</td>
+    <td data-column="updatedAt" title={row.updatedAt}>{formatted}</td>
+    <td><span className="usage-row-status" data-recorded={recorded}>{recorded ? (zh ? "已记录" : "Recorded") : (zh ? "未记录" : "Unrecorded")}</span></td>
+  </tr>{expanded && <tr className="usage-expanded"><td colSpan={6}>
+    <div><span>{zh ? "用量构成" : "Token breakdown"}</span><strong>{splitLabel(row, zh, true)}</strong></div>
+    {row.cacheHitRate !== undefined && <div><span>{zh ? "缓存率" : "Cache hit"}</span><strong>{percent(row.cacheHitRate)}</strong></div>}
+    {row.cacheWriteTokens !== undefined && <div><span>{zh ? "其中缓存写入" : "Cache writes within input"}</span><strong>{row.cacheWriteTokens.toLocaleString("en-US")}</strong></div>}
+    {row.costSource && <div><span>{zh ? "费用来源" : "Cost source"}</span><strong>{labels[row.costSource]}</strong></div>}
+  </td></tr>}</>;
 }

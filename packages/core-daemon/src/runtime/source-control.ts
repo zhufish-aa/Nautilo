@@ -1,7 +1,7 @@
-import {createHash} from "node:crypto";
+import {createHash,randomUUID} from "node:crypto";
 import {spawn} from "node:child_process";
 import {createReadStream,existsSync} from "node:fs";
-import {lstat,open,readlink,realpath} from "node:fs/promises";
+import {lstat,open,readlink,realpath,unlink} from "node:fs/promises";
 import {dirname,isAbsolute,join,relative} from "node:path";
 import type {SourceControlChange,SourceControlDiff,SourceControlMutation,SourceControlRepository,SourceControlStatus,SourceControlSave,SourceControlSaveResult} from "@agenthub/schemas";
 import {describeSourcePatch,selectSourcePatch,sourcePatchToken} from "./source-control-patch.js";
@@ -26,6 +26,43 @@ async function git(cwd:string,args:string[],input?:string,limit=4*LIMIT,raw=fals
 }
 async function checked(cwd:string,args:string[],input?:string):Promise<string>{const result=await git(cwd,args,input);if(result.code!==0)throw new Error(result.stderr.trim()||result.stdout.trim()||"Git 操作失败");if(result.truncated)throw new Error("Git 输出过大，请缩小操作范围后重试。");return result.stdout;}
 function validPath(value:string):void {if(!value||value.includes("\0")||process.platform==="win32"&&value.includes("\\")||value.startsWith("/")||value.split("/").some(part=>["..",".",".git",""].includes(part))||value[1]===":")throw new Error("文件路径必须位于当前 Git 工作目录内");}
+async function commitFiles(root:string,changes:SourceControlChange[],names:string[],message:string):Promise<string>{
+  if(!Array.isArray(names)||!names.length||names.length>10000)throw new Error("请选择需要提交的文件（每次最多 10000 个）。");
+  const byPath=new Map(changes.map(change=>[change.path,change]));
+  const paths=new Set<string>(),newFiles=new Set<string>();
+  for(const name of names){
+    validPath(name);
+    const change=byPath.get(name);
+    if(!change)throw new Error("文件状态已改变，请刷新后重试。");
+    if(change.directory)throw new Error(`不能直接提交嵌套仓库或未跟踪目录：${name}`);
+    paths.add(name);
+    if(change.originalPath)paths.add(change.originalPath);
+    if(change.untracked)newFiles.add(name);
+  }
+  for(const name of byPath.keys()){
+    if(paths.has(name))continue;
+    for(let slash=name.indexOf("/");slash>=0;slash=name.indexOf("/",slash+1)){
+      if(paths.has(name.slice(0,slash)))throw new Error("文件被目录替换，请一并勾选该目录中的更改。");
+    }
+  }
+  const gitDir=(await checked(root,["rev-parse","--absolute-git-dir"])).trim();
+  const pathFile=join(gitDir,`.nautilo-commit-${randomUUID()}`);
+  const writer=await open(pathFile,"wx");
+  try{
+    try{await writer.writeFile([...paths].join("\0")+"\0");}finally{await writer.close();}
+    try{
+      if(newFiles.size)await checked(root,["add","--intent-to-add","--pathspec-from-file=-","--pathspec-file-nul"],[...newFiles].join("\0")+"\0");
+      return await checked(root,["commit","--only","--file=-",`--pathspec-from-file=${pathFile}`,"--pathspec-file-nul"],message);
+    }catch(error){
+      if(newFiles.size)try{
+        const {changes}=parseSourceControlStatus(await checked(root,["status","--porcelain=v2","-z","--untracked-files=no"]));
+        const intent=changes.filter(file=>newFiles.has(file.path)&&file.indexStatus==="."&&file.worktreeStatus==="A").map(file=>file.path);
+        if(intent.length)await checked(root,["update-index","--force-remove","-z","--stdin"],intent.join("\0")+"\0");
+      }catch(cleanup){throw new Error(`${error}；清理新文件的提交准备记录失败：${cleanup}`);}
+      throw error;
+    }
+  }finally{await unlink(pathFile).catch(()=>{});}
+}
 export function parseSourceControlStatus(raw:string):Pick<SourceControlRepository,"changes"|"ahead"|"behind"|"detached"|"head"|"branch"|"upstream"> {
   const state:ReturnType<typeof parseSourceControlStatus>={changes:[],ahead:0,behind:0,detached:false},records=raw.split("\0");
   for(let index=0;index<records.length;index++){
@@ -129,8 +166,16 @@ export class SourceControl {
         else{const change=selected[0];if(selected.length!==1||change.untracked||change.conflict||change.submodule)throw new Error("请选择一个非冲突的已跟踪文件放弃未暂存更改。");if(!input.fileToken||input.fileToken!==await fileToken(root,change.path))throw new Error("文件内容已改变，请重新查看差异后再放弃更改。");args=["restore","--worktree","--",change.path];}
         const separator=args.indexOf("--"),filePaths=args.slice(separator+1);args=[...args.slice(0,separator),"--pathspec-from-file=-","--pathspec-file-nul"];output=await checked(root,args,filePaths.join("\0")+"\0");
       }else if(input.action==="commit"){
-        if(state.changes.some(change=>change.conflict))throw new Error("请先解决冲突并暂存文件。");if(state.operation!=="merge"&&!state.changes.some(change=>![".","?"].includes(change.indexStatus)))throw new Error("请先暂存需要提交的更改。");if(state.operation&&state.operation!=="merge")throw new Error("请先在原生终端完成当前 Git 操作。");
-        if(!input.message?.trim()||Buffer.byteLength(input.message)>65536||input.message.includes("\0"))throw new Error("请输入有效的提交说明。");output=await checked(root,["commit","--file=-"],input.message);
+        if(state.changes.some(change=>change.conflict))throw new Error("请先解决冲突并暂存文件。");
+        if(state.operation&&state.operation!=="merge")throw new Error("请先在原生终端完成当前 Git 操作。");
+        if(!input.message?.trim()||Buffer.byteLength(input.message)>65536||input.message.includes("\0"))throw new Error("请输入有效的提交说明。");
+        if(input.paths!==undefined){
+          if(state.operation==="merge")throw new Error("合并需要一次提交完整的合并结果。");
+          output=await commitFiles(root,state.changes,input.paths,input.message);
+        }else{
+          if(state.operation!=="merge"&&!state.changes.some(change=>![".","?"].includes(change.indexStatus)))throw new Error("暂存区没有可提交的更改。");
+          output=await checked(root,["commit","--file=-"],input.message);
+        }
       }else if(input.action==="create-branch"||input.action==="switch-branch"){
         if(!input.branch||input.branch.startsWith("-")||(await git(root,["check-ref-format","--branch",input.branch])).code!==0)throw new Error("分支名称无效。");if(state.operation)throw new Error("请先完成当前 Git 操作。");if(input.action==="switch-branch"&&state.changes.length)throw new Error("请先提交或处理当前更改，再切换分支。");output=await checked(root,input.action==="create-branch"?["switch","-c",input.branch]:["switch","--",input.branch]);
       }else if(["fetch","pull","push"].includes(input.action)){

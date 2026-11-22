@@ -19,11 +19,12 @@ test('timeline follows delayed process layout, survives collapse, and respects r
       import { createRoot } from 'react-dom/client';
       import { flushSync } from 'react-dom';
       import { TimelineViewport } from './src/renderer/src/features/timeline/Timeline';
+      import { I18nProvider } from './src/renderer/src/lib/i18n';
       const root = createRoot(document.getElementById('root'));
       window.qa = {
         render: (contentKey = 0, forceFollowKey, sessionKey = 's', active = true) => flushSync(() => root.render(
-          <StrictMode><TimelineViewport rows={['user', 'turn'].map(key => ({ key, render: () => <div>{key}</div> }))}
-            {...{contentKey, forceFollowKey, sessionKey, active}} /></StrictMode>)),
+          <StrictMode><I18nProvider><TimelineViewport rows={['user', 'turn'].map(key => ({ key, render: () => <div>{key}</div> }))}
+            {...{contentKey, forceFollowKey, sessionKey, active}} /></I18nProvider></StrictMode>)),
         close: () => flushSync(() => root.unmount())
       };
     ` },
@@ -96,10 +97,10 @@ test('timeline follows delayed process layout, survives collapse, and respects r
 
     scroll(700);
     w.qa.render(2, 'new-user-message');
-    assert.equal(top, 1450, 'sending a new message resumes follow mode immediately');
+    assert.equal(top, 700, 'sending a message does not move a reader away from history');
     w.qa.render(2, 'new-user-message', 's', false);
     height = 1800; resized(content); await frame();
-    assert.equal(top, 1450, 'hidden workbenches must not scroll');
+    assert.equal(top, 700, 'hidden workbenches must not scroll');
     w.qa.render(2, 'new-user-message', 'other-session', true);
     assert.equal(top, 1650);
     w.qa.close();

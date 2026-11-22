@@ -132,6 +132,10 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
   const respondInteraction = useInteractionRespond();
   const questions = interaction.questions ?? [];
   const pending = interaction.status === "pending";
+  const question = questions.length === 1 ? questions[0] : undefined;
+  const title = question?.question || interaction.title;
+  const nativeToolApproval = interaction.providerId === "omp" && question?.options?.some(option => option.label === "Deny")
+    ? /^Allow tool:\s*([\w.:-]+)(?=\s|$)/.exec(title)?.[1] : undefined;
 
   const [selections, setSelections] = useState<Record<string, string[]>>({});
   const [texts, setTexts] = useState<Record<string, string>>(() => Object.fromEntries(questions.map(question => [question.id, question.initialValue ?? ""])));
@@ -195,11 +199,15 @@ function QuestionCard({ interaction }: { interaction: InteractionRequest }): JSX
   return (
     <section className="interaction-question" aria-label={t("sessions.interactions.question")}>
       <div className="interaction-question-heading">
-        <p>{questions.length === 1 ? questions[0]!.question : interaction.title || t("sessions.interactions.question")}</p>
+        <p>{nativeToolApproval ? `${t("sessions.interactions.approval")} · ${nativeToolApproval}` : title || t("sessions.interactions.question")}</p>
         {pending && seconds !== undefined && Number.isFinite(seconds) && <span className="interaction-question-timer">{seconds}s</span>}
         {pending && <button type="button" aria-label={t("sessions.interactions.dismiss")} disabled={submitting} onClick={() => void cancel()}><X size={16} /></button>}
       </div>
       <div className="interaction-question-fields">
+        {nativeToolApproval && <details className="text-xs text-ink-3">
+          <summary className="cursor-pointer">{t("sessions.interactions.showMore")}</summary>
+          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-xs text-ink-2">{title}</pre>
+        </details>}
         {questions.map((question) => (
           <QuestionField
             key={question.id}

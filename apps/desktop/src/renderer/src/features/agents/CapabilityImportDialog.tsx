@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
   AlertTriangle,
+  ArrowLeft,
   Check,
   ChevronDown,
+  CircleHelp,
   ShieldCheck,
   FileUp,
   FolderOpen,
@@ -43,6 +45,7 @@ import {
   isCurrentPreview,
 } from "./import-safety";
 import { toast } from "../../stores/toast";
+import { skillStructure } from "./skill-frontmatter";
 
 /** Text handed to the dialog from outside, e.g. a file dropped on the list page. */
 export interface CapabilityImportSeed {
@@ -74,6 +77,7 @@ const SKILL_DIR_PRESETS = [
 ];
 
 const PARSE_DEBOUNCE_MS = 250;
+const IMPORT_STEPS = ["source", "preview", "result"] as const;
 
 /** One importable entry in the shared preview table. */
 interface PreviewRow {
@@ -204,6 +208,7 @@ export function CapabilityImportDialog({
   const [skillFileName, setSkillFileName] = useState<string | undefined>(
     undefined,
   );
+  const [skillDropActive, setSkillDropActive] = useState(false);
 
   const [picked, setPicked] = useState<string[]>([]);
   const [templateValues, setTemplateValues] = useState<
@@ -284,6 +289,7 @@ export function CapabilityImportDialog({
     setCommandText("");
     setSkillText(seed?.tab === "skills" ? seed.text : "");
     setSkillFileName(seed?.tab === "skills" ? seed.fileName : undefined);
+    setSkillDropActive(false);
     setTab(seed?.tab ?? "mcp");
     setMcpSource("paste");
     setStage("source");
@@ -398,10 +404,13 @@ export function CapabilityImportDialog({
   }, [open, tab, mcpSource]);
 
   const runScan = (dir: string): void => {
-    if (!dir.trim()) return;
+    if (!dir.trim() || scanning) return;
+    invalidatePreview();
+    setScan(undefined);
+    const revision = sourceRevision.current;
     setScanning(true);
     void scanSkills(dir)
-      .then(setScan)
+      .then(result => { if (sourceRevision.current === revision) setScan(result); })
       .catch((error: unknown) =>
         toast.error(
           zh
@@ -419,11 +428,17 @@ export function CapabilityImportDialog({
     runScan(dir);
   };
 
-  const onSkillFileChosen = (event: ChangeEvent<HTMLInputElement>): void => {
-    const file = event.target.files?.[0];
-    // Allow re-picking the same file.
-    event.target.value = "";
-    if (!file) return;
+  const updateSkillText = (text: string): void => {
+    invalidatePreview();
+    setSkillText(text);
+    setSkillFileName(undefined);
+  };
+
+  const loadSkillFile = (file: File): void => {
+    if (!/\.(?:md|markdown)$/i.test(file.name)) {
+      setParseError(zh ? "请选择 .md 或 .markdown 文件。" : "Choose a .md or .markdown file.");
+      return;
+    }
     invalidatePreview();
     setSkillText("");
     setSkillFileName(undefined);
@@ -442,6 +457,12 @@ export function CapabilityImportDialog({
             : "Operation failed. Check the configuration and retry.",
         ),
       );
+  };
+
+  const onSkillFileChosen = (event: ChangeEvent<HTMLInputElement>): void => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) loadSkillFile(file);
   };
 
   const existingKeys = useMemo(
@@ -618,583 +639,561 @@ export function CapabilityImportDialog({
     }
   };
 
+  const title = tab === "mcp" ? (zh ? "导入 MCP" : "Import MCP") : (zh ? "导入技能" : "Import skills");
+  const activeStep = IMPORT_STEPS.indexOf(stage);
+  const structure = useMemo(() => skillStructure(open && tab === "skills" && skillSource === "file" ? skillText : ""), [open, tab, skillSource, skillText]);
+  const closeImport = (): void => {
+    if (busy) return;
+    sourceRevision.current += 1;
+    onOpenChange(false);
+  };
+  const stepSummary = stage === "result"
+    ? (zh ? `已处理 ${results.length} 项` : `${results.length} processed`)
+    : selectedRows.length > 0
+      ? (zh ? `${stage === "source" ? "已就绪" : "已选择"} ${selectedRows.length} 项` : `${selectedRows.length} ${stage === "source" ? "ready" : "selected"}`)
+      : (zh ? (tab === "skills" && skillSource === "dir" ? "待扫描目录" : "待输入内容") : (tab === "skills" && skillSource === "dir" ? "Waiting for directory scan" : "Waiting for input"));
+
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next && busy) return;
-        if (!next) sourceRevision.current += 1;
-        onOpenChange(next);
+        if (!next) closeImport();
+        else onOpenChange(true);
       }}
-      title={tab === "mcp" ? (zh ? "导入 MCP" : "Import MCP") : (zh ? "导入技能" : "Import skills")}
+      title={title}
       presentation="workspace"
       widthClass="capability-import-dialog"
-      footer={
-        <>
-          <span className="import-selection-count">{zh ? `已选择 ${selectedRows.length} 项` : `${selectedRows.length} selected`}</span>
-          <Button
-            variant="ghost"
-            onClick={() =>
-              stage === "preview" ? setStage("source") : onOpenChange(false)
-            }
-            disabled={busy}
-          >
-            {stage === "preview"
-              ? zh
-                ? "上一步"
-                : "Back"
-              : stage === "result"
-                ? t("common.close")
-                : t("common.cancel")}
-          </Button>
-          {stage !== "result" && (
-            <Button
-              variant="primary"
-              onClick={() =>
-                stage === "source" ? setStage("preview") : void submit()
-              }
-              disabled={
-                busy ||
-                selectedRows.length === 0 ||
-                !isCurrentPreview(parseSource, parseText, acceptedKey) ||
-                (stage === "preview" && needsProvider)
-              }
-            >
-              {busy
-                ? t("agents.tools.import.importing")
-                : stage === "source"
-                  ? zh
-                    ? "解析并预览"
-                    : "Preview"
-                  : t("agents.tools.import.submit", {
-                      count: selectedRows.length,
-                    })}
-            </Button>
-          )}
-        </>
-      }
     >
-      <div className="capability-form space-y-6">
-        <ol
-          className="import-steps"
-          aria-label={zh ? "导入步骤" : "Import steps"}
-        >
-          {(["source", "preview", "result"] as const).map((step, index) => (
-            <li
-              key={step}
-              aria-current={stage === step ? "step" : undefined}
-              className={cn(
-                "flex items-center gap-2",
-                stage === step ? "font-medium text-ink" : "text-ink-3",
-              )}
-            >
-              <span className="grid h-6 w-6 place-items-center rounded-full border border-line">
-                {(["source", "preview", "result"].indexOf(stage) > index) ? <Check size={18} /> : index + 1}
-              </span>
-              {zh
-                ? ["来源", "预览", "完成"][index]
-                : ["Source", "Preview", "Done"][index]}
-            </li>
-          ))}
-        </ol>
-        {stage === "result" && (
-          <div aria-live="polite" className="divide-y divide-line">
-            {results.map((result, index) => (
-              <div
-                key={index}
-                className="flex items-center justify-between gap-4 py-4 text-sm"
-              >
-                <span>{result.name}</span>
-                <span
-                  className={
-                    result.status === "failed" ? "text-danger" : "text-ink-2"
-                  }
-                >
-                  {
-                    {
-                      created: zh ? "已导入" : "Imported",
-                      updated: zh ? "已更新" : "Updated",
-                      skipped: zh ? "已跳过" : "Skipped",
-                      failed: zh
-                        ? "失败，请检查配置"
-                        : "Failed; check configuration",
-                    }[result.status]
-                  }
-                </span>
-              </div>
-            ))}
+      <div className="import-workbench">
+        <header className="import-workbench-heading">
+          <div>
+            <Button type="button" variant="ghost" size="icon" aria-label={zh ? "返回" : "Back"} disabled={busy}
+              onClick={() => stage === "preview" ? setStage("source") : closeImport()}><ArrowLeft size={17} aria-hidden /></Button>
+            <h2>{title}</h2>
           </div>
-        )}
-        <div hidden={stage !== "source"} className="space-y-5">
-          <TabBar
-            aria-label={t("agents.tools.import.title")}
-            value={tab}
-            onValueChange={(value) => switchTab(value as ImportTab)}
-            items={[
-              { value: "mcp", label: t("agents.tools.import.tabMcp") },
-              { value: "skills", label: t("agents.tools.import.tabSkills") },
-            ]}
-          />
-
-          {tab === "mcp" ? (
-            <div className="space-y-3">
-              <TabBar
-                aria-label={t("agents.tools.import.tabMcp")}
-                value={mcpSource}
-                onValueChange={(value) => switchMcpSource(value as McpSource)}
-                items={[
-                  {
-                    value: "template",
-                    label: t("agents.tools.import.sourceTemplate"),
-                  },
-                  {
-                    value: "paste",
-                    label: t("agents.tools.import.sourcePaste"),
-                  },
-                  {
-                    value: "command",
-                    label: t("agents.tools.import.sourceCommand"),
-                  },
-                  { value: "scan", label: t("agents.tools.import.sourceScan") },
-                ]}
-              />
-
-              {mcpSource === "template" && (
-                <div className="divide-y divide-line border-y border-line">
-                  {MCP_TEMPLATES.map((template) => {
-                    const active = picked.includes(template.id);
-                    const values = templateValues[template.id] ?? {};
-                    return (
-                      <div
-                        key={template.id}
-                        className={cn(
-                          "px-1 py-4 transition-colors",
-                          active ? "bg-panel/30" : "bg-card",
-                        )}
-                      >
-                        <button
-                          type="button"
-                          role="checkbox"
-                          aria-checked={active}
-                          onClick={() =>
-                            setPicked((prev) =>
-                              prev.includes(template.id)
-                                ? prev.filter((id) => id !== template.id)
-                                : [...prev, template.id],
-                            )
-                          }
-                          className="flex w-full items-start gap-2.5 text-left"
-                        >
-                          <span
-                            className={cn(
-                              "mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded border",
-                              active
-                                ? "border-accent bg-accent text-on-accent"
-                                : "border-line-strong",
-                            )}
-                          >
-                            {active && (
-                              <Check className="h-3 w-3" aria-hidden />
-                            )}
-                          </span>
-                          <span className="min-w-0">
-                            <span className="block text-[13px] font-medium text-ink">
-                              {template.name}
-                            </span>
-                            <span className="mt-0.5 block text-xs leading-relaxed text-ink-3">
-                              {t(template.descriptionKey)}
-                            </span>
-                          </span>
-                        </button>
-                        {active &&
-                          template.fields?.map((field) => (
-                            <div key={field.argIndex} className="mt-2.5">
-                              <Field label={t(field.labelKey)}>
-                                <Input
-                                  value={values[field.argIndex] ?? ""}
-                                  onChange={(event) =>
-                                    setTemplateValues((prev) => ({
-                                      ...prev,
-                                      [template.id]: {
-                                        ...(prev[template.id] ?? {}),
-                                        [field.argIndex]: event.target.value,
-                                      },
-                                    }))
-                                  }
-                                  placeholder={field.placeholder}
-                                  spellCheck={false}
-                                  className="font-mono text-[13px]"
-                                />
-                              </Field>
-                            </div>
-                          ))}
-                        {active && !templateReady(template, values) && (
-                          <p className="mt-1.5 text-xs text-warn">
-                            {t("agents.tools.import.templateFill")}
-                          </p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              {mcpSource === "paste" && (
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => jsonFileRef.current?.click()}
-                    >
-                      <FileUp className="h-4 w-4" />
-                      {zh ? "选择 JSON 文件" : "Choose JSON file"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setRevealSource((value) => !value)}
-                    >
-                      {revealSource
-                        ? zh
-                          ? "隐藏敏感值"
-                          : "Hide secrets"
-                        : zh
-                          ? "编辑 JSON 原文"
-                          : "Edit source JSON"}
-                    </Button>
-                    {jsonFileName && (
-                      <span className="text-sm text-ink-3">{jsonFileName}</span>
-                    )}
-                    <input
-                      ref={jsonFileRef}
-                      type="file"
-                      accept=".json,application/json"
-                      hidden
-                      onChange={(event) => void onJsonFile(event)}
-                    />
-                  </div>
-                  <Field
-                    label={t("agents.tools.import.pasteLabel")}
-                    htmlFor="import-paste"
-                  >
-                    <Textarea
-                      id="import-paste"
-                      autoFocus
-                      rows={10}
-                      value={revealSource ? pasteText : maskedJson(pasteText)}
-                      readOnly={!revealSource}
-                      onChange={(event) => updatePaste(event.target.value)}
-                      placeholder={t("agents.tools.import.pastePlaceholder")}
-                      spellCheck={false}
-                      className="font-mono text-[13px] leading-relaxed"
-                    />
-                  </Field>
-                </div>
-              )}
-
-              {mcpSource === "command" && (
-                <Field
-                  label={t("agents.tools.import.commandLabel")}
-                  htmlFor="import-command"
-                  hint={t("agents.tools.import.commandHint")}
+          <ol className="import-steps" aria-label={zh ? "导入步骤" : "Import steps"}>
+            {IMPORT_STEPS.map((step, index) => <li key={step} aria-current={stage === step ? "step" : undefined}
+              data-complete={index < activeStep}>
+              <span>{index < activeStep ? <Check size={13} aria-hidden /> : index + 1}</span>
+              {zh ? ["来源", "预览", "完成"][index] : ["Source", "Preview", "Done"][index]}
+            </li>)}
+          </ol>
+        </header>
+        <div className="import-workbench-card">
+          {stage === "result" && (
+            <div aria-live="polite" className="import-result-body divide-y divide-line">
+              {results.map((result, index) => (
+                <div
+                  key={index}
+                  className="flex items-center justify-between gap-4 py-4 text-sm"
                 >
-                  <Textarea
-                    id="import-command"
-                    autoFocus
-                    rows={3}
-                    value={commandText}
-                    onChange={(event) => {
-                      invalidatePreview();
-                      setCommandText(event.target.value);
-                    }}
-                    placeholder={t("agents.tools.import.commandPlaceholder")}
-                    spellCheck={false}
-                    className="font-mono text-[13px]"
-                  />
-                </Field>
-              )}
-
-              {mcpSource === "scan" && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-xs text-ink-3">
-                      {discovering
-                        ? t("agents.tools.import.discovering")
-                        : t("agents.tools.import.sourceScan")}
-                    </p>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={runDiscover}
-                      disabled={discovering}
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" aria-hidden />{" "}
-                      {t("agents.tools.import.rescan")}
-                    </Button>
-                  </div>
-                  <div className="divide-y divide-line border-y border-line">
-                    {sources.map((source) => (
-                      <div
-                        key={source.id}
-                        className="flex items-center justify-between gap-3 rounded-xl border border-line bg-card px-3 py-2"
-                      >
-                        <div className="min-w-0">
-                          <p className="text-[13px] font-medium text-ink">
-                            {source.label}
-                          </p>
-                          <p
-                            className="truncate font-mono text-[11px] text-ink-3"
-                            title={source.path}
-                          >
-                            {source.path}
-                          </p>
-                        </div>
-                        <span className="shrink-0 text-xs text-ink-3">
-                          {!source.available
-                            ? t("agents.tools.import.sourceMissing")
-                            : source.error
-                              ? source.error
-                              : source.servers.length === 0
-                                ? t("agents.tools.import.sourceEmpty")
-                                : source.servers.length}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+                  <span>{result.name}</span>
+                  <span
+                    className={
+                      result.status === "failed" ? "text-danger" : "text-ink-2"
+                    }
+                  >
+                    {
+                      {
+                        created: zh ? "已导入" : "Imported",
+                        updated: zh ? "已更新" : "Updated",
+                        skipped: zh ? "已跳过" : "Skipped",
+                        failed: zh
+                          ? "失败，请检查配置"
+                          : "Failed; check configuration",
+                      }[result.status]
+                    }
+                  </span>
                 </div>
-              )}
+              ))}
             </div>
-          ) : (
-            <div className="space-y-3">
-              <TabBar
-                aria-label={t("agents.tools.import.tabSkills")}
-                value={skillSource}
-                onValueChange={(value) =>
-                  switchSkillSource(value as SkillSource)
-                }
-                items={[
-                  { value: "file", label: t("agents.tools.import.sourceFile") },
-                  { value: "dir", label: t("agents.tools.import.sourceDir") },
-                ]}
-              />
-
-              {skillSource === "file" ? (
-                <div className="space-y-2.5">
-                  <div className="flex flex-wrap items-center gap-2.5">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <FileUp className="h-3.5 w-3.5" aria-hidden />{" "}
-                      {t("agents.tools.import.chooseFile")}
-                    </Button>
-                    {skillFileName && (
-                      <span className="text-xs text-ink-3">
-                        {skillFileName}
-                      </span>
-                    )}
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".md,.markdown"
-                      className="hidden"
-                      tabIndex={-1}
-                      aria-hidden
-                      onChange={onSkillFileChosen}
-                    />
+          )}
+          <div hidden={stage !== "source"}>
+            <div className="import-source-toolbar">
+              <div className="import-kind-tabs">
+                <TabBar aria-label={t("agents.tools.import.title")} value={tab} onValueChange={value => switchTab(value as ImportTab)}
+                  items={[
+                    { value: "skills", label: t("agents.tools.import.tabSkills") },
+                    { value: "mcp", label: t("agents.tools.import.tabMcp") },
+                  ]} />
+              </div>
+              <div className="import-source-tabs">
+                {tab === "mcp" ? <TabBar aria-label={t("agents.tools.import.tabMcp")} value={mcpSource}
+                  onValueChange={value => switchMcpSource(value as McpSource)} items={[
+                    { value: "template", label: t("agents.tools.import.sourceTemplate") },
+                    { value: "paste", label: t("agents.tools.import.sourcePaste") },
+                    { value: "command", label: t("agents.tools.import.sourceCommand") },
+                    { value: "scan", label: t("agents.tools.import.sourceScan") },
+                  ]} /> : <TabBar aria-label={t("agents.tools.import.tabSkills")} value={skillSource}
+                  onValueChange={value => switchSkillSource(value as SkillSource)} items={[
+                    { value: "file", label: zh ? "文件 / 粘贴" : "File / Paste" },
+                    { value: "dir", label: t("agents.tools.import.sourceDir") },
+                  ]} />}
+              </div>
+            </div>
+            {tab === "mcp" ? (
+              <div className="import-source-body space-y-3">
+                {mcpSource === "template" && (
+                  <div className="divide-y divide-line border-y border-line">
+                    {MCP_TEMPLATES.map((template) => {
+                      const active = picked.includes(template.id);
+                      const values = templateValues[template.id] ?? {};
+                      return (
+                        <div
+                          key={template.id}
+                          className={cn(
+                            "px-1 py-4 transition-colors",
+                            active ? "bg-panel/30" : "bg-card",
+                          )}
+                        >
+                          <button
+                            type="button"
+                            role="checkbox"
+                            aria-checked={active}
+                            onClick={() =>
+                              setPicked((prev) =>
+                                prev.includes(template.id)
+                                  ? prev.filter((id) => id !== template.id)
+                                  : [...prev, template.id],
+                              )
+                            }
+                            className="flex w-full items-start gap-2.5 text-left"
+                          >
+                            <span
+                              className={cn(
+                                "mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded border",
+                                active
+                                  ? "border-accent bg-accent text-on-accent"
+                                  : "border-line-strong",
+                              )}
+                            >
+                              {active && (
+                                <Check className="h-3 w-3" aria-hidden />
+                              )}
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block text-[13px] font-medium text-ink">
+                                {template.name}
+                              </span>
+                              <span className="mt-0.5 block text-xs leading-relaxed text-ink-3">
+                                {t(template.descriptionKey)}
+                              </span>
+                            </span>
+                          </button>
+                          {active &&
+                            template.fields?.map((field) => (
+                              <div key={field.argIndex} className="mt-2.5">
+                                <Field label={t(field.labelKey)}>
+                                  <Input
+                                    value={values[field.argIndex] ?? ""}
+                                    onChange={(event) =>
+                                      setTemplateValues((prev) => ({
+                                        ...prev,
+                                        [template.id]: {
+                                          ...(prev[template.id] ?? {}),
+                                          [field.argIndex]: event.target.value,
+                                        },
+                                      }))
+                                    }
+                                    placeholder={field.placeholder}
+                                    spellCheck={false}
+                                    className="font-mono text-[13px]"
+                                  />
+                                </Field>
+                              </div>
+                            ))}
+                          {active && !templateReady(template, values) && (
+                            <p className="mt-1.5 text-xs text-warn">
+                              {t("agents.tools.import.templateFill")}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
+                )}
+
+                {mcpSource === "paste" && (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => jsonFileRef.current?.click()}
+                      >
+                        <FileUp className="h-4 w-4" />
+                        {zh ? "选择 JSON 文件" : "Choose JSON file"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setRevealSource((value) => !value)}
+                      >
+                        {revealSource
+                          ? zh
+                            ? "隐藏敏感值"
+                            : "Hide secrets"
+                          : zh
+                            ? "编辑 JSON 原文"
+                            : "Edit source JSON"}
+                      </Button>
+                      {jsonFileName && (
+                        <span className="text-sm text-ink-3">{jsonFileName}</span>
+                      )}
+                      <input
+                        ref={jsonFileRef}
+                        type="file"
+                        accept=".json,application/json"
+                        hidden
+                        onChange={(event) => void onJsonFile(event)}
+                      />
+                    </div>
+                    <Field
+                      label={t("agents.tools.import.pasteLabel")}
+                      htmlFor="import-paste"
+                    >
+                      <Textarea
+                        id="import-paste"
+                        autoFocus
+                        rows={10}
+                        value={revealSource ? pasteText : maskedJson(pasteText)}
+                        readOnly={!revealSource}
+                        onChange={(event) => updatePaste(event.target.value)}
+                        placeholder={t("agents.tools.import.pastePlaceholder")}
+                        spellCheck={false}
+                        className="font-mono text-[13px] leading-relaxed"
+                      />
+                    </Field>
+                  </div>
+                )}
+
+                {mcpSource === "command" && (
                   <Field
-                    label={t("agents.tools.import.skillLabel")}
-                    htmlFor="import-skill"
-                    hint={t("agents.tools.import.skillHint")}
+                    label={t("agents.tools.import.commandLabel")}
+                    htmlFor="import-command"
+                    hint={t("agents.tools.import.commandHint")}
                   >
                     <Textarea
-                      id="import-skill"
-                      rows={10}
-                      value={skillText}
+                      id="import-command"
+                      autoFocus
+                      rows={3}
+                      value={commandText}
                       onChange={(event) => {
                         invalidatePreview();
-                        setSkillText(event.target.value);
-                        setSkillFileName(undefined);
+                        setCommandText(event.target.value);
                       }}
-                      placeholder={t("agents.tools.import.skillPlaceholder")}
+                      placeholder={t("agents.tools.import.commandPlaceholder")}
                       spellCheck={false}
-                      className="font-mono text-[13px] leading-relaxed"
-                    />
-                  </Field>
-                </div>
-              ) : (
-                <div className="space-y-2.5">
-                  <div className="flex items-center gap-2">
-                    <Input
-                      value={scanDir}
-                      onChange={(event) => setScanDir(event.target.value)}
-                      placeholder={SKILL_DIR_PRESETS[0].dir}
-                      spellCheck={false}
-                      aria-label={t("agents.tools.import.sourceDir")}
                       className="font-mono text-[13px]"
                     />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void pickScanDir()}
-                      disabled={scanning}
-                    >
-                      <FolderOpen className="h-3.5 w-3.5" aria-hidden />{" "}
-                      {t("agents.tools.import.chooseDir")}
-                    </Button>
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() => runScan(scanDir)}
-                      disabled={scanning || !scanDir.trim()}
-                    >
-                      {scanning
-                        ? t("agents.tools.import.scanning")
-                        : t("agents.tools.import.rescan")}
-                    </Button>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-ink-3">
-                      {t("agents.tools.import.presetDirs")}
-                    </span>
-                    {SKILL_DIR_PRESETS.map((preset) => (
-                      <button
-                        key={preset.dir}
-                        type="button"
-                        title={preset.dir}
-                        onClick={() => {
-                          setScanDir(preset.dir);
-                          runScan(preset.dir);
-                        }}
-                        className="rounded-full border border-line bg-card px-2.5 py-1 font-mono text-[11px] text-ink-3 transition-colors hover:text-ink"
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-                  {scan && (
-                    <p className="text-xs text-ink-3">
-                      {t("agents.tools.import.scanned", {
-                        count: scan.scannedFiles,
-                      })}
-                      {scan.truncated &&
-                        ` · ${t("agents.tools.import.truncated")}`}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-        {stage !== "result" && errors.length > 0 && (
-          <div
-            role="alert"
-            className="space-y-1 rounded-xl border border-danger/25 bg-danger/10 px-3.5 py-2.5 text-xs leading-relaxed text-danger"
-          >
-            {errors.map((error) => (
-              <p key={error}>{error.replace(/"[^"\n]*"/g, "••••")}</p>
-            ))}
-          </div>
-        )}
-
-        <div hidden={stage !== "preview"} className="space-y-6">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-[13px] font-medium text-ink-2">
-                {t("agents.tools.import.previewTitle")}
-                {rows.length > 0 && (
-                  <span className="ml-1.5 text-ink-3">{rows.length}</span>
+                  </Field>
                 )}
-              </p>
-              {rows.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={toggleAll}>
-                  {t("agents.tools.import.selectAll")}
-                </Button>
-              )}
-            </div>
 
-            {rows.length === 0 ? (
-              <p className="py-6 text-center text-xs text-ink-3">
-                {t("agents.tools.import.previewEmpty")}
-              </p>
+                {mcpSource === "scan" && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs text-ink-3">
+                        {discovering
+                          ? t("agents.tools.import.discovering")
+                          : t("agents.tools.import.sourceScan")}
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={runDiscover}
+                        disabled={discovering}
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" aria-hidden />{" "}
+                        {t("agents.tools.import.rescan")}
+                      </Button>
+                    </div>
+                    <div className="divide-y divide-line border-y border-line">
+                      {sources.map((source) => (
+                        <div
+                          key={source.id}
+                          className="flex items-center justify-between gap-3 rounded-xl border border-line bg-card px-3 py-2"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-[13px] font-medium text-ink">
+                              {source.label}
+                            </p>
+                            <p
+                              className="truncate font-mono text-[11px] text-ink-3"
+                              title={source.path}
+                            >
+                              {source.path}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-xs text-ink-3">
+                            {!source.available
+                              ? t("agents.tools.import.sourceMissing")
+                              : source.error
+                                ? source.error
+                                : source.servers.length === 0
+                                  ? t("agents.tools.import.sourceEmpty")
+                                  : source.servers.length}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             ) : (
-              <ul className="import-preview-list">
-                {rows.map((row) => {
-                  const checked = !deselected.includes(row.key);
-                  return (
-                    <li key={row.key} className="import-preview-card">
-                      <div className="import-preview-heading">
-                        <button type="button" role="checkbox" aria-label={row.name} aria-checked={checked} onClick={() => toggleRow(row.key)} className={cn("import-checkbox", checked && "is-checked")}>{checked && <Check size={16} />}</button>
-                        <details className="import-server-details" open={rows[0]?.key === row.key}>
-                          <summary><ChevronDown size={21} /><span>{row.name}</span>{row.config && <Tag label={row.config.transport} />}{row.exists && <Tag label={zh ? "同名冲突" : "Name conflict"} className="border-warn/25 bg-warn/10 text-warn" />}</summary>
-                          {row.config ? <McpConfigurationTable config={row.config} zh={zh} /> : <p className="model-help">{row.detail}</p>}
-                          {row.warnings.map((warning) => <p key={warning} className="flex items-center gap-2 px-4 pb-3 text-sm text-warn"><AlertTriangle size={16} />{warning.replace(/"[^"\n]*"/g, "••••")}</p>)}
-                        </details>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+              <div className="import-source-body">
+                {skillSource === "file" ? <>
+                  <div className="import-drop-zone" data-dragging={skillDropActive}
+                    onDragOver={event => {
+                      if (!event.dataTransfer.types.includes("Files")) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      event.dataTransfer.dropEffect = "copy";
+                      setSkillDropActive(true);
+                    }}
+                    onDragLeave={event => {
+                      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSkillDropActive(false);
+                    }}
+                    onDrop={event => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setSkillDropActive(false);
+                      const file = event.dataTransfer.files[0];
+                      if (file) loadSkillFile(file);
+                    }}>
+                    <FileUp size={17} aria-hidden />
+                    <span>{zh ? "拖拽 .md 文件到此处，或" : "Drop a .md file here, or"}</span>
+                    <button type="button" onClick={() => fileInputRef.current?.click()}>{zh ? "浏览本地文件" : "Browse local files"}</button>
+                    <small>{zh ? "支持标准 YAML Frontmatter" : "Supports YAML frontmatter"}</small>
+                    <input ref={fileInputRef} type="file" accept=".md,.markdown" hidden onChange={onSkillFileChosen} />
+                  </div>
+                  <div className="import-skill-compose">
+                    <div className="import-skill-editor">
+                      <header>
+                        <label htmlFor="import-skill" title={skillFileName}>{skillFileName || "SKILL.md"}</label>
+                        <button type="button" title={t("agents.tools.import.skillHint")} aria-label={t("agents.tools.import.skillHint")}>
+                          <CircleHelp size={14} aria-hidden />
+                        </button>
+                        <div>
+                          <button type="button" onClick={() => updateSkillText([
+                            "---", "name: project-notes",
+                            zh ? "description: 汇总项目结构和运行入口" : "description: Summarize project structure and entry points",
+                            "tags: [project, notes]", "---", "",
+                            zh ? "阅读项目文档，列出主要入口和各模块的职责。" : "Read project documentation and list the entry points and module responsibilities.",
+                          ].join("\n"))}>{zh ? "填入示例" : "Fill example"}</button>
+                          {skillText && <button type="button" onClick={() => updateSkillText("")}>{zh ? "清空" : "Clear"}</button>}
+                        </div>
+                      </header>
+                      <textarea id="import-skill" value={skillText} onChange={event => updateSkillText(event.target.value)} spellCheck={false}
+                        aria-label={t("agents.tools.import.skillLabel")} placeholder={t("agents.tools.import.skillPlaceholder")} />
+                    </div>
+                    <aside className="import-skill-structure" aria-label={zh ? "实时结构检测" : "Live structure check"}>
+                      <h3>{zh ? "实时结构检测" : "Live structure check"}</h3>
+                      <dl className="import-structure-fields">
+                        {[
+                          ["name", zh ? "技能名" : "Skill name", structure.name],
+                          ["description", zh ? "触发说明" : "Description", structure.description],
+                          ["tags", zh ? "标签" : "Tags", structure.tags.join(" · ")],
+                        ].map(([key, label, value]) => <div key={key} data-present={Boolean(value)}>
+                          <dt><span aria-hidden /><code>{key}</code><small>{label}</small></dt>
+                          {value && <dd title={value}>{value}</dd>}
+                        </div>)}
+                      </dl>
+                      {structure.invalid && <p className="import-structure-warning">{zh ? "请检查 Frontmatter 格式或结束分隔线。" : "Check the frontmatter and its closing delimiter."}</p>}
+                      <dl className="import-structure-stats">
+                        <div><dt>{zh ? "正文行数" : "Body lines"}</dt><dd>{structure.lines.toLocaleString(locale)}</dd></div>
+                        <div><dt>{zh ? "字符数" : "Characters"}</dt><dd>{structure.characters.toLocaleString(locale)}</dd></div>
+                      </dl>
+                    </aside>
+                  </div>
+                </> : (
+                  <div className="import-directory space-y-2.5">
+                    <div className="import-directory-actions">
+                      <Input
+                        value={scanDir}
+                        onChange={event => { invalidatePreview(); setScan(undefined); setScanDir(event.target.value); }}
+                        placeholder={SKILL_DIR_PRESETS[0].dir}
+                        spellCheck={false}
+                        aria-label={t("agents.tools.import.sourceDir")}
+                        className="font-mono text-[13px]"
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void pickScanDir()}
+                        disabled={scanning}
+                      >
+                        <FolderOpen className="h-3.5 w-3.5" aria-hidden />{" "}
+                        {zh ? "浏览目录" : "Browse folders"}
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => runScan(scanDir)}
+                        disabled={scanning || !scanDir.trim()}
+                      >
+                        {scanning
+                          ? t("agents.tools.import.scanning")
+                          : t("agents.tools.import.rescan")}
+                      </Button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-ink-3">
+                        {t("agents.tools.import.presetDirs")}
+                      </span>
+                      {SKILL_DIR_PRESETS.map((preset) => (
+                        <button
+                          key={preset.dir}
+                          type="button"
+                          title={preset.dir}
+                          disabled={scanning}
+                          onClick={() => {
+                            setScanDir(preset.dir);
+                            runScan(preset.dir);
+                          }}
+                          className="import-directory-preset"
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                    {!scan && <p className="text-xs text-ink-3" role="status">
+                      {scanning ? t("agents.tools.import.scanning") : (zh ? "扫描该目录及其子目录中的 Markdown 技能。" : "Scan this folder and its subfolders for Markdown skills.")}
+                    </p>}
+                    {scan && (
+                      <p className="text-xs text-ink-3" role="status">
+                        {t("agents.tools.import.scanned", {
+                          count: scan.scannedFiles,
+                        })}
+                        {scan.truncated &&
+                          ` · ${t("agents.tools.import.truncated")}`}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
-
-          <div className="import-destination">
-          <Field
-            label={t("agents.tools.import.providersLabel")}
-            hint={
-              needsProvider ? undefined : t("agents.tools.import.providersHint")
-            }
-            error={
-              needsProvider ? t("agents.tools.import.needProvider") : undefined
-            }
-          >
+          {stage !== "result" && errors.length > 0 && (
             <div
-              className="flex flex-wrap gap-2"
-              role="group"
-              aria-label={t("agents.tools.import.providersLabel")}
+              role="alert"
+              className="import-errors space-y-1 text-xs leading-relaxed text-danger"
             >
-              {providers.map((provider) => {
-                const active = providerIds.includes(provider.id);
-                return (
-                  <button
-                    key={provider.id}
-                    type="button"
-                    role="checkbox"
-                    aria-checked={active}
-                    onClick={() => toggleProvider(provider.id)}
-                    className={cn(
-                      "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors",
-                      "focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none",
-                      active
-                        ? "border-accent/40 bg-accent-soft text-accent"
-                        : "border-line bg-card text-ink-3 hover:text-ink",
-                    )}
-                  >
-                    {active && <Check className="h-3 w-3" aria-hidden />}
-                    {provider.name}
-                  </button>
-                );
-              })}
+              {errors.map((error) => (
+                <p key={error}>{error.replace(/"[^"\n]*"/g, "••••")}</p>
+              ))}
             </div>
-          </Field>
+          )}
 
-          <Field
-            label={t("agents.tools.import.conflictLabel")}
-            className="import-conflicts"
-          >
-            <div className="import-conflict-options" role="group" aria-label={t("agents.tools.import.conflictLabel")}>
-              {(["skip", "overwrite", "rename"] as const).map((value) => <button key={value} type="button" aria-pressed={conflict === value} onClick={() => setConflict(value)}>{t(`agents.tools.import.conflict${value === "skip" ? "Skip" : value === "overwrite" ? "Overwrite" : "Rename"}`)}</button>)}
+          <div hidden={stage !== "preview"} className="import-preview-body space-y-4">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[13px] font-medium text-ink-2">
+                  {t("agents.tools.import.previewTitle")}
+                  {rows.length > 0 && (
+                    <span className="ml-1.5 text-ink-3">{rows.length}</span>
+                  )}
+                </p>
+                {rows.length > 0 && (
+                  <Button variant="ghost" size="sm" onClick={toggleAll}>
+                    {t("agents.tools.import.selectAll")}
+                  </Button>
+                )}
+              </div>
+
+              {rows.length === 0 ? (
+                <p className="py-6 text-center text-xs text-ink-3">
+                  {t("agents.tools.import.previewEmpty")}
+                </p>
+              ) : (
+                <ul className="import-preview-list">
+                  {rows.map((row) => {
+                    const checked = !deselected.includes(row.key);
+                    return (
+                      <li key={row.key} className="import-preview-card">
+                        <div className="import-preview-heading">
+                          <button type="button" role="checkbox" aria-label={row.name} aria-checked={checked} onClick={() => toggleRow(row.key)} className={cn("import-checkbox", checked && "is-checked")}>{checked && <Check size={16} />}</button>
+                          <details className="import-server-details" open={rows[0]?.key === row.key}>
+                            <summary><ChevronDown size={21} /><span>{row.name}</span>{row.config && <Tag label={row.config.transport} />}{row.exists && <Tag label={zh ? "同名冲突" : "Name conflict"} className="border-warn/25 bg-warn/10 text-warn" />}</summary>
+                            {row.config ? <McpConfigurationTable config={row.config} zh={zh} /> : <p className="model-help">{row.detail}</p>}
+                            {row.warnings.map((warning) => <p key={warning} className="flex items-center gap-2 px-4 pb-3 text-sm text-warn"><AlertTriangle size={16} />{warning.replace(/"[^"\n]*"/g, "••••")}</p>)}
+                          </details>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
-          </Field>
+
+            <div className="import-destination">
+            <Field
+              label={t("agents.tools.import.providersLabel")}
+              hint={
+                needsProvider ? undefined : t("agents.tools.import.providersHint")
+              }
+              error={
+                needsProvider ? t("agents.tools.import.needProvider") : undefined
+              }
+            >
+              <div
+                className="flex flex-wrap gap-2"
+                role="group"
+                aria-label={t("agents.tools.import.providersLabel")}
+              >
+                {providers.map((provider) => {
+                  const active = providerIds.includes(provider.id);
+                  return (
+                    <button
+                      key={provider.id}
+                      type="button"
+                      role="checkbox"
+                      aria-checked={active}
+                      onClick={() => toggleProvider(provider.id)}
+                      className={cn(
+                        "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors",
+                        "focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none",
+                        active
+                          ? "border-accent/40 bg-accent-soft text-accent"
+                          : "border-line bg-card text-ink-3 hover:text-ink",
+                      )}
+                    >
+                      {active && <Check className="h-3 w-3" aria-hidden />}
+                      {provider.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </Field>
+
+            <Field
+              label={t("agents.tools.import.conflictLabel")}
+              className="import-conflicts"
+            >
+              <div className="import-conflict-options" role="group" aria-label={t("agents.tools.import.conflictLabel")}>
+                {(["skip", "overwrite", "rename"] as const).map((value) => <button key={value} type="button" aria-pressed={conflict === value} onClick={() => setConflict(value)}>{t(`agents.tools.import.conflict${value === "skip" ? "Skip" : value === "overwrite" ? "Overwrite" : "Rename"}`)}</button>)}
+              </div>
+            </Field>
+            </div>
+            {tab === "mcp" && <p className="import-safety-note flex items-center gap-2 text-ink-3"><ShieldCheck size={16} aria-hidden />
+              {zh
+                ? "仅导入配置，MCP 保持停用，不会自动启动服务器。"
+                : "MCP configurations import disabled. No server is started."}
+            </p>}
           </div>
-          <p className="import-safety-note flex items-center gap-2 text-ink-3"><ShieldCheck size={20} />
-            {zh
-              ? "仅导入配置，MCP 保持停用，不会自动启动服务器。"
-              : "MCP configurations import disabled. No server is started."}
-          </p>
+          <footer className="import-action-bar">
+            <span className="import-selection-count" role="status">{stepSummary}</span>
+            <div>
+              <Button type="button" variant="ghost" disabled={busy} onClick={() => stage === "preview" ? setStage("source") : closeImport()}>
+                {stage === "preview" ? (zh ? "上一步" : "Back") : t(stage === "result" ? "common.close" : "common.cancel")}
+              </Button>
+              {stage !== "result" && <Button type="button" variant="primary"
+                onClick={() => stage === "source" ? setStage("preview") : void submit()}
+                disabled={busy || selectedRows.length === 0 || !isCurrentPreview(parseSource, parseText, acceptedKey) || (stage === "preview" && needsProvider)}>
+                {busy ? t("agents.tools.import.importing") : stage === "source"
+                  ? (zh ? "解析并预览" : "Preview") : t("agents.tools.import.submit", { count: selectedRows.length })}
+              </Button>}
+            </div>
+          </footer>
         </div>
       </div>
     </Dialog>

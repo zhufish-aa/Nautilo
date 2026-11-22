@@ -685,8 +685,8 @@ const zh = {
       direct_onlyDesc: "禁止委派，所有工作由主 Agent 自己完成"
     },
     validation: {
-      noMembers: "团队还没有成员，无法作为运行目标",
-      noEnabled: "所有成员都被禁用，主 Agent 无人可用",
+      noMembers: "团队还没有可委派的成员",
+      noEnabled: "所有成员都已停用，当前没有可委派成员",
       mainMissing: "尚未指定主 Agent",
       mainDisabled: "主 Agent「{name}」已被禁用",
       duplicateInstance: "成员 {names} 使用相同的 Harness、账号与模型",
@@ -1788,8 +1788,8 @@ const en: Messages = {
       direct_onlyDesc: "Delegation disabled; the main agent does everything"
     },
     validation: {
-      noMembers: "The team has no members and cannot run",
-      noEnabled: "Every member is disabled; no one can act as main agent",
+      noMembers: "The team has no members to delegate to",
+      noEnabled: "All members are disabled; none can receive delegated work",
       mainMissing: "No main agent selected",
       mainDisabled: "Main agent “{name}” is disabled",
       duplicateInstance: "Members {names} share the same harness, account and model",

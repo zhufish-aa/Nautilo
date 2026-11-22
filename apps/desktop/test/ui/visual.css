@@ -1,3 +1,4 @@
 @import "../../src/renderer/src/styles/global.css";
+@import "../../src/renderer/src/styles/management.css";
 /* Vite's independent root would otherwise only scan test/ui for utilities. */
 @source "../../src/renderer/src";

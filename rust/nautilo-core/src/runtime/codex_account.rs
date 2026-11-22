@@ -82,11 +82,12 @@ impl CodexAccount {
             }
             if !res.status().is_success() {
                 let status=res.status().as_u16();
+                let retry_after = res.headers().get(reqwest::header::RETRY_AFTER).and_then(|value| value.to_str().ok()).map(str::to_owned);
                 let failure:Value=res.json().await.unwrap_or(Value::Null);
                 let detail=failure["error"]["message"].as_str().or(failure["message"].as_str())
                     .unwrap_or("The upstream rejected the selected account's model request");
                 let detail=detail.replace(&credential.0,"[redacted]").chars().take(1000).collect::<String>();
-                return Err(crate::runtime::account_auth::ModelRequestError{status,message:format!("Codex model request returned HTTP {status}: {detail}")}.into());
+                return Err(crate::runtime::account_auth::ModelRequestError{status,retry_after,message:format!("Codex model request returned HTTP {status}: {detail}")}.into());
             }
             reply = Some(res);
             break;

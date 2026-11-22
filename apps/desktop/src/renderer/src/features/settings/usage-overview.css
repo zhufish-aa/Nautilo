@@ -1,0 +1,175 @@
+/* Same surfaces and separators as the connection editor and session inspector. */
+.usage-overview {
+  --usage-surface: light-dark(var(--card), var(--session-inspector-fill));
+  --usage-edge: var(--session-inspector-divider);
+  --usage-blue: var(--glass-accent-blue);
+  --usage-cached: var(--usage-blue);
+  --usage-input: var(--glass-accent-amber);
+  --usage-output: var(--glass-accent-emerald);
+  --usage-unknown: var(--line-strong);
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  width: 100%;
+  max-width: 1160px;
+  margin-inline: auto;
+  container-type: inline-size;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.usage-overview h2 { color: var(--ink); font-size: 13px; font-weight: 600; }
+.usage-overview :is(button, a, select, svg[tabindex]):focus-visible { outline: 2px solid var(--usage-blue); outline-offset: 2px; }
+.usage-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 9px 14px; border-bottom: 1px solid var(--usage-edge); }
+.usage-overview .usage-view-tabs { display: flex; gap: 14px; }
+.usage-overview .usage-view-tabs button {
+  position: relative;
+  min-height: 40px;
+  padding: 0 6px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  font-size: 13px;
+}
+.usage-overview .usage-view-tabs button[aria-selected="true"] { border-color: var(--usage-blue); color: var(--ink); font-weight: 600; }
+.usage-actions, .usage-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
+.usage-actions { padding-block: 3px; }
+.usage-actions > :is(button, a) {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  padding: 0 7px; height: 30px; border-radius: 6px; color: var(--ink-2); font-size: 11.5px; white-space: nowrap;
+}
+.usage-actions > :is(button, a):hover:not(:disabled) { background: var(--surface-soft); color: var(--ink); }
+.usage-actions > button:disabled { opacity: .45; }
+.usage-segments {
+  display: flex; flex: none; align-items: center; gap: 1px; padding: 2px;
+  border: 1px solid var(--usage-edge); border-radius: 7px; background: var(--glass-search-fill);
+}
+.usage-segments button { min-height: 24px; white-space: nowrap; padding: 0 8px; border-radius: 5px; color: var(--ink-2); font-size: 11.5px; }
+.usage-segments button:hover { color: var(--ink); background: var(--surface-soft); }
+.usage-segments button[aria-pressed="true"] { color: var(--ink); background: color-mix(in srgb, var(--usage-blue) 14%, transparent); }
+.usage-notes { display: flex; flex-wrap: wrap; gap: 4px 15px; margin-block: -7px -2px; color: var(--ink-2); font-size: 11.5px; }
+.usage-notes > a { margin-inline-start: auto; }
+.usage-notes :is(a, button), .usage-kpis small a { display: inline-flex; align-items: center; gap: 3px; }
+.usage-notes :is(a, button):hover, .usage-kpis small a:hover { text-decoration: underline; }
+.usage-panel { min-width: 0; background: var(--usage-surface); border: 1px solid var(--usage-edge); border-radius: 12px; }
+.usage-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.usage-kpis > div { min-width: 0; padding: 14px 17px; }
+.usage-kpis > div + div { border-inline-start: 1px solid var(--usage-edge); }
+.usage-kpis h2 { font-size: 12px; color: var(--ink-2); }
+.usage-kpis strong { display: block; margin-top: 5px; font-size: 24px; line-height: 1.35; letter-spacing: -.025em; font-weight: 650; }
+.usage-kpis em { color: var(--ink-2); font-size: 11.5px; font-weight: 500; font-style: normal; letter-spacing: normal; white-space: nowrap; }
+.usage-kpis small { display: block; margin-top: 5px; color: var(--ink-2); font-size: 11px; line-height: 1.45; }
+.usage-kpis .usage-rate, .usage-table td[data-hit="true"] { color: var(--usage-blue); }
+.usage-mix, .usage-rank-bar { display: flex; overflow: hidden; background: var(--line-strong); border-radius: 999px; height: 4px; }
+.usage-kpis .usage-mix { margin-block: 5px; }
+.usage-overview [data-series="cached"] { --series-color: var(--usage-cached); }
+.usage-overview [data-series="input"] { --series-color: var(--usage-input); }
+.usage-overview [data-series="output"] { --series-color: var(--usage-output); }
+.usage-overview [data-series="unknown"] { --series-color: var(--usage-unknown); }
+.usage-mix span, .usage-legend i { background: var(--series-color); }
+.usage-mix span { flex-basis: 0; min-width: 0; }
+.usage-charts { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 16px; }
+.usage-charts > .usage-panel { padding: 18px 20px; }
+.usage-chart-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; min-height: 48px; }
+.usage-chart-heading h2 { line-height: 25px; }
+.usage-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 9px; color: var(--ink-2); font-size: 10.5px; }
+.usage-legend span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.usage-legend i { width: 6px; height: 6px; border-radius: 50%; }
+.usage-trend { position: relative; min-height: 210px; }
+.usage-trend svg { display: block; overflow: visible; }
+.usage-trend svg text { fill: var(--ink-2); font-size: 10px; }
+.usage-trend svg [data-series] { fill: var(--series-color); }
+.usage-grid-line { stroke: var(--usage-edge); stroke-dasharray: 3 4; }
+.usage-trend-cursor { stroke: var(--usage-blue); opacity: .72; pointer-events: none; }
+.usage-chart-empty { min-height: 210px; display: grid; place-items: center; padding: 14px; text-align: center; color: var(--ink-2); font-size: 12px; }
+.usage-chart-tooltip {
+  position: absolute; z-index: 2; top: 1px; width: min(206px, 100%); padding: 9px 11px;
+  border: 1px solid var(--line-strong); border-radius: 8px; background: var(--usage-surface); pointer-events: none; font-size: 11px;
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--ink) 10%, transparent);
+}
+.usage-chart-tooltip b { display: block; margin-bottom: 4px; }
+.usage-chart-tooltip dl > div { display: flex; align-items: center; justify-content: space-between; gap: 5px; padding-block: 1px; }
+.usage-chart-tooltip dt, .usage-chart-tooltip small { color: var(--ink-2); }
+.usage-chart-tooltip small { display: block; margin-top: 5px; }
+.usage-ranking { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.usage-ranking button { display: grid; width: 100%; padding: 4px 3px; gap: 5px; text-align: start; border-radius: 4px; }
+.usage-ranking button:hover { background: var(--surface-soft); }
+.usage-rank-line { display: grid; grid-template-columns: minmax(0, 1fr) max-content 47px; gap: 8px; align-items: baseline; font-size: 11.5px; }
+.usage-rank-line b { font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.usage-rank-line small { text-align: end; color: var(--ink-2); font-size: inherit; }
+.usage-rank-bar i { background: var(--usage-blue); border-radius: inherit; }
+.usage-details-heading { display: flex; justify-content: space-between; gap: 9px; align-items: center; flex-wrap: wrap; padding: 12px 15px; border-bottom: 1px solid var(--usage-edge); }
+.usage-details-heading h2 small { margin-inline-start: 5px; color: var(--ink-2); font-size: 11px; font-weight: 400; }
+.usage-filters { gap: 8px; flex-wrap: nowrap; }
+.usage-search, .usage-filters select {
+  min-width: 0; height: 30px; border: 1px solid var(--usage-edge); border-radius: 7px; background: var(--glass-search-fill);
+  font-size: 11.5px; color: var(--ink);
+}
+.usage-search { display: flex; align-items: center; flex: none; width: 220px; max-width: 100%; gap: 7px; padding-inline: 8px; }
+.usage-search svg { flex: none; color: var(--ink-2); }
+.usage-search input { min-width: 0; width: 100%; outline: none; }
+.usage-search:focus-within { border-color: var(--usage-blue); }
+.usage-filters select { padding-inline: 7px; }
+.usage-children-control { display: flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 11.5px; color: var(--ink-2); }
+.usage-children-control input { width: 13px; height: 13px; accent-color: var(--usage-blue); }
+.usage-drill { padding: 7px 15px; border-bottom: 1px solid var(--usage-edge); }
+.usage-drill button { display: inline-flex; align-items: center; gap: 6px; color: var(--usage-blue); font-size: 12px; }
+.usage-table { width: 100%; table-layout: fixed; font-size: 12px; }
+.usage-table :is(th, td) { padding: 8px 10px; text-align: end; }
+.usage-table :is(th, td):first-child { width: 39%; padding-inline-start: 15px; text-align: start; }
+.usage-table :is(th, td):last-child { width: 86px; padding-inline-end: 15px; }
+.usage-table th { color: var(--ink-2); font-weight: 500; font-size: 11px; padding-block: 9px; white-space: nowrap; }
+.usage-table th button { display: inline-flex; align-items: center; gap: 3px; }
+.usage-table th[aria-sort] { color: var(--ink); }
+.usage-table td { border-top: 1px solid var(--usage-edge); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+.usage-table tbody > tr:not(.usage-expanded):hover { background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.usage-table td[data-column="updatedAt"] { color: var(--ink-2); font-size: 11px; }
+.usage-table .usage-mix { height: 3px; width: min(100%, 64px); margin-block-start: 3px; margin-inline-start: auto; }
+.usage-session-title { display: flex; width: 100%; align-items: center; gap: 4px; text-align: start; }
+.usage-session-title svg { flex: none; color: var(--ink-2); }
+.usage-session-title[aria-expanded="true"] svg { transform: rotate(90deg); }
+.usage-session-title span, .usage-session-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-session-title span { color: var(--ink); font-weight: 600; }
+.usage-session-title:hover span { color: var(--usage-blue); }
+.usage-session-meta { margin: 2px 0 0 17px; color: var(--ink-2); font: 10.5px var(--font-mono); }
+.usage-row-status { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); white-space: nowrap; font-size: 11px; }
+.usage-row-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3); }
+.usage-row-status[data-recorded="true"]::before { background: var(--usage-output); }
+.usage-expanded td { white-space: normal; text-align: start; color: var(--ink-2); }
+.usage-expanded td > div { display: grid; grid-template-columns: minmax(90px, auto) 1fr; gap: 12px; padding-block: 3px; }
+.usage-expanded strong { color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
+.usage-more, .usage-table-empty { display: block; width: 100%; text-align: center; border-top: 1px solid var(--usage-edge); padding: 11px 10px; color: var(--ink-2); font-size: 12px; }
+.usage-overview .request-logs :is(.request-log-table, .request-log-toolbar label, .request-log-toolbar select) {
+  border-color: var(--usage-edge);
+  background: var(--usage-surface);
+}
+@container (max-width: 730px) {
+  .usage-charts { grid-template-columns: minmax(0, 1fr); }
+  .usage-charts > .usage-panel { padding-inline: 13px; }
+  .usage-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .usage-kpis > div:nth-child(3) { border-inline-start: 0; }
+  .usage-kpis > div:nth-child(n+3) { border-top: 1px solid var(--usage-edge); }
+  .usage-filters { flex-wrap: wrap; }
+  .usage-table :is(th, td) { padding-inline: 5px; }
+  .usage-table :is(th, td):first-child { padding-inline-start: 8px; width: 32%; }
+  .usage-table :is(th, td):last-child { width: 60px; padding-inline-end: 8px; }
+}
+@container (max-width: 445px) {
+  .usage-toolbar { justify-content: start; }
+  .usage-actions { padding-block-end: 7px; }
+  .usage-actions > button > span { display: none; }
+  .usage-filters > label:first-child { width: 100%; }
+  .usage-table :is(th, td)[data-column="cache"] { display: none; }
+  .usage-table :is(th, td):first-child { width: 31%; }
+  .usage-table td { font-size: 10px; }
+  .usage-table :is(th, td):last-child { width: 49px; padding-inline-end: 5px; }
+  .usage-row-status { font-size: 9px; gap: 3px; }
+  .usage-overview .request-logs :is(.request-log-columns, .request-log-summary) {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 46px) minmax(0, 46px) minmax(0, 66px);
+    gap: 6px;
+    padding-inline: 8px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .usage-overview *, .usage-overview *::before { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

@@ -108,9 +108,11 @@ export class CoreDaemonClient {
     const child = this.process;
     this.process = undefined;
     this.socketPath = undefined;
-    if (!child) return;
-    child.kill();
-    await new Promise<void>((resolve) => child.once("close", () => resolve()));
+    if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve) => {
+      child.once("close", () => resolve());
+      child.kill();
+    });
   }
 
   private async waitForReady(child: ChildProcess): Promise<ReadyMessage> {

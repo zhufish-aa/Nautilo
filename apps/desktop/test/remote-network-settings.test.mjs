@@ -39,14 +39,16 @@ test("public relay accepts blank addresses; active custom errors do not block au
 test("switching from direct to public relay saves immediately without entering a server", () => {
   const { RemoteNetworkSettings } = load("../src/renderer/src/features/settings/remote/RemoteNetworkSettings.tsx", {
     "./remote-network-settings": helpers,
-    "lucide-react": { ChevronDown: () => null, Globe2: () => null },
+    "lucide-react": { ChevronDown: () => null, RefreshCw: () => null },
     "../../../components/ui/Button": { Button: () => null },
     "../../../components/ui/Switch": { Switch: () => null },
     "./RelayNodeSelect": { RelayNodeSelect: () => null },
+    "./RemoteCopyButton": { RemoteCopyButton: () => null },
   });
   const saved = [];
   const updated = [];
   const tree = RemoteNetworkSettings({ settings: base, endpointId: "", dirty: false, busy: false, zh: true,
+    measurements: { nodes: [], loading: false, error: "", refresh: async () => {} },
     update: (next) => updated.push(next), save: async (next) => { saved.push(next); } });
   function find(node, type) {
     if (!node || typeof node !== "object") return;

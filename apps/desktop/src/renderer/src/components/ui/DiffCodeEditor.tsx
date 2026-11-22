@@ -57,7 +57,7 @@ function currentTheme(review = false): string {
   return review ? `nautilo-change-review-${mode}` : `agenthub-${mode}`;
 }
 
-monaco.editor.defineTheme("nautilo-change-review-dark", {
+const REVIEW_DARK_THEME: monaco.editor.IStandaloneThemeData = {
   base: "vs-dark",
   inherit: true,
   rules: [
@@ -102,9 +102,10 @@ monaco.editor.defineTheme("nautilo-change-review-dark", {
     "scrollbarSlider.hoverBackground": "#90939940",
     "scrollbarSlider.activeBackground": "#90939960"
   }
-});
+};
+monaco.editor.defineTheme("nautilo-change-review-dark", REVIEW_DARK_THEME);
 
-monaco.editor.defineTheme("nautilo-change-review-light", {
+const REVIEW_LIGHT_THEME: monaco.editor.IStandaloneThemeData = {
   base: "vs",
   inherit: true,
   rules: [
@@ -149,7 +150,71 @@ monaco.editor.defineTheme("nautilo-change-review-light", {
     "scrollbarSlider.hoverBackground": "#59616D40",
     "scrollbarSlider.activeBackground": "#59616D60"
   }
-});
+};
+monaco.editor.defineTheme("nautilo-change-review-light", REVIEW_LIGHT_THEME);
+for (const [mode, theme, colors] of [
+  ["dark", REVIEW_DARK_THEME, { keyword:"C099FF", function:"7AA2F7", string:"9ECE6A", number:"FF9E64", type:"2AC3DE", identifier:"E2E8F0", comment:"637099" }],
+  ["light", REVIEW_LIGHT_THEME, { keyword:"7C3AED", function:"1D4ED8", string:"15803D", number:"C2410C", type:"0E7490", identifier:"1E293B", comment:"64748B" }]
+] as const) {
+  monaco.editor.defineTheme(`nautilo-source-control-${mode}`, {
+    ...theme,
+    rules: [
+      { token:"", foreground:colors.identifier },
+      ...Object.entries(colors).map(([token, foreground]) => ({token, foreground, fontStyle:""})),
+      { token:"constant", foreground:colors.number },
+      { token:"variable", foreground:colors.identifier },
+      { token:"property", foreground:colors.identifier }
+    ]
+  });
+}
+
+/** Style the visible labels of Monaco's own fold widgets and keep their native actions. */
+function styleSourceControlFolds(container: HTMLElement): () => void {
+  const folds = ".diff-hidden-lines .center";
+  const labelSelector = ":scope > div:nth-child(2) > span:first-child";
+  const update = (): void => {
+    const zh = document.documentElement.lang.startsWith("zh");
+    for (const fold of container.querySelectorAll(folds)) {
+      const label = fold.querySelector<HTMLElement>(labelSelector);
+      const count = label?.textContent?.match(/\d+/)?.[0];
+      const action = fold.querySelector<HTMLAnchorElement>("a[role='button']");
+      if (!label || !count || !action) continue;
+      const text = zh ? `展开 ${count} 行` : `Expand ${count} ${count === "1" ? "line" : "lines"}`;
+      if (label.textContent !== text) label.textContent = text;
+      label.title = text;
+      action.title = text;
+      action.setAttribute("aria-label", text);
+      action.tabIndex = 0;
+    }
+  };
+  const observer = new MutationObserver(update);
+  for (const overlay of container.querySelectorAll(".overlayWidgets")) {
+    observer.observe(overlay, { childList: true, subtree: true });
+  }
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+  const expandLabel = (event: MouseEvent): void => {
+    if (!(event.target instanceof Element)) return;
+    const fold = event.target.closest(folds);
+    if (fold?.querySelector(labelSelector) === event.target) {
+      fold.querySelector<HTMLAnchorElement>("a[role='button']")?.click();
+    }
+  };
+  const expandWithKeyboard = (event: KeyboardEvent): void => {
+    if (!(event.target instanceof HTMLAnchorElement) || !event.target.closest(folds)) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.target.click();
+  };
+  container.addEventListener("click", expandLabel);
+  container.addEventListener("keydown", expandWithKeyboard, true);
+  update();
+  return () => {
+    observer.disconnect();
+    container.removeEventListener("click", expandLabel);
+    container.removeEventListener("keydown", expandWithKeyboard, true);
+  };
+}
 
 export interface DiffReviewPosition { index: number; count: number }
 export interface DiffReviewNavigation { move: (direction: -1 | 1) => void }
@@ -223,7 +288,9 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
     const language = languageForFile(filePath ?? "");
     const review = appearance === "review";
     const sourceControl = appearance === "source-control";
-    const theme = (): string => currentTheme(review || sourceControl);
+    const theme = (): string => sourceControl
+      ? `nautilo-source-control-${document.documentElement.classList.contains("dark") ? "dark" : "light"}`
+      : currentTheme(review);
     const options: monaco.editor.IStandaloneEditorConstructionOptions = review ? {
       ...EDITOR_OPTIONS,
       fontFamily: '"JetBrains Mono Variable", "Noto Sans SC Variable", "Cascadia Code", Consolas, monospace',
@@ -246,16 +313,18 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
     } : sourceControl ? {
       ...EDITOR_OPTIONS,
       fontFamily: '"JetBrains Mono Variable", "Noto Sans SC Variable", Consolas, monospace',
-      fontSize: 13,
-      lineHeight: 22,
+      fontSize: 12,
+      lineHeight: 1.6,
       fontWeight: "500",
       fontLigatures: false,
       lineNumbers: "on",
-      lineNumbersMinChars: 3,
-      lineDecorationsWidth: 12,
-      padding: {top: 12, bottom: 20},
+      lineNumbersMinChars: 5,
+      lineDecorationsWidth: 34,
+      padding: {top: 12, bottom: 16},
       renderLineHighlight: "none",
-      smoothScrolling: true,
+      smoothScrolling: false,
+      // A read-only preview does not need native text input to update its position on scroll.
+      ...(readOnly ? {editContext: false} : {}),
       cursorSmoothCaretAnimation: "off",
       scrollbar: {verticalScrollbarSize: 9, horizontalScrollbarSize: 9, useShadows: false},
       unicodeHighlight: {ambiguousCharacters: false, invisibleCharacters: false, nonBasicASCII: false}
@@ -381,13 +450,15 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
     activeModelKey.current = identity;
     modelCache.current.set(identity, { modified: modifiedModel, original: originalModelRef.current ?? undefined });
 
-    if (review) void document.fonts.load('500 15px "JetBrains Mono Variable"').then(() => {
+    if (review || sourceControl) void document.fonts.load(`500 ${review ? 15 : 12}px "JetBrains Mono Variable"`, sourceControl ? "n→" : undefined).then(() => {
       if (!disposed) { monaco.editor.remeasureFonts(); editor.layout(); }
     }).catch(() => { /* The configured local monospace fallback remains available. */ });
     const themeObserver = new MutationObserver(() => monaco.editor.setTheme(theme()));
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    const removeFoldStyling = sourceControl ? styleSourceControlFolds(container) : undefined;
 
     return () => {
+      removeFoldStyling?.();
       themeObserver.disconnect();
       disposed = true;
       retryDiffRef.current = null;
@@ -401,7 +472,7 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
       modifiedModelRef.current = null;
       originalModelRef.current = null;
       editorRef.current = undefined;
-      if (review) monaco.editor.setTheme(currentTheme());
+      if (review || sourceControl) monaco.editor.setTheme(currentTheme());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasOriginal, appearance]);
@@ -454,7 +525,6 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
   }, [value]);
   useEffect(()=>{const model=originalModelRef.current;if(model&&before!==undefined&&model.getValue()!==before)model.setValue(before);},[before]);
   useEffect(()=>{const editor=editorRef.current;if(!editor)return;if("getOriginalEditor" in editor)editor.updateOptions({readOnly,renderSideBySide:sideBySide,renderIndicators:appearance !== "default" || !readOnly,hideUnchangedRegions:{enabled:hideUnchanged}});else editor.updateOptions({readOnly});},[readOnly,sideBySide,hideUnchanged,appearance]);
-
   return <div className={appearance === "review" ? "review-editor-shell" : "flex min-h-0 min-w-0 flex-1"} style={{flexDirection: "column"}}>
     {diffError && <div role="alert" className="flex items-center justify-between gap-3 px-3 py-2 text-sm" title={diffError}><span>差异计算暂不可用，文件内容和编辑草稿已保留。</span><button type="button" onClick={() => retryDiffRef.current?.()}>重试</button></div>}
     <div ref={containerRef} className="min-h-0 min-w-0 flex-1" />

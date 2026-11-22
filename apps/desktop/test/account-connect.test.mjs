@@ -9,6 +9,14 @@ const require = createRequire(import.meta.url);
 const source = await readFile(new URL('../src/renderer/src/features/settings/account-connect.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 const { connectOfficialAccount } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(compiled)}`);
+const harnessSource = await readFile(new URL('../src/shared/account-harnesses.ts', import.meta.url), 'utf8');
+const harnesses = {};
+new Function('exports', ts.transpileModule(harnessSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText)(harnesses);
+const profileSource = await readFile(new URL('../src/main/account-profile.ts', import.meta.url), 'utf8');
+const profileModule = { exports: {} };
+new Function('require', 'module', 'exports', ts.transpileModule(profileSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText)(
+  id => id === '../shared/account-harnesses' ? harnesses : require(id), profileModule, profileModule.exports
+);
 function fixture(patch = {}) {
   const calls = [];
   const deps = { detect: async (id) => { calls.push(['detect', id]); return id; }, prepare: async (id) => { calls.push(['prepare', id]); return { profileId: 'account-one', directory: '/managed/one' }; }, start: async (input) => { calls.push(['start', input]); return { ok: true }; }, status: async () => ({ state: 'succeeded' }), cancel: async (id) => { calls.push(['cancel', id]); }, save: async (value) => { calls.push(['save', value]); return { ...value, revision: 1 }; }, wait: async () => {}, ...patch };
@@ -54,9 +62,7 @@ test('failed native startup and cancelled running flow never save a connection',
   assert.ok(!running.calls.some(x => x[0] === 'save')); assert.equal(running.calls.at(-1)[0], 'cancel');
 });
 test('profile allocator makes separate protected directories without accepting caller paths', async (t) => {
-  const src = await readFile(new URL('../src/main/account-profile.ts', import.meta.url), 'utf8');
-  const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const module = { exports: {} }; new Function('require', 'module', 'exports', js)(require, module, module.exports);
+  const module = profileModule;
   const base = await mkdtemp(join(tmpdir(), 'account-profile-test-')); t.after(() => rm(base, { recursive: true, force: true }));
   const first = await module.exports.prepareAccountProfile(base, 'codex'), second = await module.exports.prepareAccountProfile(base, 'codex');
   assert.notEqual(first.directory, second.directory); assert.ok(first.directory.startsWith(join(base, 'account-profiles')));
@@ -64,6 +70,10 @@ test('profile allocator makes separate protected directories without accepting c
   assert.ok(openCode.directory.startsWith(join(base,'account-profiles','opencode-')));
   assert.ok((await module.exports.recoverableAccountProfiles(base)).some(profile=>profile.profileId===openCode.profileId&&profile.providerId==='opencode'));
   await module.exports.attachAccountProfile(base,'opencode',openCode.profileId);
+  const kimiOne = await module.exports.prepareAccountProfile(base, 'kimi-code');
+  const kimiTwo = await module.exports.prepareAccountProfile(base, 'kimi-code');
+  assert.notEqual(kimiOne.directory, kimiTwo.directory);
+  assert.ok((await module.exports.recoverableAccountProfiles(base)).some(profile => profile.profileId === kimiTwo.profileId));
   if (process.platform !== 'win32') assert.equal((await stat(first.directory)).mode & 0o777, 0o700); assert.equal((await lstat(first.directory)).isSymbolicLink(), false);
   await assert.rejects(module.exports.prepareAccountProfile(base, '../other'));
   const linkBase = join(base, 'linked'); await mkdir(linkBase); await symlink(join(base, 'account-profiles'), join(linkBase, 'account-profiles'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -90,10 +100,8 @@ test('recovering an active or stopping process never launches another login or s
 });
 
 test('pending records survive cancellation/save failure and attachment removes metadata only', async (t) => {
-  const { writeFile, access } = await import('node:fs/promises');
-  const src = await readFile(new URL('../src/main/account-profile.ts', import.meta.url), 'utf8');
-  const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const module = { exports: {} }; new Function('require', 'module', 'exports', js)(require, module, module.exports);
+  const { writeFile, access, realpath } = await import('node:fs/promises');
+  const module = profileModule;
   const base = await mkdtemp(join(tmpdir(), 'account-recovery-test-')); t.after(() => rm(base, { recursive: true, force: true }));
   const profile = await module.exports.prepareAccountProfile(base, 'claude-code');
   const authPath = join(profile.directory, '.credentials.json'); await writeFile(authPath, 'synthetic-private-fixture');
@@ -102,9 +110,13 @@ test('pending records survive cancellation/save failure and attachment removes m
   assert.deepEqual(Object.keys(records[0]).sort(), ['createdAt', 'directory', 'profileId', 'providerId']);
   if (process.platform !== 'win32') assert.equal((await stat(join(profile.directory, 'anthropic'))).mode & 0o777, 0o700);
   await access(authPath); // Merely listing never deletes even a potentially live profile.
+  await module.exports.recordAccountVerification(base, 'claude-code', `${profile.profileId}:${profile.directory}`, await realpath(profile.directory));
   await module.exports.attachAccountProfile(base, 'claude-code', profile.profileId);
   assert.deepEqual(await module.exports.recoverableAccountProfiles(base), []);
   assert.equal(await readFile(authPath, 'utf8'), 'synthetic-private-fixture');
+  const verification = JSON.parse(await readFile(join(profile.directory, '.nautilo-verified-login.json'), 'utf8'));
+  assert.equal(verification.providerId, 'claude-code'); assert.ok(Number.isFinite(Date.parse(verification.lastVerifiedAt)));
+  assert.deepEqual(Object.keys(verification).sort(), ['lastVerifiedAt', 'providerId']);
   await assert.rejects(module.exports.attachAccountProfile(base, 'claude-code', '../outside'));
   const replaced = await module.exports.prepareAccountProfile(base, 'claude-code');
   await rm(join(replaced.directory, 'anthropic'), { recursive: true });

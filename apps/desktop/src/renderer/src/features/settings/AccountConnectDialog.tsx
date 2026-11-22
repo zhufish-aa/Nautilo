@@ -7,7 +7,8 @@ import { getBridge } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
 import { useAgentsStore } from "../../stores/agents";
 import { useConnectionsStore } from "../../stores/connections";
-import { ACCOUNT_HARNESSES, accountHarnessName, connectOfficialAccount, type AccountHarness, type ConnectStage } from "./account-connect";
+import { accountHarnessName, connectOfficialAccount, type ConnectStage } from "./account-connect";
+import { ACCOUNT_HARNESSES, supportsAccountLogin, type AccountHarness } from "../../../../shared/account-harnesses";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 
 type RecoverableProfile = { profileId: string; directory: string; providerId: string; createdAt: number };
@@ -33,7 +34,7 @@ export function AccountConnectDialog({ open, onOpenChange, onConnected, onSelect
     try {
       const profiles = await getBridge()?.accounts.recoverableLogins?.() ?? [];
       const saved = new Set(useConnectionsStore.getState().connections.map((connection) => connection.id));
-      if (request === generation.current) setRecoverable(profiles.filter((profile) => !saved.has(profile.profileId) && ACCOUNT_HARNESSES.includes(profile.providerId as AccountHarness)));
+      if (request === generation.current) setRecoverable(profiles.filter((profile) => !saved.has(profile.profileId) && supportsAccountLogin(profile.providerId)));
     } catch { if (request === generation.current) setError((current) => current || (zh ? "无法读取未完成的登录记录，请稍后重试。" : "Could not read unfinished login records. Try again later.")); }
   };
   useEffect(() => {
@@ -85,7 +86,7 @@ export function AccountConnectDialog({ open, onOpenChange, onConnected, onSelect
       <p className="text-xs leading-relaxed text-ink-3">{zh ? "账号登录由官方 CLI 完成。OpenCode 使用 Console 浏览器授权，不需要填写 API Key；授权成功后才添加账号。" : "The official CLI handles sign-in. OpenCode uses Console browser authorization without API key entry. The account is added after authorization succeeds."}</p>
       {stage === "login" && <p className="text-xs leading-relaxed text-ink-3">{zh ? "若浏览器没有打开，或 CLI 要求终端输入，请取消后检查官方 CLI 安装。Windows 需要原生可执行文件，当前不执行 .cmd/.bat 登录脚本。" : "If the browser does not open or the CLI requires terminal input, cancel and check the CLI installation. Windows requires a native executable; .cmd/.bat login scripts are not executed."}</p>}
       <p className="text-xs leading-relaxed text-ink-3">{zh ? "取消只停止本地等待，不会撤销已完成的服务端授权。未完成账号空间会保留，稍后可在此恢复。列表仅扫描前 128 个账号目录，较多目录时可能不完整。" : "Cancel stops the local wait; it does not revoke server authorization. Unfinished profiles are retained. Recovery scans the first 128 account directories, so large collections may be incomplete."}</p>
-      <p className="text-xs leading-relaxed text-ink-2">{zh ? "Codex、Claude Code 与 OpenCode 使用各自的独立账号目录。Antigravity 与本机 agy 共享系统凭据库中的 Google 登录，当前仅支持一个连接。" : "Codex, Claude Code and OpenCode use separate account directories. Antigravity shares Google sign-in with local agy through the OS keyring and supports one connection."}</p>
+      <p className="text-xs leading-relaxed text-ink-2">{zh ? "Codex、Claude Code、OpenCode 和 Kimi Code 可以添加多个独立账号。Antigravity 与本机 agy 共享系统凭据库中的 Google 登录，当前仅支持一个连接。" : "Codex, Claude Code, OpenCode and Kimi Code support multiple isolated accounts. Antigravity shares Google sign-in with local agy through the OS keyring and supports one connection."}</p>
     </div>
   </Dialog>;
 }

@@ -244,7 +244,9 @@ export function classifyLocalHref(href: string | undefined | null): LocalHrefCla
   return { kind: "none" };
 }
 
-/** Markdown and URL parsers sometimes prefix Windows drive paths with '/'. */
+/** Turn a Markdown file destination into a path the filesystem can open. */
 export function normalizeLocalFilePath(path: string): string {
-  return path.replace(/^\/(?=[A-Za-z]:[/\\])/, "");
+  const localPath = path.replace(/^\/(?=[A-Za-z]:[/\\])/, "");
+  const withoutLine = localPath.replace(/(?::\d+(?:-\d+)?|#L\d+(?:-L?\d+)?)$/i, "");
+  return hasKnownExtension(withoutLine) ? withoutLine : localPath;
 }

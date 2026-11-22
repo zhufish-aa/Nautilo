@@ -43,7 +43,7 @@ test('process stays expanded while generating, collapses after the result, and c
   assert.match(live, /Reading the file/);
   assert.match(live, /Final answer/);
   assert.match(live, /aria-expanded="true"/);
-  assert.match(live, /conversation-activity-pulse/);
+  assert.match(live, /conversation-wait-orbit/);
   assert.doesNotMatch(live, /data-activity-(mark|sweep)/);
   assert.doesNotMatch(live, /assistant-identity|assistant-mark/);
   assertOrder(live, ['Reading the file', 'Native child dispatch', 'Checking the delegated result', 'Team task card', 'Verify directory', 'Approval needed', 'Final answer']);
@@ -52,7 +52,7 @@ test('process stays expanded while generating, collapses after the result, and c
   assert.doesNotMatch(collapsed, /Reading the file/);
   assert.match(collapsed, /Final answer/);
   assert.match(collapsed, /已完成，用时 1分12秒/);
-  assert.doesNotMatch(collapsed, /conversation-activity-pulse/);
+  assert.doesNotMatch(collapsed, /conversation-wait-orbit/);
   assert.doesNotMatch(collapsed, /项过程|assistant-identity/);
   assert.ok(collapsed.indexOf('conversation-turn-summary') < collapsed.indexOf('Final answer'));
   assert.equal((collapsed.match(/Native child dispatch/g) ?? []).length, 1, 'native delegation remains visible outside the collapsed process');

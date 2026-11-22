@@ -32,6 +32,7 @@ import com.journeyapps.barcodescanner.ScanOptions
     val state by model.state.collectAsStateWithLifecycle()
     var pairSheet by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
+    var showWorkflows by remember(state.host?.id, state.session?.id, state.screen) { mutableStateOf(false) }
     var link by remember { mutableStateOf("") }
     val context = LocalContext.current
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -104,6 +105,9 @@ import com.journeyapps.barcodescanner.ScanOptions
                     ActionIcon(Icons.Outlined.MoreHoriz, "更多") { menu = true }
                     NMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         if (state.screen == Screen.TeamTasks) NMenuItem(text = { Text("刷新任务") }, onClick = { menu = false; model.refreshTeamTasks() }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) })
+                        if (state.screen == Screen.Chat && state.connected && "session.workflows" in state.capabilities)
+                            NMenuItem(text = { Text("工作流执行") }, onClick = { menu = false; showWorkflows = true },
+                                leadingIcon = { Icon(Icons.Outlined.AccountTree, null) })
                         NMenuItem(text = { Text("电脑连接") }, onClick = { menu = false; model.navigate(Screen.Computers) }, leadingIcon = { Icon(Icons.Outlined.Computer, null) })
                         NMenuItem(text = { Text("重新连接") }, onClick = { menu = false; model.retry() }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) })
                     }
@@ -134,6 +138,9 @@ import com.journeyapps.barcodescanner.ScanOptions
                     Screen.FilePreview -> FilePreviewScreen(state, model)
                 }
             }
+        }
+        if (showWorkflows) state.session?.let { session ->
+            SessionWorkflowsSheet(session.id, model) { showWorkflows = false }
         }
         if (pairSheet) NSheet(onDismissRequest = { pairSheet = false }) {
             Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {

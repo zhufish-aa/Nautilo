@@ -68,6 +68,29 @@ class ProjectionTest {
         assertEquals("completed", p.runStatus)
         assertEquals(14L, p.sequence)
     }
+
+    @Test fun ompReplyAfterStopStaysBelowTheContinueMessage() {
+        val projection = SessionProjection()
+        val start = "2026-11-14T01:00:00Z"
+        val resume = "2026-11-14T01:00:02Z"
+        projection.optimistic(ChatMessage("first", "user", "查看项目", start))
+        projection.apply(event(1, "agent.message_delta", "查看中", "omp-message-before-stop"))
+        projection.apply(event(2, "agent.message", "查看中", "saved-previous").apply {
+            getJSONObject("payload").put("providerMessageId", "omp-message-before-stop")
+        })
+        projection.apply(event(3, "run.cancelled", ""))
+        projection.optimistic(ChatMessage("second", "user", "继续", resume))
+        projection.apply(event(4, "agent.message_delta", "找到", "omp-message-after-resume")
+            .put("runId", "next").put("timestamp", "2026-11-14T01:00:03Z"))
+        projection.apply(event(5, "agent.message", "找到项目目录", "saved-next")
+            .put("runId", "next").put("timestamp", "2026-11-14T01:00:04Z").apply {
+                getJSONObject("payload").put("providerMessageId", "omp-message-after-resume")
+            })
+
+        val turns = conversationTimeline(projection.messageList(), projection.activityList(), emptyList())
+        assertEquals(listOf("message:first", "turn:run:after:first", "message:second", "turn:next:after:second"), turns.map { it.key })
+        assertEquals(listOf("查看中", "找到项目目录"), turns.filterIsInstance<ConversationItem.Turn>().map { it.answer?.text })
+    }
     @Test fun pendingDeliveryHydratesWithoutDuplicateBubblesOrTruncatingStream() {
         val p = SessionProjection()
         p.optimistic(ChatMessage("user", "user", "继续", "2026-11-14T01:00:00Z", "waiting"))

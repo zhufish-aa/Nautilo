@@ -21,12 +21,14 @@ async function fixture({initial=repository(),request}={}){
     b.onResolve({filter:/components\/ui\/(Dialog|Select)$/},args=>({path:args.path.endsWith('Dialog')?'dialog':'select',namespace:'fixture'}));
     b.onResolve({filter:/stores\/projects$/},()=>({path:'projects',namespace:'fixture'}));
     b.onResolve({filter:/components\/ui\/DiffCodeEditor$/},()=>({path:'code',namespace:'fixture'}));
+    b.onResolve({filter:/SourceControlNativePreview$/},()=>({path:'native-code',namespace:'fixture'}));
+    b.onLoad({filter:/^native-code$/,namespace:'fixture'},()=>({loader:'tsx',resolveDir:desktop,contents:`export default function NativeCode({before,value,filePath,sideBySide}){return <div data-code-preview data-file={filePath} data-read-only='true' data-layout={sideBySide?'split':'unified'}><pre data-before>{before}</pre><pre data-after>{value}</pre></div>}`}));
     b.onLoad({filter:/.*/,namespace:'fixture'},args=>({loader:'tsx',resolveDir:desktop,contents:args.path==='code'?`export default function Code({before,value,filePath,readOnly,sideBySide,onChange}){return <div data-code-preview data-file={filePath} data-read-only={String(readOnly)} data-layout={sideBySide?'split':'unified'}><pre data-before>{before}</pre>{!readOnly&&onChange?<textarea aria-label='合并结果编辑器' value={value} onChange={event=>onChange(event.target.value)}/>:<pre data-after>{value}</pre>}</div>}`:args.path==='projects'?`export const useProjectsStore={getState:()=>({rescanProject:async()=>{}})};`:args.path==='dialog'?`export function Dialog({open,title,description,children,footer}){return open?<div role='dialog' aria-label={title}><h2>{title}</h2><p>{description}</p>{children}{footer}</div>:null}`:`export function SelectField({value,onValueChange,options,disabled,'aria-label':label}){return <select aria-label={label} value={value} disabled={disabled} onChange={event=>onValueChange(event.target.value)}>{options.map(option=><option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}</select>}`}));
   }}]});
   const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost',runScripts:'outside-only',pretendToBeVisual:true}),w=dom.window;let state=initial;
   w.ResizeObserver=class{observe(){}disconnect(){}};w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){},addListener(){},removeListener(){}});w.HTMLElement.prototype.scrollTo=()=>{};
   const base=async(method,input)=>{
-    if(method==='health.get')return{status:'ok',features:{sourceControl:1,sourceControlHistory:1,sourceControlEditing:1}};
+    if(method==='health.get')return{status:'ok',features:{sourceControl:2,sourceControlHistory:1,sourceControlEditing:1}};
     if(method==='scm.status')return structuredClone(state);
     if(method==='scm.diff')return{path:input.path,source:input.source,patch:`--- a/${input.path}\n+++ b/${input.path}\n@@ -1 +1 @@\n-old\n+${input.source==='index'?'staged':'working'}\n`,fileToken:input.source==='worktree'?'file-1':undefined,binary:false,truncated:false};
     if(method==='scm.mutate'){state={...state,token:'state-2',changes:input.action==='commit'?state.changes.map(item=>({...item,indexStatus:'.'})):input.action==='stage'?state.changes.map(item=>input.paths.includes(item.path)?{...item,indexStatus:item.untracked?'A':item.worktreeStatus,worktreeStatus:'.',untracked:false}:item):input.action==='unstage'?state.changes.map(item=>input.paths.includes(item.path)?{...item,indexStatus:'.',worktreeStatus:'M'}:item):state.changes};return{status:structuredClone(state)};}
@@ -38,21 +40,21 @@ async function fixture({initial=repository(),request}={}){
 }
 function inputText(w,node,value){Object.getOwnPropertyDescriptor(w.HTMLTextAreaElement.prototype,'value').set.call(node,value);node.dispatchEvent(new w.Event('input',{bubbles:true}));}
 
-test('commit submits only the staged index, keeps working changes and clears its draft',{skip:!JSDOM},async()=>{
+test('advanced index commit keeps working changes and clears its draft',{skip:!JSDOM},async()=>{
   const f=await fixture();const{w}=f;
   try{
-    await until(()=>w.document.querySelector('textarea'));const area=w.document.querySelector('textarea');inputText(w,area,'Quoted "subject"\n\nBody');await until(()=>!f.byText('提交所选 (1)').disabled);
-    f.byText('提交所选 (1)').click();await until(()=>w.document.body.textContent.includes('所选更改已提交'));
+    await until(()=>w.document.querySelector('textarea'));const area=w.document.querySelector('textarea');inputText(w,area,'Quoted "subject"\n\nBody');await until(()=>!f.byText('提交暂存区 (1)').disabled);
+    f.byText('提交暂存区 (1)').click();await until(()=>w.document.body.textContent.includes('所选更改已提交'));
     const actions=f.calls('scm.mutate');assert.equal(actions.length,1);assert.equal(actions[0].input.action,'commit');assert.equal(actions[0].input.message,'Quoted "subject"\n\nBody');assert.equal(actions[0].input.paths,undefined);
-    assert.equal(w.document.querySelector('textarea').value,'');assert.ok(f.button('查看文件差异 file.txt'));assert.ok(f.button('查看文件差异 new.txt'));assert.equal(f.byText('提交所选 (0)').disabled,true);
+    assert.equal(w.document.querySelector('textarea').value,'');assert.ok(f.button('查看文件差异 file.txt'));assert.ok(f.button('查看文件差异 new.txt'));assert.equal(f.button('提交所选 (0)').disabled,true);
   }finally{f.close();}
 });
 test('staged and worktree diffs stay separate while a different source is loading',{skip:!JSDOM},async()=>{
   let release;const f=await fixture({request:(method,input,base)=>method==='scm.diff'&&input.source==='index'?new Promise(resolve=>{release=()=>base(method,input).then(resolve)}):base(method,input)});const{w}=f;
   try{
-    await until(()=>w.document.querySelector('.scm-diff-code')?.textContent.includes('+working'));f.button('查看已选更改').click();await until(()=>release);
+    await until(()=>w.document.querySelector('.scm-diff-code')?.textContent.includes('+working'));f.button('查看暂存区更改').click();await until(()=>release);
     assert.equal(w.document.querySelector('.scm-diff-code')?.textContent.includes('+working')??false,false,'do not label a working patch as a staged patch');
-    release();await until(()=>w.document.querySelector('.scm-diff-code')?.textContent.includes('+staged'));assert.match(w.document.querySelector('.scm-diff-source').textContent,/此次提交的内容/);
+    release();await until(()=>w.document.querySelector('.scm-diff-code')?.textContent.includes('+staged'));assert.match(w.document.querySelector('.scm-diff-source').textContent,/暂存区的更改/);
   }finally{f.close();}
 });
 test('discard confirmation retains the reviewed file token across refresh and preserves new edits',{skip:!JSDOM},async()=>{
@@ -88,7 +90,7 @@ test('a resolved merge can be committed even when its staged tree matches HEAD',
   const f=await fixture({initial:{...repository(),changes:[],operation:'merge'}});
   try{await until(()=>f.w.document.querySelector('textarea'));inputText(f.w,f.w.document.querySelector('textarea'),'Finish merge');await until(()=>!f.byText('完成合并').disabled);f.byText('完成合并').click();await until(()=>f.calls('scm.mutate').length===1);assert.equal(f.calls('scm.mutate')[0].input.action,'commit');}finally{f.close();}
 });
-test('a resolved rebase points to continuation instead of claiming unresolved file conflicts',{skip:!JSDOM},async()=>{const f=await fixture({initial:{...repository(),operation:'rebase',changes:[file('file.txt','M','.')]}});try{await until(()=>f.w.document.querySelector('.scm-operation'));assert.match(f.w.document.querySelector('.scm-operation').textContent,/请在终端继续/);assert.doesNotMatch(f.w.document.querySelector('.scm-operation').textContent,/请先处理冲突/);inputText(f.w,f.w.document.querySelector('textarea'),'Continue rebase');assert.equal(f.byText('提交所选 (1)').disabled,true);assert.equal(f.calls('scm.mutate').length,0);}finally{f.close();}});
+test('a resolved rebase points to continuation instead of claiming unresolved file conflicts',{skip:!JSDOM},async()=>{const f=await fixture({initial:{...repository(),operation:'rebase',changes:[file('file.txt','M','.')]}});try{await until(()=>f.w.document.querySelector('.scm-operation'));assert.match(f.w.document.querySelector('.scm-operation').textContent,/请在终端继续/);assert.doesNotMatch(f.w.document.querySelector('.scm-operation').textContent,/请先处理冲突/);inputText(f.w,f.w.document.querySelector('textarea'),'Continue rebase');assert.equal(f.button('提交所选 (0)').disabled,true);assert.equal(f.calls('scm.mutate').length,0);}finally{f.close();}});
 test('new source-control entry points require the backend feature declaration',{skip:!JSDOM},async()=>{
   for(const enabled of [false,true]){
     const f=await fixture({request:(method,input,base)=>method==='health.get'?{status:'ok',features:enabled?{sourceControl:1}:{}}:base(method,input)});
@@ -113,19 +115,26 @@ test('hunk and line controls send the reviewed patch identity and preserve sourc
     await until(()=>f.byText('按行选择'));f.byText('按行选择').click();
     await until(()=>f.button('暂存区块 3')&&!f.button('暂存区块 3').disabled);f.button('暂存区块 3').click();await until(()=>f.calls('scm.mutate').length===1);
     let action=f.calls('scm.mutate')[0].input;assert.equal(action.action,'stage-hunks');assert.equal(action.patchToken,'reviewed-patch');assert.equal(action.hunkIds.join(','),'hunk-1');assert.equal(action.paths.join(','),'file.txt');
-    f.button('查看已选更改').click();await until(()=>f.w.document.querySelector('.scm-diff-source')?.textContent.includes('此次提交的内容')&&f.byText('按行选择'));f.byText('按行选择').click();await until(()=>f.w.document.querySelector('input[aria-label="选择更改行 5"]')&&!f.w.document.querySelector('input[aria-label="选择更改行 5"]').disabled);
+    f.button('查看暂存区更改').click();await until(()=>f.w.document.querySelector('.scm-diff-source')?.textContent.includes('暂存区的更改')&&f.byText('按行选择'));f.byText('按行选择').click();await until(()=>f.w.document.querySelector('input[aria-label="选择更改行 5"]')&&!f.w.document.querySelector('input[aria-label="选择更改行 5"]').disabled);
     f.w.document.querySelector('input[aria-label="选择更改行 5"]').click();await until(()=>f.byText('取消暂存选中行')&&!f.byText('取消暂存选中行').disabled);f.byText('取消暂存选中行').click();await until(()=>f.calls('scm.mutate').length===2);
     action=f.calls('scm.mutate')[1].input;assert.equal(action.action,'unstage-hunks');assert.equal(action.lines.join(','),'5');assert.equal(action.patchToken,'reviewed-patch');
   }finally{f.close();}
 });
-test('working and staged groups keep partial changes separate and submit only the native index',{skip:!JSDOM},async()=>{
+test('checking files issues no Git request and commit receives only the checked paths',{skip:!JSDOM},async()=>{
   const f=await fixture();const{w}=f;
   try{
-    const checkbox=(label,group)=>w.document.querySelector(`[data-group="${group}"] input[aria-label="选择提交文件 ${label}"]`);
-    await until(()=>checkbox('file.txt','index'));assert.equal(checkbox('file.txt','index').checked,true);assert.equal(checkbox('file.txt','worktree').checked,false);assert.equal(checkbox('new.txt','untracked').checked,false);
-    checkbox('new.txt','untracked').click();await until(()=>checkbox('new.txt','index')?.checked);assert.equal(f.calls('scm.mutate')[0].input.action,'stage');assert.deepEqual(Array.from(f.calls('scm.mutate')[0].input.paths),['new.txt']);
-    checkbox('file.txt','index').click();await until(()=>!checkbox('file.txt','index'));assert.equal(f.calls('scm.mutate')[1].input.action,'unstage');assert.deepEqual(Array.from(f.calls('scm.mutate')[1].input.paths),['file.txt']);
-    inputText(w,w.document.querySelector('textarea'),'Only the chosen file');await until(()=>!f.byText('提交所选 (1)').disabled);f.byText('提交所选 (1)').click();await until(()=>f.calls('scm.mutate').length===3);assert.equal(f.calls('scm.mutate')[2].input.action,'commit');assert.equal(f.calls('scm.mutate')[2].input.paths,undefined);
+    const checkbox=label=>w.document.querySelector(`input[aria-label="选择提交文件 ${label}"]`);
+    await until(()=>checkbox('file.txt')&&checkbox('new.txt'));
+    assert.equal(checkbox('file.txt').checked,false);
+    const reads=f.calls('scm.status').length;
+    checkbox('new.txt').click();assert.equal(checkbox('new.txt').checked,true);
+    checkbox('file.txt').click();checkbox('file.txt').click();assert.equal(checkbox('file.txt').checked,false);
+    assert.equal(f.calls('scm.mutate').length,0);assert.equal(f.calls('scm.status').length,reads);
+    inputText(w,w.document.querySelector('textarea'),'Only the chosen file');
+    await until(()=>!f.button('提交所选 (1)')?.disabled&&f.button('提交所选 (1)'));
+    f.button('提交所选 (1)').click();await until(()=>f.calls('scm.mutate').length===1);
+    assert.equal(f.calls('scm.mutate')[0].input.action,'commit');
+    assert.deepEqual(Array.from(f.calls('scm.mutate')[0].input.paths),['new.txt']);
     assert.equal(w.document.querySelectorAll('.scm-file-row').length,2,'one row per file, including partial changes');assert.equal(f.button('暂存 new.txt'),null);
   }finally{f.close();}
 });
@@ -137,23 +146,85 @@ test('unchanged status refreshes and revisiting a file do not reload its diff',{
     f.w.qa.hide();f.w.qa.show();await until(()=>f.w.document.querySelector('textarea'));assert.equal(f.calls('scm.diff').length,2);
   }finally{f.close();}
 });
-test('staging another file while Git is busy queues its intent against the fresh index token',{skip:!JSDOM},async()=>{
-  let release;const f=await fixture({request:(method,input,base)=>method==='scm.mutate'&&input.action==='stage'&&input.paths.includes('new.txt')?new Promise(resolve=>{release=()=>base(method,input).then(resolve);}):base(method,input)});
+test('folder view compacts single-child paths and keeps batch checks separate from native staging',{skip:!JSDOM},async()=>{
+  const folder='apps/desktop/src/features';
+  const paths=[folder+'/Panel.tsx',folder+'/Panel.css'];
+  const f=await fixture({initial:{...repository(),changes:[...paths.map(path=>file(path)),file('docs/other.md','M','.')]}}),{w}=f;
+  const folderCheck=()=>w.document.querySelector(`input[aria-label="选择目录 ${folder}"]`);
   try{
-    const checkbox=(path,group)=>f.w.document.querySelector(`[data-group="${group}"] input[aria-label="选择提交文件 ${path}"]`);
-    await until(()=>checkbox('new.txt','untracked'));checkbox('new.txt','untracked').click();await until(()=>release);
-    assert.equal(checkbox('file.txt','index').disabled,false);checkbox('file.txt','index').click();assert.equal(f.calls('scm.mutate').length,1);
-    release();await until(()=>f.calls('scm.mutate').length===2&&!checkbox('file.txt','index'));
-    assert.equal(f.calls('scm.mutate')[1].input.action,'unstage');assert.equal(f.calls('scm.mutate')[1].input.token,'state-2');
+    await until(()=>f.button('文件夹树'));
+    f.button('文件夹树').click();
+    await until(folderCheck);
+    assert.equal(f.button(folder).getAttribute('title'),folder);
+    assert.ok(!f.button('apps'),'only the combined path should be a folder row');
+    f.button(folder).click();
+    await until(()=>!f.button('查看文件差异 '+paths[0]));
+    f.button(folder).click();
+    await until(()=>f.button('查看文件差异 '+paths[0]));
+    w.document.querySelector(`input[aria-label="选择提交文件 ${paths[0]}"]`).click();
+    await until(()=>folderCheck().indeterminate);
+    folderCheck().click();
+    await until(()=>folderCheck().checked);
+    assert.equal(f.calls('scm.mutate').length,0);
+    f.byText('已选 2 项').click();
+    await until(()=>!f.button('查看文件差异 docs/other.md'));
+    f.byText('已选 2 项').click();
+    await until(()=>f.button('查看文件差异 docs/other.md'));
+    f.button('暂存目录 '+folder).click();
+    await until(()=>f.button('取消暂存目录 '+folder)&&!f.button('取消暂存目录 '+folder).disabled);
+    assert.deepEqual(Array.from(f.calls('scm.mutate')[0].input.paths),paths);
+    f.button('取消暂存目录 '+folder).click();
+    await until(()=>f.calls('scm.mutate').length===2);
+    assert.equal(f.calls('scm.mutate')[1].input.action,'unstage');
+    assert.deepEqual(Array.from(f.calls('scm.mutate')[1].input.paths),paths);
+    f.w.qa.hide();f.w.qa.show();
+    await until(()=>f.button('文件夹树'));
+    assert.equal(f.button('文件夹树').getAttribute('aria-pressed'),'true');
+  }finally{f.close();}
+});
+test('the floating dock expands for multiline input and collapses on single-line blur',{skip:!JSDOM},async()=>{
+  const f=await fixture(),{w}=f;
+  try{
+    const area=()=>w.document.querySelector('.scm-commit-dock textarea');
+    await until(area);
+    assert.ok(area().closest('.scm-review-canvas'));
+    assert.equal(area().rows,1);
+    f.button('展开提交说明').click();
+    await until(()=>area().rows===4);
+    area().blur();
+    await until(()=>area().rows===1);
+    inputText(w,area(),'Subject\n\nBody');
+    await until(()=>area().rows===4);
+    area().focus();area().blur();
+    assert.equal(area().rows,4);
+    assert.equal(area().value,'Subject\n\nBody');
+  }finally{f.close();}
+});
+test('older backend cannot receive a direct commit that it would mistake for an index commit',{skip:!JSDOM},async()=>{
+  const f=await fixture({request:(method,input,base)=>method==='health.get'?{features:{sourceControl:1}}:base(method,input)});
+  try{
+    const {w}=f,checkbox=()=>w.document.querySelector('input[aria-label="选择提交文件 new.txt"]');
+    await until(checkbox);checkbox().click();inputText(w,w.document.querySelector('textarea'),'Selected only');
+    assert.equal(f.button('提交所选 (1)').disabled,true);
+    assert.equal(f.calls('scm.mutate').length,0);
   }finally{f.close();}
 });
 test('commit-and-push waits for a successful native commit and uses its new token',{skip:!JSDOM},async()=>{
   const f=await fixture({initial:{...repository(),remotes:['origin'],upstream:'origin/main',upstreamRemote:'origin'}});
-  try{await until(()=>f.w.document.querySelector('textarea'));inputText(f.w,f.w.document.querySelector('textarea'),'Selected fix');await until(()=>!f.byText('提交并推送').disabled);f.byText('提交并推送').click();await until(()=>f.calls('scm.mutate').length===2);assert.deepEqual(Array.from(f.calls('scm.mutate'),item=>item.input.action),['commit','push']);assert.equal(f.calls('scm.mutate')[1].input.token,'state-2');}finally{f.close();}
+  try{
+    await until(()=>f.w.document.querySelector('select[aria-label="推送目标"]')?.value==='origin');
+    f.w.document.querySelector('input[aria-label="选择提交文件 new.txt"]').click();
+    inputText(f.w,f.w.document.querySelector('textarea'),'Selected fix');
+    await until(()=>!f.button('提交并推送').disabled);
+    f.button('提交并推送').click();
+    await until(()=>f.calls('scm.mutate').length===2);
+    assert.deepEqual(Array.from(f.calls('scm.mutate'),item=>item.input.action),['commit','push']);
+    assert.equal(f.calls('scm.mutate')[1].input.token,'state-2');
+  }finally{f.close();}
 });
 test('a successful commit keeps a newer message draft typed while the commit was pending',{skip:!JSDOM},async()=>{
   let release;const f=await fixture({request:(method,input,base)=>method==='scm.mutate'&&input.action==='commit'?new Promise(resolve=>{release=()=>base(method,input).then(resolve);}):base(method,input)});
-  try{await until(()=>f.w.document.querySelector('textarea'));inputText(f.w,f.w.document.querySelector('textarea'),'Submitted message');await until(()=>!f.byText('提交所选 (1)').disabled);f.byText('提交所选 (1)').click();await until(()=>release);inputText(f.w,f.w.document.querySelector('textarea'),'Next commit draft');release();await until(()=>f.w.document.body.textContent.includes('所选更改已提交'));assert.equal(f.w.document.querySelector('textarea').value,'Next commit draft');}finally{f.close();}
+  try{await until(()=>f.w.document.querySelector('textarea'));f.w.document.querySelector('input[aria-label="选择提交文件 new.txt"]').click();inputText(f.w,f.w.document.querySelector('textarea'),'Submitted message');await until(()=>!f.button('提交所选 (1)').disabled);f.button('提交所选 (1)').click();await until(()=>release);inputText(f.w,f.w.document.querySelector('textarea'),'Next commit draft');release();await until(()=>f.w.document.body.textContent.includes('所选更改已提交'));assert.equal(f.w.document.querySelector('textarea').value,'Next commit draft');}finally{f.close();}
 });
 test('code previews use complete file versions in a read-only syntax editor and keep advanced controls secondary',{skip:!JSDOM},async()=>{
   const f=await fixture({request:async(method,input,base)=>{const value=await base(method,input);return method==='scm.diff'?{...value,before:'const version = 1;\n',after:'const version = 2;\n',patchToken:'reviewed',hunks:[{id:'hunk',header:'@@ -1 +1 @@',startLine:3,endLine:5}]}:value;}});
@@ -239,7 +310,19 @@ test('pane borders resize with pointer and keyboard, persist widths and restore 
   const f=await fixture();const{w}=f;
   try{
     await until(()=>w.document.querySelector('[aria-label="调整源码管理宽度"]'));const edge=w.document.querySelector('[aria-label="调整源码管理宽度"]'),start=Number(edge.getAttribute('aria-valuenow'));
-    edge.dispatchEvent(new w.MouseEvent('pointerdown',{button:0,clientX:300,bubbles:true}));edge.dispatchEvent(new w.MouseEvent('pointermove',{clientX:360,bubbles:true}));edge.dispatchEvent(new w.MouseEvent('pointerup',{clientX:360,bubbles:true}));await until(()=>Number(edge.getAttribute('aria-valuenow'))===start-60);assert.equal(w.localStorage.getItem('nautilo.scm.panel.width'),String(start-60));assert.equal(w.document.body.style.cursor,'');
+    const resized=[];
+    const observer=new w.MutationObserver(records=>resized.push(...records));
+    observer.observe(edge,{attributeFilter:['aria-valuenow']});
+    edge.dispatchEvent(new w.MouseEvent('pointerdown',{button:0,clientX:300,bubbles:true}));
+    assert.ok(edge.hasAttribute('data-resizing'));
+    for(let clientX=301;clientX<=350;clientX++)edge.dispatchEvent(new w.MouseEvent('pointermove',{clientX,bubbles:true}));
+    await until(()=>Number(edge.getAttribute('aria-valuenow'))===start-50);
+    assert.equal(resized.length,1);
+    observer.disconnect();
+    edge.dispatchEvent(new w.MouseEvent('pointerup',{clientX:360,bubbles:true}));
+    await until(()=>Number(edge.getAttribute('aria-valuenow'))===start-60);
+    assert.ok(!edge.hasAttribute('data-resizing'));
+    assert.equal(w.localStorage.getItem('nautilo.scm.panel.width'),String(start-60));assert.equal(w.document.body.style.cursor,'');
     const files=w.document.querySelector('[aria-label="调整文件列表宽度"]');files.dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));await until(()=>files.getAttribute('aria-valuenow')==='296');assert.equal(w.localStorage.getItem('nautilo.scm.files.width'),'296');w.qa.hide();w.qa.show();await until(()=>w.document.querySelector('[aria-label="调整文件列表宽度"]'));assert.equal(w.document.querySelector('[aria-label="调整文件列表宽度"]').getAttribute('aria-valuenow'),'296');assert.equal(w.document.querySelector('[aria-label="调整源码管理宽度"]').getAttribute('aria-valuenow'),String(start-60));
     f.button('最大化源码管理').click();await until(()=>w.document.querySelector('.workspace-panel-right.is-maximized'));f.button('还原源码管理').click();await until(()=>!w.document.querySelector('.workspace-panel-right.is-maximized'));
   }finally{f.close();}

@@ -284,7 +284,7 @@ export function MemberEditorDialog({
         if (!saving) onOpenChange(value);
       }}
       title={member ? t("teams.member.editTitle") : t("teams.member.createTitle")}
-      widthClass="max-w-2xl"
+      widthClass="max-w-2xl team-dialog"
       footer={
         <>
           <Button variant="outline" disabled={saving} onClick={() => onOpenChange(false)}>
@@ -309,7 +309,7 @@ export function MemberEditorDialog({
         <div
           role="tablist"
           aria-label={member ? t("teams.member.editTitle") : t("teams.member.createTitle")}
-          className="flex gap-6 border-b border-line"
+          className="team-dialog-tabs flex gap-6 border-b border-line"
         >
           {(["basic", "role"] as const).map((value) => (
             <button

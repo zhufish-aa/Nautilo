@@ -54,3 +54,15 @@ export interface AssistantExcerptPage {
   items: AssistantExcerpt[];
   next: number | null;
 }
+export interface AssistantDispatchKey {
+  sessionId: string;
+  messageId: string;
+  runId?: string;
+  projectRunId?: string;
+}
+
+export interface AssistantDispatch {
+  messageId: string;
+  status?: string;
+  result?: string;
+}

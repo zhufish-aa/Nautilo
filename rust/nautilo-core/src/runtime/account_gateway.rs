@@ -38,6 +38,8 @@ mod opencode_tests;
 
 use http::{error, response, write_sse};
 
+const ASSISTANT_SESSION_ID: &str = "workspace-assistant";
+
 pub(crate) fn supports_account_provider(provider: &str) -> bool {
     matches!(provider, "codex" | "claude-code" | "opencode" | "antigravity")
 }
@@ -102,6 +104,29 @@ impl AccountGateways {
         connection: &Value,
         outer: &mut AdapterStartRequest,
     ) -> CoreResult<()> {
+        let route = self.route(session_id, connection, outer).await?;
+        let provider = connection["harness"].as_str().unwrap_or("");
+        let configured = connection["models"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let catalog = if matches!(provider, "opencode" | "antigravity")
+            || (route::requested_model(outer).is_none() && configured.is_empty())
+        {
+            let native = route.template.lock().unwrap().clone();
+            self.adapters.list_models(&native.instance, Some(&json!({"env": native.env}))).await?
+        } else {
+            Value::Null
+        };
+        route::bind_selected_model(outer, configured, &catalog)?;
+        self.configure_outer(&route, session_id, connection, outer);
+        Ok(())
+    }
+
+    pub(crate) async fn assistant_endpoint(&self, connection: &Value) -> CoreResult<(String, String)> {
+        let request = AdapterStartRequest { cwd: std::env::temp_dir().to_string_lossy().into_owned(), ..Default::default() };
+        let route = self.route(ASSISTANT_SESSION_ID, connection, &request).await?;
+        Ok((route.url.clone(), route.key.clone()))
+    }
+
+    async fn route(&self, session_id: &str, connection: &Value, outer: &AdapterStartRequest) -> CoreResult<Arc<Route>> {
         let provider = connection["harness"].as_str().unwrap_or("");
         if !supports_account_provider(provider) {
             return Err(invalid(
@@ -127,18 +152,7 @@ impl AccountGateways {
         };
         drop(routes);
         route.check_login().await?;
-        let configured = connection["models"].as_array().map(Vec::as_slice).unwrap_or_default();
-        let catalog = if matches!(provider, "opencode" | "antigravity")
-            || (route::requested_model(outer).is_none() && configured.is_empty())
-        {
-            let native = route.template.lock().unwrap().clone();
-            self.adapters.list_models(&native.instance, Some(&json!({"env": native.env}))).await?
-        } else {
-            Value::Null
-        };
-        route::bind_selected_model(outer, configured, &catalog)?;
-        self.configure_outer(&route, session_id, connection, outer);
-        Ok(())
+        Ok(route)
     }
     pub async fn cancel_session(&self, session: &str) {
         let prefix = format!("{session}:");
@@ -253,6 +267,13 @@ impl Route {
                     opencode.relay(&mut socket,&body,identity,&cwd,cancelled,&mut headers).await
                 } else { self.antigravity.as_ref().unwrap().relay(&mut socket,&body,cancelled,&mut headers).await };
             self.conversations.lock().await.retain(|current| !Arc::ptr_eq(current, &child));
+            if let Err(cause) = &result {
+                if let Some(error) = cause.downcast_ref::<crate::runtime::account_auth::ModelRequestError>().filter(|error| error.status == 429) {
+                    if let (Some(id), Some(revision)) = (self.connection["id"].as_str(), self.connection["revision"].as_u64()) {
+                        let _ = crate::application::connection_service::record_rate_limit(&self.db.lock().unwrap().raw, id, revision, error.retry_after.as_deref());
+                    }
+                }
+            }
             let result = match result {
                 Ok(()) => Ok(()),
                 Err(e) if headers => {
@@ -290,7 +311,13 @@ impl Route {
         let (child, mut conversation) = self.select_conversation(&body, messages, identity).await;
         let child_id = child.template.lock().unwrap().local_session_id.clone().unwrap();
         let result = child.clone().serve_native(socket, &body, &child_id, &mut conversation).await;
-        if result.is_err() { child.stop(); conversation.reusable = false; }
+        if result.is_err() || self.is_assistant() {
+            // The assistant sends its own full context on every step. An
+            // account worker waiting for a native tool result cannot be reused.
+            child.stop();
+            conversation.worker = None;
+            conversation.reusable = false;
+        }
         if !conversation.reusable { child.invalidate_checkpoint(&child_id); }
         conversation.used_at = std::time::Instant::now();
         drop(conversation);
@@ -309,7 +336,11 @@ impl Route {
             ("NATIVE_ACCOUNT_ERROR", message.to_owned())
         }
     }
+    fn is_assistant(&self) -> bool {
+        self.route_id.split(':').next() == Some(ASSISTANT_SESSION_ID)
+    }
     fn checkpoint(&self, id: &str, hashes: &[String], tools: &str, model: Option<&str>, last_assistant: Option<&str>) {
+        if self.is_assistant() { return; }
         let checkpoint = json!({
             "id": id,
             "nativeSessionId": self.native_id.lock().unwrap().clone(),
@@ -327,6 +358,7 @@ impl Route {
     }
 
     fn invalidate_checkpoint(&self, id: &str) {
+        if self.is_assistant() { return; }
         let db = self.db.lock().unwrap();
         let records = Repositories::new(&db.raw).account_gateway_sessions();
         if let Ok(Some(mut row)) = records.get(id) {

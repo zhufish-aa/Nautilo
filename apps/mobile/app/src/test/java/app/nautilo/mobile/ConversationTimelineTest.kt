@@ -105,7 +105,11 @@ class ConversationTimelineTest {
 
     @Test fun onlyDesktopVisibleExtensionMethodsBecomeRows() {
         fun extension(method: String, raw: org.json.JSONObject = json()) = ActivityItem(method, "provider_ui", method, time = time(1), payload = json("method" to method, "raw" to raw))
-        val timeline = conversationTimeline(emptyList(), listOf(extension("set_status"), extension("notify"), extension("open_url", json("url" to "https://example.com/auth")), extension("open_url", json("url" to "file:///private"))), emptyList())
+        val timeline = conversationTimeline(emptyList(), listOf(
+            extension("set_status"), extension("notify").copy(id = "empty"),
+            extension("notify", json("instructions" to "Extension unavailable")),
+            extension("open_url", json("url" to "https://example.com/auth")), extension("open_url", json("url" to "file:///private")),
+        ), emptyList())
         assertEquals(listOf("activity:notify", "activity:open_url"), timeline.flatMap { (it as ConversationItem.Turn).parts }.map { it.key })
     }
     @Test fun steeringSplitsTheReplyEvenWhenTheNativeRunIsUnchanged() {

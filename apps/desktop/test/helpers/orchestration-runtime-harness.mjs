@@ -5,7 +5,7 @@ import ts from "typescript";
 const lib = new URL("../../src/renderer/src/lib/", import.meta.url);
 const compile = (source) => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 export const helperModules = {};
-for (const name of ["context-usage", "deepseek-legacy-history", "process-display", "orchestration-timeline-policy", "tool-timeline-groups", "subagent-activities", "provider-diff", "tool-display", "changed-files"]) {
+for (const name of ["context-usage", "session-lifecycle", "deepseek-legacy-history", "process-display", "orchestration-timeline-policy", "tool-timeline-groups", "subagent-activities", "provider-diff", "tool-display", "changed-files"]) {
   const exports = {};
   vm.runInNewContext(compile(readFileSync(new URL(`${name}.ts`, lib), "utf8")), {
     exports, TextEncoder, TextDecoder, require: (name) => helperModules[name]
@@ -25,7 +25,7 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
   const instances = Array.from({ length: agentCount }, (_, i) => ({ id: `a${i}`, executable: "fake", displayName: `Agent ${i}` }));
   const team = { id: "t", members: instances.map((instance) => ({ agentInstanceId: instance.id, enabled: true })) };
   const state = {
-    providerCommandRevisions: {}, sessions: [session], tasks: {}, artifacts: {}, foreground: {}, running: {}, activeAgentRunIds: {}, events: { s: [] }, queuedFollowUps: { s: [] },
+    providerCommandRevisions: {}, sessions: [session], tasks: {}, artifacts: {}, foreground: {}, running: {}, activeAgentRunIds: {}, events: { s: [] }, queuedFollowUps: { s: [] }, nextTurnModels: {},
     _append: (id, data) => {
       const event = { id: data.kind === "message" && data.messageId ? `message-${data.messageId}` : `local-${state.events[id].length}`, sessionId: id, timestamp: session.createdAt, sequence: 0, data };
       state.events[id].push(event);
@@ -104,6 +104,7 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
     "../stores/usage": { useUsageStore: { getState: () => ({ ingest() {} }) } },
     "../stores/sessions": { useSessionsStore: { getState: () => state } },
     "../stores/agents": { useAgentsStore: { getState: () => ({ instances }) } },
+    "../stores/connections": { useConnectionsStore: { getState: () => ({ connections: [] }) } },
     "../stores/projects": { useProjectsStore: { getState: () => projectState } },
     "../stores/teams": { useTeamsStore: { getState: () => ({ teams: [team] }) } },
     "../stores/interactions": interactionsModule ?? { ingestInteractionEvents() {}, useInteractionsStore: { getState: () => ({ _removeSessions() {} }) } }

@@ -215,7 +215,7 @@ pub fn parse_codex_app_server_notification(method: &str, params: &Value) -> Vec<
             let usage = params.get("tokenUsage").or_else(|| params.get("usage")).cloned().unwrap_or(Value::Null);
             let total = usage.get("total").unwrap_or(&usage);
             let last = usage.get("last").unwrap_or(&usage);
-            vec![AdapterEvent::Usage {
+            let mut events = vec![AdapterEvent::Usage {
                 usage_scope: Some("session".to_string()),
                 usage_key: params.get("threadId").and_then(text_of),
                 input_tokens_includes_cache: Some(true),
@@ -232,7 +232,17 @@ pub fn parse_codex_app_server_notification(method: &str, params: &Value) -> Vec<
                 context_used: last.get("totalTokens").and_then(number_of),
                 context_window: usage.get("modelContextWindow").and_then(number_of),
                 raw: Some(params.clone()),
-            }]
+            }];
+            if let (Some(used), Some(cached)) = (number_of(&last["totalTokens"]), number_of(&last["cachedInputTokens"])) {
+                events.push(AdapterEvent::Usage {
+                    usage_scope: Some("context".into()), usage_key: None, input_tokens_includes_cache: Some(true),
+                    input_tokens: number_of(&last["inputTokens"]), output_tokens: number_of(&last["outputTokens"]),
+                    cached_input_tokens: Some(cached), cache_creation_input_tokens: None, reasoning_output_tokens: None,
+                    reported_cost: None, estimated_cost: None, currency: None,
+                    context_used: Some(used), context_window: None, raw: None,
+                });
+            }
+            events
         }
         "item/started" | "item/completed" => parse_item(method, params),
         _ => vec![],

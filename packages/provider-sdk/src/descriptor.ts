@@ -57,6 +57,8 @@ export interface ProviderDescriptor {
   baseUrlEnv?: string;
   /** CLI-native permission modes; omit when the CLI has no selectable modes. */
   permissionModes?: ProviderPermissionMode[];
+  /** Native plugin can query quota through the harness's existing login. */
+  nativeAccountQuota?: boolean;
   /** Provider-native upstream API protocols; omit when the provider has no choice. */
   apiTypes?: ProviderApiType[];
   /** Optional native wire for host-managed protocol translation on API bindings. */

@@ -5,32 +5,27 @@ use crate::errors::{invalid, CoreResult};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+pub async fn search(daemon: &Daemon, input: &Value) -> CoreResult<Value> {
+    use crate::database::Repositories;
+    use crate::runtime::orchestration::official_web_search::{execute_official_web_search, supports_official_web_search};
+
+    let query = input["query"].as_str().map(str::trim).filter(|query| !query.is_empty() && query.chars().count() <= 1800)
+        .ok_or_else(|| invalid("query", "Supply a public search query of 1 to 1800 characters"))?;
+    let candidates = Repositories::new(&daemon.db.lock().unwrap().raw).agents().list_default()?;
+    let source = candidates.iter().find(|agent| agent["enabled"] == true && supports_official_web_search(agent, &daemon.db))
+        .ok_or_else(|| invalid("webSearch", "Enable Official web search in a Harness configuration first."))?;
+    let call = json!({"arguments":{"query":query,"search_context_size":"low"}});
+    Ok(execute_official_web_search(&call, source, &daemon.db, &daemon.credentials).await)
+}
+
 pub async fn step(daemon: &Daemon, input: &Value) -> CoreResult<Value> {
     let id = input["connectionId"].as_str().unwrap_or("");
     let model = input["model"].as_str().unwrap_or("");
     let connection = daemon.connections.get(id, None)?;
-    if connection["kind"] != "api"
-        || connection["enabled"] != true
-        || !connection["models"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|m| m["id"] == model && m["enabled"] != false)
-    {
-        return Err(invalid(
-            "model",
-            "请在设置中选择已启用的助手 API 连接和模型。",
-        ));
+    let account = connection["kind"] == "login";
+    if connection["enabled"] != true || (account && connection["accountGateway"] != true) {
+        return Err(invalid("connectionId", "请为助手选择已启用的 API 连接或已开放模型调用的账号。"));
     }
-    let key = daemon
-        .credentials
-        .read(&credential_key(
-            id,
-            connection["revision"].as_u64().unwrap_or(0),
-        ))?
-        .and_then(|entry| entry["apiKey"].as_str().map(str::to_owned))
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| invalid("connectionId", "助手 API 连接缺少密钥。"))?;
     let instructions = input["instructions"].as_str().unwrap_or("");
     let parts = input["context"]
         .as_array()
@@ -48,7 +43,24 @@ pub async fn step(daemon: &Daemon, input: &Value) -> CoreResult<Value> {
     {
         return Err(invalid("context", "助手请求超出大小限制。"));
     }
-    let protocol = connection["protocol"].as_str().unwrap_or("chat");
+    let catalog = if account && !connection["models"].as_array().is_some_and(|models| !models.is_empty()) {
+        Some(daemon.connections.discover_models(&json!({"connectionId":id,"revision":connection["revision"]}), true, false).await?)
+    } else { None };
+    let selected = catalog.as_ref().unwrap_or(&connection)["models"]
+        .as_array().into_iter().flatten()
+        .find(|item| item["id"] == model && item["enabled"] != false)
+        .ok_or_else(|| invalid("model", "请选择这个连接下已启用的助手模型。"))?;
+    let (base, key) = if account {
+        daemon.runs.account_gateways.assistant_endpoint(&connection).await?
+    } else {
+        let key = daemon.credentials.read(&credential_key(id, connection["revision"].as_u64().unwrap_or(0)))?
+            .and_then(|entry| entry["apiKey"].as_str().map(str::to_owned))
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| invalid("connectionId", "助手 API 连接缺少密钥。"))?;
+        (connection["baseUrl"].as_str().unwrap_or("").to_owned(), key)
+    };
+    let base = base.trim_end_matches('/');
+    let protocol = if account { "chat" } else { connection["protocol"].as_str().unwrap_or("chat") };
     let messages: Vec<Value> = context
         .iter()
         .map(|part| json!({"role":"user","content":part}))
@@ -95,15 +107,8 @@ pub async fn step(daemon: &Daemon, input: &Value) -> CoreResult<Value> {
         }
     }
     if let Some(effort) = input["reasoningEffort"].as_str().filter(|e| !e.is_empty()) {
-        let configured = connection["models"]
-            .as_array()
-            .and_then(|ms| ms.iter().find(|m| m["id"] == model));
-        if !configured.is_some_and(|m| {
-            m["defaultReasoningEffort"] == effort
-                || m["reasoningEfforts"]
-                    .as_array()
-                    .is_some_and(|levels| levels.iter().any(|l| l == effort))
-        }) {
+        if selected["defaultReasoningEffort"] != effort
+            && !selected["reasoningEfforts"].as_array().is_some_and(|levels| levels.iter().any(|l| l == effort)) {
             return Err(invalid("reasoningEffort", "推理强度不在模型配置中。"));
         }
         let off = matches!(effort, "off" | "none");
@@ -134,10 +139,6 @@ pub async fn step(daemon: &Daemon, input: &Value) -> CoreResult<Value> {
             }
         }
     }
-    let base = connection["baseUrl"]
-        .as_str()
-        .unwrap_or("")
-        .trim_end_matches('/');
     let endpoint = if base.ends_with(suffix) {
         base.to_owned()
     } else {

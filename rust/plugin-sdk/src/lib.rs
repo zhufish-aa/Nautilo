@@ -20,6 +20,7 @@
 use serde_json::{json, Value};
 
 pub mod jsonrpc;
+pub mod acp_form;
 pub mod images;
 pub mod usage;
 pub mod connection;
@@ -197,6 +198,11 @@ pub trait ProviderPlugin: Send + Sync {
     fn set_daemon_channel(&self, _channel: std::sync::Arc<dyn DaemonChannel>) {}
     async fn list_modes(&self, _instance: &Value, _context: &Value) -> anyhow::Result<Value> {
         Ok(json!({"modes":[]}))
+    }
+
+    /// Read the quota of the account selected by this native configuration.
+    async fn account_quota(&self, _instance: &Value, _context: &Value) -> anyhow::Result<Value> {
+        Ok(json!({"windows":[]}))
     }
 
     /// Optional management of the harness's own plugins in its selected native profile.

@@ -39,11 +39,13 @@ test("native withdrawal preserves other runs and sessions, including same-path f
   assert.deepEqual(paths([other, foreign, grouped]), ["same", "foreign"]);
 });
 
-test("runtime replays native snapshots once, carries scope, suppresses legacy patch rows and keeps raw artifact", () => {
+test("runtime keeps individual edits and one native snapshot for the workspace", () => {
   const h = createHarness();
   const events = [runtime(1, "file.changed", { path: "old", changeType: "modified", diff: patch("old") }), nativeEvent(2, patch("a") + patch("b")), nativeEvent(3, patch("a")), runtime(4, "file.changed", { path: "late", changeType: "modified", diff: patch("late") })];
   const timeline = h.runtime.buildStandaloneTimeline([], events, []);
   assert.deepEqual(paths(timeline), ["a"]);
+  const activities = Array.from(timeline, row => row.data.kind === "tool_group" ? Array.from(row.data.items) : [row]).flat();
+  assert.deepEqual(activities.map(row => row.id), ["e1", "e3", "e4"]);
   const empty = h.runtime.buildStandaloneTimeline([], [...events, nativeEvent(5, "")], []);
   assert.deepEqual(paths(empty), []);
   const artifact = { id: "native-diff:r", kind: "diff", name: "r.native.diff.json", metadata: { source: "provider", runId: "r" }, content: JSON.stringify({ files: [], diff: patch("a"), source: "provider" }) };
@@ -54,6 +56,21 @@ test("runtime replays native snapshots once, carries scope, suppresses legacy pa
   const warning = h.runtime.toUiArtifact({ ...artifact, metadata: { comparisonUnavailable: true, source: "filesystem" } })[0];
   assert.equal(warning.comparisonUnavailable, true);
   assert.equal(warning.diffSource, "filesystem");
+});
+
+test("two edits to one file keep their original rows and patches after run completion", () => {
+  const h = createHarness();
+  const path = "src/main.rs";
+  const edits = ["first edit", "second edit"].map((text, index) =>
+    runtime(index * 2 + 1, "file.changed", { path, changeType: "modified", diff: patch(path, text) }));
+  const events = [edits[0], nativeEvent(2, patch(path)), edits[1], nativeEvent(4, patch(path, "whole turn"))];
+  const editRows = timeline => Array.from(timeline, row => row.data.kind === "tool_group" ? Array.from(row.data.items) : [row]).flat()
+    .filter(row => row.data.kind === "file_change" && !row.data.replace)
+    .map(row => [row.id, row.data.files[0].diff]);
+  const expected = edits.map(event => [event.eventId, event.payload.diff]);
+  assert.deepEqual(editRows(h.runtime.buildStandaloneTimeline([], events, [])), expected);
+  const finished = [...events, runtime(5, "run.completed", { summary: "done" })];
+  assert.deepEqual(editRows(h.runtime.buildStandaloneTimeline([], finished, [])), expected);
 });
 
 test("native cache is bounded per run/session and latest snapshot replaces, never concatenates", () => {

@@ -5,10 +5,26 @@ use std::sync::Arc;
 use crate::adapters::{AdapterRun,AdapterStartRequest};
 use crate::adapters::codex::chat_compat::ChatCompatProxy;
 
+pub(super) fn uses_bound_api(instance: &Value) -> bool {
+    let options = &instance["providerOptions"];
+    options["runtimeConnectionId"].is_string() && options["baseUrl"].is_string()
+}
+
+#[test]
+fn saved_login_keeps_the_native_config_and_acp_transport() {
+    let login = serde_json::json!({"providerOptions":{"runtimeConnectionId":"account","loginProfileDirectory":"profile"}});
+    let mut env = HashMap::from([("KIMI_CODE_HOME".into(), "profile".into())]);
+    assert!(!uses_bound_api(&login));
+    prepare(&login, &mut env).unwrap();
+    assert_eq!(env["KIMI_CODE_HOME"], "profile");
+    let api = serde_json::json!({"providerOptions":{"runtimeConnectionId":"endpoint","baseUrl":"https://example.test/v1"}});
+    assert!(uses_bound_api(&api));
+}
+
 /// Older Kimi builds do not initialize native Anthropic API providers. Keep
 /// their supported Responses transport while the scoped bridge owns that wire.
 pub fn prepare_protocol(request: &mut AdapterStartRequest) -> CoreResult<Option<Arc<ChatCompatProxy>>> {
-    if request.instance.pointer("/providerOptions/runtimeConnectionId").is_none() || request.instance.pointer("/providerOptions/apiType").and_then(Value::as_str)!=Some("anthropic-messages") {return Ok(None)}
+    if !uses_bound_api(&request.instance) || request.instance.pointer("/providerOptions/apiType").and_then(Value::as_str)!=Some("anthropic-messages") {return Ok(None)}
     let base=request.instance["providerOptions"]["baseUrl"].as_str().unwrap_or("").to_string();
     let proxy=Arc::new(ChatCompatProxy::start_protocol(base,request.env.clone().unwrap_or_default(),false,true)
         .map_err(|e|invalid("connectionId",&e.to_string()))?);
@@ -32,7 +48,7 @@ pub fn keep_protocol(run: AdapterRun, proxy: Option<Arc<ChatCompatProxy>>) -> Ad
 /// Kimi's explicit api_key_env binding avoids its global config and login.
 pub fn prepare(instance: &Value, env: &mut HashMap<String, String>) -> CoreResult<()> {
     let options = &instance["providerOptions"];
-    if options["runtimeConnectionId"].as_str().is_none() {
+    if !uses_bound_api(instance) {
         return Ok(());
     }
     let root = env.get("NAUTILO_CONNECTION_DIRECTORY").ok_or_else(|| {

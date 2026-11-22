@@ -1,84 +1,149 @@
-import { useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import {
-  AlertTriangle,
-  ArrowLeft,
-  Bot,
-  CircleHelp,
-  Loader2,
-  Pencil,
-  Plus,
-  ShieldCheck,
-  Trash2,
-  Users
-} from "lucide-react";
+import { useId, useRef, useState } from "react";
+import { AlertTriangle, ChevronDown, ChevronRight, CircleHelp, Loader2, Pencil, Plus, Trash2, Zap } from "lucide-react";
 import type { DelegationPolicy } from "@agenthub/domain";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { providerMeta } from "../../lib/provider-catalog";
-import type { UiTeamMember } from "../../lib/types";
+import { TASK_TYPE_KEYS, type TeamIssue, type UiTeam, type UiTeamMember } from "../../lib/types";
 import { newId } from "../../lib/utils";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
-import { EmptyState } from "../../components/ui/EmptyState";
 import { Field, Input } from "../../components/ui/Input";
+import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { Tooltip } from "../../components/ui/Tooltip";
-import { useTeamsStore, validateTeam } from "../../stores/teams";
-import { useConnectionsStore } from "../../stores/connections";
 import { useAgentsStore } from "../../stores/agents";
+import { useConnectionsStore } from "../../stores/connections";
+import { useTeamsStore } from "../../stores/teams";
 import { toast } from "../../stores/toast";
 import { MemberEditorDialog } from "./MemberEditorDialog";
 import { persistTeamChange } from "./team-mutations";
-import { IdentityAvatar, ProviderAvatar } from "../../components/ui/IdentityAvatar";
 
 const POLICIES: DelegationPolicy[] = ["autonomous", "ask_before_delegate", "direct_only"];
 
-export function TeamEditorPage({ teamIdOverride, backTo = "/teams" }: { teamIdOverride?: string; backTo?: string }): JSX.Element {
+function TeamMemberRow({ member, pending, onToggle, onEdit, onRemove }: {
+  member: UiTeamMember;
+  pending: boolean;
+  onToggle: (enabled: boolean) => void;
+  onEdit: () => void;
+  onRemove: () => void;
+}): JSX.Element {
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
-  const { teamId: routeTeamId } = useParams<{ teamId: string }>();
-  const teamId = teamIdOverride ?? routeTeamId;
-  const connections = useConnectionsStore((state) => state.connections);
-  const navigate = useNavigate();
-  const team = useTeamsStore((state) => state.teams.find((item) => item.id === teamId));
-  const updateTeam = useTeamsStore((state) => state.updateTeam);
-  const deleteTeam = useTeamsStore((state) => state.deleteTeam);
-  const addMember = useTeamsStore((state) => state.addMember);
-  const updateMember = useTeamsStore((state) => state.updateMember);
-  const removeMember = useTeamsStore((state) => state.removeMember);
-  const instances = useAgentsStore((state) => state.instances);
+  const instance = useAgentsStore(state => state.instances.find(item => item.id === member.agentInstanceId));
+  const connection = useConnectionsStore(state => state.connections.find(item => item.id === member.connectionId));
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
+  const role = member.role;
+  const roleSummary = role.description.trim() || role.responsibilities[0] || role.name;
+  const provider = instance ? providerMeta(instance.providerId).name : (zh ? "Harness 不可用" : "Harness unavailable");
+  const account = connection?.name ?? (member.connectionId
+    ? (zh ? "连接不可用" : "Connection unavailable")
+    : (zh ? "未绑定账号" : "No account bound"));
+  const model = member.model || (zh ? "默认模型" : "Default model");
+  const route = [provider, account, model].join(" · ");
+  const detailLabel = zh ? "成员详情" : "Member details";
+  const details: Array<[string, string | undefined]> = [
+    [t("teams.role.name"), role.name],
+    [t("teams.role.description"), role.description],
+    [t("teams.role.responsibilities"), role.responsibilities.join(" · ")],
+    [t("teams.role.limitations"), role.limitations.join(" · ")],
+    [t("teams.role.strengths"), Object.entries(role.strengths).map(([name, score]) => `${name} ${score}/5`).join(" · ")],
+    [t("teams.role.permissionPolicy"), role.permissionPolicyId === "default" ? (zh ? "默认策略" : "Default policy") : role.permissionPolicyId],
+    [t("teams.member.taskTypes"), member.allowedTaskTypes.map(type => (TASK_TYPE_KEYS as readonly string[]).includes(type)
+      ? t(`taskTypes.${type}` as MessageKey) : type).join(" · ")],
+    [t("teams.member.maxConcurrent"), member.maxConcurrentTasks?.toString()],
+    [zh ? "推理强度" : "Reasoning effort", member.reasoningEffort],
+    [zh ? "服务档位" : "Service tier", member.serviceTier],
+    [zh ? "连接版本" : "Connection revision", member.connectionRevision?.toString()],
+  ];
+  const visibleDetails = details.filter(([, value]) => value?.trim());
+  const hasDetails = visibleDetails.length > 0 || Boolean(role.systemInstructions.trim());
+
+  return (
+    <li className="team-roster-entry" data-enabled={member.enabled}>
+      <div className="team-roster-row">
+        <div className="team-roster-identity">
+          <div className="team-roster-mark">
+            <ProviderAvatar providerId={instance?.providerId ?? ""} size="sm" />
+            <span className="team-state-dot" data-tone={member.enabled ? "ok" : "muted"} aria-hidden />
+          </div>
+          <div className="team-roster-name">
+            <strong title={member.displayName}>{member.displayName}</strong>
+            {roleSummary && <span title={roleSummary}>{roleSummary}</span>}
+          </div>
+        </div>
+        <div className="team-roster-route" title={route}>
+          <span>{provider}</span><span aria-hidden>·</span><span>{account}</span><span aria-hidden>·</span><strong>{model}</strong>
+        </div>
+        <div className="team-roster-actions">
+          <Switch disabled={pending} checked={member.enabled} onCheckedChange={onToggle}
+            aria-label={`${t("teams.member.enabled")} ${member.displayName}`} />
+          {hasDetails && <Tooltip content={detailLabel}>
+            <Button type="button" variant="ghost" size="icon" aria-expanded={expanded} aria-controls={detailsId}
+              aria-label={`${detailLabel} ${member.displayName}`} onClick={() => setExpanded(open => !open)}>
+              <ChevronDown size={15} aria-hidden />
+            </Button>
+          </Tooltip>}
+          <Tooltip content={t("common.edit")}>
+            <Button type="button" variant="ghost" size="icon" disabled={pending} aria-label={`${t("common.edit")} ${member.displayName}`} onClick={onEdit}>
+              <Pencil size={14} aria-hidden />
+            </Button>
+          </Tooltip>
+          <Tooltip content={t("teams.editor.remove")}>
+            <Button type="button" variant="ghost" size="icon" className="team-risk-action" disabled={pending}
+              aria-label={`${t("teams.editor.remove")} ${member.displayName}`} onClick={onRemove}>
+              <Trash2 size={14} aria-hidden />
+            </Button>
+          </Tooltip>
+        </div>
+      </div>
+      {hasDetails && <div className="team-roster-disclosure" data-open={expanded} id={detailsId} aria-hidden={!expanded}>
+        <div>
+          <div className="team-roster-details">
+            <dl>
+              {visibleDetails.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+            </dl>
+            {role.systemInstructions.trim() && <div className="team-roster-instructions">
+              <h4>{t("teams.role.systemInstructions")}</h4>
+              <pre>{role.systemInstructions}</pre>
+            </div>}
+            <Button type="button" variant="outline" size="sm" disabled={pending} tabIndex={expanded ? 0 : -1} onClick={onEdit}>
+              {zh ? "编辑此成员" : "Edit this member"}
+            </Button>
+          </div>
+        </div>
+      </div>}
+    </li>
+  );
+}
+
+export function TeamWorkbench({ team, issues, pending, setPending, onDelete }: {
+  team: UiTeam;
+  issues: TeamIssue[];
+  pending: boolean;
+  setPending: (pending: boolean) => void;
+  onDelete: () => void;
+}): JSX.Element {
+  const { t, locale } = useI18n();
+  const zh = locale === "zh-CN";
+  const { updateTeam, deleteTeam, addMember, updateMember, removeMember } = useTeamsStore();
+  const instances = useAgentsStore(state => state.instances);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<UiTeamMember>();
-  const [removing, setRemoving] = useState<UiTeamMember>();
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmation, setConfirmation] = useState<"team" | UiTeamMember>();
   const [renameOpen, setRenameOpen] = useState(false);
   const [name, setName] = useState("");
-  const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const inFlight = useRef(false);
-  const issues = useMemo(() => (team ? validateTeam(team, instances, connections) : []), [team, instances, connections]);
-  const instanceById = useMemo(
-    () => new Map(instances.map((instance) => [instance.id, instance])),
-    [instances]
-  );
-  if (!team)
-    return (
-      <EmptyState
-        icon={Users}
-        title={zh ? "团队不存在" : "Team not found"}
-        description={t("teams.empty.desc")}
-        action={
-          <Button variant="outline" onClick={() => navigate(backTo)}>
-            <ArrowLeft className="h-4 w-4" aria-hidden />
-            {t("teams.editor.back")}
-          </Button>
-        }
-      />
-    );
+  const enabled = team.members.filter(member => member.enabled);
+  const roleSummary = [...new Set(team.members.map(({ role }) => role.description.trim() || role.name))].filter(Boolean).slice(0, 3).join(" · ");
+  const routed = enabled.length > 0 && team.delegationPolicy !== "direct_only";
+  const removing = typeof confirmation === "object" ? confirmation : undefined;
+  const tone = issues[0]?.level ?? "ok";
 
   const mutate = async (action: () => Promise<void>, onSuccess?: () => void): Promise<void> => {
-    if (inFlight.current) return;
+    if (pending || inFlight.current) return;
     inFlight.current = true;
     setPending(true);
     setError("");
@@ -92,336 +157,140 @@ export function TeamEditorPage({ teamIdOverride, backTo = "/teams" }: { teamIdOv
       setPending(false);
     }
   };
-  const handleSave = async (draft: Omit<UiTeamMember, "id">): Promise<void> => {
-    // Let the member dialog show the error and remain open until Core confirms.
-    await persistTeamChange(team.id, () =>
-      editing
-        ? updateMember(team.id, editing.id, draft)
-        : addMember(team.id, { ...draft, id: newId("member") })
-    );
-  };
+
   const openEditor = (member?: UiTeamMember): void => {
     setEditing(member);
     setError("");
     setEditorOpen(true);
   };
-  const failure = error ? (
-    <p
-      role="alert"
-      className="rounded-lg border border-danger/20 bg-danger/5 p-3 text-sm text-danger"
-    >
-      {error}
-    </p>
-  ) : null;
-  const cancel = (close: () => void): JSX.Element => (
-    <Button variant="outline" disabled={pending} onClick={close}>
-      {t("common.cancel")}
-    </Button>
-  );
-  const spinner = pending ? (
-    <Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden />
-  ) : null;
+  const saveName = (): void => {
+    if (name.trim()) void mutate(() => updateTeam(team.id, { name: name.trim() }), () => setRenameOpen(false));
+  };
+  const remove = (): void => {
+    if (removing) {
+      void mutate(() => removeMember(team.id, removing.id), () => setConfirmation(undefined));
+    } else {
+      void mutate(() => deleteTeam(team.id), () => {
+        setConfirmation(undefined);
+        toast.info(t("teams.editor.deletedToast", { name: team.name }));
+        onDelete();
+      });
+    }
+  };
+
+  const failure = error && <p role="alert" className="team-operation-error">{error}</p>;
+  const spinner = pending && <Loader2 size={15} className="motion-safe:animate-spin" aria-hidden />;
+  const addLabel = t("teams.editor.addMember");
+
   return (
-    <div className="team-editor-page">
-      <Link
-        to={backTo}
-        className="team-back-link"
-      >
-        <ArrowLeft className="h-4 w-4" aria-hidden />
-        {t("teams.editor.back")}
-      </Link>
-      <header className="team-profile-header">
-        <IdentityAvatar label={team.name} seed={team.id} size="lg" />
-        <div className="team-profile-copy"><span className="team-profile-eyebrow">{zh ? "协作团队" : "AGENT TEAM"}</span><h1>{team.name}</h1><p>{team.members.length ? team.members.slice(0,3).map(member => member.role.name || member.displayName).join(" · ") : (zh ? "添加成员，组建你的专属 Agent 团队" : "Build your own team of agents")}</p></div>
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={pending}
-          onClick={() => {
-            setName(team.name);
-            setError("");
-            setRenameOpen(true);
-          }}
-        >
-          <Pencil className="h-4 w-4" aria-hidden />
-          {t("common.edit")}
-        </Button>
-      <div className="team-profile-stats"><div><strong>{team.members.length}</strong><span>{zh ? "团队成员" : "Team members"}</span></div><div><strong>{team.members.filter(member => member.enabled).length}</strong><span>{zh ? "已启用成员" : "Enabled members"}</span></div><div><strong className="team-config-state" data-ready={!issues.some(issue=>issue.level==="critical")}><ShieldCheck size={17} />{issues.some(issue=>issue.level==="critical") ? (zh ? "待完善" : "Needs setup") : (zh ? "配置就绪" : "Ready")}</strong><span>{zh ? "团队配置" : "Configuration"}</span></div></div>
-      </header>
-      {!renameOpen && !removing && !confirmDelete && failure}
-      <section className="team-policy-card" aria-labelledby="team-policy-title">
-        <div className="flex flex-wrap items-center gap-4">
-          <h2 id="team-policy-title" className="text-sm font-semibold text-ink">
-            {t("teams.editor.policyTitle")}
-          </h2>
-          <div className="w-64 max-w-full">
-            <SelectField
-              value={team.delegationPolicy}
-              disabled={pending}
-              aria-label={t("teams.editor.policyTitle")}
-              onValueChange={(value) =>
-                void mutate(() =>
-                  updateTeam(team.id, { delegationPolicy: value as DelegationPolicy })
-                )
-              }
-              options={POLICIES.map((policy) => ({
-                value: policy,
-                label: t(`teams.policy.${policy}` as MessageKey)
-              }))}
-            />
+    <div className="team-workbench">
+      <header className="team-detail-heading">
+        <div className="team-detail-copy">
+          <div>
+            <h2 title={team.name}>{team.name}</h2>
+            <span className="team-state" data-tone={tone}><span className="team-state-dot" />
+              {issues.length ? (zh ? "配置待修正" : "Needs attention") : (zh ? "就绪" : "Ready")}
+            </span>
           </div>
-          <Tooltip content={t("teams.editor.policyDesc")}>
-            <button
-              type="button"
-              className="rounded p-1 text-ink-3 focus-visible:ring-2 focus-visible:ring-accent"
-              aria-label={t("teams.editor.policyDesc")}
-            >
-              <CircleHelp className="h-4 w-4" aria-hidden />
-            </button>
-          </Tooltip>
+          {roleSummary && <p title={roleSummary}>{zh ? "成员职责" : "Member roles"}<span aria-hidden> · </span>{roleSummary}</p>}
         </div>
-        <p className="team-policy-description">
+        <div className="team-detail-actions">
+          <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => {
+            setName(team.name); setError(""); setRenameOpen(true);
+          }}><Pencil size={14} aria-hidden />{t("common.edit")}</Button>
+          <Button type="button" size="sm" variant="ghost" className="team-risk-action" disabled={pending} onClick={() => {
+            setError(""); setConfirmation("team");
+          }}><Trash2 size={14} aria-hidden />{t("teams.editor.deleteTeam")}</Button>
+        </div>
+      </header>
+      {issues.length > 0 && <ul className="team-issues" aria-label={t("teams.editor.validationTitle")}>
+        {issues.map(issue => <li key={issue.id} data-tone={issue.level}>
+          <AlertTriangle size={14} aria-hidden /><span>{t(issue.textKey as MessageKey, issue.values)}</span>
+        </li>)}
+      </ul>}
+      {!renameOpen && !confirmation && failure}
+
+      <section className="team-topology" aria-label={zh ? "调度拓扑" : "Delegation flow"}>
+        <div className="team-topology-track" data-active={routed}>
+          <div className="team-topology-node team-topology-source">
+            <Zap size={16} aria-hidden />
+            <div><h3>{t("teams.card.main")}</h3><p>{zh ? "统筹拆解与汇总" : "Plans work and combines results"}</p></div>
+          </div>
+          <div className="team-topology-route">
+            <SelectField value={team.delegationPolicy} disabled={pending} aria-label={t("teams.editor.policyTitle")}
+              onValueChange={value => void mutate(() => updateTeam(team.id, { delegationPolicy: value as DelegationPolicy }))}
+              options={POLICIES.map(policy => ({ value: policy, label: t(`teams.policy.${policy}` as MessageKey) }))} />
+            <ChevronRight className="team-topology-arrow" size={13} aria-hidden />
+          </div>
+          <div className="team-topology-node team-topology-target">
+            <div className="team-topology-target-heading">
+              <h3>{zh ? "子 Agent 编队" : "Subagent team"}</h3>
+              <span>{enabled.length}/{team.members.length} {zh ? "启用" : "enabled"}</span>
+            </div>
+            {enabled.length > 0 && <ul className="team-topology-members">
+              {enabled.slice(0, 3).map(member => {
+                const instance = instances.find(item => item.id === member.agentInstanceId);
+                return <li key={member.id} title={member.displayName}>
+                  {instance && <ProviderAvatar providerId={instance.providerId} size="sm" />}
+                  <span>{member.displayName}</span>
+                </li>;
+              })}
+              {enabled.length > 3 && <li>+{enabled.length - 3}</li>}
+            </ul>}
+          </div>
+        </div>
+        <p className="team-topology-description">
           {t(`teams.policy.${team.delegationPolicy}Desc` as MessageKey)}
+          <Tooltip content={t("teams.editor.policyDesc")}>
+            <button type="button" aria-label={t("teams.editor.policyDesc")}><CircleHelp size={14} aria-hidden /></button>
+          </Tooltip>
         </p>
       </section>
-      <section className="team-members-section" aria-labelledby="team-members-title">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h2 id="team-members-title" className="team-section-title">
-            <Users size={18} />{t("teams.editor.membersTitle")}{" "}
-            <span className="ml-2 text-sm font-normal text-ink-3">{team.members.length}</span>
-          </h2>
-          <Button variant="ghost" disabled={pending} onClick={() => openEditor()}>
-            <Plus className="h-4 w-4" aria-hidden />
-            {t("teams.editor.addMember")}
+
+      <section className="team-roster" aria-labelledby="team-roster-title">
+        <header>
+          <h3 id="team-roster-title">{zh ? "成员编排" : "Team members"}<span>{team.members.length}</span></h3>
+          {team.members.length > 0 && <Button type="button" variant="outline" size="sm" className="team-add-member" disabled={pending} onClick={() => openEditor()}>
+            <Plus size={14} aria-hidden />{addLabel}
+          </Button>}
+        </header>
+        {team.members.length > 0 ? <ul className="team-roster-list">
+          {team.members.map(member => <TeamMemberRow key={member.id} member={member} pending={pending}
+            onToggle={value => void mutate(() => updateMember(team.id, member.id, { enabled: value }))}
+            onEdit={() => openEditor(member)} onRemove={() => { setError(""); setConfirmation(member); }} />)}
+        </ul> : <div className="team-roster-empty">
+          <p>{zh ? "为主 Agent 添加可委派的成员。" : "Add a member the main agent can delegate to."}</p>
+          <Button type="button" variant="outline" size="sm" className="team-add-member" disabled={pending} onClick={() => openEditor()}>
+            <Plus size={14} aria-hidden />{zh ? "添加首位成员" : "Add the first member"}
           </Button>
-        </div>
-        {!team.members.length ? (
-          <EmptyState
-            icon={Bot}
-            title={t("teams.editor.membersTitle")}
-            description={t("teams.editor.membersDesc")}
-            action={
-              <Button variant="outline" onClick={() => openEditor()}>
-                <Plus className="h-4 w-4" aria-hidden />
-                {t("teams.editor.addMember")}
-              </Button>
-            }
-          />
-        ) : (
-          <ul className="team-member-list">
-            {team.members.map((member) => {
-              const instance = instanceById.get(member.agentInstanceId);
-              const meta = instance ? providerMeta(instance.providerId) : undefined;
-              return (
-                <li key={member.id} className="team-member-row">
-                  <IdentityAvatar label={member.displayName} seed={member.id} />
-                  <div className="team-member-name">
-                    <p className="truncate text-[15px] font-medium">{member.displayName}</p>
-                    <p className="mt-1 truncate text-sm text-ink-3" title={member.role.description}>
-                      {member.role.name}
-                    </p>
-                  </div>
-                  <span
-                    className="team-member-binding text-sm text-ink-3"
-                    title={[member.model, member.reasoningEffort].filter(Boolean).join(" · ")}
-                  >
-                    <span className="team-member-provider"><ProviderAvatar providerId={instance?.providerId ?? "custom"} size="sm" />{meta?.name ?? (zh ? "Harness 不可用" : "Harness unavailable")}</span><small>{member.connectionId ? `${connections.find((connection) => connection.id === member.connectionId)?.name ?? member.connectionId} · ${member.model || (zh ? "默认模型" : "Default model")}` : (zh ? "请选择供应商或账号" : "Select a provider or account")}</small>
-                  </span>
-                  <div className="team-member-actions">
-                  <Switch
-                    disabled={pending}
-                    checked={member.enabled}
-                    onCheckedChange={(enabled) =>
-                      void mutate(() => updateMember(team.id, member.id, { enabled }))
-                    }
-                    aria-label={`${member.displayName}: ${member.enabled ? t("common.enabled") : t("common.disabled")}`}
-                  />
-                  <Tooltip content={t("common.edit")}>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      disabled={pending}
-                      aria-label={`${t("common.edit")} ${member.displayName}`}
-                      onClick={() => openEditor(member)}
-                    >
-                      <Pencil className="h-4 w-4" aria-hidden />
-                    </Button>
-                  </Tooltip>
-                  <Tooltip content={t("teams.editor.remove")}>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      disabled={pending}
-                      aria-label={`${t("teams.editor.remove")} ${member.displayName}`}
-                      onClick={() => {
-                        setError("");
-                        setRemoving(member);
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4 text-ink-3" aria-hidden />
-                    </Button>
-                  </Tooltip>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+        </div>}
       </section>
-      <section className="team-validation-section" aria-labelledby="team-validation">
-        <h2
-          id="team-validation"
-          className="mb-3 flex items-center gap-2 text-sm font-medium text-ink-2"
-        >
-          <ShieldCheck className="h-4 w-4" aria-hidden />
-          {t("teams.editor.validationTitle")}
-        </h2>
-        {issues.length ? (
-          <ul className="space-y-3">
-            {issues.map((issue) => (
-              <li
-                key={issue.id}
-                className="flex items-start gap-2 text-sm leading-relaxed text-ink-3"
-              >
-                <AlertTriangle
-                  className={`mt-0.5 h-4 w-4 shrink-0 ${issue.level === "critical" ? "text-danger" : issue.level === "warning" ? "text-warn" : "text-ink-3"}`}
-                  aria-hidden
-                />
-                {t(issue.textKey as MessageKey, issue.values)}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-ink-3">{t("teams.validation.ok")}</p>
-        )}
-      </section>
-      <div className="team-danger-zone">
-        <Button
-          variant="ghost"
-          className="text-danger hover:text-danger"
-          disabled={pending}
-          onClick={() => {
-            setError("");
-            setConfirmDelete(true);
-          }}
-        >
-          <Trash2 className="h-4 w-4" aria-hidden />
-          {t("teams.editor.deleteTeam")}
-        </Button>
-      </div>
-      <MemberEditorDialog
-        open={editorOpen}
-        onOpenChange={setEditorOpen}
-        member={editing}
-        onSave={handleSave}
-      />
-      <Dialog
-        open={renameOpen}
-        onOpenChange={(value) => {
-          if (!pending) setRenameOpen(value);
-        }}
-        title={zh ? "编辑团队" : "Edit team"}
-        footer={
-          <>
-            {cancel(() => setRenameOpen(false))}
-            <Button
-              variant="primary"
-              disabled={pending || !name.trim()}
-              onClick={() =>
-                void mutate(
-                  () => updateTeam(team.id, { name: name.trim() }),
-                  () => setRenameOpen(false)
-                )
-              }
-            >
-              {spinner}
-              {t("common.save")}
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <Field label={t("teams.editor.nameLabel")} htmlFor="team-name">
-            <Input
-              id="team-name"
-              value={name}
-              disabled={pending}
-              onChange={(event) => setName(event.target.value)}
-              autoFocus
-            />
-          </Field>
-          {failure}
-        </div>
+
+      <MemberEditorDialog open={editorOpen} onOpenChange={setEditorOpen} member={editing}
+        onSave={draft => persistTeamChange(team.id, () => editing
+          ? updateMember(team.id, editing.id, draft)
+          : addMember(team.id, { ...draft, id: newId("member") }))} />
+
+      <Dialog open={renameOpen} onOpenChange={value => { if (!pending) setRenameOpen(value); }}
+        title={zh ? "编辑团队" : "Edit team"} widthClass="max-w-md team-dialog" footer={<>
+          <Button variant="outline" disabled={pending} onClick={() => setRenameOpen(false)}>{t("common.cancel")}</Button>
+          <Button variant="primary" disabled={pending || !name.trim()} onClick={saveName}>{spinner}{t("common.save")}</Button>
+        </>}>
+        <Field label={t("teams.editor.nameLabel")} htmlFor="team-name">
+          <Input id="team-name" value={name} disabled={pending} autoFocus onChange={event => setName(event.target.value)}
+            onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); saveName(); } }} />
+        </Field>
+        {failure}
       </Dialog>
-      <Dialog
-        open={Boolean(removing)}
-        onOpenChange={(value) => {
-          if (!pending && !value) setRemoving(undefined);
-        }}
-        title={t("teams.editor.removeTitle")}
-        description={
-          removing ? t("teams.editor.removeDesc", { name: removing.displayName }) : undefined
-        }
-        footer={
-          <>
-            {cancel(() => setRemoving(undefined))}
-            <Button
-              variant="danger"
-              disabled={pending}
-              onClick={() =>
-                removing &&
-                void mutate(
-                  () => removeMember(team.id, removing.id),
-                  () => setRemoving(undefined)
-                )
-              }
-            >
-              {spinner}
-              {t("teams.editor.remove")}
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-ink-3">{removing?.role.name}</p>
-          {failure}
-        </div>
-      </Dialog>
-      <Dialog
-        open={confirmDelete}
-        onOpenChange={(value) => {
-          if (!pending) setConfirmDelete(value);
-        }}
-        title={t("teams.editor.deleteTitle")}
-        description={t("teams.editor.deleteDesc", { name: team.name })}
-        footer={
-          <>
-            {cancel(() => setConfirmDelete(false))}
-            <Button
-              variant="danger"
-              disabled={pending}
-              onClick={() =>
-                void mutate(
-                  () => deleteTeam(team.id),
-                  () => {
-                    toast.info(t("teams.editor.deletedToast", { name: team.name }));
-                    navigate(backTo);
-                  }
-                )
-              }
-            >
-              {spinner}
-              {t("teams.editor.deleteTeam")}
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-ink-3">
-            {t("teams.card.members", { count: team.members.length })}
-          </p>
-          {failure}
-        </div>
+
+      <Dialog open={Boolean(confirmation)} onOpenChange={value => { if (!pending && !value) setConfirmation(undefined); }}
+        title={t(removing ? "teams.editor.removeTitle" : "teams.editor.deleteTitle")}
+        description={removing ? t("teams.editor.removeDesc", { name: removing.displayName }) : t("teams.editor.deleteDesc", { name: team.name })}
+        widthClass="max-w-md team-dialog" footer={<>
+          <Button variant="outline" disabled={pending} onClick={() => setConfirmation(undefined)}>{t("common.cancel")}</Button>
+          <Button variant="danger" disabled={pending} onClick={remove}>{spinner}{t(removing ? "teams.editor.remove" : "teams.editor.deleteTeam")}</Button>
+        </>}>
+        {failure}
       </Dialog>
     </div>
   );

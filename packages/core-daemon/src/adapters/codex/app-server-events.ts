@@ -43,7 +43,7 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
     const usage = record(params.tokenUsage ?? params.usage);
     const total = record(usage.total ?? usage);
     const last = record(usage.last ?? usage);
-    return [{
+    const events: AdapterEvent[] = [{
       kind: "usage",
       usageScope: "session",
       usageKey: text(params.threadId),
@@ -58,6 +58,13 @@ export function parseCodexAppServerNotification(method: string, paramsValue: unk
       contextWindow: typeof usage.modelContextWindow === "number" ? usage.modelContextWindow : undefined,
       raw: paramsValue
     }];
+    if (typeof last.totalTokens === "number" && typeof last.cachedInputTokens === "number") {
+      events.push({ kind: "usage", usageScope: "context", inputTokensIncludesCache: true,
+        inputTokens: typeof last.inputTokens === "number" ? last.inputTokens : undefined,
+        outputTokens: typeof last.outputTokens === "number" ? last.outputTokens : undefined,
+        cachedInputTokens: last.cachedInputTokens, contextUsed: last.totalTokens });
+    }
+    return events;
   }
   if (method !== "item/started" && method !== "item/completed") return [];
 

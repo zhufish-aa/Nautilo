@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::database::connection::db_fail;
-use crate::database::history_projection::{read_projection, read_snapshot};
+use crate::database::history_projection::{read_projection, read_snapshot, recover_legacy_omp_replies};
 use crate::errors::{CoreError, CoreResult, ErrorCode};
 
 fn now_iso() -> String {
@@ -309,6 +309,9 @@ impl<'a> SessionRepository<'a> {
         read_snapshot(self.db, || {
             let session = self.get(session_id)?.ok_or_else(|| CoreError::reason(ErrorCode::IpcNotFound, "session not found"))?;
             let mut projection = read_projection(self.db, "messages", &format!("messages:session:{session_id}"), cursor)?;
+            if let Some(items) = projection["items"].as_array_mut() {
+                recover_legacy_omp_replies(self.db, session_id, items)?;
+            }
             projection["session"] = session;
             Ok(projection)
         })

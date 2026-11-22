@@ -27,6 +27,7 @@ const bridge = {
     configure: (settings:import("../shared/workspace-assistant").AssistantSettings) => ipcRenderer.invoke("assistant:configure",settings),
     submit: (id:string,text:string) => ipcRenderer.invoke("assistant:submit",id,text),
     stop: (id:string) => ipcRenderer.invoke("assistant:stop",id),
+    automations: (action?:import("../shared/workspace-assistant").AssistantAutomationAction) => ipcRenderer.invoke("assistant:automations", action),
     onOutput:(cb:(output:import("../shared/workspace-assistant").AssistantLiveOutput)=>void)=>{
       const listener=(_event:Electron.IpcRendererEvent,draft:import("../shared/workspace-assistant").AssistantLiveOutput)=>cb(draft);
       ipcRenderer.on("assistant:output",listener);return ()=>{ipcRenderer.removeListener("assistant:output",listener);};

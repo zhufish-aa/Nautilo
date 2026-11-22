@@ -2,7 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Activity, ArrowLeft, BellRing, Braces, ChevronRight, CircleAlert, Copy, Download, Link, Pause, Play, Plus, Redo2, Save, Scan, Square, Trash2, Undo2, Workflow, X } from "lucide-react";
 import type { WorkflowDefinition, WorkflowLayout, WorkflowNode, WorkflowRun, WorkflowTemplate, WorkflowValidation, WorkflowIssue } from "@agenthub/domain";
+import { StageActivityPill } from "../../components/layout/StageActivityPill";
 import { Dialog } from "../../components/ui/Dialog";
+import { SelectField } from "../../components/ui/Select";
 import { requestCore } from "../../lib/bridge";
 import { useUiReducedMotion } from "../../lib/ui-motion";
 import { useSessionsStore } from "../../stores/sessions";
@@ -386,6 +388,13 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
     });
   }
   const active = run && ["running", "paused", "finalizing"].includes(run.status);
+  const liveRun = mode === "run" && sequence === undefined ? run : undefined;
+  const executing = liveRun && !liveRun.approvalId && !liveRun.workspace?.approvalId &&
+    (liveRun.status === "running" || liveRun.status === "finalizing" && liveRun.workspace?.stage !== "waiting_merge");
+  const runningNodes = executing ? liveRun.instances.filter(instance => ["running", "verifying", "starting"].includes(instance.status)) : [];
+  const runningNode = definition.nodes.find(node => node.id === runningNodes[0]?.nodeId);
+  const runOptions = mode === "run" && !inspection ? summaries.map(item => ({ value: item.id, label: `${new Date(item.createdAt).toLocaleString()} · ${statusLabels[item.status]}` })) : [];
+  if (run && !inspection && !runOptions.some(item => item.value === run.id)) runOptions.push({ value: run.id, label: "本次运行" });
   const verificationTemplates = projects.find(project => project.id === sessions.find(session => session.id === sessionId)?.projectId)?.verificationTemplates || [];
   const pendingNodes = mode === "run" && sequence === undefined && run ? run.instances.filter(instance => instance.workspace?.stage === "waiting_approval") : [];
   if (inspection && !run) return <div className="workflow-inspection-loading" role={runError ? "alert" : "status"}>
@@ -395,7 +404,7 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
   return <div className="workflow-studio" data-inspection={!!inspection || undefined} data-mode={mode} data-history={historyVersion} data-motion-reduced={motionReduced} onKeyDown={event => {
     if (event.key === "Escape" && preview && !event.defaultPrevented) setPreviewPlayback(undefined);
     const target = event.target as Element;
-    if (mode !== "design" || target.closest("input,textarea,select,[contenteditable=true],[role=menu]")) return;
+    if (mode !== "design" || target.closest("input,textarea,select,[contenteditable=true],[role=menu],[role=combobox],[role=listbox]")) return;
     if (event.ctrlKey || event.metaKey) {
       if (event.key.toLowerCase() === "z") { event.preventDefault(); undo(event.shiftKey); }
       if (event.key.toLowerCase() === "s") { event.preventDefault(); void save(); }
@@ -414,6 +423,10 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
         <h2 className="wf-inspection-title">{run.definition.name || "流程执行"}</h2>
       </> : <><div className="wf-breadcrumb"><Workflow size={13}/>工作流<ChevronRight size={11}/><span>{mode === "run" ? "运行记录" : templateId ? "编辑流程" : "草稿"}</span></div>
         <input className="wf-title-input" aria-label="流程名称" value={mode === "run" && run ? run.definition.name || "流程执行" : draft.definition.name || ""} readOnly={mode === "run"} onChange={event => change(next => { next.definition.name = event.target.value; })}/></>}</div>
+      <StageActivityPill key={runId} activity={executing ? {
+        id: liveRun.id, startedAt: liveRun.createdAt,
+        label: runningNode ? nodeLabel(runningNode) + (runningNodes.length > 1 ? ` 等 ${runningNodes.length} 个节点` : "") : statusLabels[liveRun.status]
+      } : undefined} completed={liveRun?.status === "completed" ? [liveRun.id] : undefined} />
       <div className="wf-header-actions">
         {mode === "run" && run?.parentRunId && <button onClick={() => inspectRun(run.parentRunId!)}><ArrowLeft size={14}/>父流程</button>}
         {mode === "run" && !inspection && <button onClick={() => { setMode("design"); setParams(templateId ? { template: templateId } : {}); }}><ArrowLeft size={14}/>返回画板</button>}
@@ -438,7 +451,17 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
       onNew={() => openFromLibrary(undefined, true)} onOpen={template => openFromLibrary(template)} onDraft={() => openFromLibrary()}/>}
     <section className="wf-stage" aria-label={mode === "design" ? "流程画布" : "执行现场"}>
       <div className="wf-stage-bar"><span><Workflow size={14}/>{mode === "design" ? "流程画布" : "执行现场"}<small>{mode === "design" ? `${definition.nodes.length} 个节点 · ${definition.edges.length} 条连线` : sequence === undefined ? "实时" : "历史回放"}</small>{preview && <span className="wf-preview-status" role="status">{previewPlaying ? "正在预览" : "预览完成"}</span>}</span>
-        <div>{mode === "design" ? <><button disabled={!history.current.length} aria-label="撤销" onClick={() => undo()}><Undo2 size={14}/></button><button disabled={!future.current.length} aria-label="重做" onClick={() => undo(true)}><Redo2 size={14}/></button><button aria-label="自动排列节点" onClick={() => change(next => { next.layout = initialLayout(next.definition); })}><Scan size={14}/></button><select aria-label="添加节点" value="" onChange={event => { const kind = addableKinds.find(kind => kind === event.target.value); if (kind) addNode(kind); }}><option value="">＋ 添加节点</option>{addableKinds.map(kind => <option key={kind} value={kind}>{nodeKinds[kind]}</option>)}</select></> : <>{!!run?.messages.length && <button onClick={() => setMessagesOpen(true)}><BellRing size={14}/>会话消息 {run.messages.length}</button>}<select aria-label="查看流程运行" value={runId || ""} onChange={event => setParams({ ...(templateId ? { template: templateId } : {}), run: event.target.value })}>{summaries.map(item => <option key={item.id} value={item.id}>{new Date(item.createdAt).toLocaleString()} · {statusLabels[item.status]}</option>)}{run && !summaries.some(item => item.id === run.id) && <option value={run.id}>本次运行</option>}</select></>}</div>
+        <div className="wf-stage-controls">{mode === "design" ? <>
+          <button disabled={!history.current.length} aria-label="撤销" onClick={() => undo()}><Undo2 size={14}/></button>
+          <button disabled={!future.current.length} aria-label="重做" onClick={() => undo(true)}><Redo2 size={14}/></button>
+          <button aria-label="自动排列节点" onClick={() => change(next => { next.layout = initialLayout(next.definition); })}><Scan size={14}/></button>
+          <SelectField aria-label="添加节点" value="" placeholder="＋ 添加节点" options={addableKinds.map(kind => ({ value: kind, label: nodeKinds[kind] }))}
+            onValueChange={value => { const kind = addableKinds.find(kind => kind === value); if (kind) addNode(kind); }} />
+        </> : <>
+          {!!run?.messages.length && <button onClick={() => setMessagesOpen(true)}><BellRing size={14}/>会话消息 {run.messages.length}</button>}
+          {!inspection && <SelectField aria-label="查看流程运行" value={runId} options={runOptions}
+            onValueChange={id => setParams({ ...(templateId ? { template: templateId } : {}), run: id })} />}
+        </>}</div>
       </div>
       <WorkflowCanvas key={mode === "run" ? runId : definition.id} definition={definition} layout={layout} selected={selected} editing={mode === "design"} instances={projection.instances} events={projection.events} onSelect={selectNode} issues={issues}
         motionPlaying={mode === "design" || sequence === undefined || replaying} motionLive={sequence === undefined} motionReduced={motionReduced}

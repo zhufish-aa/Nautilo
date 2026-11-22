@@ -5,10 +5,13 @@ import type {
   AssistantRead,
   AssistantSessionPage,
   AssistantExcerptPage,
+  AssistantDispatch,
 } from "@agenthub/schemas";
 import { CoreError } from "../errors.js";
 
 export function assistantRecords(db: DatabaseSync, input: IpcRequestMap["assistant.records"]["input"]) {
+  if (input.id) return db.prepare("SELECT rowid AS seq,data FROM assistant_records WHERE id=? AND kind=?")
+    .all(input.id, input.kind).map(row => ({ seq: Number(row.seq), value: JSON.parse(String(row.data)) }));
   return db
     .prepare(
       "SELECT rowid AS seq, data FROM assistant_records WHERE kind=? AND rowid>? AND (?=0 OR rowid<?) AND (?='' OR instr(lower(data),lower(?))>0) ORDER BY rowid " +
@@ -29,7 +32,7 @@ export function assistantRecords(db: DatabaseSync, input: IpcRequestMap["assista
 export function saveAssistantRecord(db: DatabaseSync, input: IpcRequestMap["assistant.save"]["input"]) {
   const data = JSON.stringify(input.value);
   if (
-    !["turn", "settings", "memory"].includes(input.kind) ||
+    !["turn", "settings", "memory", "automation"].includes(input.kind) ||
     !input.id ||
     input.id.length > 100 ||
     (input.kind !== "turn" && input.id !== input.kind) ||
@@ -46,6 +49,21 @@ export function saveAssistantRecord(db: DatabaseSync, input: IpcRequestMap["assi
     .get(input.id, input.kind, data);
   if (!row) throw new CoreError("IPC_INVALID_REQUEST", { reason: "Assistant record identity conflict" });
   return { seq: Number(row.rowid) };
+}
+
+export function assistantDispatches(db: DatabaseSync, { items }: IpcRequestMap["assistant.dispatches"]["input"]): AssistantDispatch[] {
+  if (!Array.isArray(items) || items.length > 100)
+    throw new CoreError("IPC_INVALID_REQUEST", { reason: "Supply up to 100 assistant dispatches" });
+  const locate = db.prepare("SELECT coalesce((SELECT id FROM runs WHERE id=? AND session_id=?2), (SELECT run_id FROM runtime_events WHERE session_id=?2 AND json_extract(data,'$.type')='run.started' AND json_extract(data,'$.payload.userMessageId')=?3 ORDER BY sequence DESC LIMIT 1)) AS id");
+  const status = db.prepare("SELECT coalesce((SELECT json_extract(data,'$.status') FROM project_runs WHERE id=?),(SELECT json_extract(data,'$.status') FROM runs WHERE id=?)) AS status");
+  const result = db.prepare("SELECT substr(json_extract(data,'$.text'),1,6000) AS text FROM messages WHERE session_id=?1 AND json_extract(data,'$.sender')='agent' AND ((?2<>'' AND json_extract(data,'$.runId')=?2) OR (?3<>'' AND json_extract(data,'$.projectRunId')=?3)) ORDER BY created_at DESC,rowid DESC LIMIT 1");
+  return items.map(item => {
+    const id = String(locate.get(item.runId ?? null, item.sessionId, item.messageId)?.id ?? "");
+    const current = status.get(item.projectRunId ?? "", id)?.status as AssistantDispatch["status"];
+    return { messageId: item.messageId, status: current ?? undefined, result: current === "completed"
+      ? result.get(item.sessionId, id, item.projectRunId ?? "")?.text as string | undefined
+      : undefined };
+  });
 }
 
 const sessions = `WITH filter AS (SELECT ? AS project, ? AS session, lower(?) AS term, ? AS previews),

@@ -1,28 +1,26 @@
-import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { buildRust, run, workspace } from './rust-build.mjs';
 import { copyAccountNotices } from './copy-account-notices.mjs';
 try {
   const env=await buildRust();
   const target=env.CARGO_TARGET_DIR?resolve(workspace,env.CARGO_TARGET_DIR):join(workspace,'rust','target');
-  const binary=join(target,'x86_64-pc-windows-gnu','debug',process.platform==='win32'?'nautilo-core.exe':'nautilo-core');
+  const nativeBuild = join(target, 'x86_64-pc-windows-gnu', 'debug');
+  const binary=join(nativeBuild,process.platform==='win32'?'nautilo-core.exe':'nautilo-core');
   if(!existsSync(binary))throw new Error(`Rust backend not found: ${binary}`);
-  const runtime=join(target,'nautilo-preview',String(Date.now()));mkdirSync(runtime,{recursive:true});
-  const core=join(runtime,process.platform==='win32'?'nautilo-core.exe':'nautilo-core');copyFileSync(binary,core);
-  copyAccountNotices(runtime);
-  env.AGENTHUB_CORE_PATH=core;
-  const pluginRoot=join(runtime,'plugins');mkdirSync(pluginRoot,{recursive:true});
-  for(const id of ['opencode','trae','pi','omp','commandcode','deepseek','codex-plugins','antigravity']) {
-    const plugin=join(pluginRoot,id);mkdirSync(plugin,{recursive:true});
-    const executable=`agenthub-plugin-${id}${process.platform==='win32'?'.exe':''}`;
-    copyFileSync(join(workspace,'rust','plugins',id,'agenthub-plugin.json'),join(plugin,'agenthub-plugin.json'));
-    copyFileSync(join(target,'x86_64-pc-windows-gnu','debug',executable),join(plugin,executable));
-  }
-  env.AGENTHUB_DEV_PLUGIN_DIR=pluginRoot;
+  copyAccountNotices(nativeBuild);
+  env.AGENTHUB_CORE_PATH=binary;
+  env.AGENTHUB_DEV_PLUGIN_DIR=join(workspace,'rust','plugins');
   env.AGENTHUB_NODE_PATH=process.execPath;
   const pnpm=process.env.npm_execpath;
   if(!pnpm || !existsSync(pnpm))throw new Error('请从项目根目录运行 pnpm dev:desktop。');
   await run(process.execPath,[pnpm,'build'],{cwd:workspace,env});
   console.log('Starting Nautilo preview: Electron + Rust');
-  await run(process.execPath,[pnpm,'--filter','@agenthub/desktop','dev'],{cwd:workspace,env});
-}catch(error){console.error(error.message);process.exitCode=1;}
+  const desktopArgs = process.platform === 'win32'
+    ? [join(workspace, 'scripts', 'start-desktop-preview.mjs')]
+    : [pnpm, '--filter', '@agenthub/desktop', 'dev'];
+  await run(process.execPath,desktopArgs,{cwd:workspace,env});
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 1;
+}

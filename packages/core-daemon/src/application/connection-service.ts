@@ -1,5 +1,5 @@
 import type { AgentInstance, InstanceModelConfig, ProviderModelCatalog, RuntimeConnection, RuntimeConnectionInput } from "@agenthub/domain";
-import type { IpcRequestMap } from "@agenthub/schemas";
+import { accountQuotaSource, type AccountQuota, type IpcRequestMap } from "@agenthub/schemas";
 import { Database } from "../database/index.js";
 import { CoreError } from "../errors.js";
 import { AdapterRegistry, discoverOpenAiCompatibleModels, mergeInstanceModelConfig } from "../adapters/index.js";
@@ -7,6 +7,8 @@ import { validateModelEndpoint } from "../adapters/model-config.js";
 import { CredentialService, EnvironmentPolicyService, loginProfileDirectory, providerEnvironmentPassthrough } from "../runtime/security/index.js";
 import { applyConnection, connectionCredentialId, connectionEnvironment, readConnection } from "../runtime/runtime-connection.js";
 import { diagnoseConnection } from "../runtime/service-probe.js";
+import { readApiQuota, readKimiLoginQuota, readLoginQuota } from "./connection-quota.js";
+import { MemberRouter } from "../runtime/orchestration/member-router.js";
 
 function invalid(field: string, reason: string): never { throw new CoreError("IPC_INVALID_REQUEST", { field, reason }); }
 function models(input: unknown): InstanceModelConfig[] | undefined {
@@ -106,14 +108,34 @@ export class ConnectionService {
       const removed = this.database.runtimeConnections.remove(id); db.exec("COMMIT"); return { removed };
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
-  async discover(input: IpcRequestMap["connection.models"]["input"]): Promise<ProviderModelCatalog> {
-    try { return await this.discoverRaw(input); }
+  async discover(input: IpcRequestMap["connection.models"]["input"], forceRefresh = true): Promise<ProviderModelCatalog> {
+    try { return await this.discoverRaw(input, true, forceRefresh); }
     catch { return { providerId:`connection:${input.connectionId}`,models:[],source:"unavailable",fetchedAt:new Date().toISOString(),warning:"Connection model discovery failed. Check the endpoint, protocol, credentials and CLI compatibility; secrets are not included in this error." }; }
   }
   async diagnose(input: IpcRequestMap["connection.diagnose"]["input"]) {
     return diagnoseConnection(this.get(input.connectionId,input.revision),()=>this.discoverRaw(input,false));
   }
-  private async discoverRaw(input: IpcRequestMap["connection.models"]["input"], mergeConfigured = true): Promise<ProviderModelCatalog> {
+  async quota(input: IpcRequestMap["connection.quota"]["input"]): Promise<AccountQuota> {
+    if ("agentInstanceId" in input) return { windows: [] };
+    if ("sessionId" in input) {
+      const session = this.database.sessions.get(input.sessionId);
+      if (!session) return invalid("sessionId", "Session does not exist");
+      const agent = new MemberRouter(this.database).resolveSession(session);
+      if (session.connectionId || agent.providerId !== "kimi-code" || agent.providerOptions?.baseUrl
+        || agent.profile || agent.baseArgs.length) return { windows: [] };
+      return readKimiLoginQuota(session.model);
+    }
+    const connection = this.get(input.connectionId, input.revision);
+    if (!connection.enabled) return invalid("connectionId", "Select an enabled account");
+    if (!accountQuotaSource(connection)) return { windows: [] };
+    if (connection.kind === "api") {
+      const key = this.credentials.read(connectionCredentialId(connection.id, connection.revision))?.apiKey;
+      return key && connection.baseUrl ? readApiQuota(connection.baseUrl, key) : { windows: [] };
+    }
+    const { agent, env } = this.loginProbe(connection);
+    return readLoginQuota(agent, env);
+  }
+  private async discoverRaw(input: IpcRequestMap["connection.models"]["input"], mergeConfigured: boolean, forceRefresh = true): Promise<ProviderModelCatalog> {
     const connection = this.get(input.connectionId, input.revision);
     const unavailable = (warning: string): ProviderModelCatalog => ({ providerId: `connection:${connection.id}`, models: [], source: "unavailable", fetchedAt: new Date().toISOString(), warning });
     if (!connection.enabled) return unavailable("The selected connection is disabled");
@@ -123,18 +145,23 @@ export class ConnectionService {
         const result = { ...catalog, providerId: `connection:${connection.id}` };
         return mergeConfigured ? mergeInstanceModelConfig(result, connection.models) : result;
       }
+    const {agent, env} = this.loginProbe(connection, input.agentInstanceId);
+    return this.adapters.listModels(agent, { env }, forceRefresh);
+  }
+
+  private loginProbe(connection: RuntimeConnection, agentInstanceId?: string) {
       const matching = this.database.agents.list().filter((agent) => agent.providerId === connection.harness && agent.enabled);
-      const original = input.agentInstanceId ? this.database.agents.get(input.agentInstanceId)
+      const original = agentInstanceId ? this.database.agents.get(agentInstanceId)
         : matching.find((agent) => agent.providerOptions?.configurationKind === "harness") ?? matching[0];
-      if (input.agentInstanceId && (!original || original.providerId !== connection.harness)) return unavailable("Account and harness must match");
+      if (agentInstanceId && (!original || original.providerId !== connection.harness)) return invalid("harness", "Account and harness must match");
       const executable = original?.executable || this.adapters.get(connection.harness!).descriptor?.defaultExecutable;
-      if (!executable) return unavailable("Install the account's harness to discover models");
+      if (!executable) return invalid("executable", "Install the account's harness");
       const now = new Date().toISOString();
       const probe: AgentInstance = { id: `connection-models:${connection.id}`, providerId: connection.harness!,
         displayName: connection.harness!, executable, baseArgs: [], capabilities: [], enabled: true,
         status: "available", createdAt: now, updatedAt: now };
       const agent = applyConnection(connection, probe);
       const passthrough = providerEnvironmentPassthrough(agent, process.env, this.adapters.get(agent.providerId).descriptor);
-      return this.adapters.listModels(agent, { env: connectionEnvironment(connection, agent, this.environment.build(undefined, passthrough), this.credentials) }, true);
+      return { agent, env: connectionEnvironment(connection, agent, this.environment.build(undefined, passthrough), this.credentials) };
   }
 }

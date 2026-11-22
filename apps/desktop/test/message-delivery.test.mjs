@@ -43,6 +43,22 @@ test("identical queued messages have independent identities and remain visible b
   await Promise.all([first, second]);
 });
 
+test("a pending steer splits a tool group before the durable user message arrives", () => {
+  const h = createHarness();
+  const time = second => `2026-11-03T00:00:0${second}.000Z`;
+  const command = second => ({ id: `command-${second}`, sessionId: "s", runId: "r", sequence: second, timestamp: time(second), data: { kind: "command", status: "done" } });
+  const before = command(1);
+  const after = command(3);
+  const pending = { id: "message-steer", sessionId: "s", sequence: 1, timestamp: time(4), data: { kind: "message", sender: "user", messageId: "steer" } };
+  const group = { ...before, data: { kind: "tool_group", items: [before, after] } };
+  h.runtime.pendingMessages.set("s", new Map([["steer", pending]]));
+  const receipt = { type: "session.follow_up_steered", sequence: 2, timestamp: time(2), payload: { messageId: "steer" } };
+  h.runtime.replaceSessionTimeline("s", [group], [receipt]);
+  assert.deepEqual(Array.from(h.state.events.s, row => row.id), ["command-1", "message-steer", "command-3"]);
+  assert.equal(h.runtime.pendingMessages.get("s").get("steer"), pending);
+  assert.equal(h.runtime.needsStandalonePersistenceSync([receipt]), true);
+});
+
 test("a late standalone history read cannot reset a conversation that just became a team run", async () => {
   const h = createHarness();
   const oldRead = h.runtime.hydrateStandaloneSession(h.session);
@@ -89,6 +105,26 @@ test("streamed assistant reply keeps its row key after being saved", () => {
   assert.equal(before[0].id, after[0].id);
   assert.equal(after.length, 1);
   assert.notEqual(after[0].data.streaming, true);
+});
+
+test("interleaved OMP replies stay in place when the second reply is saved first", () => {
+  const { runtime } = createHarness();
+  const a = "omp-message-11111111-1111-4111-8111-111111111111";
+  const b = "omp-message-22222222-2222-4222-8222-222222222222";
+  const event = (sequence, type, payload) => ({ schemaVersion: 1, eventId: `e${sequence}`, sessionId: "s", projectId: "p", runId: "r", sequence, timestamp: `2026-11-03T00:00:0${sequence}Z`, type, payload });
+  const streams = [event(1, "agent.message_delta", { messageId: a, text: "A…" }), event(2, "agent.message_delta", { messageId: b, text: "B…" })];
+  const save = (sequence, providerMessageId, messageId, text) => [
+    event(sequence, "agent.message", { providerMessageId, messageId, text }),
+    { id: messageId, sessionId: "s", runId: "r", sender: "agent", kind: "chat", text, createdAt: `2026-11-03T00:00:0${sequence}Z` }
+  ];
+  const [doneB, persistedB] = save(3, b, "saved-b", "B complete");
+  const [doneA, persistedA] = save(4, a, "saved-a", "A complete");
+  const before = runtime.buildStandaloneTimeline([], streams, []);
+  const during = runtime.buildStandaloneTimeline([persistedB], [...streams, doneB], []);
+  const after = runtime.buildStandaloneTimeline([persistedB, persistedA], [...streams, doneB, doneA], []);
+  const view = (rows) => Array.from(rows, ({ id, data }) => [id, data.text, Boolean(data.streaming)]);
+  assert.deepEqual(view(during), [[before[0].id, "A…", true], [before[1].id, "B complete", false]]);
+  assert.deepEqual(view(after), [[before[0].id, "A complete", false], [before[1].id, "B complete", false]]);
 });
 
 for (const outcome of ['steer', 'queue', 'error']) {

@@ -249,6 +249,9 @@ pub trait AgentCliAdapter: Send + Sync {
     async fn list_modes(&self, _instance: &Value, _context: Option<&Value>) -> CoreResult<Value> {
         Ok(serde_json::json!({"modes":[]}))
     }
+    async fn account_quota(&self, _instance: &Value, _context: &Value) -> CoreResult<Value> {
+        Ok(serde_json::json!({"windows":[]}))
+    }
     fn provider_id(&self) -> &str;
     /// The ProviderDescriptor JSON served to the renderer via provider.catalog.
     fn descriptor(&self) -> Value;

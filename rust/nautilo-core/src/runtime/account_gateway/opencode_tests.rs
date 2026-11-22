@@ -279,6 +279,32 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn assistant_steps_use_the_selected_login_and_discover_its_models() {
+    let f = Fixture::new(false).await;
+    let daemon = crate::application::core_daemon::Daemon::new(f.root.join("assistant")).await.unwrap();
+    daemon.adapters.register(Arc::new(CatalogOnly));
+    let account = json!({"id":"assistant-chosen","name":"Selected account","kind":"login","harness":"opencode",
+        "nativeLogin":true,"loginProfileDirectory":f.root.join("account"),"enabled":true,"models":[]});
+    daemon.connections.upsert(&json!({"connection":account})).unwrap();
+    let mut input = json!({"connectionId":"assistant-chosen","model":"opencode/fixture-free","instructions":"Route the assistant request",
+        "context":["MAIN"],"tools":[{"name":"Read","description":"Inspect a fixture","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}]});
+    assert!(crate::runtime::assistant_model::step(&daemon, &input).await.is_err());
+    daemon.integrations.set_account_route("assistant-chosen", true).unwrap();
+    input["streamId"] = json!(uuid::Uuid::new_v4().to_string());
+    let call = crate::runtime::assistant_model::step(&daemon, &input).await.unwrap();
+    assert_eq!(call["call"]["name"], "Read");
+    assert_eq!(call["call"]["arguments"]["path"], "你好");
+    input["context"] = json!(["ACTUAL_TOOL_RESULT"]);
+    let reply = crate::runtime::assistant_model::step(&daemon, &input).await.unwrap();
+    assert_eq!(reply["text"], "你好 DONE");
+    assert_eq!(reply["inputTokens"], 9);
+    daemon.integrations.set_account_route("assistant-chosen", false).unwrap();
+    assert!(crate::runtime::assistant_model::step(&daemon, &input).await.is_err());
+    drop(daemon);
+    f.close().await;
+}
+
+#[tokio::test]
 async fn opencode_uses_selected_console_credentials_and_supports_independent_api_calls() {
     let f = Fixture::new(true).await;
     let title = f

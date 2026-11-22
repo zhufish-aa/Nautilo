@@ -45,6 +45,21 @@ async fn resident_turns_deliver_final_chunks_before_completion_and_resume_native
     resumed.close().await;
 }
 
+#[tokio::test]
+async fn resume_can_load_the_original_session_without_replaying_history() {
+    let mut events = Plugin::default()
+        .start("run", request("continue"), Some("requires-load".into()))
+        .await
+        .unwrap();
+    let mut received = Vec::new();
+    while let Some(event) = events.recv().await {
+        received.push(event);
+    }
+    assert!(received.iter().any(|event| event["providerSessionId"] == "requires-load"));
+    assert!(received.iter().any(|event| event["phase"] == "turn_completed"));
+    assert!(!received.iter().any(|event| event.to_string().contains("HISTORY MUST NOT REPLAY")));
+}
+
 struct Replies;
 impl DaemonChannel for Replies {
     fn ask(

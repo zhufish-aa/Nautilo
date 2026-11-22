@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { conversationLocations, type ConversationLocation } from "../../lib/conversation-navigation";
-import { ClipboardList } from "lucide-react";
+import { ClipboardList, PanelRight } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { TimelineEventView, type TimelineRow, TimelineViewport } from "../timeline/Timeline";
 import { ConversationTurnView, isTurnTraceStep, turnEventAlwaysVisible } from "../timeline/ConversationTurnView";
 import { workflowTool } from "../timeline/WorkflowToolActivity";
 import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
+import { Dialog } from "../../components/ui/Dialog";
 import { Composer } from "./Composer";
 import { providerUiState } from "../../lib/provider-ui";
 import { useNativeTerminalState } from "../../lib/use-native-terminal";
 import { ArtifactsDrawer, DagDrawer, SubagentDrawer, TerminalDrawer } from "./Drawers";
-import { RunActivityIndicator } from "./RunActivityIndicator";
+import { RunActivityIndicator, SessionActivityPill } from "./RunActivityIndicator";
 import { sessionTargetName } from "./SessionListPanel";
 import { useSessionsStore, SESSION_EMPTY } from "../../stores/sessions";
 import { InteractionCards } from "./InteractionCards";
@@ -29,11 +30,13 @@ import {
   registerProjectSessionView,
   registerStandaloneSessionView
 } from "../../lib/orchestration-runtime";
-import { conversationRows } from "../../lib/conversation-timeline";
+import { conversationRows, conversationRunSummaries, type ConversationTurn } from "../../lib/conversation-timeline";
 import { cachedChangedFileCount } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
 import { TodoGoalCard } from "./TodoGoalCard";
+import { SessionInspector } from "./SessionInspector";
+import { SessionToolsInventory } from "./SessionToolsInventory";
 import { SessionWorkspaceMenu } from "./SessionWorkspaceMenu";
 import { BrowserDrawer } from "./BrowserDrawer";
 import { getBridge, requestCore } from "../../lib/bridge";
@@ -46,7 +49,7 @@ import { toast } from "../../stores/toast";
 
 const pendingTitles = new Map<string, Promise<{ title?: string }>>();
 
-export type DrawerKind = "terminal" | "artifacts" | "dag" | "source-control" | "browser" | "workflow" | null;
+export type DrawerKind = "terminal" | "artifacts" | "dag" | "source-control" | "browser" | "workflow" | "tools" | null;
 
 // Stable fallbacks: `?? []` inside a selector would return a fresh array on
 // every store update and re-render subscribers of empty sessions each token.
@@ -109,8 +112,8 @@ export function SessionWorkbench({
   onOpenSession,
   headerActions,
   onOpenLocalFile,
-  onToggleAgents,
-  agentsOpen = false,
+  onToggleInspector,
+  inspectorOpen = false,
   focusKey
 }: {
   sessionId: string;
@@ -126,8 +129,8 @@ export function SessionWorkbench({
   headerActions?: ReactNode;
   /** Local file clicks open the contextual document preview. */
   onOpenLocalFile?: (path: string) => void;
-  onToggleAgents?: () => void;
-  agentsOpen?: boolean;
+  onToggleInspector?: () => void;
+  inspectorOpen?: boolean;
   focusKey?: string;
 }): JSX.Element {
   const { t, locale } = useI18n();
@@ -216,13 +219,12 @@ export function SessionWorkbench({
     return unregister;
   }, [active, sessionId, projectRunId]);
 
-  // File the artifacts drawer should focus when opened via a "view diff" entry.
-  const [diffFocusPath, setDiffFocusPath] = useState<string | null>(null);
   const [workflowInspection, setWorkflowInspection] = useState<{ sessionId: string; runId: string }>();
   // Dispatch card currently opened in the sub-agent detail drawer.
   const [subagentEventId, setSubagentEventId] = useState<string>();
   const [showTodos, setShowTodos] = useState(false);
   const workspaceTrigger = useRef<HTMLButtonElement>(null);
+  const [compactTarget, setCompactTarget] = useState<HTMLSpanElement | null>(null);
   useEffect(() => { setShowTodos(false); setSubagentEventId(undefined); }, [sessionId]);
 
   // Only the numeric badge is subscribed. Streaming text in another session
@@ -248,10 +250,6 @@ export function SessionWorkbench({
     setSubagentEventId(eventId);
   }, [onOpenDrawer]);
   useEffect(() => { if (drawer) setSubagentEventId(undefined); }, [drawer]);
-  const handleViewDiff = useCallback(
-    (path?: string): void => { setDiffFocusPath(path ?? null); onOpenDrawer("artifacts"); },
-    [onOpenDrawer]
-  );
   const handleOpenWorkflow = useCallback((runId: string): void => {
     setWorkflowInspection({ sessionId, runId });
     onOpenDrawer("workflow");
@@ -299,7 +297,7 @@ export function SessionWorkbench({
   } = {}): WorkbenchRow => {
     const step = stepTurn === undefined ? undefined : { turnId: stepTurn, before: false, after: false };
     return { key, result, step, estimatedHeight: estimatedHeight ?? (step ? 30 : undefined), render: () => (
-      <div className={`conversation-message-row mx-auto w-full max-w-3xl px-5 ${process ? "py-0.5" : "py-2"} sm:px-8`}
+      <div className="conversation-message-row mx-auto w-full" data-process={process || undefined}
         data-trace-step={step ? true : undefined}>
         {step ? <div className="conversation-process-row" data-turn-id={step.turnId} data-trace-step
           data-trace-prev={step.before || undefined} data-trace-next={step.after || undefined}>{node}</div> : node}
@@ -316,10 +314,18 @@ export function SessionWorkbench({
     }
   };
   if (delegatedTask) timelineRows.push(shell("delegated", <DelegatedTaskCard task={delegatedTask} />));
-  const timelineActions = { onEditMessage: handleEditMessage, onViewDiff: handleViewDiff, onOpenSession, onOpenSubagent: handleOpenSubagent, onOpenWorkflow: handleOpenWorkflow, onOpenLocalFile };
-  conversationRows(visibleEvents, workbenchRunning).forEach((row) => {
+  const timelineActions = { onEditMessage: handleEditMessage, onOpenSession, onOpenSubagent: handleOpenSubagent, onOpenWorkflow: handleOpenWorkflow, onOpenLocalFile };
+  const conversation = conversationRows(visibleEvents, workbenchRunning);
+  const summaries = conversationRunSummaries(conversation);
+  const isExpanded = (summary: ConversationTurn): boolean => {
+    const choice = turnExpansions[`${sessionId}:${summary.id}`];
+    return choice?.completed === summary.completed ? choice.open : !summary.completed;
+  };
+  conversation.forEach((row) => {
     if (row.kind === "event") {
       addInteractions(row.event.timestamp);
+      const owner = summaries.get(row.event.id);
+      if (owner && !isExpanded(owner)) return;
       timelineRows.push(shell(row.event.id, <TimelineEventView event={row.event} {...timelineActions} />, {
         result: row.event.data.kind === "message" && row.event.data.sender === "agent" && !row.event.data.streaming,
         estimatedHeight: estimateShortMessageHeight(row.event),
@@ -327,31 +333,32 @@ export function SessionWorkbench({
       return;
     }
     const turn = row.turn;
-    const key = `${sessionId}:${turn.id}`;
-    const choice = turnExpansions[key];
-    const expanded = choice?.completed === turn.completed ? choice.open : !turn.completed;
-    timelineRows.push(shell(turn.id, <ConversationTurnView turn={turn} {...timelineActions} summaryOnly expanded={expanded}
+    const summary = summaries.get(turn.id) ?? turn;
+    const key = `${sessionId}:${summary.id}`;
+    const expanded = isExpanded(summary);
+    if (turn.id === summary.id) timelineRows.push(shell(turn.id, <ConversationTurnView turn={summary} {...timelineActions} summaryOnly expanded={expanded}
       onToggle={() => setTurnExpansions(previous => Object.fromEntries([
-        ...Object.entries(previous).filter(([id]) => id !== key), [key, { completed: turn.completed, open: !expanded }]
+        ...Object.entries(previous).filter(([id]) => id !== key), [key, { completed: summary.completed, open: !expanded }]
       ].slice(-500)))} />, { estimatedHeight: 65 }));
     // A single turn may contain hundreds of activities. Each visible activity
     // participates in the viewport's one virtualizer, rather than one huge row.
     for (const event of turn.events) {
       addInteractions(event.timestamp);
-      if (!expanded && !turnEventAlwaysVisible(turn, event)) continue;
+      if (!expanded && !turnEventAlwaysVisible(summary, event)) continue;
       const content = <TimelineEventView event={event} {...timelineActions} showAuthor={false} />;
       const result = event === turn.result;
+      const compact = event.data.kind === "provider_ui" || event.data.kind === "tool_activity" && !event.data.subagent;
       if (isTurnTraceStep(event)) timelineRows.push(shell(event.id, content, {
         process: true, stepTurn: turn.id, estimatedHeight: event.data.kind === "tool_activity" && workflowTool(event.data.toolName) ? 38 : undefined,
       }));
       else timelineRows.push(shell(event.id, <div className={result ? "conversation-result" : "conversation-process-row"} data-turn-id={turn.id}>{content}</div>, {
-        process: !result, result, estimatedHeight: estimateShortMessageHeight(event),
+        process: compact, result, estimatedHeight: compact ? 30 : estimateShortMessageHeight(event),
       }));
     }
   });
   if (workbenchRunning) timelineRows.push(shell("live-activity", (
     <RunActivityIndicator lifecycle={visibleLifecycle} events={visibleEvents} waitingForDelegates={waitingForDelegates} />
-  )));
+  ), { estimatedHeight: 30 }));
   addInteractions("\uffff");
   if (events.length === 0 && !workbenchRunning) {
     timelineRows.push(shell("empty", (
@@ -371,6 +378,34 @@ export function SessionWorkbench({
   }
   navigationLocations.current = conversationLocations(visibleEvents, timelineRows, navigationLocations.current);
 
+  const workspaceMenu = <SessionWorkspaceMenu key={sessionId} trigger={workspaceTrigger} project={project}
+    openFolder={bridge?.shell && project?.rootPath ? () => {
+      void bridge.shell.openPath(project.rootPath).then(error => { if (error) toast.error(error); }).catch(error => toast.error(String(error)));
+    } : undefined}
+    actions={{
+      terminal: { checked: drawer === "terminal", run: () => toggleDrawer("terminal") },
+      browser: bridge?.browser ? browserAction : undefined,
+      "source-control": coreFeatures.sourceControl ? { checked: drawer === "source-control", run: () => toggleDrawer("source-control") } : undefined,
+      artifacts: {
+        checked: drawer === "artifacts", detail: changedFileCount > 0 ? String(changedFileCount) : undefined,
+        run: () => toggleDrawer("artifacts")
+      },
+      goals: todoGoal ? {
+        checked: showTodos, detail: `${todoGoal.filter(item => item.status === "done").length}/${todoGoal.length}`,
+        run: () => setShowTodos(open => !open)
+      } : undefined,
+      dag: tasks.length > 0 ? { checked: drawer === "dag", detail: String(tasks.length), run: () => toggleDrawer("dag") } : undefined,
+      workflows: coreFeatures.workflows === 1 && !session.parentSessionId ? { run: () => {
+        const query = new URLSearchParams({ session: sessionId });
+        void requestCore<Array<{ id: string }>>("workflow.list", { sessionId }).then(runs => {
+          if (runs[0]) query.set("run", runs[0].id);
+          window.location.hash = "#/workflows?" + query;
+        }).catch(error => toast.error(String(error)));
+      } } : undefined,
+      agents: onToggleInspector ? { checked: inspectorOpen, run: onToggleInspector } : undefined,
+      tools: { run: () => onOpenDrawer("tools") }
+    }} />;
+
   return (
     <div className="conversation-workspace relative flex h-full min-h-0 min-w-0 flex-1">
       <div className="session-chat-column relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -379,50 +414,26 @@ export function SessionWorkbench({
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <h1 title={`${project?.name ?? ""} · ${targetName}`} className="truncate text-[15px] font-medium text-ink">{session.title || t("sessions.header.untitled")}</h1>
             <span data-testid="session-fixed-agent" title={locale === "zh-CN" ? "会话 Agent 已固定；账号、供应商和模型可在下方选择，下一轮生效。" : "Agent is fixed for this conversation. Change account, provider or model below for the next message."} className="inline-flex max-w-48 shrink-0 items-center gap-1.5 rounded-md border border-line bg-surface/50 px-2 py-1 text-xs text-muted"><span aria-hidden>◈</span><span className="truncate">{targetName}</span></span>
-            {(visibleStatus === "running" || visibleStatus === "waiting_approval" || visibleStatus === "failed") && <StatusChip
-              tone={visibleStatus === "running" ? "accent" : visibleStatus === "waiting_approval" ? "warn" : visibleStatus === "failed" ? "danger" : "muted"}
+            {(visibleStatus === "waiting_approval" || visibleStatus === "failed") && <StatusChip
+              tone={visibleStatus === "waiting_approval" ? "warn" : "danger"}
               label={t(`sessions.status.${visibleStatus}` as MessageKey)}
-              pulse={visibleStatus === "running"}
             />}
           </div>
 
         </div>
+        {active && drawer !== "workflow" && <SessionActivityPill key={sessionId} lifecycle={visibleLifecycle} events={visibleEvents}
+          waitingForDelegates={waitingForDelegates} foreground={foregroundLifecycle} orchestration={orchestrationLifecycle} />}
         <div className="flex shrink-0 items-center gap-2">
           {headerActions}
-          {active && <SessionWorkspaceMenu key={sessionId} trigger={workspaceTrigger} project={project}
-            openFolder={bridge?.shell && project?.rootPath ? () => {
-              void bridge.shell.openPath(project.rootPath).then(error => { if (error) toast.error(error); }).catch(error => toast.error(String(error)));
-            } : undefined}
-            actions={{
-              terminal: { checked: drawer === "terminal", run: () => toggleDrawer("terminal") },
-              browser: bridge?.browser ? browserAction : undefined,
-              "source-control": coreFeatures.sourceControl === 1 ? { checked: drawer === "source-control", run: () => toggleDrawer("source-control") } : undefined,
-              artifacts: {
-                checked: drawer === "artifacts", detail: changedFileCount > 0 ? String(changedFileCount) : undefined,
-                run: () => { setDiffFocusPath(null); toggleDrawer("artifacts"); }
-              },
-              goals: todoGoal ? {
-                checked: showTodos, detail: `${todoGoal.filter(item => item.status === "done").length}/${todoGoal.length}`,
-                run: () => {
-                  if (agentsOpen && !session.target.teamId) onToggleAgents?.();
-                  setShowTodos(open => !open);
-                }
-              } : undefined,
-              dag: tasks.length > 0 ? { checked: drawer === "dag", detail: String(tasks.length), run: () => toggleDrawer("dag") } : undefined,
-              workflows: coreFeatures.workflows === 1 && !session.parentSessionId ? { run: () => {
-                const query = new URLSearchParams({ session: sessionId });
-                void requestCore<Array<{ id: string }>>("workflow.list", { sessionId }).then(runs => {
-                  if (runs[0]) query.set("run", runs[0].id);
-                  window.location.hash = "#/workflows?" + query;
-                }).catch(error => toast.error(String(error)));
-              } } : undefined,
-              agents: onToggleAgents ? { checked: agentsOpen, run: onToggleAgents } : undefined
-            }} />}
+          {active && onToggleInspector && <button type="button" className="session-inspector-toggle" aria-pressed={inspectorOpen}
+            aria-label={locale === "zh-CN" ? "会话信息栏" : "Conversation details"} title={locale === "zh-CN" ? "会话信息栏" : "Conversation details"}
+            onClick={onToggleInspector}><PanelRight size={16} aria-hidden /></button>}
+          {active && !inspectorOpen && workspaceMenu}
         </div>
       </header>
 
       {workflowDispatches.dispatches.length > 0 && <WorkflowDispatchCard key={sessionId} dispatches={workflowDispatches.dispatches} zh={locale === "zh-CN"} />}
-      <div className="relative min-h-0 flex-1" data-run-state={waitingForApproval ? "waiting" : workbenchRunning ? "running" : session.status === "failed" ? "failed" : "idle"}>
+      <div className="session-chat-timeline relative min-h-0 flex-1" data-run-state={waitingForApproval ? "waiting" : workbenchRunning ? "running" : session.status === "failed" ? "failed" : "idle"}>
       <WorkflowDispatchContext.Provider value={workflowDispatches}><TimelineViewport
         focusKey={focusKey}
         rows={timelineRows}
@@ -431,6 +442,7 @@ export function SessionWorkbench({
         forceFollowKey={lastUserMessageId}
         locations={navigationLocations.current}
         active={active}
+        className="session-chat-scroll"
       /></WorkflowDispatchContext.Provider>
       {todoGoal && showTodos && <TodoGoalCard todos={todoGoal} onClose={() => {
         setShowTodos(false);
@@ -446,6 +458,7 @@ export function SessionWorkbench({
       {nativeOwnsSession && <div className="mx-auto flex w-full max-w-[1000px] items-center justify-between gap-3 px-5 pb-2 text-[13px] text-ink-2"><span>{nativeTerminal.historySync?.status === "failed" ? (locale === "zh-CN" ? "原生历史同步失败，请在终端中重试" : "Native history sync failed. Retry in the terminal.") : nativeTerminal.historySync?.status === "syncing" ? (locale === "zh-CN" ? "正在同步原生会话历史" : "Syncing native session history") : (locale === "zh-CN" ? "会话正在原生终端中运行" : "Session is active in the native terminal")}</span><Button variant="ghost" size="sm" onClick={() => onOpenDrawer("terminal")}>{locale === "zh-CN" ? "返回终端" : "Open terminal"}</Button></div>}
       <Composer
         sessionId={sessionId}
+        compactTarget={compactTarget}
         targetName={targetName}
         running={workbenchRunning}
         disabled={session.status === "archived" || nativeOwnsSession}
@@ -453,14 +466,18 @@ export function SessionWorkbench({
 
       {<TerminalDrawer open={drawer === "terminal" && active} onClose={onCloseDrawer} sessionId={sessionId} />}
       </div>
-      {<ArtifactsDrawer open={drawer === "artifacts" && active} onClose={onCloseDrawer} sessionId={sessionId} focusPath={diffFocusPath} />}
+      {active && inspectorOpen && <SessionInspector session={session} events={visibleEvents} menu={workspaceMenu} onOpenSession={onOpenSession} compactSlot={setCompactTarget} />}
+      <ArtifactsDrawer open={drawer === "artifacts" && active} onClose={onCloseDrawer} sessionId={sessionId} />
       {drawer === "browser" && active && getBridge()?.browser && <BrowserDrawer key={sessionId} sessionId={sessionId} onClose={onCloseDrawer} />}
-      <SourceControlDrawer open={drawer === "source-control" && active && coreFeatures.sourceControl === 1} onClose={onCloseDrawer} sessionId={sessionId} projectId={project?.id} />
+      <SourceControlDrawer open={drawer === "source-control" && active && !!coreFeatures.sourceControl} onClose={onCloseDrawer} sessionId={sessionId} projectId={project?.id} />
       <AnimatePresence initial={false}>
         {drawer === "workflow" && active && workflowInspection?.sessionId === sessionId && <WorkflowExecutionDrawer
           key={workflowInspection.runId} runId={workflowInspection.runId} onClose={onCloseDrawer} onOpenSession={openWorkflowConversation} />}
       </AnimatePresence>
       <DagDrawer open={drawer === "dag"} onClose={onCloseDrawer} tasks={tasks} />
+      <Dialog open={active && drawer === "tools"} onOpenChange={onCloseDrawer} title={locale === "zh-CN" ? "本次会话工具" : "Session tools"}>
+        {active && drawer === "tools" && <SessionToolsInventory key={sessionId} sessionId={sessionId} />}
+      </Dialog>
       <SubagentDrawer open={!!subagentEventId} onClose={() => setSubagentEventId(undefined)} sessionId={sessionId} eventId={subagentEventId} />
     </div>
   );

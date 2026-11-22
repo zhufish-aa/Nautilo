@@ -51,7 +51,7 @@ export function retainUsageEvents(log: Map<string, UsageEvent>, events: readonly
       const value = payload as UsageSnapshot;
       key = JSON.stringify(["usage", usageSnapshotKey(value, event) ?? "legacy", event.runId ?? null]);
       safePayload = Object.fromEntries([
-        "usageScope", "usageKey", "inputTokens", "outputTokens", "cachedInputTokens",
+        "usageScope", "usageKey", "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens",
         "cacheCreationInputTokens", "reasoningOutputTokens", "inputTokensIncludesCache",
         "reportedCost", "estimatedCost", "currency", "model", "agentInstanceId",
         "connectionId", "connectionRevision", "pricingSnapshot",
@@ -83,7 +83,7 @@ export function retainUsageEvents(log: Map<string, UsageEvent>, events: readonly
   return changed;
 }
 
-const counterNames = ["inputTokens", "outputTokens", "cachedInputTokens", "cacheCreationInputTokens", "reasoningOutputTokens", "reportedCost", "estimatedCost"] as const;
+const counterNames = ["totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheCreationInputTokens", "reasoningOutputTokens", "reportedCost", "estimatedCost"] as const;
 
 function sessionDelta(current: UsageSnapshot, previous: UsageSnapshot): UsageSnapshot | undefined {
   if (current.inputTokensIncludesCache !== previous.inputTokensIncludesCache || current.currency !== previous.currency) return undefined;

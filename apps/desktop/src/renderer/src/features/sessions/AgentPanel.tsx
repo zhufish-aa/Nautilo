@@ -1,11 +1,7 @@
 import { useMemo } from "react";
-import { useNavigate } from "react-router-dom";
-import { Crown, Settings2 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
-import { cn } from "../../lib/utils";
 import { providerMeta } from "../../lib/provider-catalog";
 import type { UiSession, UiTeam, UiTeamMember } from "../../lib/types";
-import { StatusChip, Tag } from "../../components/ui/Badge";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
@@ -75,84 +71,29 @@ function SessionEntryRow({
             ? "ok"
             : "muted";
 
-  return (
-    <li>
-      <button
-        onClick={() => onOpen(session.id)}
-        aria-current={active ? "page" : undefined}
-        className={cn(
-          "group flex w-full items-center gap-2.5 rounded-lg border-0 px-3 py-3 text-left transition-colors duration-150 outline-none",
-          "focus-visible:ring-2 focus-visible:ring-accent/70",
-          active ? "bg-card-hover" : "bg-transparent hover:bg-card-hover"
-        )}
-      >
-        <span
-          aria-hidden
-          className="agent-avatar relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-panel text-ink-2"
-        >
-          <ProviderAvatar providerId={info.providerId ?? "custom"} size="sm" />
-          <span
-            className={cn(
-              "absolute -right-0.5 -bottom-0.5 h-2 w-2 rounded-full border border-card",
-              status === "running" ? "bg-accent motion-safe:animate-pulse" : status === "completed" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-ink-3"
-            )}
-          />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-1.5">
-            <span className={cn("truncate text-[13px] font-medium", active ? "text-ink" : "text-ink-2")}>
-              {member?.displayName ?? session.title}
-            </span>
-            {isMain && <Crown className="h-3.5 w-3.5 shrink-0 text-warn" aria-label={t("sessions.panel.mainBadge")} />}
-            {session.unreadCount > 0 && (
-              <span className="ml-auto flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-on-accent">
-                {session.unreadCount}
-              </span>
-            )}
-          </span>
-          <span className="sr-only">
-            {[member?.role.name, providerName, model].filter(Boolean).join(" · ")}
-          </span>
-          {!isMain && (
-            <span className="mt-1 block truncate text-[11px] text-ink-3" title={session.title}>
-              {session.title}
-            </span>
-          )}
-        </span>
-        <StatusChip
-          tone={tone}
-          label={t(`sessions.status.${status}` as MessageKey)}
-          pulse={status === "running"}
-          className="h-5 shrink-0 px-1.5 text-[10px]"
-        />
-      </button>
-    </li>
-  );
+  const title = session.title || member?.displayName || t("sessions.header.untitled");
+  return <li>
+    <button type="button" className="session-inspector-agent" aria-current={active ? "page" : undefined}
+      onClick={() => onOpen(session.id)} title={[title, member?.role.name, providerName, model].filter(Boolean).join(" · ")}>
+      <span className="session-inspector-harness" data-status={status}>
+        <ProviderAvatar providerId={info.providerId ?? "custom"} size="sm" />
+      </span>
+      <span className="session-inspector-agent-name">{title}</span>
+      {isMain && <span className="sr-only">{t("sessions.panel.mainSession")}</span>}
+      {session.unreadCount > 0 && <span className="session-inspector-unread">{session.unreadCount}</span>}
+      <span className="session-inspector-status" data-tone={tone}>{t(`sessions.status.${status}` as MessageKey)}</span>
+    </button>
+  </li>;
 }
 
 export function AgentPanel({
   session,
   onOpenSession
 }: {
-  session?: UiSession;
-  onOpenSession: (sessionId: string) => void;
-}): JSX.Element {
-  // Guard outside the hook-bearing body: hooks must not run without a session.
-  if (!session) {
-    return <aside className="flex w-64 shrink-0 border-l border-line bg-panel  xl:block" />;
-  }
-  return <AgentPanelBody session={session} onOpenSession={onOpenSession} />;
-}
-
-function AgentPanelBody({
-  session,
-  onOpenSession
-}: {
   session: UiSession;
   onOpenSession: (sessionId: string) => void;
-}): JSX.Element {
+}): JSX.Element | null {
   const { t } = useI18n();
-  const navigate = useNavigate();
   const teams = useTeamsStore((state) => state.teams);
   const allSessions = useSessionsStore((state) => state.sessions);
 
@@ -177,95 +118,23 @@ function AgentPanelBody({
   }, [session, allSessions]);
 
   const rootInfo = useEntryInfo(root, team);
+  if (subs.length === 0 && root.id === session.id) return null;
 
-  return (
-    <aside aria-label={t("sessions.panel.title")} className="agent-assignment-panel flex min-h-0 w-64 flex-1 flex-col border-l border-line bg-panel">
-      <div className="agent-assignment-heading flex items-center justify-between border-b border-line px-4 py-3">
-        <h2 className="text-sm font-medium text-ink">{t("sessions.panel.title")}</h2>
-        {team && (
-          <button
-            onClick={() => navigate(`/teams/${team.id}`)}
-            title={t("sessions.panel.editTeam")}
-            className="rounded-md p-1 text-ink-3 transition-colors hover:bg-accent-soft hover:text-accent focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:outline-none"
-          >
-            <Settings2 className="h-4 w-4" aria-hidden />
-          </button>
-        )}
-      </div>
-
-      <div className="agent-assignment-body min-h-0 flex-1 overflow-y-auto p-3">
-        {team && root ? (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between px-1">
-              <span className="truncate text-xs text-ink-3">{team.name}</span>
-              <Tag label={t(`teams.policy.${team.delegationPolicy}` as MessageKey)} className="shrink-0" />
-            </div>
-
-            <section>
-              <h3 className="mb-1.5 px-1 text-xs font-medium text-ink-3">
-                {t("sessions.panel.mainSession")}
-              </h3>
-              <ul className="space-y-2">
-                <SessionEntryRow info={rootInfo} isMain active={session.id === root.id} onOpen={onOpenSession} />
-              </ul>
-            </section>
-
-            <section>
-              <h3 className="mb-1.5 px-1 text-xs font-medium text-ink-3">
-                {t("sessions.panel.subSessions")}
-              </h3>
-              {subs.length === 0 ? (
-                <p className="rounded-lg border border-line px-3 py-3 text-center text-xs text-ink-3">
-                  {t("sessions.panel.noSub")}
-                </p>
-              ) : (
-                <ul className="space-y-2">
-                  {subs.map((sub) => (
-                    <SubEntry key={sub.id} session={sub} team={team} active={session.id === sub.id} onOpen={onOpenSession} />
-                  ))}
-                </ul>
-              )}
-            </section>
-          </div>
-        ) : (
-          <SingleAgentInfo session={session} />
-        )}
-        <SessionToolsInventory sessionId={session.id}/>
-      </div>
-    </aside>
-  );
+  return <section className="session-inspector-section session-inspector-lineage">
+    <header className="session-inspector-section-heading"><h3>{t("sessions.panel.subSessions")}</h3></header>
+    <ul>
+      {session.id !== root.id && <SessionEntryRow info={rootInfo} isMain active={false} onOpen={onOpenSession} />}
+      {subs.map(sub => <SubEntry key={sub.id} session={sub} team={team} active={session.id === sub.id} onOpen={onOpenSession} />)}
+    </ul>
+  </section>;
 }
 
-function SubEntry({
-  session,
-  team,
-  active,
-  onOpen
-}: {
+function SubEntry({ session, team, active, onOpen }: {
   session: UiSession;
-  team: UiTeam;
+  team?: UiTeam;
   active: boolean;
   onOpen: (id: string) => void;
 }): JSX.Element {
   const info = useEntryInfo(session, team);
   return <SessionEntryRow info={info} isMain={false} active={active} onOpen={onOpen} />;
 }
-
-function SingleAgentInfo({ session }: { session: UiSession }): JSX.Element {
-  const { t } = useI18n();
-  const instances = useAgentsStore((state) => state.instances);
-  const lifecycle = useSessionsStore((state) => state.running[session.id]);
-  const status = visibleSessionStatus(session.status, lifecycle);
-  const target = session.target;
-  const instance =
-    target.type === "agent" ? instances.find((item) => item.id === target.instanceId) : undefined;
-  const meta = instance ? providerMeta(instance.providerId) : undefined;
-
-  return (
-    <section className="agent-inspector">
-      <header><ProviderAvatar providerId={instance?.providerId ?? "custom"} /><div><h3>{instance?.displayName ?? "Agent"}</h3><p>{meta?.name === instance?.displayName ? meta?.vendor : meta?.name}</p></div><StatusChip tone={status === "running" ? "accent" : status === "failed" ? "danger" : status === "completed" ? "ok" : status === "waiting_approval" ? "warn" : "muted"} label={t(`sessions.status.${status}` as MessageKey)} /></header>
-      <dl><div><dt>{t("agents.instances.model")}</dt><dd title={session.model}>{session.model ?? t("agents.instances.defaultModel")}</dd></div><div><dt>{t("agents.editor.basic.reasoning")}</dt><dd><span className="agent-effort-value">{session.reasoningEffort ?? t("agents.editor.basic.reasoningDefault")}</span></dd></div></dl>
-    </section>
-  );
-}
-import { SessionToolsInventory } from "./SessionToolsInventory";

@@ -5,7 +5,7 @@ export const nodeSize = (node: WorkflowNode): { width: number; height: number } 
 export const nodeLabel = (node: WorkflowNode): string => node.name || node.id;
 export const nodeKinds = { main: "主 Agent", dispatch: "分发", agent: "Agent", join: "汇合", condition: "条件判断", call: "子流程" } as const;
 
-export function nodeTone(node: WorkflowNode): "indigo" | "cyan" | "violet" | "amber" | "emerald" | "neutral" {
+export function nodeTone(node: Pick<WorkflowNode, "id" | "kind" | "role">): "indigo" | "cyan" | "violet" | "amber" | "emerald" | "neutral" {
   if (node.id === "$return" || node.id === "$return_needs_decision") return "emerald";
   if (node.kind === "main" || node.kind === "dispatch") return "indigo";
   if (node.kind === "join" || node.kind === "condition") return "violet";

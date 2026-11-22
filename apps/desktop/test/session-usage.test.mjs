@@ -3,9 +3,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
 const source = await readFile(new URL("../src/renderer/src/lib/session-usage.ts", import.meta.url), "utf8");
-const { aggregateSessionUsage, estimateSnapshot } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText)}`);
+const { aggregateSessionUsage, estimateSnapshot, promptCacheRates } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText)}`);
 const event = (id, payload, sequence = Number(id), runId = "run") => ({ eventId: String(id), sequence, runId, type: "usage.updated", payload });
 const usage = { usageScope: "turn", inputTokens: 100, outputTokens: 20, inputTokensIncludesCache: true };
+test("Antigravity cache reads above uncached input do not fall back to a previous zero", () => {
+  const agents = new Set(["agy"]);
+  const cold = { ...usage, agentInstanceId:"agy", inputTokens:22801, cachedInputTokens:0 };
+  const hit = { ...usage, agentInstanceId:"agy", inputTokens:2327, cachedInputTokens:20736 };
+  assert.deepEqual(promptCacheRates([cold, hit], agents), { hit:90, average:45 });
+  assert.deepEqual(promptCacheRates([cold, { ...hit, inputTokensIncludesCache:false, cacheCreationInputTokens:0 }], agents), { hit:90, average:45 });
+  assert.equal(promptCacheRates([cold, { ...hit, agentInstanceId:"other" }], agents), undefined);
+  assert.equal(promptCacheRates([hit, { ...cold, cachedInputTokens:undefined }], agents), undefined);
+  assert.deepEqual(promptCacheRates([cold], agents), { hit:0, average:0 });
+});
 test("usage snapshots replace rather than sum duplicate/cumulative reports", () => {
  const a = event(1, usage), b = event(2, {...usage, inputTokens: 200});
  assert.equal(aggregateSessionUsage([b,a,a,b]).totalTokens,220);

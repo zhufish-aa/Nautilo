@@ -20,11 +20,8 @@ pub struct OpenCodeAccount {
     sessions: std::sync::Mutex<HashMap<String, wire::Session>>,
 }
 impl OpenCodeAccount {
-    pub fn new(connection: &Value, env: &HashMap<String, String>) -> Self {
-        // Magpie warms this during provider discovery, before the first model
-        // request. A failed update keeps the pinned minimum client version.
-        wire::version();
-        let root = if let Some(profile) = connection["loginProfileDirectory"]
+    fn auth_root(connection: &Value, env: &HashMap<String, String>) -> PathBuf {
+        if let Some(profile) = connection["loginProfileDirectory"]
             .as_str()
             .filter(|s| !s.is_empty())
         {
@@ -35,11 +32,20 @@ impl OpenCodeAccount {
             dirs::home_dir()
                 .unwrap_or_default()
                 .join(".local/share/opencode")
-        };
+        }
+    }
+
+    pub fn new(connection: &Value, env: &HashMap<String, String>) -> Self {
+        wire::version();
         Self {
-            credentials: Mutex::new(auth::Credentials::new(root)),
+            credentials: Mutex::new(auth::Credentials::new(Self::auth_root(connection, env))),
             sessions: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    pub async fn quota_key(connection: &Value, env: &HashMap<String, String>) -> anyhow::Result<String> {
+        let mut credentials = auth::Credentials::new(Self::auth_root(connection, env));
+        Ok(credentials.provider("opencode-go", false).await?.key)
     }
 
     pub async fn relay(
@@ -140,6 +146,7 @@ impl OpenCodeAccount {
         };
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let retry_after = response.headers().get(reqwest::header::RETRY_AFTER).and_then(|value| value.to_str().ok()).map(str::to_owned);
             let error: Value = response.json().await.unwrap_or(Value::Null);
             let message = error["error"]["message"]
                 .as_str()
@@ -152,6 +159,7 @@ impl OpenCodeAccount {
                 .collect::<String>();
             return Err(crate::runtime::account_auth::ModelRequestError {
                 status,
+                retry_after,
                 message: format!("OpenCode model request returned HTTP {status}: {safe}"),
             }
             .into());

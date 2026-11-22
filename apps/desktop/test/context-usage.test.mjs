@@ -14,3 +14,9 @@ test("missing context stays unknown, zero stays zero and invalid fields are igno
   assert.equal(latestContextUsage([usage({usageScope:"turn",inputTokens:999})]),undefined);
   assert.deepEqual(latestContextUsage([usage({contextUsed:0,contextWindow:100}),usage({contextUsed:-1,contextWindow:NaN})]),{contextUsed:0,contextWindow:100});
 });
+test("context cache comes from the same observation as the current context size",()=>{
+  const measured=usage({usageScope:"context",contextUsed:443200,cachedInputTokens:440000});
+  const accounting=usage({usageScope:"session",contextWindow:1048576,cachedInputTokens:2747000});
+  assert.deepEqual(latestContextUsage([measured,accounting]),{contextUsed:443200,contextWindow:1048576,cachedInputTokens:440000});
+  assert.deepEqual(latestContextUsage([measured,accounting,usage({contextUsed:7200})]),{contextUsed:7200,contextWindow:1048576});
+});

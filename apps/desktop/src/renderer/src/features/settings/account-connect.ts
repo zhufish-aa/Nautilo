@@ -1,8 +1,7 @@
 import type { RuntimeConnection } from "@agenthub/domain";
 import type { ConnectionDraft } from "../../stores/connections";
-export type AccountHarness = "codex" | "claude-code" | "antigravity" | "opencode";
-export const ACCOUNT_HARNESSES: AccountHarness[] = ["codex", "claude-code", "antigravity", "opencode"];
-export const accountHarnessName = (harness: string): string => ({ codex: "Codex", "claude-code": "Claude Code", antigravity: "Antigravity", opencode: "OpenCode" } as Record<string, string>)[harness] ?? harness;
+import type { AccountHarness } from "../../../../shared/account-harnesses";
+export const accountHarnessName = (harness: string): string => ({ codex: "Codex", "claude-code": "Claude Code", antigravity: "Antigravity", opencode: "OpenCode", "kimi-code": "Kimi Code" } as Record<string, string>)[harness] ?? harness;
 export type ConnectStage = "detecting" | "preparing" | "login" | "saving";
 export interface AccountConnectDependencies {
   detect(harness: AccountHarness): Promise<string>;

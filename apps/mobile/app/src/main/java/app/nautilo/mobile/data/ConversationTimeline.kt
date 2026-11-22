@@ -49,8 +49,12 @@ internal fun conversationActivityVisible(item: ActivityItem): Boolean {
     if (item.kind == "stopped") return true
     if (item.kind == "provider_ui") {
         val p = item.payload
-        return p.text("method") == "notify" || p.text("method") == "open_url" &&
-            p.optJSONObject("raw")?.text("url")?.matches(Regex("https?://.+", RegexOption.IGNORE_CASE)) == true
+        val raw = p.optJSONObject("raw")
+        return when (p.text("method")) {
+            "notify" -> p.text("text").isNotBlank() || raw?.text("instructions")?.isNotBlank() == true
+            "open_url" -> raw?.text("url")?.matches(Regex("https?://.+", RegexOption.IGNORE_CASE)) == true
+            else -> false
+        }
     }
     if (item.kind == "artifact" && item.payload.text("kind") == "diff") return false
     if (item.eventType.isBlank()) return item.kind in setOf("thought", "tool", "terminal", "team", "error", "file", "plan", "recovery", "task", "handoff", "approval", "verification", "git", "artifact", "checkpoint")

@@ -1,12 +1,18 @@
 //! Bounded reads for the workbench assistant. The session journal stays on disk.
 use crate::database::connection::db_fail;
 use crate::errors::{invalid, not_found, CoreResult};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 const RECORDS: &str = "SELECT rowid AS seq, data FROM assistant_records WHERE kind=? AND rowid>? AND (?=0 OR rowid<?) AND (?='' OR instr(lower(data),lower(?))>0)";
 
 pub fn records(db: &Connection, input: &Value) -> CoreResult<Value> {
+    if let Some(id) = input["id"].as_str() {
+        let record: Option<(i64, String)> = db.query_row("SELECT rowid,data FROM assistant_records WHERE id=?1 AND kind=?2",
+            params![id, input["kind"].as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional().map_err(db_fail)?;
+        return Ok(json!(record.into_iter().map(|(seq, data)| json!({"seq":seq,"value":serde_json::from_str::<Value>(&data).unwrap_or(Value::Null)})).collect::<Vec<_>>()));
+    }
     let order = if input["oldest"] == true {
         "ASC"
     } else {
@@ -27,7 +33,7 @@ pub fn save(db: &Connection, input: &Value) -> CoreResult<Value> {
     let kind = input["kind"].as_str().unwrap_or("");
     let id = input["id"].as_str().unwrap_or("");
     let data = input["value"].to_string();
-    if !matches!(kind, "turn" | "settings" | "memory")
+    if !matches!(kind, "turn" | "settings" | "memory" | "automation")
         || id.is_empty()
         || id.len() > 100
         || (kind != "turn" && id != kind)
@@ -38,6 +44,64 @@ pub fn save(db: &Connection, input: &Value) -> CoreResult<Value> {
     }
     let seq: i64 = db.query_row("INSERT INTO assistant_records(id,kind,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE assistant_records.kind=excluded.kind RETURNING rowid",params![id,kind,data],|row|row.get(0)).map_err(db_fail)?;
     Ok(json!({"seq":seq}))
+}
+
+pub fn dispatches(db: &Connection, input: &Value) -> CoreResult<Value> {
+    let items = input["items"].as_array().filter(|items| items.len() <= 100)
+        .ok_or_else(|| invalid("items", "Supply up to 100 assistant dispatches"))?;
+    let mut output = Vec::with_capacity(items.len());
+    let mut run = db.prepare_cached(
+        "SELECT coalesce((SELECT id FROM runs WHERE id=?1 AND session_id=?2), (SELECT run_id FROM runtime_events WHERE session_id=?2 AND json_extract(data,'$.type')='run.started' AND json_extract(data,'$.payload.userMessageId')=?3 ORDER BY sequence DESC LIMIT 1))"
+    ).map_err(db_fail)?;
+    let mut result = db.prepare_cached(
+        "SELECT substr(json_extract(data,'$.text'),1,6000) FROM messages WHERE session_id=?1 AND json_extract(data,'$.sender')='agent' AND ((?2<>'' AND json_extract(data,'$.runId')=?2) OR (?3<>'' AND json_extract(data,'$.projectRunId')=?3)) ORDER BY created_at DESC,rowid DESC LIMIT 1"
+    ).map_err(db_fail)?;
+    for item in items {
+        let session_id = item["sessionId"].as_str().ok_or_else(|| invalid("sessionId", "Missing session"))?;
+        let message_id = item["messageId"].as_str().ok_or_else(|| invalid("messageId", "Missing message"))?;
+        let project_run = item["projectRunId"].as_str().unwrap_or("");
+        let run_id: Option<String> = run.query_row(params![item["runId"].as_str(), session_id, message_id], |row| row.get(0)).map_err(db_fail)?;
+        let run_id = run_id.as_deref().unwrap_or("");
+        let status: Option<String> = db.query_row(
+            "SELECT coalesce((SELECT json_extract(data,'$.status') FROM project_runs WHERE id=?1),(SELECT json_extract(data,'$.status') FROM runs WHERE id=?2))",
+            params![project_run, run_id], |row| row.get(0)).map_err(db_fail)?;
+        let summary = if status.as_deref() == Some("completed") {
+            result.query_row(params![session_id,run_id,project_run], |row| row.get::<_, Option<String>>(0))
+                .optional().map_err(db_fail)?.flatten()
+        } else {
+            None
+        };
+        let mut dispatch = json!({"messageId":message_id});
+        if let Some(status) = status { dispatch["status"] = json!(status); }
+        if let Some(summary) = summary { dispatch["result"] = json!(summary); }
+        output.push(dispatch);
+    }
+    Ok(json!(output))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_projection_links_queued_message_to_its_completed_run() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::database::migrations::migrate(&db).unwrap();
+        db.execute("INSERT INTO runs VALUES('run','worker','{\"status\":\"running\"}','2026-11-22')", []).unwrap();
+        db.execute("INSERT INTO runtime_events VALUES('started',1,'worker',NULL,'run',?1,'2026-11-22')",
+            [json!({"type":"run.started","payload":{"userMessageId":"submitted"}}).to_string()]).unwrap();
+        let keys = json!({"items":[{"sessionId":"worker","messageId":"submitted"},
+            {"sessionId":"other","messageId":"submitted","runId":"run"}]});
+        let running = dispatches(&db, &keys).unwrap();
+        assert_eq!(running[0]["status"], "running");
+        assert!(running[1]["status"].is_null());
+        db.execute("UPDATE runs SET data=?1 WHERE id='run'", [json!({"status":"completed"}).to_string()]).unwrap();
+        db.execute("INSERT INTO messages VALUES('reply','worker',?1,'2026-11-22')",
+            [json!({"runId":"run","sender":"agent","text":"Verified"}).to_string()]).unwrap();
+        let done = dispatches(&db, &keys).unwrap();
+        assert_eq!(done[0]["status"], "completed");
+        assert!(done[0]["result"].as_str().unwrap().contains("Verified"));
+    }
 }
 
 const SESSIONS: &str = r#"WITH filter AS (SELECT ? AS project, ? AS session, lower(?) AS term, ? AS previews),

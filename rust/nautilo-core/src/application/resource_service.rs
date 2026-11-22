@@ -277,10 +277,12 @@ impl ResourceService {
             &format!("resource-plan:{id}"),
             &json!({"apiKey":uuid::Uuid::new_v4().to_string(),"files":files}),
         )?;
+        // Redaction reads the credential vault, which uses the same database.
+        let plan = self.redaction.value(&plan);
         Repositories::new(&self.db.lock().unwrap().raw)
             .resource_transactions()
-            .save(&self.redaction.value(&plan), &now)?;
-        Ok(self.redaction.value(&plan))
+            .save(&plan, &now)?;
+        Ok(plan)
     }
     pub fn apply(&self, id: &str, undo: bool) -> CoreResult<Value> {
         let _lock = self.write_lock.lock().unwrap();

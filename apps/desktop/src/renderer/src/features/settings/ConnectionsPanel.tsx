@@ -2,10 +2,9 @@ import { AccountConnectDialog } from "./AccountConnectDialog";
 import { accountHarnessName } from "./account-connect";
 import { AccountRoutingControl } from "./AccountRoutingControl";
 import { NativeConnectionImportDialog } from "./NativeConnectionImportDialog";
-import { useEffect, useId, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Eye, EyeOff, FolderInput, LoaderCircle, Plus, RefreshCw, Search, Server, Trash2, Info } from "lucide-react";
+import { ArrowRight, Eye, EyeOff, FolderInput, LoaderCircle, LogIn, Plus, RefreshCw, Search, Server, ShieldCheck, Trash2 } from "lucide-react";
 import type { RuntimeConnection } from "@agenthub/domain";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -16,18 +15,26 @@ import { IdentityAvatar, ProviderAvatar } from "../../components/ui/IdentityAvat
 import { Tooltip } from "../../components/ui/Tooltip";
 import { useI18n } from "../../lib/i18n";
 import { newId } from "../../lib/utils";
-import { useConnectionsStore, type ConnectionDraft } from "../../stores/connections";
+import { requestCore } from "../../lib/bridge";
+import { connectionModelKey, useConnectionsStore, type ConnectionDraft } from "../../stores/connections";
 import { useAgentsStore } from "../../stores/agents";
 import { toast } from "../../stores/toast";
 import { AccountLoginPanel } from "../agents/AccountLoginPanel";
 import { ModelConfigurationEditor } from "../agents/ModelConfigurationEditor";
 import { modelRow, serializeModels, type ModelRow } from "../agents/model-editor";
-import { DiagnosticStatus, ServiceDiagnosticPanel } from "./ServiceDiagnosticPanel";
-import { useUiReducedMotion, useSurfaceEntrance } from "../../lib/ui-motion";
+import { ServiceDiagnosticPanel } from "./ServiceDiagnosticPanel";
+import { AccountStorage, AccountSummary } from "./AccountConnectionDetails";
+import { useSurfaceEntrance } from "../../lib/ui-motion";
+import "./connections.css";
 
 const protocols = [{ value: "responses", label: "OpenAI Responses" }, { value: "chat", label: "OpenAI Chat Completions" }, { value: "anthropic", label: "Anthropic Messages" }];
 function label(connection: RuntimeConnection): string { return connection.kind === "login" ? accountHarnessName(connection.harness ?? "codex") : protocols.find((item) => item.value === connection.protocol)?.label ?? connection.protocol ?? "API"; }
 function fresh(kind: "api" | "login"): ConnectionDraft { return { id: newId("connection"), name: "", kind, enabled: true, ...(kind === "api" ? { protocol: "responses" as const, baseUrl: "" } : { harness: "codex", loginProfileDirectory: "" }), models: [] }; }
+
+function endpointHost(url?: string): string | undefined {
+  if (!url) return;
+  try { return new URL(url).host; } catch { return; }
+}
 
 function ConnectionMark({ connection, size = "sm" }: { connection: Pick<ConnectionDraft, "id" | "name" | "kind" | "harness">; size?: "sm" | "md" }): JSX.Element {
   return connection.kind === "login" ? <ProviderAvatar providerId={connection.harness ?? "codex"} size={size} /> : <IdentityAvatar label={connection.name || "API"} seed={connection.id} size={size} />;
@@ -39,10 +46,8 @@ export function ConnectionsPanel(): JSX.Element {
   const requestedConnectionId = searchParams.get("connection");
   const focusedConnection = useRef<string>();
   const { locale } = useI18n(); const zh = locale === "zh-CN";
-  const motionId = useId(); const reducedMotion = useUiReducedMotion();
-  const { connections, loading, error: loadError, hydrate, save, remove, models: discover } = useConnectionsStore();
+  const { connections, loading, error: loadError, hydrate, save, remove, models: discover, modelCatalogs, get: getConnection } = useConnectionsStore();
   const installations = useAgentsStore((state) => state.installations);
-  const instances = useAgentsStore((state) => state.instances);
   const loadConnectionModels = useConnectionsStore((state) => state.loadModels);
   const [kind, setKind] = useState<"api" | "login">("api");
   const [query, setQuery] = useState("");
@@ -58,13 +63,32 @@ export function ConnectionsPanel(): JSX.Element {
   const [deleteOpen, setDeleteOpen] = useState(false); const [discardTarget, setDiscardTarget] = useState<RuntimeConnection | "api" | "login" | "new">();
   const [dirty, setDirty] = useState(false); const generation = useRef(0);
   const selected = connections.find((item) => item.id === selectedId);
+  const [accountDetail, setAccountDetail] = useState<RuntimeConnection>();
+  const [now, setNow] = useState(Date.now);
+  const detailMeta = accountDetail?.id === selected?.id && accountDetail?.revision === selected?.revision ? accountDetail?.accountMeta : undefined;
+  const selectedAccount = selected && { ...selected, accountMeta: { ...selected.accountMeta, localUsage: detailMeta?.localUsage, referencedByHarnesses: detailMeta?.referencedByHarnesses } };
   const detailRef = useSurfaceEntrance<HTMLElement>(selectedId);
-  const visible = connections.filter((item) => item.kind === kind && `${item.name} ${item.baseUrl ?? ""}`.toLowerCase().includes(query.toLowerCase()));
+  const visible = connections.filter(item => item.kind === kind && [item.name, item.baseUrl, label(item), item.accountMeta?.accountEmail, item.accountMeta?.accountLabel, item.accountMeta?.subscriptionPlan].filter(Boolean).join(" ").toLowerCase().includes(query.trim().toLowerCase()));
+  const searchLabel = kind === "login" ? (zh ? "搜索账号" : "Search accounts") : (zh ? "搜索连接" : "Search connections");
   useEffect(() => { void hydrate(); }, [hydrate]);
+  useEffect(() => {
+    if (!selected || selected.kind !== "login") return;
+    let active = true;
+    void requestCore<RuntimeConnection>("connection.get", { connectionId: selected.id, revision: selected.revision, includeUsage: true }).then(value => {
+      if (active) setAccountDetail(value);
+    }, () => undefined);
+    return () => { active = false; };
+  }, [selected?.id, selected?.revision]);
+  useEffect(() => {
+    const delays = connections.map(item => Date.parse(item.accountMeta?.rateLimitedUntil ?? "") - now).filter(delay => delay > 0);
+    if (!delays.length) return;
+    const timer = window.setTimeout(() => setNow(Date.now()), Math.min(60_000, ...delays) + 20);
+    return () => window.clearTimeout(timer);
+  }, [connections, now]);
   const edit = (connection: RuntimeConnection): void => {
     setKind(connection.kind);
     generation.current++; setFetching(false); setSelectedId(connection.id); setRevision(connection.revision);
-    const { revision: _revision, createdAt: _created, updatedAt: _updated, hasCredential: _credential, accountGateway: _gateway, ...values } = connection;
+    const { revision: _revision, createdAt: _created, updatedAt: _updated, hasCredential: _credential, accountGateway: _gateway, accountMeta: _meta, ...values } = connection;
     setDraft(values); setRows((connection.models ?? []).map((model) => modelRow(model, newId("model"))));
     setApiKey(""); setClearApiKey(false); setShowKey(false); setError(""); setDirty(false);
   };
@@ -135,10 +159,13 @@ export function ConnectionsPanel(): JSX.Element {
     const request = ++generation.current;
     setFetching(true);
     try {
+      await getConnection(selected.id);
       const catalog = await loadConnectionModels(selected.id, selected.revision, true);
       if (request !== generation.current) return;
       if (catalog.models.length) setRows(catalog.models.map((model) => modelRow(model, newId("model"))));
       setError(catalog.warning ?? "");
+    } catch (cause) {
+      if (request === generation.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (request === generation.current) setFetching(false);
     }
@@ -150,50 +177,113 @@ export function ConnectionsPanel(): JSX.Element {
     finally { setBusy(false); }
   };
   const installed = installations.find((item) => item.providerId === draft?.harness);
-  return <div className="connections-panel space-y-6" data-tab={tab}>
-    <div className="connection-kind-tabs">{([{ id: "api", name: zh ? "API 连接" : "API connections" }, { id: "login", name: zh ? "登录账号" : "Login accounts" }] as const).map((item) => <button type="button" key={item.id} disabled={busy} aria-pressed={kind === item.id} onClick={() => navigate(item.id)}>{kind === item.id && <motion.span className="management-selection" layoutId={`${motionId}-kind`} transition={{type:"spring",duration:reducedMotion ? 0 : 0.5,bounce:0.2}} aria-hidden/>}<span>{item.name}</span><span className="connection-kind-count">{connections.filter(connection=>connection.kind===item.id).length}</span></button>)}</div>
+  const modelCount = rows.filter(row => row.enabled).length;
+  const previewModels = [...new Set((draft?.models ?? []).filter(model => model.enabled !== false).map(model => model.displayName?.trim() || model.id))];
+  const catalog = selected && modelCatalogs[connectionModelKey(selected.id, selected.revision)];
+  const defaultModel = previewModels[0] ?? catalog?.models.find(model => model.id === catalog.defaultModel)?.displayName ?? catalog?.defaultModel;
+  const meta = selected?.accountMeta;
+  const storedDirectory = draft?.harness === "antigravity" ? undefined : draft?.loginProfileDirectory || undefined;
+  const storage = meta?.storageMeta ?? (storedDirectory ? { configDir: storedDirectory } : undefined);
+  const headingStatus = Date.parse(meta?.rateLimitedUntil ?? "") > now ? { tone: "danger", text: zh ? "限流冷却中" : "Rate limited" }
+    : draft?.enabled ? { tone: "ok", text: zh ? "已启用" : "Enabled" } : { tone: "muted", text: zh ? "已停用" : "Disabled" };
+  const headingSubtitle = draft?.kind === "login" && selected ? [label(selected), meta?.accountEmail || meta?.accountLabel, meta?.workspaceName].filter(Boolean).join(" · ")
+    : draft?.kind === "api" ? [protocols.find(item => item.value === draft.protocol)?.label, endpointHost(draft.baseUrl)].filter(Boolean).join(" · ") : undefined;
+  return <div className="connections-panel" data-tab={tab}>
+    <div className="connection-kind-tabs" role="group" aria-label={zh ? "连接类型" : "Connection type"}>
+      {([{ id: "api", name: zh ? "API 连接" : "API connections" }, { id: "login", name: zh ? "登录账号" : "Login accounts" }] as const).map(item => (
+        <button type="button" key={item.id} disabled={busy} aria-pressed={kind === item.id} onClick={() => navigate(item.id)}>
+          <span>{item.name}</span><span className="connection-kind-count">{connections.filter(connection => connection.kind === item.id).length}</span>
+        </button>
+      ))}
+    </div>
     {loadError && <div role="alert" className="flex items-center justify-between gap-3 text-sm text-danger"><span>{loadError}</span><Button variant="outline" size="sm" onClick={() => void hydrate()}>{zh ? "重试" : "Retry"}</Button></div>}
-    <div className="connection-layout grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
-      <aside className="space-y-3 lg:border-r lg:border-line lg:pr-5">
-        <div className="relative"><Search className="absolute left-3 top-3 h-4 w-4 text-ink-3" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} aria-label={zh ? "搜索连接" : "Search connections"} placeholder={zh ? "搜索连接" : "Search connections"} /></div>
-        <Button variant="outline" className="w-full" disabled={busy} onClick={() => navigate("new")}><Plus className="h-4 w-4" />{kind === "login" ? (zh ? "添加账号" : "Add account") : (zh ? "添加连接" : "Add connection")}</Button>
-        {kind === "api" && <Button variant="outline" className="w-full" disabled={busy} onClick={() => setImportOpen(true)}><FolderInput className="h-4 w-4"/>{zh ? "从 Harness 导入" : "Import from a harness"}</Button>}
-        <div className="connection-list">{visible.map((item) => <button type="button" key={item.id} disabled={busy} aria-pressed={selectedId === item.id} onClick={() => navigate(item)}>
-          {selectedId === item.id && <motion.span className="connection-selection" layoutId={`${motionId}-connection`} transition={{type:"spring",duration:reducedMotion ? 0 : 0.5,bounce:0.2}} aria-hidden/>}
-          <ConnectionMark connection={item}/><span className="connection-item-copy"><span className="connection-item-name">{item.name}</span><span className="connection-item-protocol">{label(item)}{!item.enabled ? zh ? " · 已停用" : " · Disabled" : ""}</span><DiagnosticStatus target={{kind:"connection",id:item.id,version:String(item.revision)}}/></span>
-        </button>)}</div>
+    <div className="connection-layout">
+      <aside>
+        <div className="connection-list-toolbar" data-kind={kind}>
+          <div className="connection-search relative"><Search className="absolute left-3 h-4 w-4 text-ink-3" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} aria-label={searchLabel} placeholder={searchLabel} /></div>
+          <div className="connection-list-actions">
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => navigate("new")}><Plus size={15}/>{kind === "login" ? (zh ? "添加账号" : "Add account") : (zh ? "添加连接" : "Add connection")}</Button>
+            {kind === "api" && <Button variant="ghost" size="sm" disabled={busy} onClick={() => setImportOpen(true)}><FolderInput size={14}/>{zh ? "从 Harness 导入" : "Import from harness"}</Button>}
+          </div>
+        </div>
+        <div className="connection-list">{visible.map(item => {
+          const meta = item.accountMeta;
+          const cooling = Date.parse(meta?.rateLimitedUntil ?? "") > now;
+          const tone = !item.enabled ? "muted" : cooling || meta?.authStatus === "expired" || meta?.authStatus === "error" ? "danger" : meta?.authStatus === "valid" ? "ok" : "warn";
+          const identity = meta?.accountEmail || meta?.accountLabel || label(item);
+          const savedModels = item.models?.filter(model => model.enabled !== false).length ?? 0;
+          const count = item.models?.length ? savedModels : modelCatalogs[connectionModelKey(item.id, item.revision)]?.models.length ?? 0;
+          const badge = cooling ? (zh ? "限流中" : "Limited") : !item.enabled ? (zh ? "停用" : "Disabled") : meta?.subscriptionPlan;
+          return <button type="button" key={item.id} disabled={busy} aria-pressed={selectedId === item.id} onClick={() => navigate(item)}>
+            <span className="connection-list-mark"><ConnectionMark connection={item}/><i className="connection-status-dot" data-tone={tone}/></span>
+            <span className="connection-item-copy">
+              <span className="connection-item-line"><span className="connection-item-name" title={item.name}>{item.name}</span><span className="connection-item-model-count">{count}{zh ? " 模型" : " models"}</span></span>
+              <span className="connection-item-line"><span className="connection-item-protocol" title={identity}>{identity}</span>{badge && <span className="connection-tag" data-tone={cooling ? "danger" : !item.enabled ? "muted" : "plan"}>{badge}</span>}</span>
+            </span>
+          </button>;
+        })}</div>
         {loading && <p className="text-xs text-ink-3">{zh ? "读取连接…" : "Loading connections…"}</p>}
         {!loading && !visible.length && <p className="px-2 py-4 text-xs text-ink-3">{zh ? "暂无匹配的连接" : "No matching connections"}</p>}
       </aside>
-      {draft ? <section ref={detailRef} className="connection-detail min-w-0 space-y-5">
-        <header className="connection-heading"><ConnectionMark connection={draft} size="md" /><div className="connection-heading-copy"><h2>{draft.name || (zh ? "新连接" : "New connection")}</h2><Tooltip content={zh ? "保存会创建新版本。旧会话继续使用原版本及原密钥，修改或清空这里的密钥不会撤销旧版本。停用连接可阻止所有版本运行；撤销密钥请前往服务商。不会自动切换其他账号或端点。" : "Saving creates a revision. Existing conversations retain their original revision and key; changing or clearing this key does not revoke older revisions. Disabling blocks all revisions. Revoke keys with the provider. No account or endpoint is substituted."}><button type="button" className="connection-revision-pill">{revision ? `${zh ? "版本" : "Revision"} ${revision}` : zh ? "尚未保存" : "Not saved"}<Info size={12} aria-hidden /></button></Tooltip></div>{selected && <Button variant="ghost" size="sm" className="connection-delete" disabled={busy} onClick={() => setDeleteOpen(true)} aria-label={zh ? "删除连接" : "Delete connection"}><Trash2 size={14} />{zh ? "删除" : "Delete"}</Button>}</header>
+      {draft ? <section ref={detailRef} className="connection-detail min-w-0">
+        <header className="connection-heading">
+          <ConnectionMark connection={draft} size="md" />
+          <div className="connection-heading-copy">
+            <div className="connection-heading-line">
+              <h2>{draft.name || (zh ? "新连接" : "New connection")}</h2>
+              <span className="connection-tag" data-tone={headingStatus.tone}>{headingStatus.text}</span>
+              {meta?.subscriptionPlan && <span className="connection-tag" data-tone="plan">{meta.subscriptionPlan}</span>}
+              {revision && <Tooltip content={zh ? "保存会创建新版本。已有会话继续用原版本和原密钥。停用连接会阻止所有版本运行；如需撤销密钥，请前往服务商。" : "Saving creates a revision. Existing sessions keep their revision and key. Disabling blocks all revisions. Revoke keys with the provider."}><button type="button" className="connection-revision-pill" aria-label={zh ? `版本 ${revision}` : `Revision ${revision}`}>v{revision}</button></Tooltip>}
+            </div>
+            {headingSubtitle && <p title={headingSubtitle}>{headingSubtitle}</p>}
+          </div>
+          {selected && <Button variant="ghost" size="sm" className="connection-delete" disabled={busy} onClick={() => setDeleteOpen(true)} aria-label={zh ? "删除连接" : "Delete connection"}><Trash2 size={14} />{zh ? "删除" : "Delete"}</Button>}
+        </header>
         <div className="connection-editor-tabs" role="tablist" aria-label={zh ? "连接配置" : "Connection configuration"} onKeyDown={(event) => {
           if (busy || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
           event.preventDefault();
           const next = event.key === "Home" ? "connection" : event.key === "End" ? "models" : tab === "connection" ? "models" : "connection";
           setTab(next);
           event.currentTarget.querySelector<HTMLButtonElement>(`[data-connection-tab="${next}"]`)?.focus();
-        }}>{([{ id: "connection", name: zh ? "连接设置" : "Connection" }, { id: "models", name: zh ? "模型配置" : "Models" }] as const).map((item) => <button type="button" role="tab" key={item.id} id={`connection-${item.id}-tab`} data-connection-tab={item.id} aria-controls={`connection-${item.id}-panel`} aria-selected={tab === item.id} tabIndex={tab === item.id ? 0 : -1} disabled={busy} onClick={() => setTab(item.id)}>{tab === item.id && <motion.span className="management-selection" layoutId={`${motionId}-tab`} transition={{type:"spring",duration:reducedMotion ? 0 : 0.5,bounce:0.2}} aria-hidden/>}<span>{item.name}</span>{item.id === "models" && <span className="connection-kind-count">{rows.filter(row=>row.enabled !== false).length}</span>}</button>)}</div>
-        {selected && <ServiceDiagnosticPanel target={{kind:"connection",id:selected.id,version:String(selected.revision)}} disabled={busy || dirty}/>}
+        }}>{([{ id: "connection", name: zh ? "连接设置" : "Connection" }, { id: "models", name: zh ? "模型配置" : "Models" }] as const).map((item) => <button type="button" role="tab" key={item.id} id={`connection-${item.id}-tab`} data-connection-tab={item.id} aria-controls={`connection-${item.id}-panel`} aria-selected={tab === item.id} tabIndex={tab === item.id ? 0 : -1} disabled={busy} onClick={() => setTab(item.id)}><span>{item.name}</span>{item.id === "models" && <span className="connection-kind-count">{modelCount}</span>}</button>)}</div>
+        <div className="connection-detail-scroll">
         <fieldset disabled={busy} className="connection-editor-panels min-w-0">
-        <div className="connection-tab-panel" role="tabpanel" id="connection-connection-panel" aria-labelledby="connection-connection-tab" hidden={tab !== "connection"}><div className="connection-form-fields">
-          <Field label={zh ? "连接名称" : "Connection name"}><Input value={draft.name} onChange={(event) => patch({ name: event.target.value })} aria-label={zh ? "连接名称" : "Connection name"} placeholder={zh ? "例如：工作 API" : "e.g. Work API"} /></Field>
+        <div className="connection-tab-panel" role="tabpanel" id="connection-connection-panel" aria-labelledby="connection-connection-tab" hidden={tab !== "connection"}>
+          {draft.kind === "login" && selectedAccount && <>
+            <AccountSummary key={`${selectedAccount.id}:${selectedAccount.revision}`} connection={selectedAccount} modelCount={modelCount} defaultModel={defaultModel} onModels={() => setTab("models")} now={now} />
+            <div className="connection-verification">
+              {draft.loginProfileDirectory ? <AccountLoginPanel disabled={dirty} onLoginSuccess={() => void refreshAfterLogin()} key={`${selectedAccount.id}:${selectedAccount.revision}`} instance={{ id: selectedAccount.id, displayName: selectedAccount.name, providerId: selectedAccount.harness!, executable: installed?.executable ?? "", baseArgs: [], envPolicyId: "env-standard", enabled: selectedAccount.enabled, status: "available", loginProfileDirectory: selectedAccount.loginProfileDirectory, createdAt: selectedAccount.createdAt, updatedAt: selectedAccount.updatedAt }} />
+                : <div className="connection-auth-shared"><LogIn size={17}/><p>{zh ? "此账号共享本机的官方登录。可在官方 CLI 管理，或用「添加账号」建立独立连接。" : "This account shares the device's official login. Manage it in the official CLI or add an isolated account."}</p></div>}
+              <ServiceDiagnosticPanel key={selectedAccount.id} target={{kind:"connection",id:selectedAccount.id,version:String(selectedAccount.revision)}} disabled={busy || dirty}/>
+            </div>
+          </>}
+          {draft.kind === "api" && selected && <div className="connection-verification"><ServiceDiagnosticPanel key={selected.id} target={{kind:"connection",id:selected.id,version:String(selected.revision)}} disabled={busy || dirty}/></div>}
+          <div className="connection-form-fields">
+          <Field label={zh ? "连接名称" : "Connection name"} className={draft.kind === "login" && !previewModels.length ? "connection-full-field" : undefined}><Input value={draft.name} onChange={(event) => patch({ name: event.target.value })} aria-label={zh ? "连接名称" : "Connection name"} placeholder={zh ? "例如：工作连接" : "e.g. Work connection"} /></Field>
           {draft.kind === "api" ? <>
             <Field label={zh ? "协议" : "Protocol"} hint={zh ? "API 连接可供各个 Harness 使用，由对应插件应用端点、密钥和模型配置。模型列表只显示这里已启用的模型。运行使用所选连接，不会借用其他账号或密钥。" : "API connections are available to each harness. Its plugin applies the endpoint, key and model configuration. Only models enabled here appear in the picker. Runs use the selected connection without borrowing another account or key."}><SelectField value={draft.protocol} options={protocols} onValueChange={(protocol) => patch({ protocol: protocol as RuntimeConnection["protocol"] })} aria-label={zh ? "协议" : "Protocol"} /></Field>
-            <Field label="Base URL" className="connection-full-field" hint={zh ? "填入服务商的 API 基础地址。HTTPS 必需，127.0.0.1 或 [::1] 本机地址可用 HTTP。" : "Use your provider's API base URL. HTTPS is required; HTTP is allowed for 127.0.0.1 or [::1]."}><Input value={draft.baseUrl ?? ""} onChange={(event) => patch({ baseUrl: event.target.value })} aria-label="Base URL" placeholder="https://api.example.com/v1" spellCheck={false} className="font-mono text-sm" /></Field>
-            <Field label="API Key" className="connection-full-field"><div className="relative"><Input type={showKey ? "text" : "password"} value={apiKey} autoComplete="off" spellCheck={false} aria-label="API Key" placeholder={selected?.hasCredential && !clearApiKey ? (zh ? "已保存 · 留空保留" : "Saved · leave blank to keep") : (zh ? "运行前需配置 API Key" : "API key required before running")} onChange={(event) => { setApiKey(event.target.value); setClearApiKey(false); setDirty(true); }} className="pr-11 font-mono text-sm" /><button type="button" onClick={() => setShowKey(!showKey)} aria-label={showKey ? zh ? "隐藏密钥" : "Hide key" : zh ? "显示密钥" : "Show key"} className="connection-key-visibility">{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button></div>{selected?.hasCredential && <button type="button" className="mt-2 text-xs text-ink-3 underline" onClick={() => { setApiKey(""); setClearApiKey(!clearApiKey); setDirty(true); }}>{clearApiKey ? (zh ? "保存时移除密钥 · 撤销" : "Key will be removed on save · undo") : (zh ? "移除已保存的密钥" : "Remove saved key")}</button>}</Field>
-          </> : <>
-            <Field label={zh ? "账号类型" : "Account type"} hint={draft.harness === "opencode" ? (draft.loginProfileDirectory ? (zh ? "独立保存此 OpenCode 账号的原生登录与会话，配置、插件、Skills 和 MCP 保留原生优先级。" : "Native login and sessions are isolated for this account; configuration, plugins, Skills and MCP retain native precedence.") : (zh ? "旧连接共享本机 OpenCode 的原生登录。" : "Legacy connection sharing local OpenCode login.")) : draft.harness === "antigravity" ? (zh ? "与官方 agy 共用系统凭据库中的 Google 登录。" : "Google sign-in is shared with official agy through the OS keyring.") : (zh ? "一个目录对应一个账号。已用于会话的目录不要重新登录其他账号。" : "Use one directory per account. Keep the identity of existing conversations.")}><p className="text-sm text-ink-2">{accountHarnessName(draft.harness ?? "codex")}</p></Field>
-            {draft.loginProfileDirectory && <details className="connection-storage connection-full-field"><summary className="cursor-pointer text-xs text-ink-3">{zh ? "账号存储信息（应用管理）" : "Account storage (managed by the app)"}</summary><p className="mt-2 break-all font-mono text-xs text-ink-3">{draft.loginProfileDirectory}</p></details>}
-            {selected && <AccountRoutingControl key={selected.id} connection={selected} disabled={busy || dirty} />}
-            {draft.harness === "opencode" && !draft.loginProfileDirectory ? <p className="connection-full-field text-xs text-ink-3">{zh ? "此旧连接共享本机 OpenCode 登录。需要独立账号时，请使用“添加账号 → OpenCode”完成官方浏览器授权。" : "This legacy connection shares local OpenCode login. For an isolated account, use Add account → OpenCode and complete official browser authorization."}</p> : selected && !dirty && installed?.executable ? <AccountLoginPanel onLoginSuccess={() => void refreshAfterLogin()} key={`${selected.id}:${selected.revision}`} instance={{ id: selected.id, displayName: selected.name, providerId: selected.harness!, executable: installed.executable, baseArgs: [], envPolicyId: "env-standard", enabled: selected.enabled, status: "available", loginProfileDirectory: selected.loginProfileDirectory, createdAt: selected.createdAt, updatedAt: selected.updatedAt }} /> : <p className="text-xs text-ink-3">{zh ? "安装对应官方 CLI 后可重新登录此账号。" : "Install the matching official CLI to sign in to this account again."}</p>}
-          </>}
-          <div className="connection-enabled-control connection-full-field"><span className="text-sm">{zh ? "启用连接" : "Enable connection"}</span><Switch checked={draft.enabled} onCheckedChange={(enabled) => patch({ enabled })} aria-label={zh ? "启用连接" : "Enable connection"} /></div>
-        </div></div><div className="connection-tab-panel connection-models space-y-4" role="tabpanel" id="connection-models-panel" aria-labelledby="connection-models-tab" hidden={tab !== "models"}>{draft.kind === "login" && <p className="text-sm text-ink-3">{fetching ? (zh ? "正在自动获取账号模型…" : "Discovering account models…") : (zh ? "模型由登录账号自动获取。可刷新列表，或按需调整显示名称和价格。" : "Models are discovered from this account. Refresh or customize labels and pricing as needed.")}</p>}{draft.kind === "api" && (!selected || dirty) && <p className="text-xs text-ink-3">{zh ? "先保存连接，再获取模型；手动编辑随连接一起保存。" : "Save the connection before fetching models. Manual edits are saved with it."}</p>}<ModelConfigurationEditor key={draft.id} fetchAction={<Button variant="outline" size="sm" disabled={!selected || dirty || fetching} onClick={() => void fetchModels()}>{fetching ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{zh ? "获取模型" : "Fetch models"}</Button>} models={rows} onChange={(models) => { setRows(models); setDirty(true); generation.current++; setFetching(false); }} /></div>
+            <Field label="Base URL" className="connection-full-field" hint={zh ? "填入服务商的 API 基础地址。HTTPS 必需，127.0.0.1 或 [::1] 本机地址可用 HTTP。" : "Use your provider's API base URL. HTTPS is required; HTTP is allowed for 127.0.0.1 or [::1]."}><Input value={draft.baseUrl ?? ""} onChange={(event) => patch({ baseUrl: event.target.value })} aria-label="Base URL" placeholder="https://api.example.com/v1" spellCheck={false} className="connection-mono" /></Field>
+            <Field label="API Key" className="connection-full-field"><div className="relative"><Input type={showKey ? "text" : "password"} value={apiKey} autoComplete="off" spellCheck={false} aria-label="API Key" placeholder={selected?.hasCredential && !clearApiKey ? (zh ? "已保存 · 留空保留" : "Saved · leave blank to keep") : (zh ? "运行前需配置 API Key" : "API key required before running")} onChange={(event) => { setApiKey(event.target.value); setClearApiKey(false); setDirty(true); }} className="pr-11 connection-mono" /><button type="button" onClick={() => setShowKey(!showKey)} aria-label={showKey ? zh ? "隐藏密钥" : "Hide key" : zh ? "显示密钥" : "Show key"} className="connection-key-visibility">{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
+              {selected?.hasCredential && <div className="connection-key-actions">{!clearApiKey && <span><ShieldCheck size={14}/>{zh ? "当前已保存凭据" : "Credential saved"}</span>}<button type="button" onClick={() => { setApiKey(""); setClearApiKey(!clearApiKey); setDirty(true); }}>{clearApiKey ? (zh ? "保存时移除密钥 · 撤销" : "Key will be removed on save · undo") : (zh ? "移除密钥" : "Remove key")}</button></div>}
+            </Field>
+          </> : previewModels.length > 0 && <div className="connection-model-preview">
+            <span>{zh ? "已配置模型" : "Configured models"}</span>
+            <div><div>{previewModels.slice(0, 4).map(model => <code key={model} title={model}>{model}</code>)}</div>
+              {previewModels.length > 4 && <button type="button" onClick={() => setTab("models")}>+{previewModels.length - 4} {zh ? "更多" : "more"}<ArrowRight size={12}/></button>}
+            </div>
+          </div>}
+          </div>
+          <div className="connection-switches">
+            {selectedAccount?.kind === "login" && <AccountRoutingControl key={selectedAccount.id} connection={selectedAccount} disabled={busy || dirty} />}
+            <div className="connection-enabled-control"><div><strong>{zh ? "启用连接" : "Enable connection"}</strong><p>{zh ? "关闭后在新建任务和模型选择器中隐藏" : "Hide in new tasks and model pickers when disabled"}</p></div><Switch checked={draft.enabled} onCheckedChange={(enabled) => patch({ enabled })} aria-label={zh ? "启用连接" : "Enable connection"} /></div>
+          </div>
+          {draft.kind === "login" && storage && <AccountStorage key={draft.id} storage={storage}/>}
+        </div><div className="connection-tab-panel connection-models space-y-4" role="tabpanel" id="connection-models-panel" aria-labelledby="connection-models-tab" hidden={tab !== "models"}>{draft.kind === "login" && <p className="text-sm text-ink-3">{fetching ? (zh ? "正在自动获取账号模型…" : "Discovering account models…") : (zh ? "模型由登录账号自动获取。可刷新列表，或按需调整显示名称和价格。" : "Models are discovered from this account. Refresh or customize labels and pricing as needed.")}</p>}{draft.kind === "api" && (!selected || dirty) && <p className="text-xs text-ink-3">{zh ? "先保存连接，再获取模型；手动编辑随连接一起保存。" : "Save the connection before fetching models. Manual edits are saved with it."}</p>}<ModelConfigurationEditor key={draft.id} fetchAction={<Button variant="outline" size="sm" disabled={!selected || dirty || fetching} onClick={() => void fetchModels()}>{fetching ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{zh ? "获取模型" : "Fetch models"}</Button>} models={rows} onChange={(models) => { setRows(models); setDirty(true); generation.current++; setFetching(false); }} /></div>
         </fieldset>
         {error && <div className="space-y-2"><p role="alert" className="break-words text-sm text-danger">{error}</p>{selected && <Button variant="ghost" size="sm" disabled={busy} onClick={() => void reloadCurrent()}>{zh ? "放弃修改并重载已保存版本" : "Discard edits and reload saved version"}</Button>}</div>}
+        </div>
 
-        <div className="connection-save-bar flex justify-end gap-3"><Button variant="outline" disabled={busy} onClick={() => { if (selected) edit(selected); else { setDraft(undefined); setDirty(false); setApiKey(""); } }}>{zh ? "取消" : "Cancel"}</Button><Button variant="primary" disabled={busy || (!!selected && !dirty)} onClick={() => void submit()}>{busy && <LoaderCircle className="h-4 w-4 animate-spin" />}{tab === "models" ? (zh ? "保存模型" : "Save models") : (zh ? "保存连接" : "Save connection")}</Button></div>
+        <div className="connection-save-bar flex justify-end gap-3"><Button variant="ghost" disabled={busy} onClick={() => { if (selected) edit(selected); else { setDraft(undefined); setDirty(false); setApiKey(""); } }}>{zh ? "取消" : "Cancel"}</Button><Button variant="primary" className="connection-save" disabled={busy || (!!selected && !dirty)} onClick={() => void submit()}>{busy && <LoaderCircle className="h-4 w-4 animate-spin" />}{tab === "models" ? (zh ? "保存模型" : "Save models") : (zh ? "保存连接" : "Save connection")}</Button></div>
       </section> : <div className="flex min-h-64 flex-col items-center justify-center gap-4 text-center"><Server className="h-7 w-7 text-ink-3" /><p className="text-sm text-ink-3">{zh ? "添加独立供应商连接，再在新会话中选择。" : "Add an independent provider connection, then select it in a new conversation."}</p><Button variant="outline" onClick={() => navigate("new")}>{kind === "login" ? (zh ? "添加账号" : "Add account") : (zh ? "添加连接" : "Add connection")}</Button></div>}
     </div>
     <AccountConnectDialog open={accountOpen} onOpenChange={setAccountOpen} onConnected={(connection) => { setKind("login"); setQuery(""); edit(connection); toast.success(zh ? "账号已添加" : "Account added"); }} onSelectExisting={(connection) => { setKind("login"); setQuery(""); edit(connection); }} />

@@ -35,6 +35,7 @@ import java.time.Instant
     val texts = remember(request.text("id")) { mutableStateMapOf<String, String>() }
     var submitting by remember(request.text("id")) { mutableStateOf(false) }
     val questions = request.objects("questions")
+    val tool = ompApprovalTool(request)
     val complete = questions.all { question -> question.optBoolean("allowEmpty") || selections[question.text("id")].orEmpty().isNotEmpty() || (texts[question.text("id")] ?: question.text("initialValue")).isNotBlank() }
     val cancel = { submitting = true; model.answer(request.text("id"), JSONObject(), cancelled = true, finished = { submitting = false }); Unit }
     val uri = LocalUriHandler.current
@@ -48,10 +49,11 @@ import java.time.Instant
     NPanel(shape = RoundedCornerShape(22.dp), border = BorderStroke(1.dp, Line), color = MobilePalette.card) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.padding(start = 8.dp), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (questions.size == 1) questions.first().text("question") else request.text("title", "需要你的回答"), Modifier.weight(1f).padding(top = 6.dp), fontSize = 16.sp, lineHeight = 25.sp, fontWeight = FontWeight.SemiBold)
+                Text(if (tool != null) "审批 · $tool" else questions.singleOrNull()?.text("question") ?: request.text("title", "需要你的回答"), Modifier.weight(1f).padding(top = 6.dp), fontSize = 16.sp, lineHeight = 25.sp, fontWeight = FontWeight.SemiBold)
                 seconds?.let { Text("${it}秒", Modifier.padding(top = 7.dp).background(MobilePalette.amber.copy(alpha = .11f), RoundedCornerShape(20.dp)).padding(horizontal = 7.dp, vertical = 2.dp), fontSize = 12.sp, color = MobilePalette.amber) }
                 NIconButton(cancel, enabled = !disabled && !submitting, modifier = Modifier.size(32.dp)) { Icon(Icons.Outlined.Close, "跳过", Modifier.size(16.dp), tint = Secondary) }
             }
+            if (tool != null) CollapsedEventText("查看审批详情", questions.first().text("question"))
             request.optJSONObject("plan")?.text("content")?.takeIf(String::isNotBlank)?.let { Markdown(it) }
             if (request.text("detail").isNotBlank()) Text(request.text("detail"), fontSize = 13.sp, lineHeight = 21.sp, color = Secondary)
             request.objects("links").forEach { link ->
@@ -108,9 +110,11 @@ import java.time.Instant
 
 @Composable private fun AnsweredQuestionCard(request: JSONObject) {
     val questions = request.objects("questions")
+    val tool = ompApprovalTool(request)
     NPanel(shape = RoundedCornerShape(22.dp), border = BorderStroke(1.dp, Line)) {
         Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(if (questions.size == 1) questions.first().text("question") else request.text("title", "需要你的回答"), fontSize = 16.sp, lineHeight = 25.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (tool != null) "审批 · $tool" else questions.singleOrNull()?.text("question") ?: request.text("title", "需要你的回答"), fontSize = 16.sp, lineHeight = 25.sp, fontWeight = FontWeight.SemiBold)
+            if (tool != null) CollapsedEventText("查看审批详情", questions.first().text("question"))
             questions.forEach { question ->
                 if (questions.size > 1) Text(question.text("question"), fontSize = 14.sp, lineHeight = 23.sp, fontWeight = FontWeight.Medium)
                 val answer = request.optJSONObject("response")?.optJSONObject("answers")?.strings(question.text("id")).orEmpty()
@@ -118,6 +122,15 @@ import java.time.Instant
             }
         }
     }
+}
+
+private val ompApprovalTitle = Regex("^Allow tool:\\s*([\\w.:-]+)(?=\\s|$)")
+
+private fun ompApprovalTool(request: JSONObject): String? {
+    if (request.text("providerId") != "omp") return null
+    val question = request.objects("questions").singleOrNull() ?: return null
+    if (question.objects("options").none { it.text("label") == "Deny" }) return null
+    return ompApprovalTitle.find(question.text("question"))?.groupValues?.get(1)
 }
 
 @Composable private fun QuestionInput(question: JSONObject, value: String, enabled: Boolean, update: (String) -> Unit) {

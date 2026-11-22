@@ -4,12 +4,12 @@ import { readFile } from 'node:fs/promises';
 const patch = JSON.parse(await readFile(process.argv[process.argv.indexOf('--patch') + 1], 'utf8'));
 const transport = patch[0].insert.find(entry => entry.id === 'nautilo-transport');
 const { apply } = await import(transport.name);
-const listeners = new Map(), agents = new Map(), tools = new Map();
+const listeners = new Map(), agents = new Map(), tools = new Map(), workspaces = new Map();
 let sequence = 0;
 const fire = (name, ...args) => listeners.get(name)?.(...args);
 const event = (agent, type, data) => fire('session/event', agent.session, { seq: ++sequence, type, data });
 function agent(id, parentSession) {
-  const result = { session: { id, seq: 0, header: { parentSession } }, ctx: {}, status: 'idle', count: 0, async whenIdle() { await this.done; } };
+  const result = { session: { id, seq: 0, header: { parentSession } }, ctx: { get() {} }, status: 'idle', count: 0, async whenIdle() { await this.done; } };
   agents.set(id, result); return result;
 }
 function message(a, text) {
@@ -22,10 +22,23 @@ const ctx = {
   get(name) { return name === 'subagents' ? { async waitForChildren() { return false; } } : undefined; },
   tools: { register(tool) { tools.set(tool.name, tool); } },
   sessions: { async flush() {} },
-  permissionPresets: { set() {} },
+  permissionPresets: { set() {}, current() { return 'standard'; } },
   agentPresets: { defaultId: 'standard', async list() { return [{ id: 'standard' }, { id: 'ptc' }]; }, composedPreset() { return 'standard'; }, async select() {}, serviceFor() {} },
+  workspaceRegistry: {
+    async create(cwd) {
+      if (!workspaces.has(cwd)) {
+        workspaces.set(cwd, { id: cwd, sessionIds: [], async attachSession(id) { this.sessionIds.push(id); } });
+      }
+      return workspaces.get(cwd);
+    }
+  },
   sessionController: {
-    async create({ sessionId }) { agent(sessionId); return { sessionId }; },
+    async create({ sessionId, workspaceId }) {
+      const created = agent(sessionId);
+      created.session.header.cwd = workspaceId;
+      await workspaces.get(workspaceId).attachSession(sessionId);
+      return { sessionId };
+    },
     async resolveAgent(id) { return { agent: agents.get(id) }; },
     async modelCatalog() { return { default: { provider: 'fixture', model: 'test' }, groups: [] }; },
     async selectModel() {}, async cancel() {},

@@ -13,17 +13,34 @@ export function ResizeHandle({label,value,min,max,onChange,onCommit,edge="right"
   label:string;value:number;min:number;max:number;onChange:(value:number)=>void;onCommit:(value:number)=>void;
   edge?:"left"|"right";reset:number;
 }):JSX.Element{
+  const handle=useRef<HTMLDivElement>(null);
   const drag=useRef<{x:number;value:number;cursor:string;select:string}>();
-  const latest=useRef(value);latest.current=value;
+  const frame=useRef<number>();
+  const latest=useRef(value);if(!drag.current)latest.current=value;
+  const change=useRef(onChange);change.current=onChange;
   const commit=useRef(onCommit);commit.current=onCommit;
   const clamp=(value:number):number=>Math.round(Math.max(min,Math.min(Math.max(min,max),value)));
-  const finish=():void=>{if(!drag.current)return;document.body.style.cursor=drag.current.cursor;document.body.style.userSelect=drag.current.select;drag.current=undefined;};
+  const finish=():void=>{
+    if(frame.current!==undefined){cancelAnimationFrame(frame.current);frame.current=undefined;}
+    if(!drag.current)return;
+    handle.current?.removeAttribute("data-resizing");
+    document.body.style.cursor=drag.current.cursor;document.body.style.userSelect=drag.current.select;drag.current=undefined;
+  };
   useEffect(()=>{const blur=():void=>{if(drag.current)commit.current(latest.current);finish();};window.addEventListener("blur",blur);return()=>{window.removeEventListener("blur",blur);finish();};},[]);
   const next=(x:number):number=>clamp(drag.current!.value+(x-drag.current!.x)*(edge==="left"?-1:1));
-  return <div role="separator" tabIndex={0} aria-label={label} aria-orientation="vertical" aria-valuemin={min} aria-valuemax={Math.max(min,max)} aria-valuenow={value}
+  return <div ref={handle} role="separator" tabIndex={0} aria-label={label} aria-orientation="vertical" aria-valuemin={min} aria-valuemax={Math.max(min,max)} aria-valuenow={value}
     className="pane-resize-handle" data-edge={edge} title={label}
-    onPointerDown={event=>{if(event.button!==0)return;event.preventDefault();event.currentTarget.focus();event.currentTarget.setPointerCapture?.(event.pointerId);drag.current={x:event.clientX,value,cursor:document.body.style.cursor,select:document.body.style.userSelect};document.body.style.cursor="col-resize";document.body.style.userSelect="none";}}
-    onPointerMove={event=>{if(drag.current){const width=next(event.clientX);latest.current=width;onChange(width);}}}
+    onPointerDown={event=>{if(event.button!==0)return;event.preventDefault();event.currentTarget.focus();event.currentTarget.setPointerCapture?.(event.pointerId);drag.current={x:event.clientX,value,cursor:document.body.style.cursor,select:document.body.style.userSelect};event.currentTarget.setAttribute("data-resizing","");document.body.style.cursor="col-resize";document.body.style.userSelect="none";}}
+    onPointerMove={event=>{
+      if(!drag.current)return;
+      const width=next(event.clientX);
+      if(width===latest.current)return;
+      latest.current=width;
+      if(frame.current===undefined)frame.current=requestAnimationFrame(()=>{
+        frame.current=undefined;
+        change.current(latest.current);
+      });
+    }}
     onPointerUp={event=>{if(!drag.current)return;onCommit(next(event.clientX));finish();event.currentTarget.releasePointerCapture?.(event.pointerId);}}
     onPointerCancel={()=>{if(drag.current)onCommit(latest.current);finish();}} onLostPointerCapture={()=>{if(drag.current)onCommit(latest.current);finish();}}
     onDoubleClick={()=>onCommit(clamp(reset))}

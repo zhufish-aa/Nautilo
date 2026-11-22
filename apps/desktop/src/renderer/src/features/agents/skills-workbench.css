@@ -1,0 +1,252 @@
+:is(.skill-library, .capability-import-dialog, .resource-sync-dialog) {
+  --skill-surface: light-dark(var(--card), var(--session-inspector-fill));
+  --skill-line: var(--session-inspector-divider);
+  --skill-blue: var(--glass-accent-blue);
+  --skill-field: var(--glass-search-fill);
+  --skill-hover: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+:is(.skill-library, .capability-import-dialog, .resource-sync-dialog) .ui-button {
+  min-height: 32px;
+  height: 32px;
+  font-size: 13px;
+}
+:is(.skill-library, .capability-import-dialog, .resource-sync-dialog) .ui-button-primary {
+  border-radius: 8px;
+  background: var(--glass-action-blue);
+  color: var(--glass-action-ink);
+  box-shadow: none;
+}
+:is(.skill-library, .capability-import-dialog, .resource-sync-dialog) .ui-button-primary:hover:not(:disabled) { background: var(--skill-blue); opacity: 1; }
+:is(.skill-library, .capability-import-dialog, .resource-sync-dialog) .ui-button-outline {
+  border: 1px solid color-mix(in srgb, var(--ink) 9%, transparent);
+  border-radius: 7px;
+  background: var(--skill-hover);
+  box-shadow: none;
+}
+:is(.skill-library, .capability-import-dialog, .resource-sync-dialog) .ui-button-outline:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--skill-blue) 45%, var(--skill-line));
+}
+:is(.capability-import-dialog, .resource-sync-dialog) :is(.ui-button-primary, .ui-button-outline):disabled {
+  opacity: 1;
+  border: 1px solid var(--skill-line);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  color: color-mix(in srgb, var(--ink-3) 59%, var(--skill-surface));
+}
+:is(.skill-library, .capability-import-dialog, .resource-sync-dialog) button:focus-visible {
+  outline: 2px solid var(--skill-blue);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+:is(.skill-library, .capability-import-dialog, .resource-sync-dialog) :is(.ui-select, .ui-select > span:first-child) { text-align: start; }
+
+.capability-underline-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; min-width: 0; }
+.capability-underline-tabs > button, .import-kind-tabs [role="tab"] {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 1px 6px;
+  border-bottom: 2px solid transparent; border-radius: 0; background: transparent;
+  color: var(--ink-3); font-size: 13px; font-weight: 500; white-space: nowrap;
+}
+.capability-underline-tabs > button:hover, .import-kind-tabs [role="tab"]:hover { color: var(--ink); }
+.capability-underline-tabs > button:is([aria-pressed="true"], [aria-selected="true"]), .import-kind-tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--skill-blue);
+  color: light-dark(var(--ink), var(--glass-action-ink));
+  background: transparent;
+}
+.capability-underline-tabs > button > span { font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+.capability-heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.capability-library.skill-library {
+  max-width: 1160px;
+  padding: 0 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  container: skills-library / inline-size;
+}
+.skill-library-heading, .skill-library-context, .skill-library-toolbar, .skill-library-filters {
+  display: flex; align-items: center; min-width: 0; flex-wrap: wrap; gap: 8px 12px;
+}
+.skill-library-heading, .skill-library-toolbar { justify-content: space-between; }
+.skill-library-context > h1 { color: var(--ink); font-size: 20px; font-weight: 650; }
+.skill-library-count { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.skill-library-toolbar { align-items: flex-end; border-bottom: 1px solid var(--skill-line); }
+.skill-library-toolbar .capability-underline-tabs { margin-bottom: -1px; }
+.skill-library-filters { flex-wrap: nowrap; max-width: 100%; gap: 6px; padding-bottom: 6px; }
+.skill-library .capability-search { width: 240px; min-width: 0; }
+.skill-library .capability-search .ui-field, .skill-library .capability-source-filter,
+.skill-library .capability-harness-select .ui-select {
+  height: 32px; min-height: 32px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--skill-field); color: var(--ink); font-size: 12.5px;
+}
+.skill-library .capability-search .ui-field { padding-inline-start: 34px; }
+.skill-library .capability-source-filter { width: 144px; min-width: 116px; }
+.capability-library.skill-library .capability-harness-select { width: 172px; min-width: 0; position: relative; }
+.skill-library .capability-harness-select .ui-select { padding-inline: 32px 9px; border-color: var(--line-strong); }
+.skill-library .capability-harness-select > .provider-avatar, .resource-sync-target-select > .provider-avatar {
+  position: absolute; inset-inline-start: 8px; inset-block-start: 50%; translate: 0 -50%; width: 17px; height: 17px;
+  border-radius: 4px; background: transparent; box-shadow: none; pointer-events: none; color: var(--ink-3);
+}
+:is(.skill-library .capability-harness-select, .resource-sync-target-select) > .provider-avatar > :is(img, svg) {
+  width: 15px; height: 15px; object-fit: contain; border-radius: 3px;
+}
+.skill-library .capability-library-groups { gap: 24px; }
+.skill-library .capability-group-heading { margin: 0 0 8px; }
+.skill-library .capability-group-heading > span {
+  display: inline; min-width: 0; height: auto; padding: 0; border-radius: 0; background: transparent;
+  color: var(--ink-3); font-size: 12px;
+}
+.skill-library .capability-group-list {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+  overflow: visible; border: 0; border-radius: 0; background: transparent;
+}
+.skill-library-card {
+  position: relative; min-width: 0; border: 1px solid var(--skill-line); border-radius: 10px; background: var(--skill-surface);
+}
+.skill-library-card[data-enabled="true"] { border-color: color-mix(in srgb, var(--skill-blue) 28%, transparent); }
+.skill-card-open { width: 100%; height: 100%; min-width: 0; padding: 13px 16px; border-radius: inherit; text-align: start; }
+.skill-card-heading { display: flex; align-items: center; gap: 8px; min-height: 23px; min-width: 0; padding-inline-end: 48px; }
+.skill-card-heading > strong, .skill-card-origin { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.skill-card-heading > strong { color: var(--ink); font-size: 14px; font-weight: 650; }
+.skill-card-origin {
+  flex: 0 1 auto; max-width: 44%; padding: 1px 5px; border: 1px solid var(--skill-line); border-radius: 4px;
+  color: var(--ink-3); font-size: 11px; line-height: 1.3;
+}
+.skill-card-description {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere;
+  height: 38px; min-height: 38px; margin-top: 6px; color: var(--ink-3); font-size: 12.5px; line-height: 1.5;
+}
+.skill-card-description[data-empty="true"] { opacity: .45; }
+.skill-library .skill-library-card > .ui-switch {
+  position: absolute; inset-block-start: 14px; inset-inline-end: 16px; width: 34px; height: 20px;
+  border: 1px solid var(--line); background: light-dark(var(--line-strong), color-mix(in srgb, var(--ink) 9%, transparent));
+}
+.skill-library .skill-library-card > .ui-switch[data-state="checked"] { border-color: transparent; background: var(--skill-blue); }
+.skill-library .skill-library-card .ui-switch-thumb {
+  width: 14px; height: 14px; translate: 2px 0; transform: none; background: var(--glass-inactive-thumb); box-shadow: none;
+}
+.skill-library .skill-library-card .ui-switch-thumb[data-state="checked"] { translate: 16px 0; transform: none; background: var(--glass-action-ink); }
+
+.ui-dialog.workspace-dialog.capability-import-dialog {
+  display: block;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--canvas);
+}
+.ui-dialog.workspace-dialog.capability-import-dialog > div:first-child {
+  position: absolute; inset: 0 auto auto 0; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%);
+}
+.capability-import-dialog > div:first-child > button { display: none; }
+.ui-dialog.workspace-dialog.capability-import-dialog > div:nth-child(2) { padding: 0; overflow: visible; margin: 0; background: transparent; }
+.import-workbench { max-width: 960px; margin-inline: auto; padding: 24px 28px; container: skill-import / inline-size; }
+.import-workbench-heading, .import-workbench-heading > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+.import-workbench-heading { justify-content: space-between; margin-bottom: 16px; }
+.import-workbench-heading h2 { color: var(--ink); font-size: 19px; font-weight: 650; }
+.capability-import-dialog .import-workbench-heading .ui-button { width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: 6px; color: var(--ink-3); }
+.capability-import-dialog .import-steps { justify-content: flex-start; flex-wrap: wrap; gap: 7px; margin: 0; padding: 0; }
+.capability-import-dialog .import-steps > li { flex: none; gap: 6px; color: var(--ink-3); font-size: 12px; }
+.capability-import-dialog .import-steps > li:not(:last-child)::after { width: 36px; flex: none; margin-inline: 3px; background: var(--skill-line); }
+.capability-import-dialog .import-steps > li > span {
+  display: grid; place-items: center; width: 20px; height: 20px; flex: none;
+  border: 1px solid var(--line-strong); border-radius: 50%; font: 500 11px var(--font-mono);
+}
+.capability-import-dialog .import-steps > li[aria-current="step"] { color: var(--ink); }
+.capability-import-dialog .import-steps > li[aria-current="step"] > span { border-color: transparent; background: var(--glass-action-blue); color: var(--glass-action-ink); }
+.capability-import-dialog .import-steps > li[data-complete="true"] > span { border-color: var(--skill-line); color: var(--glass-accent-emerald); }
+.import-workbench-card { min-width: 0; border: 1px solid var(--skill-line); border-radius: 12px; background: var(--skill-surface); }
+.import-source-toolbar {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px;
+  padding: 10px 20px; border-bottom: 1px solid var(--skill-line);
+}
+.import-source-toolbar .ui-tabs { height: auto; min-width: 0; flex-wrap: wrap; }
+.import-kind-tabs .ui-tabs { gap: 16px; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.import-kind-tabs .ui-tabs [role="tab"] { min-height: 30px; height: 30px; }
+.import-source-tabs .ui-tabs { gap: 2px; min-height: 30px; padding: 2px; border: 1px solid var(--skill-line); border-radius: 7px; background: var(--glass-editor-fill); }
+.import-source-tabs .ui-tabs [role="tab"] { height: 24px; padding-inline: 8px; border: 1px solid transparent; border-radius: 5px; font-size: 12px; }
+.import-source-tabs [role="tab"][aria-selected="true"] { border-color: var(--skill-line); background: var(--skill-hover); color: var(--ink); }
+.import-source-body, .import-preview-body, .import-result-body { padding: 16px 20px; }
+.import-drop-zone {
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px 7px; min-height: 68px;
+  padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: 10px;
+  background: color-mix(in srgb, var(--ink) 1.5%, transparent); color: var(--ink-2); font-size: 12px;
+}
+.import-drop-zone[data-dragging="true"] { border-color: var(--skill-blue); background: color-mix(in srgb, var(--skill-blue) 6%, transparent); }
+.import-drop-zone > svg, .import-drop-zone > small { color: var(--ink-3); }
+.import-drop-zone > small { margin-inline-start: 6px; font-size: 11.5px; }
+.import-drop-zone > button { color: var(--skill-blue); font-weight: 550; }
+.import-drop-zone > button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.import-skill-compose { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 12px; margin-top: 14px; }
+.import-skill-editor, .import-skill-structure { min-width: 0; border: 1px solid var(--skill-line); border-radius: 10px; }
+.import-skill-editor { background: var(--glass-editor-fill); }
+.import-skill-editor:focus-within { border-color: var(--skill-blue); }
+.import-skill-editor > header {
+  display: flex; align-items: center; gap: 7px; height: 34px; min-width: 0; padding-inline: 10px;
+  border-bottom: 1px solid var(--skill-line); color: var(--ink-3);
+}
+.import-skill-editor > header label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 500 11.5px var(--font-mono); }
+.import-skill-editor > header > div { display: flex; gap: 4px; margin-inline-start: auto; }
+.import-skill-editor > header button { display: inline-flex; align-items: center; flex: none; padding: 3px 5px; border-radius: 4px; font-size: 11.5px; white-space: nowrap; }
+.import-skill-editor > header button:hover { background: var(--skill-hover); color: var(--ink); }
+.import-skill-editor > textarea {
+  display: block; width: 100%; height: 290px; min-height: 290px; max-height: 440px; resize: vertical; border: 0; outline: none;
+  padding: 14px 16px; background: transparent; color: var(--ink); font: 400 12.5px/1.68 var(--font-mono);
+}
+.import-skill-editor > textarea::placeholder { color: var(--ink-3); }
+.import-skill-structure { padding: 14px 16px; background: color-mix(in srgb, var(--ink) 2%, transparent); }
+.import-skill-structure h3 { margin: 0 0 12px; color: var(--ink); font-size: 13px; font-weight: 600; }
+.import-structure-fields { display: grid; gap: 10px; }
+.import-structure-fields dt { display: flex; align-items: center; gap: 6px; color: var(--ink-3); font-size: 11.5px; }
+.import-structure-fields dt > span { width: 6px; height: 6px; flex: none; border: 1px solid var(--line-strong); border-radius: 50%; }
+.import-structure-fields [data-present="true"] dt > span { border-color: transparent; background: var(--glass-accent-emerald); }
+.import-structure-fields dt > small { font-size: 11px; }
+.import-structure-fields dd {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere;
+  margin: 3px 0 0 12px; color: var(--ink-2); font-size: 12px; line-height: 1.45;
+}
+.import-structure-warning { margin-top: 9px; color: var(--warn); font-size: 11.5px; }
+.import-structure-stats { display: grid; gap: 6px; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--skill-line); font-size: 12px; }
+.import-structure-stats > div { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-3); }
+.import-structure-stats dd { color: var(--ink); font-variant-numeric: tabular-nums; }
+.import-directory-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.import-directory-actions > input { flex: 1 1 180px; min-width: 0; }
+.capability-import-dialog :is(.ui-field, .ui-select) { border-color: var(--line); border-radius: 7px; background: var(--glass-editor-fill); }
+.capability-import-dialog :is(.ui-field, .ui-select):focus { border-color: var(--skill-blue); box-shadow: none; }
+.import-directory-preset { min-width: 0; padding: 3px 6px; border: 1px solid var(--skill-line); border-radius: 5px; color: var(--ink-3); font: 400 11px var(--font-mono); }
+.import-directory-preset:hover:not(:disabled) { color: var(--ink); background: var(--skill-hover); }
+.import-errors { margin: 0 20px 12px; padding: 7px 9px; border-inline-start: 2px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, transparent); }
+.capability-import-dialog .import-preview-list { gap: 0; border-block: 1px solid var(--skill-line); }
+.capability-import-dialog .import-preview-card { padding: 10px 4px; border: 0; border-radius: 0; }
+.capability-import-dialog .import-preview-card + li { border-top: 1px solid var(--skill-line); }
+.capability-import-dialog .import-preview-heading { gap: 9px; }
+.capability-import-dialog .import-checkbox { width: 17px; height: 17px; margin-top: 3px; border-radius: 4px; }
+.capability-import-dialog .import-checkbox.is-checked { border-color: transparent; background: var(--glass-action-blue); color: var(--glass-action-ink); }
+.capability-import-dialog .import-server-details summary { gap: 8px; font-size: 13px; }
+.capability-import-dialog .import-config-table { margin-top: 8px; }
+.capability-import-dialog .import-destination { margin: 0; gap: 16px; padding-top: 12px; border-top: 1px solid var(--skill-line); }
+.capability-import-dialog .import-destination [aria-checked="true"], .capability-import-dialog .import-conflict-options [aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--skill-blue) 38%, var(--skill-line)); background: color-mix(in srgb, var(--skill-blue) 9%, transparent); color: var(--ink);
+}
+.capability-import-dialog .import-conflict-options { flex-wrap: wrap; gap: 3px; padding: 2px; border-color: var(--skill-line); border-radius: 7px; }
+.capability-import-dialog .import-conflict-options > button { padding-inline: 6px; white-space: nowrap; }
+.capability-import-dialog .import-safety-note { margin-block: 8px 0; font-size: 12px; }
+.import-action-bar, .import-action-bar > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.import-action-bar { justify-content: space-between; padding: 14px 20px; border-top: 1px solid var(--skill-line); }
+.capability-import-dialog .import-selection-count { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+@media (hover: hover) and (pointer: fine) {
+  .skill-library-card:hover { border-color: color-mix(in srgb, var(--skill-blue) 40%, transparent); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-reduce-motion]) :is(.skill-library-card, .import-drop-zone) { transition: border-color 160ms ease, background-color 160ms ease; }
+  html:not([data-reduce-motion]) .skill-library .skill-library-card .ui-switch-thumb { transition: translate 160ms var(--ease-out-ui), background-color 160ms ease; }
+}
+@container skills-library (max-width: 600px) {
+  .skill-library .capability-group-list { grid-template-columns: minmax(0, 1fr); }
+  .skill-library-filters { order: -1; width: 100%; padding-bottom: 0; }
+  .skill-library .capability-search { flex: 1; }
+}
+@container skill-import (max-width: 600px) {
+  .import-skill-compose, .capability-import-dialog .import-destination { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .import-workbench { padding-inline: 12px; }
+  .capability-import-dialog .import-steps > li:not(:last-child)::after { width: 17px; }
+}

@@ -14,13 +14,14 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    io::Write,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
 };
 
 #[derive(Default)]
 pub struct SourceControl {
-    gates: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    gates: Mutex<HashMap<String, Weak<tokio::sync::RwLock<()>>>>,
 }
 fn hash(data: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(data.as_ref()))
@@ -158,7 +159,7 @@ async fn root(cwd: &str) -> anyhow::Result<Option<String>> {
         },
     ))
 }
-async fn file_token(root: &str, name: &str) -> anyhow::Result<String> {
+fn verified_worktree_path(root: &str, name: &str) -> anyhow::Result<PathBuf> {
     path(name)?;
     let target = Path::new(root).join(name);
     let mut ancestor = target.parent().unwrap();
@@ -174,6 +175,10 @@ async fn file_token(root: &str, name: &str) -> anyhow::Result<String> {
     if !parent.starts_with(std::fs::canonicalize(root)?) {
         anyhow::bail!("文件路径已指向工作目录之外");
     }
+    Ok(target)
+}
+async fn file_token(root: &str, name: &str) -> anyhow::Result<String> {
+    let target = verified_worktree_path(root, name)?;
     match std::fs::symlink_metadata(&target) {
         Ok(info) if info.file_type().is_symlink() => Ok(hash(format!(
             "link:{}",
@@ -199,30 +204,27 @@ async fn file_token(root: &str, name: &str) -> anyhow::Result<String> {
     }
 }
 impl SourceControl {
-    async fn lock(&self, root: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    fn gate(&self, root: &str) -> Arc<tokio::sync::RwLock<()>> {
         let key = if cfg!(windows) {
             root.to_lowercase()
         } else {
             root.into()
         };
-        let gate = {
-            let mut gates = self.gates.lock().unwrap();
-            gates.retain(|_, v| v.strong_count() > 0);
-            if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
-                gate
-            } else {
-                let gate = Arc::new(tokio::sync::Mutex::new(()));
-                gates.insert(key, Arc::downgrade(&gate));
-                gate
-            }
-        };
-        gate.lock_owned().await
+        let mut gates = self.gates.lock().unwrap();
+        gates.retain(|_, v| v.strong_count() > 0);
+        if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
+            return gate;
+        }
+        // A status refresh and a preview can read together. Writes still take an exclusive lock.
+        let gate = Arc::new(tokio::sync::RwLock::with_max_readers((), 2));
+        gates.insert(key, Arc::downgrade(&gate));
+        gate
     }
     pub async fn status(&self, cwd: &str) -> anyhow::Result<Value> {
         let Some(root) = root(cwd).await? else {
             return Ok(json!({"schemaVersion":1,"available":false,"workingDirectory":cwd}));
         };
-        let _gate = self.lock(&root).await;
+        let _gate = self.gate(&root).read_owned().await;
         self.snapshot(cwd, &root).await
     }
     async fn snapshot(&self, cwd: &str, root: &str) -> anyhow::Result<Value> {
@@ -360,15 +362,15 @@ impl SourceControl {
         let root = root(cwd)
             .await?
             .ok_or_else(|| anyhow::anyhow!("当前目录不是 Git 仓库"))?;
-        let _gate = self.lock(&root).await;
+        let _gate = self.gate(&root).read_owned().await;
         self.read_diff(&root, input).await
     }
     pub async fn file(&self,cwd:&str,input:&Value)->anyhow::Result<Value>{
-        let root=root(cwd).await?.ok_or_else(||anyhow::anyhow!("当前目录不是 Git 仓库"))?;let _gate=self.lock(&root).await;
+        let root=root(cwd).await?.ok_or_else(||anyhow::anyhow!("当前目录不是 Git 仓库"))?;let _gate=self.gate(&root).read_owned().await;
         file::read(&root,required(input,"path")?,false).await
     }
     pub async fn save(&self,cwd:&str,input:&Value)->anyhow::Result<Value>{
-        let root=root(cwd).await?.ok_or_else(||anyhow::anyhow!("当前目录不是 Git 仓库"))?;let _gate=self.lock(&root).await;
+        let root=root(cwd).await?.ok_or_else(||anyhow::anyhow!("当前目录不是 Git 仓库"))?;let _gate=self.gate(&root).write_owned().await;
         let(staged,error)=file::write(&root,input).await?;let mut result=json!({"saved":true,"staged":staged});let mut errors=error.into_iter().collect::<Vec<_>>();
         match file::read(&root,required(input,"path")?,true).await{Ok(file)=>result["file"]=file,Err(error)=>errors.push(format!("读取保存后的文件状态失败：{error}"))};
         match self.snapshot(cwd,&root).await{Ok(status)=>result["status"]=status,Err(error)=>errors.push(format!("刷新 Git 状态失败：{error}"))};
@@ -376,15 +378,15 @@ impl SourceControl {
     }
     pub async fn commit_details(&self, cwd: &str, input: &Value) -> anyhow::Result<Value> {
         let root = root(cwd).await?.ok_or_else(|| anyhow::anyhow!("当前目录不是 Git 仓库"))?;
-        let _gate = self.lock(&root).await;
+        let _gate = self.gate(&root).read_owned().await;
         history::commit(&root, required(input, "hash")?).await
     }
     pub async fn history(&self,cwd:&str,input:&Value)->anyhow::Result<Value>{
-        let root=root(cwd).await?.ok_or_else(||anyhow::anyhow!("当前目录不是 Git 仓库"))?;let _gate=self.lock(&root).await;history_page::read(&root,input).await
+        let root=root(cwd).await?.ok_or_else(||anyhow::anyhow!("当前目录不是 Git 仓库"))?;let _gate=self.gate(&root).read_owned().await;history_page::read(&root,input).await
     }
     pub async fn commit_diff(&self, cwd: &str, input: &Value) -> anyhow::Result<Value> {
         let root = root(cwd).await?.ok_or_else(|| anyhow::anyhow!("当前目录不是 Git 仓库"))?;
-        let _gate = self.lock(&root).await;
+        let _gate = self.gate(&root).read_owned().await;
         history::diff(&root, input).await
     }
     async fn read_diff(&self, root: &str, input: &Value) -> anyhow::Result<Value> {
@@ -393,18 +395,24 @@ impl SourceControl {
         let source = required(input, "source")?;
         let state = parse_status(
             &checked(
-                &root,
-                &["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+                root,
+                &["status", "--porcelain=v2", "-z", "--untracked-files=all", "--", name],
                 None,
             )
             .await?,
         )?;
-        let change = state["changes"]
-            .as_array()
-            .unwrap()
-            .iter()
+        let mut change = state["changes"]
+            .as_array().unwrap().iter()
             .find(|item| item["path"] == name)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("文件状态已改变，请刷新后重试"))?;
+        // Path-scoped status sees the destination of a staged rename as an addition.
+        if change["indexStatus"] == "A" {
+            if let Some(original) = content::staged_rename_source(root, name).await? {
+                change["originalPath"] = json!(original);
+            }
+        }
+        let change = &change;
         if source == "index"
             && (change["untracked"] == true
                 || change["conflict"] == true
@@ -434,7 +442,7 @@ impl SourceControl {
         } else {
             None
         };
-        let preview_identity = content::identity(root, name, change, source).await?;
+        let preview_identity = content::identity(root, name, change, token.as_deref().unwrap_or("")).await?;
         if change["untracked"] == true {
             let result = git(
                 root,
@@ -532,7 +540,7 @@ impl SourceControl {
                 return Ok(json!({"status":self.status(cwd).await?}));
             }
             let directory = std::fs::canonicalize(cwd)?.to_string_lossy().into_owned();
-            let _gate = self.lock(&directory).await;
+            let _gate = self.gate(&directory).write_owned().await;
             checked(cwd, &["init"], None).await?;
             let root = root(cwd)
                 .await?
@@ -542,7 +550,7 @@ impl SourceControl {
         let root = root(cwd)
             .await?
             .ok_or_else(|| anyhow::anyhow!("当前目录不是 Git 仓库"))?;
-        let _gate = self.lock(&root).await;
+        let _gate = self.gate(&root).write_owned().await;
         let state = self.snapshot(cwd, &root).await?;
         if state["token"] != input["token"] {
             anyhow::bail!(if input["action"] == "discard" { "仓库状态或文件内容已改变，请重新查看差异后再试。" } else { "仓库状态已改变，请刷新后重试。" });
@@ -680,13 +688,6 @@ impl SourceControl {
                 if changes.iter().any(|change| change["conflict"] == true) {
                     anyhow::bail!("请先解决冲突并暂存文件。");
                 }
-                if state["operation"] != "merge"
-                    && !changes.iter().any(|change| {
-                        !matches!(change["indexStatus"].as_str(), Some(".") | Some("?"))
-                    })
-                {
-                    anyhow::bail!("请先暂存需要提交的更改。");
-                }
                 if state["operation"]
                     .as_str()
                     .is_some_and(|operation| operation != "merge")
@@ -698,7 +699,21 @@ impl SourceControl {
                 {
                     anyhow::bail!("请输入有效的提交说明。");
                 }
-                output = checked(&root, &["commit", "--file=-"], Some(message)).await?;
+                output = if let Some(names) = input.get("paths") {
+                    if state["operation"] == "merge" {
+                        anyhow::bail!("合并需要一次提交完整的合并结果。");
+                    }
+                    commit_files(&root, changes, names, message).await?
+                } else {
+                    if state["operation"] != "merge"
+                        && !changes.iter().any(|change| {
+                            !matches!(change["indexStatus"].as_str(), Some(".") | Some("?"))
+                        })
+                    {
+                        anyhow::bail!("暂存区没有可提交的更改。");
+                    }
+                    checked(&root, &["commit", "--file=-"], Some(message)).await?
+                };
             }
             "create-branch" | "switch-branch" => {
                 let branch = required(input, "branch")?;
@@ -831,6 +846,80 @@ impl SourceControl {
         }
         Ok(json!({"status":self.snapshot(cwd,&root).await?,"output":output.trim()}))
     }
+}
+
+async fn commit_files(root: &str, changes: &[Value], selection: &Value, message: &str) -> anyhow::Result<String> {
+    let names = selection.as_array()
+        .filter(|paths| !paths.is_empty() && paths.len() <= 10000)
+        .ok_or_else(|| anyhow::anyhow!("请选择需要提交的文件（每次最多 10000 个）。"))?;
+    let by_path: HashMap<_, _> = changes.iter().map(|change| (change["path"].as_str().unwrap(), change)).collect();
+    let mut paths = HashSet::new();
+    let mut new_files = HashSet::new();
+    for name in names {
+        let name = name.as_str().ok_or_else(|| anyhow::anyhow!("文件路径无效"))?;
+        path(name)?;
+        let change = by_path.get(name).ok_or_else(|| anyhow::anyhow!("文件状态已改变，请刷新后重试。"))?;
+        if change["directory"] == true {
+            anyhow::bail!("不能直接提交嵌套仓库或未跟踪目录：{name}");
+        }
+        paths.insert(name);
+        if let Some(original) = change["originalPath"].as_str() {
+            paths.insert(original);
+        }
+        if change["untracked"] == true {
+            new_files.insert(name);
+        }
+    }
+    // A literal pathspec can still match descendants when a file becomes a directory.
+    for &name in by_path.keys() {
+        if !paths.contains(name) && name.match_indices('/').any(|(offset, _)| paths.contains(&name[..offset])) {
+            anyhow::bail!("文件被目录替换，请一并勾选该目录中的更改。");
+        }
+    }
+
+    let git_dir = checked(root, &["rev-parse", "--absolute-git-dir"], None).await?;
+    let path_file = Path::new(git_dir.trim()).join(format!(".nautilo-commit-{}", uuid::Uuid::new_v4()));
+    let mut writer = std::fs::OpenOptions::new().write(true).create_new(true).open(&path_file)?;
+    let path_file = file::TempFile(path_file);
+    for name in paths {
+        writer.write_all(name.as_bytes())?;
+        writer.write_all(b"\0")?;
+    }
+    drop(writer);
+
+    // Git's path-only commit preserves other index entries. New files need an intent entry first.
+    let path_arg = format!("--pathspec-from-file={}", path_file.0.display());
+    let result = async {
+        if !new_files.is_empty() {
+            let intent = new_files.iter().copied().collect::<Vec<_>>().join("\0") + "\0";
+            checked(root, &["add", "--intent-to-add", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(&intent)).await?;
+        }
+        checked(root, &["commit", "--only", "--file=-", &path_arg, "--pathspec-file-nul"], Some(message)).await
+    }.await;
+    if let Err(error) = &result {
+        if !new_files.is_empty() {
+            let cleanup = async {
+                let raw = checked(root, &["status", "--porcelain=v2", "-z", "--untracked-files=no"], None).await?;
+                let status = parse_status(&raw)?;
+                let mut intent = String::new();
+                for change in status["changes"].as_array().unwrap() {
+                    let name = change["path"].as_str().unwrap();
+                    if new_files.contains(name) && change["indexStatus"] == "." && change["worktreeStatus"] == "A" {
+                        intent.push_str(name);
+                        intent.push('\0');
+                    }
+                }
+                if !intent.is_empty() {
+                    checked(root, &["update-index", "--force-remove", "-z", "--stdin"], Some(&intent)).await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            }.await;
+            if let Err(cleanup) = cleanup {
+                anyhow::bail!("{error}；清理新文件的提交准备记录失败：{cleanup}");
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]

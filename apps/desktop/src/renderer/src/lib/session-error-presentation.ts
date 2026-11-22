@@ -3,6 +3,16 @@ import type { RuntimeConnection } from "@agenthub/domain";
 export function sessionErrorPresentation(code: string, message: string, zh: boolean, connection?: Pick<RuntimeConnection, "id" | "name" | "kind">): {
   title: string; description: string; stopped: boolean; settings?: "accounts" | "agents"; loginRequired?: boolean;
 } {
+  if (code === "PROVIDER_SESSION_LOST" || message.includes("trajectory not found:")) return {
+    title: zh ? "反重力会话无法继续" : "Antigravity conversation unavailable",
+    description: zh ? "反重力找不到这条会话的原生记录。聊天历史仍可查看，请在同一项目新建会话继续。" : "Antigravity could not find the native conversation. This chat history is still available. Start a new conversation in the same project to continue.",
+    stopped: false,
+  };
+  if (code === "PROVIDER_FREE_QUOTA_EXHAUSTED") return {
+    title: zh ? "OpenCode 免费额度已用完" : "OpenCode free usage limit reached",
+    description: zh ? "可以等免费额度恢复，或在模型菜单里换一个可用的模型再发送。" : "Wait for your free allowance to reset, or select an available model and send your message again.",
+    stopped: false,
+  };
   const authRequired = /AGENT_NOT_AUTHENTICATED|authentication required|not logged in|signed out|sign in (?:to this account )?again|token[_ ](?:has[_ ])?expired|refresh_token_(?:reused|expired|revoked)|invalid_grant/i.test(`${code} ${message}`);
   const unauthorized = /\b401\b|unauthori[sz]ed|invalid.{0,20}(?:api.?key|authorization|token)/i.test(message);
   if (authRequired || connection?.kind === "login" && unauthorized) return {

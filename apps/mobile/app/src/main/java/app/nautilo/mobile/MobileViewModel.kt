@@ -83,6 +83,14 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
     fun cancelTeamTasks() = teamController.cancel()
     fun retryTeamTask(task: TeamTask) = teamController.retry(task)
     fun openTeamTask(task: TeamTask) = teamController.openTask(task)
+    suspend fun workflowDetails(sessionId: String, runId: String?): JSONObject {
+        val current = state.value
+        check(current.session?.id == sessionId && current.connected) { "请重新打开当前会话" }
+        val host = current.host ?: error("请先连接电脑")
+        val request = JSONObject().put("sessionId", sessionId)
+        if (runId != null) request.put("runId", runId)
+        return peer.call(host, "session.workflows", request)
+    }
     private val foreground get() = visibility.value
     private val connectionWake = Channel<Unit>(Channel.CONFLATED)
     private var sessionGeneration = 0

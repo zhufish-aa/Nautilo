@@ -13,16 +13,9 @@ export async function assistantModelStep(
   };
   const connection = services.connections.get(input.connectionId);
   const { model, instructions, context, tools } = input;
-  if (
-    !connection.enabled ||
-    connection.kind !== "api" ||
-    !connection.models?.some((m) => m.id === model && m.enabled !== false)
-  )
-    fail("请在设置中选择已启用的助手 API 连接和模型。");
-  const key = Object.values(
-    services.credentials.environment(connectionCredentialId(connection.id, connection.revision), "codex"),
-  )[0];
-  if (!key) return fail("助手 API 连接缺少密钥。");
+  const account = connection.kind === "login";
+  if (!connection.enabled || (account && !connection.accountGateway))
+    fail("请为助手选择已启用的 API 连接或已开放模型调用的账号。");
   if (
     !Array.isArray(context) ||
     !context.length ||
@@ -33,10 +26,20 @@ export async function assistantModelStep(
     tools.length > 12
   )
     fail("助手请求超出大小限制。");
-  const protocol = connection.protocol;
+  const models = account && !connection.models?.length
+    ? (await services.connections.discover({ connectionId: connection.id, revision: connection.revision }, false)).models
+    : connection.models;
+  const selected = models?.find((m) => m.id === model && (!('enabled' in m) || m.enabled !== false));
+  if (!selected) return fail("请选择这个连接下已启用的助手模型。");
+  const endpoint = account
+    ? await services.runs.accountGateways?.assistantEndpoint(connection)
+    : { base: connection.baseUrl!, key: Object.values(services.credentials.environment(connectionCredentialId(connection.id, connection.revision), "codex"))[0] };
+  if (!endpoint?.key) return fail(account ? "助手账号连接不可用。" : "助手 API 连接缺少密钥。");
+  const { key } = endpoint;
+  const protocol = account ? "chat" : connection.protocol;
   const suffix =
     protocol === "responses" ? "/responses" : protocol === "anthropic" ? "/messages" : "/chat/completions";
-  const base = connection.baseUrl!.replace(/\/+$/, "");
+  const base = endpoint.base.replace(/\/+$/, "");
   const messages = context.map((content) => ({ role: "user", content }));
   const cached = { type: "ephemeral" };
   const anthropicBlocks = context.map((text, i) => ({
@@ -68,8 +71,7 @@ export async function assistantModelStep(
     options.stream = true;
     if (protocol === "chat") options.stream_options = { include_usage: true };
   }
-  const effort = input.reasoningEffort,
-    selected = connection.models?.find((m) => m.id === model);
+  const effort = input.reasoningEffort;
   if (effort) {
     if (selected?.defaultReasoningEffort !== effort && !selected?.reasoningEfforts?.includes(effort))
       fail("推理强度不在模型配置中。");

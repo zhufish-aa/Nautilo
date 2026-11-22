@@ -17,16 +17,31 @@ async function fixture(path='src/lib.rs'){
     b.onLoad({filter:/.*/,namespace:'fixture'},args=>({loader:'js',contents:args.path==='diff-provider'?`export function bindDiffRecovery(){const p={disposed:false,dispose(){this.disposed=true}};window.qa.providers.push(p);return p}`:args.path.endsWith(':worker')?`export default class Worker{kind=${JSON.stringify(args.path.split(':')[0])}}`:`
       export const languages={getLanguages:()=>[{id:'rust',extensions:['.rs']},{id:'typescript',extensions:['.ts']},{id:'dockerfile',filenames:['Dockerfile']}]};
       const codeEditor=()=>({onDidScrollChange(){return{dispose(){}}},onDidLayoutChange(){return{dispose(){}}}});
-      const createEditor=(options)=>{const entry={options:{...options},disposed:false,setModel(models){this.models=models},onDidUpdateDiff(){return{dispose(){}}},getLineChanges(){return[]},getOriginalEditor:codeEditor,getModifiedEditor:codeEditor,updateOptions(next){Object.assign(this.options,next)},dispose(){this.disposed=true}};window.qa.editors.push(entry);return entry};
-      export const editor={defineTheme(){},setTheme(theme){window.qa.themes.push(theme)},createModel(value,language){const model={value,language,disposed:false,getValue(){return this.value},setValue(value){this.value=value;this.changed?.()},onDidChangeContent(fn){this.changed=fn},dispose(){this.disposed=true}};window.qa.models.push(model);return model},createDiffEditor(node,options){return createEditor(options)},create(node,options){return createEditor(options)}};
+      const createEditor=(options)=>{const entry={options:{...options},disposed:false,setModel(models){this.models=models},onDidUpdateDiff(){return{dispose(){}}},getLineChanges(){return[]},getOriginalEditor:codeEditor,getModifiedEditor:codeEditor,updateOptions(next){Object.assign(this.options,next)},layout(){},dispose(){this.disposed=true}};window.qa.editors.push(entry);return entry};
+      export const editor={defineTheme(){},setTheme(theme){window.qa.themes.push(theme)},remeasureFonts(){},createModel(value,language){const model={value,language,disposed:false,getValue(){return this.value},getValueLength(){return this.value.length},setValue(value){this.value=value;this.changed?.()},onDidChangeContent(fn){this.changed=fn;return{dispose(){}}},dispose(){this.disposed=true}};window.qa.models.push(model);return model},createDiffEditor(node,options){return createEditor(options)},create(node,options){return createEditor(options)}};
     `}));
   }}]});
-  const dom=new JSDOM('<div id="root"></div>',{runScripts:'outside-only',pretendToBeVisual:true}),w=dom.window;w.fixturePath=path;w.eval((await bundlePromise).outputFiles[0].text);w.qa.render();return{w,close(){w.qa.close();w.close()}};
+  const dom=new JSDOM('<div id="root"></div>',{runScripts:'outside-only',pretendToBeVisual:true}),w=dom.window;Object.defineProperty(w.document,'fonts',{value:{load:async()=>[]}});w.fixturePath=path;w.eval((await bundlePromise).outputFiles[0].text);w.qa.render();return{w,close(){w.qa.close();w.close()}};
 }
 test('SCM code editor enables syntax languages, read-only diff and complete controlled versions',{skip:!JSDOM},async()=>{
   const f=await fixture();try{const{qa}=f.w;assert.deepEqual(Array.from(qa.models,model=>model.language),['rust','rust']);const editor=qa.editors[0];assert.equal(editor.options.readOnly,true);assert.equal(editor.options.originalEditable,false);assert.equal(editor.options.ignoreTrimWhitespace,false);assert.equal(editor.options.renderSideBySide,true);assert.equal(editor.options.hideUnchangedRegions.enabled,true);assert.equal(editor.options.renderIndicators,false);
     qa.props={...qa.props,before:'fn updated_before() {}',value:'fn updated_after() {}',sideBySide:false};qa.render();assert.equal(qa.editors.length,1,'refresh updates existing models without recreating the editor');assert.equal(editor.models.original.getValue(),'fn updated_before() {}');assert.equal(editor.models.modified.getValue(),'fn updated_after() {}');assert.equal(editor.options.renderSideBySide,false);
     f.w.document.documentElement.classList.add('dark');await new Promise(resolve=>setTimeout(resolve,0));assert.equal(qa.themes.at(-1),'agenthub-dark');qa.close();assert.ok(qa.models.every(model=>model.disposed));assert.equal(editor.disposed,true);
+  }finally{f.close();}
+});
+test('read-only Git previews scroll directly and skip editing geometry', {skip:!JSDOM}, async()=>{
+  const f=await fixture();
+  try{
+    const {qa}=f.w;
+    qa.props={...qa.props,appearance:'source-control'};
+    qa.render();
+    const preview=qa.editors.at(-1).options;
+    assert.match(preview.fontFamily,/^"JetBrains Mono Variable",/);
+    assert.equal(preview.smoothScrolling,false);
+    assert.equal(preview.editContext,false);
+    assert.equal(qa.editors[0].options.editContext,undefined);
+    assert.equal(preview.renderSideBySide,true);
+    assert.equal(preview.hideUnchangedRegions.enabled,true);
   }finally{f.close();}
 });
 test('filename-based syntax selection includes Dockerfile without an extension',{skip:!JSDOM},async()=>{const f=await fixture('Dockerfile');try{assert.deepEqual(Array.from(f.w.qa.models,model=>model.language),['dockerfile','dockerfile']);}finally{f.close();}});

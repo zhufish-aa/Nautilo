@@ -81,7 +81,13 @@ impl PluginService {
         let bundle = if parent.file_name().is_some_and(|name| name == "core-daemon") {
             parent.parent().unwrap_or(parent)
         } else { parent };
-        let root = bundle.join("plugins");
+        let root = if cfg!(debug_assertions) {
+            std::env::var_os("AGENTHUB_DEV_PLUGIN_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| bundle.join("plugins"))
+        } else {
+            bundle.join("plugins")
+        };
         let Ok(entries) = std::fs::read_dir(&root) else { return };
         for entry in entries.flatten() {
             let dir = entry.path();
@@ -488,6 +494,17 @@ fn validate_manifest(manifest: &Value, dir: &str) -> CoreResult<()> {
 /// Native plugins: main points at the plugin binary (platform extension added
 /// when missing).
 fn resolve_executable(dir: &Path, main: &str) -> PathBuf {
+    // Dev manifests and resources stay in the checkout. Run the Cargo artifact
+    // directly so the workspace's Windows integrity label does not follow the binary.
+    let build_dir = if cfg!(debug_assertions)
+        && std::env::var_os("AGENTHUB_DEV_PLUGIN_DIR")
+            .is_some_and(|root| dir.parent() == Some(Path::new(&root)))
+    {
+        std::env::current_exe().ok().and_then(|mut path| path.pop().then_some(path))
+    } else {
+        None
+    };
+    let dir = build_dir.as_deref().unwrap_or(dir);
     let candidate = dir.join(main);
     if candidate.exists() {
         return candidate;

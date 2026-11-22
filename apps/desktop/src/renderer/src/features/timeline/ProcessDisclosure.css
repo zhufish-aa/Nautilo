@@ -13,6 +13,14 @@
 .process-disclosure[data-open] > .process-disclosure-row .process-disclosure-chevron { transform: rotate(90deg); opacity: 1; }
 .process-disclosure-row:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
 .process-disclosure-row:focus-visible .process-disclosure-chevron { color: var(--ink-2); opacity: 1; }
+.process-disclosure-row:disabled { cursor: default; }
+.tool-activity-card .process-disclosure-label, .provider-compatibility-note .process-disclosure-label {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .process-disclosure[data-running] > .process-disclosure-row { color: var(--ink-2); }
 .process-disclosure[data-failed] > .process-disclosure-row { color: var(--danger); }
 .process-disclosure-fold { display: grid; grid-template-rows: 0fr; opacity: 0; }
@@ -23,13 +31,14 @@
 .reasoning-card .process-disclosure-body .markdown-content p { margin-block: 4px; }
 .reasoning-card .process-disclosure-body .markdown-content p:first-child { margin-top: 0; }
 .command-disclosure-output { max-block-size: min(288px, 46dvh); overflow: auto; border: 1px solid var(--conversation-detail-border); border-radius: 8px; background: var(--conversation-detail-surface); }
+.provider-compatibility-note .command-disclosure-output { max-block-size: min(160px, 46dvh); }
 .command-disclosure-output pre { margin: 0; padding: 9px 12px; color: var(--ink-2); font: 400 12px/1.65 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .command-disclosure-output pre + pre, .command-disclosure-exit { border-top: 1px solid var(--conversation-detail-border); }
 .command-disclosure-exit { padding: 5px 12px; color: var(--conversation-detail-muted); font-size: 11px; }
 .command-disclosure-exit[data-failed] { color: var(--conversation-detail-removed); }
 
 @media (hover: hover) and (pointer: fine) {
-  .process-disclosure-row:hover { background: var(--conversation-detail-hover); color: var(--ink-2); }
+  .process-disclosure-row:hover:not(:disabled) { background: var(--conversation-detail-hover); color: var(--ink-2); }
   .process-disclosure-row:hover .process-disclosure-chevron { color: var(--ink-2); opacity: 1; }
   .process-disclosure[data-failed] > .process-disclosure-row:hover { color: var(--danger); }
 }

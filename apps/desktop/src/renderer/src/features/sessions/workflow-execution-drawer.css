@@ -1,4 +1,4 @@
-.workflow-execution-drawer { container-type: inline-size; background: var(--panel); }
+.workflow-execution-drawer { container-type: inline-size; background: var(--glass-ui-fill); backdrop-filter: var(--glass-ui-filter); }
 .workflow-execution-drawer[data-review-closing] { pointer-events: none; }
 .workflow-execution-heading { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 13px; font-weight: 550; }
 .workflow-execution-heading svg { color: var(--ink-3); }
@@ -17,7 +17,6 @@
 .workflow-studio[data-inspection] .wf-canvas { height: clamp(250px, 40dvh, 440px); }
 .workflow-studio[data-inspection] .wf-inspector-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px; }
 .workflow-studio[data-inspection] .wf-inspector-grid > div + div { padding: 12px 0 0; border-inline-start: 0; border-top: 1px solid var(--wf-border); }
-.workflow-studio[data-inspection] .wf-stage-bar select { display: none; }
 .workflow-studio .wf-inspector-grid .wf-open-session { width: fit-content; padding: 5px 9px; border: 1px solid var(--wf-border); border-radius: 7px; color: var(--wf-ink-main); font-weight: 500; }
 .workflow-studio .wf-inspector-grid .wf-open-session:hover { background: var(--wf-surface-hover); }
 

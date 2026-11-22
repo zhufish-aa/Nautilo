@@ -1,0 +1,77 @@
+.ui-dialog.mcp-editor-dialog { max-height: 85vh; }
+.mcp-editor-dialog > :nth-child(2) { min-width: 0; }
+.mcp-editor-modes,
+.mcp-runtime-tabs { border-bottom: 1px solid var(--skill-dialog-divider); }
+.mcp-editor-dialog .capability-underline-tabs button[aria-pressed="true"] {
+  border-bottom-color: var(--skill-focus-blue);
+  color: var(--ink);
+}
+.mcp-editor-modes { gap: 14px; margin-top: -6px; }
+
+.mcp-editor-primary,
+.mcp-quick-fill { display: grid; gap: 14px; }
+.mcp-editor-connection,
+.mcp-editor-description { display: grid; gap: 12px; }
+.mcp-editor-connection { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
+.mcp-editor-description { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+.mcp-editor-dialog .mcp-editor-primary input.font-mono { font-size: 12.5px; }
+:is(.mcp-editor-primary, .mcp-runtime-content)[data-filled="true"] .ui-field:not(:placeholder-shown) {
+  background: color-mix(in srgb, var(--skill-focus-blue) 5%, var(--skill-editor-surface));
+  border-color: color-mix(in srgb, var(--skill-focus-blue) 28%, var(--skill-field-border));
+}
+:is(.mcp-editor-primary, .mcp-runtime-content)[data-filled="true"] .ui-field:focus { border-color: var(--skill-focus-blue); }
+.mcp-editor-form .skill-editor-tags > div:has(> input) { min-height: 36px; }
+.mcp-editor-form .skill-editor-tags input { min-width: 76px; }
+
+.mcp-editor-transport [role="tablist"] {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+  min-height: 36px;
+  padding: 3px;
+  border: 1px solid var(--skill-field-border);
+  border-radius: 8px;
+  background: var(--skill-editor-surface);
+}
+.mcp-editor-transport button[role="tab"] {
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 11.5px;
+}
+.mcp-editor-transport button[role="tab"][aria-selected="true"] {
+  border-color: color-mix(in srgb, var(--skill-focus-blue) 26%, transparent);
+  background: color-mix(in srgb, var(--skill-focus-blue) 9%, transparent);
+  color: var(--ink);
+}
+
+.mcp-runtime {
+  min-width: 0;
+  border: 1px solid var(--skill-field-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ink) 1.5%, var(--skill-dialog-surface));
+}
+.mcp-runtime-tabs { gap: 13px; padding: 0 11px; }
+.mcp-runtime-tabs > button { font-size: 11.5px; }
+.mcp-runtime-tabs > button > span { color: var(--glass-control-muted); font-size: 10.5px; }
+.mcp-runtime-tabs .mcp-runtime-quick-fill { margin-inline-start: auto; }
+.mcp-runtime-content { min-height: 84px; padding: 10px 11px; }
+.mcp-editor-dialog .mcp-runtime-content input.ui-field { height: 32px; }
+.mcp-runtime-content .ui-button { height: 28px; }
+.mcp-runtime-content .ui-button-outline,
+.mcp-quick-fill .ui-button-outline {
+  border: 1px solid var(--skill-field-border);
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  box-shadow: none;
+}
+.mcp-runtime-content .ui-button-outline:hover,
+.mcp-quick-fill .ui-button-outline:hover {
+  border-color: color-mix(in srgb, var(--skill-focus-blue) 35%, transparent);
+}
+.mcp-quick-fill textarea.ui-field { min-height: 140px; font-size: 12.5px; }
+.mcp-quick-fill-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+@media (max-width: 430px) {
+  .mcp-editor-connection, .mcp-editor-description { grid-template-columns: minmax(0, 1fr); }
+  .mcp-runtime-tabs { gap: 8px; }
+}

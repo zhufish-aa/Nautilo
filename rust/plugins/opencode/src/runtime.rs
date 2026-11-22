@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, watch};
 
 struct SessionInteraction {
@@ -772,6 +772,23 @@ impl Runtime {
                         .unwrap_or("");
                     if status == "busy" && route.compact {
                         route.started.store(true, Ordering::Release);
+                    }
+                    if status == "retry"
+                        && p.pointer("/status/action/reason").and_then(Value::as_str) == Some("free_tier_limit")
+                        && route.foreground()
+                        && !route.ending.load(Ordering::Acquire)
+                    {
+                        let runtime = self.clone();
+                        let mut message = "OpenCode free usage limit reached.".to_string();
+                        if let Some(next) = p.pointer("/status/next").and_then(Value::as_u64) {
+                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                            if next > now && next != u64::MAX { message.push_str(&format!("\nRetry-After: {}", (next - now).div_ceil(1000))); }
+                        }
+                        drop(state);
+                        tokio::spawn(async move {
+                            runtime.interrupt(&route, 1, Some(&message)).await;
+                        });
+                        continue;
                     }
                     if kind == "session.error"
                         && route.foreground()

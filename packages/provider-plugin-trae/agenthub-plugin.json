@@ -22,7 +22,8 @@
       "DOUBAO_API_KEY"
     ],
     "envPassthrough": [
-      "TRAE_CONFIG_FILE"
+      "TRAE_CONFIG_FILE",
+      "TRAE_HOME"
     ]
   }
 }

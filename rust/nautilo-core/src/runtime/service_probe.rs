@@ -169,7 +169,10 @@ pub async fn probe_mcp(server: &Value, mut report: Value) -> Value {
         rpc.initialized(version).await?;
         report["protocolVersion"] = json!(version);
         report["serverName"] = initialized.pointer("/serverInfo/name").cloned().unwrap_or(Value::Null);
-        step(&mut report, stage, "passed", stage_started, None, None);
+        let description = initialized["instructions"].as_str()
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| initialized.pointer("/serverInfo/description").and_then(Value::as_str));
+        step(&mut report, stage, "passed", stage_started, None, description);
         stage = "tools";
         stage_started = Instant::now();
         if initialized.pointer("/capabilities/tools").is_none() {

@@ -1,0 +1,171 @@
+:root {
+  --glass-ui-fill: rgb(255 255 255 / .86);
+  --glass-ui-line: rgb(15 23 42 / .09);
+  --glass-ui-shadow: inset 0 1px rgb(255 255 255 / .95), 0 8px 24px rgb(15 23 42 / .10);
+  --glass-veil: rgb(15 23 42 / .18);
+  --glass-ui-filter: blur(16px) saturate(150%);
+  --glass-composer-fill: rgb(255 255 255 / .76);
+  --glass-composer-line: rgb(15 23 42 / .08);
+  --glass-composer-shadow: inset 0 1px rgb(255 255 255 / .98), 0 10px 30px rgb(15 23 42 / .08);
+  --glass-composer-filter: blur(20px) saturate(165%);
+  --nacre-indigo: #818cf8;
+  --nacre-sky: #38bdf8;
+  --nacre-violet: #c084fc;
+  --glass-action: #4f46e5;
+  --glass-action-bright: #6366f1;
+  --glass-action-ink: #fff;
+  --glass-action-blue: #2563eb;
+  --glass-accent-blue-bright: #3b82f6;
+  --glass-accent-blue: light-dark(var(--glass-action-blue), var(--glass-accent-blue-bright));
+  --glass-control-muted: light-dark(var(--ink-3), #94a3b8);
+  --glass-accent-amber: light-dark(var(--warn), #f59e0b);
+  --glass-accent-emerald: light-dark(var(--ok), #10b981);
+  --glass-search-fill: light-dark(var(--card), #090b0e);
+  --glass-editor-fill: light-dark(var(--card), #080a0e);
+  --glass-inactive-thumb: light-dark(var(--glass-action-ink), #71717a);
+  --session-inspector-fill: color-mix(in srgb, var(--glass-frame) 71%, var(--surface-soft));
+  --session-inspector-divider: color-mix(in srgb, var(--ink) 7%, transparent);
+  --session-inspector-blue: light-dark(var(--info), var(--color-blue-500, color-mix(in oklch, var(--info), var(--nacre-indigo))));
+  --session-inspector-amber: light-dark(var(--warn), var(--color-amber-500, color-mix(in srgb, var(--warn) 68%, var(--danger))));
+  --nacre-mark-glow: color-mix(in srgb, var(--nacre-indigo) 23%, transparent);
+}
+
+:root:where(.dark) {
+  --glass-ui-fill: rgb(24 27 36 / .86);
+  --glass-ui-line: rgb(255 255 255 / .12);
+  --glass-ui-shadow: inset 0 1px rgb(255 255 255 / .10), 0 8px 24px rgb(0 0 0 / .34);
+  --glass-veil: rgb(4 6 10 / .38);
+  --glass-composer-fill: rgb(24 27 36 / .72);
+  --glass-composer-line: var(--glass-ui-line);
+  --glass-composer-shadow: inset 0 1px rgb(255 255 255 / .10), 0 12px 32px rgb(0 0 0 / .38);
+  --nacre-mark-glow: color-mix(in srgb, var(--nacre-indigo) 30%, transparent);
+}
+
+:root:where([data-theme]:not([data-theme="light"], [data-theme="dark"])) {
+  --glass-ui-fill: color-mix(in srgb, var(--card) 88%, transparent);
+  --glass-composer-fill: color-mix(in srgb, var(--card) 76%, transparent);
+  --glass-ui-line: var(--line);
+  --glass-composer-line: var(--line-strong);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-ui-fill: var(--card);
+    --glass-composer-fill: var(--card);
+    --glass-ui-filter: none;
+    --glass-composer-filter: none;
+  }
+}
+
+.ui-dialog:not(.workspace-dialog), .ui-drawer[data-state], .ui-select-content[data-state], .session-workspace-menu[data-state] {
+  border-color: var(--glass-ui-line);
+  background: var(--glass-ui-fill);
+  box-shadow: var(--glass-ui-shadow);
+  backdrop-filter: var(--glass-ui-filter);
+}
+.ui-dialog-overlay, .ui-drawer-overlay { background: var(--glass-veil); }
+.ui-drawer-overlay { backdrop-filter: var(--glass-ui-filter); }
+
+.workspace-stage .session-chat-column {
+  --glass-composer-overlap: 32px;
+}
+.workspace-stage .session-chat-column > .composer {
+  position: relative;
+  z-index: 2;
+  padding-block: 8px 14px;
+}
+.workspace-stage .session-chat-timeline:has(+ .composer) {
+  margin-block-end: calc(-1 * var(--glass-composer-overlap));
+}
+.workspace-stage .session-chat-timeline:has(+ .composer) .session-chat-scroll {
+  padding-block-end: calc(var(--glass-composer-overlap) + 8px);
+}
+.workspace-stage .session-chat-timeline:has(+ .composer)::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: var(--glass-composer-overlap);
+  background: linear-gradient(to bottom, transparent, var(--glass-stage));
+  pointer-events: none;
+}
+.stage-activity-edge {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  mask: linear-gradient(currentColor 0 0) content-box, linear-gradient(currentColor 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.workspace-conversation-header:has(> .stage-activity-pill) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+.workspace-conversation-header:has(> .stage-activity-pill) > :first-child > div { flex-wrap: nowrap; }
+.workspace-conversation-header:has(> .stage-activity-pill) > :last-child { justify-self: end; }
+.workspace-conversation-header:has(> .stage-activity-pill) [data-testid="session-fixed-agent"] { max-width: 45%; }
+.stage-activity-pill {
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-self: center;
+  justify-content: center;
+  gap: 8px;
+  width: max-content;
+  max-width: min(256px, 43cqi);
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 1px solid var(--glass-ui-line);
+  border-radius: 999px;
+  background: var(--glass-ui-fill);
+  box-shadow: var(--glass-ui-shadow);
+  backdrop-filter: var(--glass-ui-filter);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.35;
+}
+.stage-activity-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stage-activity-time { flex: none; color: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.stage-activity-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--nacre-indigo) 52%, var(--info));
+}
+.stage-activity-edge { inset: -1px; z-index: -1; padding: 1.5px; opacity: .55; }
+.stage-activity-edge::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100px, 114%);
+  aspect-ratio: 1;
+  background: conic-gradient(from 45deg, transparent 4%, var(--nacre-indigo) 20%, var(--nacre-sky) 37%, transparent 52%, var(--nacre-violet) 75%, transparent 95%);
+  transform: translate(-50%, -50%);
+}
+.stage-activity-success {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in srgb, var(--ok) 68%, transparent);
+  box-shadow: inset 0 0 12px color-mix(in srgb, var(--ok) 20%, transparent), 0 0 12px color-mix(in srgb, var(--ok) 16%, transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+@container chat-column (max-width: 480px) {
+  .workspace-conversation-header:has(> .stage-activity-pill) [data-testid="session-fixed-agent"] { display: none; }
+  .workspace-conversation-header:has(> .stage-activity-pill) { grid-template-columns: minmax(0, 1fr) auto auto; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-reduce-motion]) .stage-activity-edge::before { animation: nacre-turn 8s linear infinite; }
+  html:not([data-reduce-motion]) .stage-activity-dot { animation: nacre-breath 2.6s ease-in-out infinite; }
+}
+@keyframes nacre-turn { to { transform: translate(-50%, -50%) rotate(1turn); } }
+@keyframes nacre-breath {
+  0%, 100% { opacity: .62; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.12); }
+}

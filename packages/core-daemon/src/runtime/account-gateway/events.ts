@@ -45,15 +45,18 @@ export async function forwardNativeEvents(
               : { reasoning_content: delta },
           );
       } else if (event.kind === "usage") {
+        const input = event.inputTokens === undefined || event.inputTokensIncludesCache !== false
+          ? event.inputTokens
+          : event.inputTokens + (event.cachedInputTokens ?? 0) + (event.cacheCreationInputTokens ?? 0);
         queue.push({
           usage: {
-            prompt_tokens: event.inputTokens,
+            prompt_tokens: input,
             completion_tokens: event.outputTokens,
             total_tokens:
-              event.inputTokens === undefined ||
+              input === undefined ||
               event.outputTokens === undefined
                 ? undefined
-                : event.inputTokens + event.outputTokens,
+                : input + event.outputTokens,
             prompt_tokens_details: { cached_tokens: event.cachedInputTokens },
             completion_tokens_details: {
               reasoning_tokens: event.reasoningOutputTokens,

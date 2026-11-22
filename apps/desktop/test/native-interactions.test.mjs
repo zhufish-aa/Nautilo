@@ -20,7 +20,7 @@ test('native dialogs round-trip selection, empty input, editor whitespace and ca
     import {conversationRows} from './src/renderer/src/lib/conversation-timeline';
     import {ConversationTurnView} from './src/renderer/src/features/timeline/ConversationTurnView';
     const root=createRoot(document.getElementById('root'));let record;let serial=0;
-    window.qa={responses:[],render(question){record={id:'i'+(++serial),sessionId:'s',providerId:'pi',status:'pending',kind:'question',title:'Native',createdAt:new Date().toISOString(),questions:[{id:'q',question:'Question',...question}]};
+    window.qa={responses:[],render(question,providerId='pi'){record={id:'i'+(++serial),sessionId:'s',providerId,status:'pending',kind:'question',title:'Native',createdAt:new Date().toISOString(),questions:[{id:'q',question:'Question',...question}]};
       flushSync(()=>{ui.setState({bySession:{s:[record]}});root.render(<I18nProvider><InteractionCards sessionId='s'/></I18nProvider>);});},
       resolve(input){this.responses.push(input);return {...record,status:input.outcome==='cancelled'?'cancelled':'resolved',response:input};},
       renderTurn:turn=>flushSync(()=>root.render(<I18nProvider><ConversationTurnView turn={turn}/></I18nProvider>)),
@@ -34,7 +34,7 @@ test('native dialogs round-trip selection, empty input, editor whitespace and ca
   w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){},addListener(){},removeListener(){}});
   w.agenthub={core:{request:async ({method,input})=>method==='interaction.list'?[]:w.qa.resolve(input)}};
   const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
-  const button=text=>[...w.document.querySelectorAll('button')].find(button=>button.textContent.trim()===text);
+  const button=text=>[...w.document.querySelectorAll('button')].find(button=>button.textContent.trim()===text || button.getAttribute('aria-label')===text || button.querySelector('.interaction-question-option-copy')?.textContent===text);
   const submit=async()=>{const b=button('提交回答');assert.ok(b,'submit control exists');assert.equal(b.disabled,false);b.click();await tick();};
   try {
     w.eval(bundle.outputFiles[0].text);
@@ -45,7 +45,15 @@ test('native dialogs round-trip selection, empty input, editor whitespace and ca
     const editor='\n  keep indentation\n';
     w.qa.render({inputType:'multiline',initialValue:editor,allowEmpty:true,preserveWhitespace:true});await tick();
     assert.equal(w.document.querySelector('textarea').value,editor);await submit();assert.equal(w.qa.responses.at(-1).answers.q[0],editor);
-    w.qa.render({inputType:'text'});await tick();button('取消').click();await tick();assert.equal(w.qa.responses.at(-1).outcome,'cancelled');
+    w.qa.render({inputType:'text'});await tick();button('跳过').click();await tick();assert.equal(w.qa.responses.at(-1).outcome,'cancelled');
+    const approvalPrompt='Allow tool: task Context: '+ 'Read a directory. '.repeat(30);
+    w.qa.render({question:approvalPrompt,options:[{id:'allow',label:'Approve'},{id:'deny',label:'Deny'}]},'omp');await tick();
+    assert.equal(w.document.querySelector('.interaction-question-heading p').textContent,'工具审批 · task');
+    const details=w.document.querySelector('.interaction-question details');
+    assert.equal(details.open,false);
+    assert.equal(details.querySelector('pre').textContent,approvalPrompt);
+    button('Deny').click();await tick();await submit();
+    assert.equal(w.qa.responses.at(-1).answers.q[0],'Deny');
     const event=(method,key,text)=>({data:{kind:'provider_ui',method,key,text}});
     assert.deepEqual(JSON.parse(JSON.stringify(w.qa.providerUiState([event('setWidget','a','old'),event('setWidget','a','new'),event('setStatus','x','busy'),event('setStatus','x','')]))),{statuses:[],widgets:['new']});
     w.qa.drafts.getState().setText('s','before');

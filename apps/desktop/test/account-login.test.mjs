@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
+import { setImmediate as nextTask } from 'node:timers/promises';
 import { resolve } from 'node:path';
 import ts from 'typescript';
 const require = createRequire(import.meta.url);
@@ -11,13 +12,16 @@ const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.Modu
 const openCodeSource = await readFile(new URL('../src/main/opencode-login.ts', import.meta.url), 'utf8');
 const openCodeModule = { exports: {} };
 new Function('require', 'module', 'exports', ts.transpileModule(openCodeSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText)(require, openCodeModule, openCodeModule.exports);
+const harnessSource = await readFile(new URL('../src/shared/account-harnesses.ts', import.meta.url), 'utf8');
+const harnessModule = { exports: {} };
+new Function('exports', ts.transpileModule(harnessSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText)(harnessModule.exports);
 function load() {
-  const handlers = {}, children = [], calls = [];
-  const imports = { './account-profile': { prepareAccountProfile: async () => ({ profileId: 'managed', directory: '/managed' }) }, electron: { ipcMain: { handle: (name, fn) => { handlers[name] = fn; } } }, 'node:fs/promises': { mkdir: async () => {}, realpath: async (path) => path }, 'node:child_process': { spawn: (...args) => { calls.push(args); const child = new EventEmitter(); child.kill = () => { child.killed = true; }; children.push(child); return child; } } };
+  const handlers = {}, children = [], calls = [], verified = [];
+  const imports = { '../shared/account-harnesses': harnessModule.exports, './account-profile': { prepareAccountProfile: async () => ({ profileId: 'managed', directory: '/managed' }), recordAccountVerification: async (...args) => { verified.push(args); } }, electron: { app: { getPath: () => '/sample' }, ipcMain: { handle: (name, fn) => { handlers[name] = fn; } } }, 'node:fs/promises': { mkdir: async () => {}, realpath: async (path) => path }, 'node:child_process': { spawn: (...args) => { calls.push(args); const child = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => { child.killed = true; }; children.push(child); return child; } } };
   const module = { exports: {} };
   new Function('require', 'module', 'exports', compiled)((name) => name === './opencode-login' ? openCodeModule.exports : name === './antigravity-login' ? { authenticateAntigravity: () => Promise.reject(new Error('not exercised here')) } : imports[name] ?? require(name), module, module.exports);
   module.exports.registerAccountLoginHandlers();
-  return { ...module.exports, handlers, children, calls };
+  return { ...module.exports, handlers, children, calls, verified };
 }
 const input = { profileId: 'one', providerId: 'codex', executable: 'codex', directory: resolve('/tmp/test-account') };
 const event = () => ({ sender: new EventEmitter() });
@@ -28,7 +32,9 @@ test('official login is shell-free, fixed-argument, and never exposes auth outpu
   assert.equal(f.calls[0][2].shell, false); assert.equal(f.calls[0][2].stdio, 'ignore');
   assert.deepEqual(f.calls[0][1], ['login']); assert.equal(f.calls[0][2].env.CODEX_HOME, input.directory);
   f.children[0].emit('exit', 0);
+  await nextTask();
   assert.deepEqual(f.handlers['account:login-status']({}, input.profileId), { state: 'succeeded' });
+  assert.deepEqual(f.verified, [['/sample', 'codex', input.profileId, input.directory]]);
 });
 test('double clicks and simultaneous directory logins are rejected, cancellation wins over exit', async () => {
   const f = load();
@@ -38,6 +44,7 @@ test('double clicks and simultaneous directory logins are rejected, cancellation
   f.handlers['account:login-cancel']({}, input.profileId);
   f.children[0].emit('exit', 0);
   assert.equal(f.children[0].killed, true); assert.equal(f.handlers['account:login-status']({}, input.profileId).state, 'cancelled');
+  assert.deepEqual(f.verified, []);
 });
 test('only supported native CLI profiles can launch', () => {
   const f = load();
@@ -78,6 +85,24 @@ test('Claude login pins both CLI and Anthropic profile roots without changing HO
   assert.equal(invocation.env.ANTHROPIC_CONFIG_DIR, require('node:path').join(input.directory, 'anthropic'));
   if (process.env.HOME) assert.equal(invocation.env.HOME, process.env.HOME);
   assert.equal(invocation.env.ANTHROPIC_PROFILE, undefined);
+});
+
+test('Kimi signs in to an isolated profile and only surfaces the device prompt', async () => {
+  const f = load();
+  const request = { ...input, providerId: 'kimi-code', executable: 'kimi.exe' };
+  assert.deepEqual(await f.handlers['account:login-start'](event(), request), { ok: true });
+  assert.deepEqual(f.calls[0][1], ['login']);
+  assert.equal(f.calls[0][2].env.KIMI_CODE_HOME, input.directory);
+  assert.equal(f.calls[0][2].env.KIMI_CODE_API_KEY, undefined);
+  f.children[0].stderr.emit('data', 'Verification URL: https://untrusted.invalid/activate\n');
+  assert.deepEqual(f.handlers['account:login-status']({}, request.profileId), { state: 'running' });
+  f.children[0].stderr.emit('data', 'Opening browser for Kimi device login: https://auth.kimi.com/activate\n');
+  f.children[0].stderr.emit('data', 'If the browser did not open, paste the URL above and enter code: ABCD-EFGH\n');
+  f.children[0].stderr.emit('data', 'secret-output\n');
+  assert.deepEqual(f.handlers['account:login-status']({}, request.profileId), { state: 'running', reason: 'https://auth.kimi.com/activate\nABCD-EFGH' });
+  f.children[0].emit('exit', 0);
+  await nextTask();
+  assert.deepEqual(f.handlers['account:login-status']({}, request.profileId), { state: 'succeeded' });
 });
 
 test('Antigravity sign-in uses official ACP without spoofing an isolated keyring', () => {

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, ChevronDown, RefreshCw, Wrench } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowUpRight, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { SessionToolInventory } from "@agenthub/schemas";
 import { requestCore } from "../../lib/bridge";
@@ -14,7 +14,6 @@ export function SessionToolsInventory({
 }): JSX.Element {
   const zh = useI18n().locale === "zh-CN",
     [result, setResult] = useState<SessionToolInventory>(),
-    [open, setOpen] = useState(false),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const version = useRef(0);
@@ -22,17 +21,9 @@ export function SessionToolsInventory({
     const session = state.sessions.find(item => item.id === sessionId);
     return JSON.stringify([sessionId, session?.target, session?.connectionId, session?.connectionRevision]);
   });
-  useEffect(() => {
-    version.current++;
-    setResult(undefined);
-    setError("");
-    setOpen(false);
-    setBusy(false);
-  }, [identity]);
-  const load = async () => {
+  const load = useCallback(async () => {
     const current = ++version.current;
     setBusy(true);
-    setOpen(true);
     setError("");
     try {
       const next = await requestCore<SessionToolInventory>("session.tools", {
@@ -44,7 +35,12 @@ export function SessionToolsInventory({
     } finally {
       if (current === version.current) setBusy(false);
     }
-  };
+  }, [sessionId]);
+  useEffect(() => {
+    setResult(undefined);
+    void load();
+    return () => { version.current++; };
+  }, [identity, load]);
   const labels = {
     native: zh ? "原生报告" : "Native reported",
     observed: zh ? "已实际调用" : "Observed",
@@ -52,16 +48,6 @@ export function SessionToolsInventory({
   };
   return (
     <section className="session-tools-inventory">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => (open ? setOpen(false) : void load())}
-      >
-        <Wrench size={15} />
-        {zh ? "本次会话工具" : "Session tools"}
-        <ChevronDown size={14} />
-      </button>
-      {open && (
         <div>
           <div className="session-tools-inventory-actions">
             <button type="button" disabled={busy} onClick={() => void load()}>
@@ -108,7 +94,6 @@ export function SessionToolsInventory({
             <Link to="/settings?section=skills">Skills<ArrowUpRight size={13}/></Link>
           </div>
         </div>
-      )}
     </section>
   );
 }

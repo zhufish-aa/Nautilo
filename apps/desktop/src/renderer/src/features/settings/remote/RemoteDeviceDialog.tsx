@@ -8,8 +8,9 @@ export function RemoteDeviceDialog({ open, name, code, busy, error, zh, onClose,
 }) {
   return <Dialog open={open} onOpenChange={(value) => { if (!value && !busy) onClose(); }}
     title={zh ? "确认设备连接" : "Confirm device"}
+    widthClass="remote-dialog max-w-lg"
     footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>{zh ? "取消" : "Cancel"}</Button>
-      <Button disabled={busy} onClick={() => void onSave()}><Check size={15} />{zh ? "确认连接" : "Connect"}</Button></>}>
+      <Button variant="primary" disabled={busy} onClick={() => void onSave()}><Check size={15} />{zh ? "确认连接" : "Connect"}</Button></>}>
     <div className="remote-device-form">
       {error && <p className="remote-error" role="alert">{error}</p>}
       <div className="remote-device-name"><ShieldCheck size={22} /><strong>{name}</strong></div>

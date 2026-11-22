@@ -16,14 +16,14 @@ import { buildThemeCss, getTheme, SYSTEM_THEME_ID } from "./lib/themes";
 import { getBridge } from "./lib/bridge";
 const AssistantPage = lazy(() => import("./features/assistant/AssistantPage"));
 const DetachedPanel = lazy(() => import("./features/sessions/DetachedPanel"));
-const AgentsPage = lazy(() => import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage })));
+const HarnessPage = lazy(() => import("./features/agents/HarnessPanel").then((module) => ({ default: module.HarnessPage })));
+const SkillsPage = lazy(() => import("./features/agents/SkillsPage"));
 const ProjectDetailPage = lazy(() => import("./features/projects/ProjectDetailPage").then((module) => ({ default: module.ProjectDetailPage })));
 const ProjectsPage = lazy(() => import("./features/projects/ProjectsPage").then((module) => ({ default: module.ProjectsPage })));
 const RunsPage = lazy(() => import("./features/runs/RunsPage").then((module) => ({ default: module.RunsPage })));
 const SettingsPage = lazy(() => import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const TasksPage = lazy(() => import("./features/tasks/TasksPage").then((module) => ({ default: module.TasksPage })));
 const WorkflowsPage = lazy(() => import("./features/workflows/WorkflowsPage").then(module => ({ default: module.WorkflowsPage })));
-const TeamEditorPage = lazy(() => import("./features/teams/TeamEditorPage").then((module) => ({ default: module.TeamEditorPage })));
 const TeamsPage = lazy(() => import("./features/teams/TeamsPage").then((module) => ({ default: module.TeamsPage })));
 
 /** Style element holding the active theme's generated CSS (registry-driven). */
@@ -117,9 +117,9 @@ export default function App(): JSX.Element {
               <Route path="/assistant" element={<AssistantPage />} />
               <Route path="/projects" element={<ProjectsPage />} />
               <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
-              <Route path="/agents" element={<Navigate to="/settings?section=agents" replace />} />
-              <Route path="/teams" element={<TeamsPage />} />
-              <Route path="/teams/:teamId" element={<TeamEditorPage />} />
+              <Route path="/agents" element={<HarnessPage />} />
+              <Route path="/skills/*" element={<SkillsPage />} />
+              <Route path="/teams/:teamId?" element={<TeamsPage />} />
               <Route path="/tasks" element={<TasksPage />} />
               <Route path="/workflows" element={<WorkflowsPage />} />
               <Route path="/runs" element={<RunsPage />} />

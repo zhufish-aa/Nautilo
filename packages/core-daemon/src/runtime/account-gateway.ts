@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import type { RuntimeConnection } from "@agenthub/domain";
 import type { AdapterStartRequest } from "../adapters/index.js";
 import { AdapterRegistry } from "../adapters/index.js";
 import { Database } from "../database/index.js";
 import { CredentialService } from "./security/credential-service.js";
-import { NativeRelay } from "./account-gateway/native-relay.js";
+import { ASSISTANT_SESSION_ID, NativeRelay } from "./account-gateway/native-relay.js";
 
 const hash = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -23,22 +24,7 @@ export class AccountGateways {
     account: RuntimeConnection,
     request: AdapterStartRequest,
   ): Promise<void> {
-    const identity = `${session}:${account.id}:${account.revision}`;
-    let promise = this.routes.get(identity);
-    if (!promise) {
-      promise = NativeRelay.open(
-        this.db,
-        this.adapters,
-        this.credentials,
-        account,
-        identity,
-        request,
-      );
-      this.routes.set(identity, promise);
-      promise.catch(() => this.routes.delete(identity));
-    }
-    const relay = await promise;
-    await relay.checkLogin();
+    const relay = await this.route(session, account, request);
     await relay.configureModels(request);
     relay.update(request);
     request.instance = {
@@ -65,6 +51,22 @@ export class AccountGateways {
     for (const key of descriptor?.credentialEnv ?? [])
       request.env![key] = relay.key;
     if (descriptor?.baseUrlEnv) request.env![descriptor.baseUrlEnv] = relay.url;
+  }
+  async assistantEndpoint(account: RuntimeConnection) {
+    const relay = await this.route(ASSISTANT_SESSION_ID, account, { cwd: tmpdir() });
+    return { base: relay.url, key: relay.key };
+  }
+  private async route(session: string, account: RuntimeConnection, request: Pick<AdapterStartRequest, "cwd">) {
+    const identity = `${session}:${account.id}:${account.revision}`;
+    let promise = this.routes.get(identity);
+    if (!promise) {
+      promise = NativeRelay.open(this.db, this.adapters, this.credentials, account, identity, request);
+      this.routes.set(identity, promise);
+      promise.catch(() => this.routes.delete(identity));
+    }
+    const relay = await promise;
+    await relay.checkLogin();
+    return relay;
   }
   async cancelSession(session: string): Promise<void> {
     for (const [id, promise] of this.routes)

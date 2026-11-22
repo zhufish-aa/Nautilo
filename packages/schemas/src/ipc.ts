@@ -1,4 +1,4 @@
-import type { AssistantModelStep, AssistantDecision, AssistantLookup, AssistantRead, AssistantSessionPage, AssistantExcerptPage } from "./assistant.js";
+import type { AssistantModelStep, AssistantDecision, AssistantLookup, AssistantRead, AssistantSessionPage, AssistantExcerptPage, AssistantDispatch, AssistantDispatchKey } from "./assistant.js";
 import type { RuntimeConnection, RuntimeConnectionInput } from "@agenthub/domain";
 import type { WorkflowTemplate, WorkflowStart, WorkflowRun, WorkflowValidation, WorkflowDefinition, WorkflowLayout, WorkflowPlan, WorkflowPlanAssignment, WorkflowRef } from "@agenthub/domain";
 import type { RemoteStatus, RemoteSettings, RemoteGrant, RemoteInvitation, RemoteRelayCatalog } from "./remote-access.js";
@@ -96,7 +96,7 @@ export interface TerminalMetadata {
   exited?: boolean; exitCode?: number;
 }
 export interface SourceControlScope { sessionId?: string; projectId?: string }
-export interface CoreFeatures { sourceControl?: 1; sourceControlHistory?: 1; sourceControlHistoryPaging?: 1; sourceControlEditing?: 1; terminalTabs?: 1; composerDrafts?: 1; taskRetry?: 1; workflows?: 1; workflowPlans?: 1 }
+export interface CoreFeatures { sourceControl?: 1 | 2; sourceControlHistory?: 1; sourceControlHistoryPaging?: 1; sourceControlEditing?: 1; terminalTabs?: 1; composerDrafts?: 1; taskRetry?: 1; workflows?: 1; workflowPlans?: 1 }
 export interface SourceControlCommitSummary { hash: string; subject: string; author: string; committedAt: string }
 export interface SourceControlHistoryInput extends SourceControlScope { query?: string; cursor?: string; limit?: number }
 export interface SourceControlHistoryPage {
@@ -152,6 +152,27 @@ export interface SourceControlMutation extends SourceControlScope {
   token: string; paths?: string[]; message?: string; branch?: string; remote?: string; fileToken?: string;
   patchToken?: string; hunkIds?: string[]; lines?: number[];
 }
+/** Subscription limits reported by the selected login, without credentials or account metadata. */
+export interface AccountQuota {
+  windows: Array<{
+    id: string; label?: string; usedPercent: number; windowMinutes?: number; resetsAt?: string;
+    /** Values in the unit returned by the provider. */
+    remainingQuota?: string;
+    totalQuota?: string;
+  }>;
+  unavailableReason?: "sign_in";
+}
+
+export function accountQuotaSource(connection: Pick<RuntimeConnection, "kind" | "harness" | "baseUrl">): string | undefined {
+  if (connection.kind === "login") {
+    return ["codex", "claude-code", "antigravity", "opencode", "kimi-code"].find(provider => provider === connection.harness);
+  }
+  const base = connection.baseUrl?.replace(/\/+$/, "");
+  if (base && /^https:\/\/opencode\.ai\/(?:zen\/go|inference\/go(?:\/(?:openai|anthropic|openai-responses))?)\/v1$/.test(base)) return "opencode";
+  if (base && /^https:\/\/api\.kimi\.(?:com|ai)\/coding(?:\/v1)?$/.test(base)) return "kimi-code";
+  return undefined;
+}
+
 export interface IpcRequestMap {
   "workflow.templates": { input: undefined; output: WorkflowTemplate[] };
   "workflow.template": { input: { id: string; revision?: number }; output: WorkflowTemplate };
@@ -190,19 +211,22 @@ export interface IpcRequestMap {
   "terminal.stop": { input: { terminalId: string }; output: { ok: true; historySync?: NativeHistorySync } };
   "terminal.status": { input: { sessionId: string; retrySync?: boolean }; output: { nativeActive: boolean; terminalId?: string; historySync?: NativeHistorySync } };
   "agent.runtimeCapabilities": { input: { sessionId?: string; agentInstanceId?: string }; output: import("@agenthub/provider-sdk").NativeRuntimeCapabilities };
-  "assistant.records": { input: { kind: "turn" | "settings" | "memory"; after?: number; before?: number; limit?: number; query?: string; oldest?: boolean }; output: Array<{seq:number;value:unknown}> };
-  "assistant.save": { input: { kind: "turn" | "settings" | "memory"; id: string; value: object }; output: {seq:number} };
+  "assistant.records": { input: { kind: "turn" | "settings" | "memory" | "automation"; id?: string; after?: number; before?: number; limit?: number; query?: string; oldest?: boolean }; output: Array<{seq:number;value:unknown}> };
+  "assistant.save": { input: { kind: "turn" | "settings" | "memory" | "automation"; id: string; value: object }; output: {seq:number} };
+  "assistant.dispatches": { input: { items: AssistantDispatchKey[] }; output: AssistantDispatch[] };
+  "assistant.search": { input: { query: string }; output: { success: boolean; content: string } };
   "assistant.modelStep": { input: AssistantModelStep; output: AssistantDecision };
   "assistant.sessions": { input: AssistantLookup; output: AssistantSessionPage };
   "assistant.excerpts": { input: AssistantRead; output: AssistantExcerptPage };
   "connection.list": { input: Record<string, never>; output: RuntimeConnection[] };
   "connection.scanNative": { input: Record<string, never>; output: import("./connection-import.js").NativeConnectionScan };
   "connection.importNative": { input: { scanId: string; candidateIds: string[] }; output: import("./connection-import.js").NativeConnectionImportResult };
-  "connection.get": { input: { connectionId: string; revision?: number }; output: RuntimeConnection };
+  "connection.get": { input: { connectionId: string; revision?: number; includeUsage?: boolean }; output: RuntimeConnection };
   "connection.gateway": { input: { connectionId: string; enabled: boolean }; output: RuntimeConnection };
   "connection.upsert": { input: { connection: RuntimeConnectionInput; expectedRevision?: number; apiKey?: string; clearApiKey?: boolean }; output: RuntimeConnection };
   "connection.remove": { input: { connectionId: string }; output: { removed: boolean } };
   "connection.models": { input: { connectionId: string; revision?: number; agentInstanceId?: string }; output: ProviderModelCatalog };
+  "connection.quota": { input: { connectionId: string; revision?: number } | { sessionId: string } | { agentInstanceId: string }; output: AccountQuota };
   "connection.diagnose": { input: { connectionId: string; revision?: number }; output: import("./service-diagnostics.js").ServiceDiagnostic };
   "requestLog.list": { input: import("./request-log.js").RequestLogQuery; output: import("./request-log.js").RequestLogPage };
   "session.tools": { input: { sessionId: string }; output: import("./request-log.js").SessionToolInventory };
@@ -301,7 +325,7 @@ export interface IpcRequestMap {
   "credential.delete": { input: { agentInstanceId: string }; output: { removed: boolean } };
   "recovery.list": { input: undefined; output: RecoverableProjectRun[] };
   "audit.list": { input: { limit?: number; resourceId?: string }; output: AuditRecord[] };
-  "metrics.get": { input: { projectId?: string }; output: RuntimeMetrics };
+  "metrics.get": { input: { projectId?: string; view?: undefined } | import("./usage-overview.js").UsageOverviewQuery; output: RuntimeMetrics | { rows: import("./usage-overview.js").UsageSourceRow[] } };
   "diagnostics.export": { input: { projectId?: string; projectRunId?: string }; output: DiagnosticExportResult };
   "event.subscribe": { input: { projectRunId?: string; sessionId?: string; afterSequence?: number }; output: { subscriptionId: string } };
   "event.replay": { input: { subscriptionId: string; afterSequence: number }; output: { events: RuntimeEvent[]; lastSequence: number } };

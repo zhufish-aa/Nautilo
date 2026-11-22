@@ -323,6 +323,7 @@ export interface QueuedFollowUp {
 export interface ContextUsage {
   inputTokens?: number;
   outputTokens?: number;
+  cachedInputTokens?: number;
   contextUsed?: number;
   contextWindow?: number;
 }

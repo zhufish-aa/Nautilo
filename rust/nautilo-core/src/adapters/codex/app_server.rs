@@ -662,8 +662,15 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                             // both settle; otherwise killing the process also
                             // clears the transport's pending-request map.
                             match tokio::time::timeout(std::time::Duration::from_millis(3_000), async {
-                                let (turn_result, interrupt_result) = tokio::join!(&mut turn, interrupted);
+                                let pause_goal = async {
+                                    if request.prompt.starts_with("/goal ") {
+                                        rpc.request("thread/goal/set", json!({"threadId":thread_id,"origin":"user","status":"paused"})).await?;
+                                    }
+                                    Ok::<_, anyhow::Error>(())
+                                };
+                                let (turn_result, interrupt_result, pause_result) = tokio::join!(&mut turn, interrupted, pause_goal);
                                 turn_result?;
+                                pause_result?;
                                 match interrupt_result {
                                     Ok(Ok(_)) => Ok(()),
                                     Ok(Err(message)) => Err(anyhow::anyhow!(message)),
@@ -691,8 +698,14 @@ fn start_on_connection(request: AdapterStartRequest, resume_session: Option<Stri
                     if let (Some(thread),Some(turn))=(thread,turn) {
                         let (_,response)=rpc.request_with_id("turn/interrupt",json!({"threadId":thread,"turnId":turn}));
                         limit_settled=matches!(tokio::time::timeout(std::time::Duration::from_secs(3),async {
-                            let (terminal,response)=tokio::join!(context.terminal(),response);
-                            terminal?;response.map_err(|_|anyhow::anyhow!("Codex interrupt channel closed"))?.map_err(anyhow::Error::msg)?;Ok::<_,anyhow::Error>(())
+                            let pause_goal = async {
+                                if request.prompt.starts_with("/goal ") {
+                                    rpc.request("thread/goal/set", json!({"threadId":thread,"origin":"automatic","status":"paused"})).await?;
+                                }
+                                Ok::<_, anyhow::Error>(())
+                            };
+                            let (terminal,response,pause)=tokio::join!(context.terminal(),response,pause_goal);
+                            terminal?;response.map_err(|_|anyhow::anyhow!("Codex interrupt channel closed"))?.map_err(anyhow::Error::msg)?;pause
                         }).await,Ok(Ok(())));
                     }
                 }
@@ -844,7 +857,12 @@ async fn run_turn(
     spawn_reason: &'static str,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
-    let warm_thread = resume_session.is_some() && resume_session == loaded_thread_id;
+    let mode = request.agent_mode.as_deref().filter(|mode| matches!(*mode, "plan" | "default"));
+    let mut mode_model = request.model.clone().filter(|model| !model.is_empty());
+    // A thread start/resume response reports the effective native model when
+    // the user lets Codex choose its model from configuration.
+    let warm_thread = resume_session.is_some() && resume_session == loaded_thread_id
+        && (mode.is_none() || mode_model.is_some());
     let timing = |phase: &str| crate::runtime::run_log::log(json!({
         "event": "codex_turn_timing", "sessionId": request.local_session_id,
         "model": request.model, "effort": request.reasoning_effort,
@@ -874,6 +892,9 @@ async fn run_turn(
             thread_params.insert("excludeTurns".to_string(), json!(true));
         }
         let response = rpc.request(method, Value::Object(thread_params)).await?;
+        if mode.is_some() && mode_model.is_none() {
+            mode_model = response["model"].as_str().filter(|model| !model.is_empty()).map(str::to_string);
+        }
         response.pointer("/thread/id").and_then(Value::as_str).map(str::to_string)
             .or_else(|| resume_session.clone()).filter(|id| !id.is_empty())
     };
@@ -892,14 +913,35 @@ async fn run_turn(
         // Manual compaction is a dedicated RPC, not a chat turn.
         rpc.request("thread/compact/start", json!({ "threadId": thread_id })).await?;
     } else {
-        let turn_response = rpc
-            .request("turn/start", turn_start_params(request, &thread_id)?)
-            .await?;
+        let mut params = turn_start_params(request, &thread_id)?;
+        if let Some(mode) = mode {
+            let model = mode_model.ok_or_else(|| anyhow::anyhow!("Codex did not report its current model for the selected mode"))?;
+            params["collaborationMode"] = json!({"mode":mode,"settings":{
+                "model":model,"reasoning_effort":params["effort"],"developer_instructions":null
+            }});
+            if mode == "plan" {
+                params["sandboxPolicy"] = json!({"type":"readOnly"});
+                params["approvalPolicy"] = json!("never");
+            }
+        }
+        let goal = request.prompt.strip_prefix("/goal ").map(str::trim);
+        if let Some(objective) = goal {
+            anyhow::ensure!(mode != Some("plan"), "Turn off Codex plan mode before starting a goal");
+            anyhow::ensure!(!objective.is_empty() && objective.chars().count() <= 4000, "Codex goals require 1 to 4,000 characters");
+            // Hold automatic continuation until this turn has applied the
+            // user's current model, approval policy and sandbox.
+            rpc.request("thread/goal/set", json!({"threadId":thread_id,"origin":"user","objective":objective,"status":"paused"})).await?;
+            params["input"][0]["text"] = json!(format!("Start working toward this goal: {objective}"));
+        }
+        let turn_response = rpc.request("turn/start", params).await?;
         let turn_id = turn_response.get("turn").and_then(|t| t.get("id")).and_then(Value::as_str).map(str::to_string);
         if let Some(user)=turn_response["turn"]["items"].as_array().into_iter().flatten().find(|item|item["type"]=="userMessage") {
             let _=sender.send(AdapterEvent::Session{provider_session_id:thread_id.clone(),raw:Some(json!({"providerUserMessageId":user["id"],"nativeTurnId":turn_id}))});
         }
         state.lock().unwrap().turn_id = turn_id;
+        if goal.is_some() && !state.lock().unwrap().cancelled {
+            rpc.request("thread/goal/set", json!({"threadId":thread_id,"origin":"user","status":"active"})).await?;
+        }
     }
     timing("turn_accepted");
     context.wait().await
@@ -1541,6 +1583,31 @@ mod queue_tests {
         let calls = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
         assert!(!calls.contains("thread/subscribe"));
         assert!(calls.contains("native-child-thread"));
+        cleanup(&request, root).await;
+    }
+
+    #[tokio::test]
+    async fn composer_plan_and_goal_use_native_codex_protocol() {
+        let (mut request, root) = fake_request("prepare a plan");
+        request.model = Some("test-model".into());
+        request.agent_mode = Some("plan".into());
+        let mut plan = start_single_connection(request.clone(), None).unwrap();
+        assert!(matches!(collect(&mut plan).await.last(), Some(AdapterEvent::Exit { exit_code: Some(0), .. })));
+
+        request.agent_mode = Some("default".into());
+        request.prompt = "/goal Verify the build".into();
+        let mut goal = start_single_connection(request.clone(), Some("existing-thread".into())).unwrap();
+        assert!(matches!(collect(&mut goal).await.last(), Some(AdapterEvent::Exit { exit_code: Some(0), .. })));
+        let log = std::fs::read_to_string(root.join("rpc.ndjson")).unwrap();
+        let frames: Vec<Value> = log.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let plan = frames.iter().find(|frame| frame["method"] == "turn/start").unwrap();
+        assert_eq!(plan["params"]["collaborationMode"]["mode"], "plan");
+        assert_eq!(plan["params"]["sandboxPolicy"]["type"], "readOnly");
+        let goal: Vec<_> = frames.iter().filter(|frame| frame["params"]["threadId"] == "existing-thread").collect();
+        assert!(goal.windows(3).any(|calls| calls[0]["method"] == "thread/goal/set"
+            && calls[0]["params"]["status"] == "paused" && calls[0]["params"]["objective"] == "Verify the build"
+            && calls[1]["method"] == "turn/start" && calls[1]["params"]["collaborationMode"]["mode"] == "default"
+            && calls[2]["method"] == "thread/goal/set" && calls[2]["params"]["status"] == "active"));
         cleanup(&request, root).await;
     }
 

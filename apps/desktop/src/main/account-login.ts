@@ -1,10 +1,11 @@
-import { prepareAccountProfile, recoverableAccountProfiles, attachAccountProfile } from "./account-profile";
+import { prepareAccountProfile, recoverableAccountProfiles, attachAccountProfile, recordAccountVerification } from "./account-profile";
 import { app, BrowserWindow, ipcMain } from "electron";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { isAbsolute, resolve, join } from "node:path";
 import { mkdir, realpath } from "node:fs/promises";
 import { authenticateAntigravity } from "./antigravity-login";
 import { authenticateOpenCode, openCodeProfileEnvironment, resolveOpenCodeExecutable } from "./opencode-login";
+import { supportsAccountLogin } from "../shared/account-harnesses";
 
 export interface AccountLoginInput { profileId: string; providerId: string; executable: string; directory: string }
 export interface AccountLoginStatus { state: "idle" | "running" | "succeeded" | "failed" | "cancelled"; reason?: string }
@@ -13,7 +14,7 @@ const jobs = new Map<string, Job>();
 const allowedEnv = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "ComSpec", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "HOME", "TMPDIR", "SHELL", "LANG", "LC_ALL", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"];
 
 export function loginInvocation(input: AccountLoginInput): { command: string; args: string[]; env: Record<string, string> } {
-  if (!input || !input.profileId || !["codex", "claude-code", "antigravity", "opencode"].includes(input.providerId) || !isAbsolute(input.directory) || /[\r\n\0]/.test(input.directory) || !input.executable?.trim() || /[\r\n\0]/.test(input.executable)) throw new Error("invalid-login-profile");
+  if (!input || !input.profileId || !supportsAccountLogin(input.providerId) || !isAbsolute(input.directory) || /[\r\n\0]/.test(input.directory) || !input.executable?.trim() || /[\r\n\0]/.test(input.executable)) throw new Error("invalid-login-profile");
   if (input.providerId === "opencode") {
     const executable = resolveOpenCodeExecutable(input.executable);
     if (!executable) throw new Error("Install a native OpenCode executable that supports console login.");
@@ -28,13 +29,23 @@ export function loginInvocation(input: AccountLoginInput): { command: string; ar
     const key = Object.keys(process.env).find((key) => key.toLowerCase() === name.toLowerCase());
     if (key && process.env[key] !== undefined) env[key] = process.env[key]!;
   }
-  if (input.providerId !== "antigravity") env[input.providerId === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"] = input.directory;
+  if (input.providerId === "codex") env.CODEX_HOME = input.directory;
+  if (input.providerId === "claude-code") env.CLAUDE_CONFIG_DIR = input.directory;
+  if (input.providerId === "kimi-code") env.KIMI_CODE_HOME = input.directory;
   for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]) {
     const key = Object.keys(process.env).find(key => key.toUpperCase() === name);
     if (key && process.env[key]) env[key] = process.env[key]!;
   }
   if (input.providerId === "claude-code") env.ANTHROPIC_CONFIG_DIR = join(input.directory, "anthropic");
-  return { command: input.executable, args: input.providerId === "antigravity" ? ["acp"] : input.providerId === "codex" ? ["login"] : ["auth", "login"], env };
+  return { command: input.executable, args: input.providerId === "antigravity" ? ["acp"] : input.providerId === "claude-code" ? ["auth", "login"] : ["login"], env };
+}
+
+function kimiLoginHint(output: string): string | undefined {
+  const text = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const url = text.match(/(?:Opening browser for Kimi device login|Verification URL):[ \t]*(https:\/\/(?:auth\.kimi\.(?:com|ai)|(?:www\.|code\.)?kimi\.(?:com|ai))\/[^\s]*)(?=\r?\n)/i)?.[1];
+  if (!url) return;
+  const code = text.match(/(?:enter code|user code):\s*([A-Z0-9-]{4,24})(?=\r?\n)/i)?.[1];
+  return code ? `${url}\n${code}` : url;
 }
 
 function stopLogin(job: Job, terminalStatus: AccountLoginStatus): void {
@@ -59,15 +70,32 @@ export function registerAccountLoginHandlers(): void {
       if ([...jobs.values()].some((job) => job.status.state === "running" && job.directory === directory)) return { ok: false, reason: "This directory already has a login in progress" };
       if (jobs.get(input.profileId)?.status.state === "running") return { ok: false, reason: "Login is already running" };
       if (input.providerId === "antigravity" && [...jobs.values()].some(job => job.status.state === "running" && job.providerId === "antigravity")) return { ok: false, reason: "Google sign-in is already running" };
-      const child = spawn(invocation.command, invocation.args, { env: invocation.env, cwd: directory, shell: false, windowsHide: true, stdio: ["antigravity", "opencode"].includes(input.providerId) ? "pipe" : "ignore" });
+      const stdio: SpawnOptions["stdio"] = ["antigravity", "opencode"].includes(input.providerId) ? "pipe"
+        : input.providerId === "kimi-code" ? ["ignore", "ignore", "pipe"] : "ignore";
+      const child = spawn(invocation.command, invocation.args, { env: invocation.env, cwd: directory, shell: false, windowsHide: true, stdio });
       const job: Job = { providerId: input.providerId, directory, child, status: { state: "running" } };
       jobs.set(input.profileId, job);
+      if (input.providerId === "kimi-code") {
+        let output = "";
+        child.stderr?.on("data", chunk => {
+          if (job.status.state !== "running" || job.terminalStatus) return;
+          output = (output + String(chunk)).slice(-4096);
+          const reason = kimiLoginHint(output);
+          if (reason) job.status = { state: "running", reason };
+        });
+      }
       const finish = (status: AccountLoginStatus): void => {
-        if (job.status.state !== "running") return;
-        job.status = job.terminalStatus ?? status;
+        if (job.status.state !== "running" || !job.child) return;
+        const finalStatus = job.terminalStatus ?? status;
         clearTimeout(job.timer);
         job.child = undefined;
-        if (job.status.state === "succeeded" && !event.sender.isDestroyed?.()) { const window = BrowserWindow?.fromWebContents(event.sender); window?.show(); window?.focus(); }
+        if (finalStatus.state !== "succeeded") { job.status = finalStatus; return; }
+        void recordAccountVerification(app.getPath("userData"), input.providerId, input.profileId, directory)
+          .catch(() => console.warn("Could not save account verification timestamp"))
+          .finally(() => {
+            job.status = finalStatus;
+            if (!event.sender.isDestroyed?.()) { const window = BrowserWindow?.fromWebContents(event.sender); window?.show(); window?.focus(); }
+          });
       };
       child.once("error", () => {
         if (!child.pid) finish({ state: "failed", reason: "Could not start the native CLI. Check its executable path." });

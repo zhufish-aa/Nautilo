@@ -76,7 +76,7 @@ interface ActiveRun {
 
 export class RunService {
   readonly requestLogs: RequestLogService;
-  private readonly accountGateways?: AccountGateways;
+  readonly accountGateways?: AccountGateways;
   generateSessionTitle(sessionId: string): Promise<{ title?: string }> {
     return this.credentials ? generateSessionTitle(this.database, this.credentials, sessionId) : Promise.resolve({});
   }

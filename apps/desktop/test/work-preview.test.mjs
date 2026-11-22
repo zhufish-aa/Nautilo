@@ -182,6 +182,8 @@ test("classifyLocalHref routes local paths to the preview and keeps externals", 
   assert.deepEqual(classifyLocalHref("\\\\server\\share\\deck.pptx"), { kind: "local", path: "\\\\server\\share\\deck.pptx" });
   assert.deepEqual(classifyLocalHref("file:///C:/work/deck.pptx"), { kind: "local", path: "C:/work/deck.pptx" });
   assert.deepEqual(classifyLocalHref("outputs/deck.pptx"), { kind: "local", path: "outputs/deck.pptx" });
+  assert.deepEqual(classifyLocalHref("/C:/work/docs/benchmark.md:105"), { kind: "local", path: "C:/work/docs/benchmark.md" });
+  assert.deepEqual(classifyLocalHref("docs/benchmark.md#L105-L110"), { kind: "local", path: "docs/benchmark.md" });
   // URL-encoded spaces decode safely; malformed encoding never throws.
   assert.deepEqual(classifyLocalHref("C:/work/my%20deck%20v2.pptx"), { kind: "local", path: "C:/work/my deck v2.pptx" });
   assert.deepEqual(classifyLocalHref("outputs/中文%20目录/deck.pptx"), { kind: "local", path: "outputs/中文 目录/deck.pptx" });

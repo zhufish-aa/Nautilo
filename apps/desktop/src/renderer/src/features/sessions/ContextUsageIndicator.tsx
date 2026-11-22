@@ -8,7 +8,9 @@ import type { SlashCommandDefinition } from "@agenthub/domain";
 import { useI18n } from "../../lib/i18n";
 import { cn } from "../../lib/utils";
 import { useAgentsStore } from "../../stores/agents";
+import { connectionModelKey, useConnectionsStore } from "../../stores/connections";
 import { useSessionsStore } from "../../stores/sessions";
+import { useTeamsStore } from "../../stores/teams";
 import { UI_EASE_OUT, useUiReducedMotion } from "../../lib/ui-motion";
 import "./context-usage.css";
 
@@ -21,23 +23,34 @@ function tokenLabel(value: number): string {
 }
 
 /** Shared context-usage derivation (indicator ring + Composer compact banner). */
-export function useContextUsage(sessionId?: string): { used?: number; limit?: number; percentage?: number } {
+export function useContextUsage(sessionId?: string): { used?: number; limit?: number; percentage?: number; cached?: number } {
   const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
   const usage = useSessionsStore((state) => sessionId ? state.contextUsage[sessionId] : undefined);
-  const instances = useAgentsStore((state) => state.instances);
-  const catalogs = useAgentsStore((state) => state.modelCatalogs);
+  const target = session?.target;
+  const member = useTeamsStore(state => target?.type === "member"
+    ? state.teams.find(team => team.id === target.teamId)?.members.find(item => item.id === target.memberId)
+    : undefined);
+  const instanceId = target?.type === "agent" ? target.instanceId : member?.agentInstanceId;
+  const nativeCatalog = useAgentsStore(state => instanceId ? state.modelCatalogs[instanceId] : undefined);
+  const connection = useConnectionsStore(state => session?.connectionId
+    ? state.connections.find(item => item.id === session.connectionId
+      && (session.connectionRevision === undefined || item.revision === session.connectionRevision))
+    : undefined);
+  const revision = session?.connectionRevision ?? connection?.revision;
+  const connectionCatalog = useConnectionsStore(state => session?.connectionId && revision !== undefined
+    ? state.modelCatalogs[connectionModelKey(session.connectionId, revision)] : undefined);
   if (!sessionId || !session) return {};
-  const instanceId = session.target.type === "agent" ? session.target.instanceId : undefined;
-  const instance = instances.find((item) => item.id === instanceId);
-  const catalog = instance ? catalogs[instance.id] : undefined;
-  const modelId = session.model || catalog?.defaultModel;
-  const model = catalog?.models.find((item) => item.id === modelId);
+  const modelId = session.model || (session.connectionId
+    ? connectionCatalog?.defaultModel : member?.model || nativeCatalog?.defaultModel);
+  const model = session.connectionId
+    ? connectionCatalog?.models.find(item => item.id === modelId) ?? connection?.models?.find(item => item.id === modelId)
+    : nativeCatalog?.models.find(item => item.id === modelId);
   const used = usage?.contextUsed;
   const limit = usage?.contextWindow ?? model?.contextWindow;
   const percentage = used !== undefined && limit
     ? Math.min(100, Math.max(0, (used / limit) * 100))
     : undefined;
-  return { used, limit, percentage };
+  return { used, limit, percentage, cached: usage?.cachedInputTokens };
 }
 
 export function ContextUsageIndicator({

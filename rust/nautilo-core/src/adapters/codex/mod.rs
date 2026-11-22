@@ -410,8 +410,7 @@ async fn discover_codex_models_via_api(instance: &Value, env: &HashMap<String, S
     Ok(Some(catalog))
 }
 
-/// Uses Codex's app-server model/list endpoint for the local catalog.
-async fn discover_codex_models_via_cli(instance: &Value, env: &HashMap<String, String>) -> CoreResult<Value> {
+pub(crate) async fn read_app_server(instance: &Value, env: &HashMap<String, String>, method: &str, params: Value) -> CoreResult<Value> {
     let executable = str_field(instance, "executable").unwrap_or("codex");
     let args = app_server::build_codex_app_server_args(instance, Some(env), None, None)?;
     let (command, args) = resolve_codex_invocation(executable, &args, env.get("PATH").map(String::as_str));
@@ -427,13 +426,16 @@ async fn discover_codex_models_via_cli(instance: &Value, env: &HashMap<String, S
     .map_err(|e| CoreError::reason(ErrorCode::IpcInternalError, e.to_string()))?;
     let handle = started.handle.clone();
     handle.write(&format!("{}\n", json!({ "method": "initialize", "id": 0, "params": app_server::codex_app_server_initialize_params() })));
-    handle.write(&format!("{}\n", json!({ "method": "initialized" })));
-    handle.write(&format!("{}\n", json!({ "method": "model/list", "id": 1, "params": { "limit": 200, "includeHidden": false } })));
+    let mut request = json!({ "method": method, "id": 1 });
+    if !params.is_null() {
+        request["params"] = params;
+    }
+    let after_init = format!("{}\n{request}\n", json!({ "method": "initialized" }));
 
     let mut events = started.events;
     let mut stdout = String::new();
     let mut result: Option<Value> = None;
-    while let Some(event) = events.recv().await {
+    'read: while let Some(event) = events.recv().await {
         match event {
             ProcessEvent::Stdout(text) => {
                 stdout.push_str(&text);
@@ -444,13 +446,14 @@ async fn discover_codex_models_via_cli(instance: &Value, env: &HashMap<String, S
                         continue;
                     }
                     if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                        if value.get("id").and_then(Value::as_i64) == Some(1) {
-                            result = Some(value);
+                        match value["id"].as_i64() {
+                            Some(0) if !value["error"].is_null() => break 'read,
+                            // One write keeps the notification and request ordered on Windows.
+                            Some(0) => handle.write(&after_init),
+                            Some(1) => { result = Some(value); break 'read; }
+                            _ => {}
                         }
                     }
-                }
-                if result.is_some() {
-                    break;
                 }
             }
             ProcessEvent::Exit { .. } | ProcessEvent::Timeout { .. } | ProcessEvent::Error(_) => break,
@@ -458,7 +461,11 @@ async fn discover_codex_models_via_cli(instance: &Value, env: &HashMap<String, S
         }
     }
     handle.cancel().await;
-    let response = result.ok_or_else(|| CoreError::reason(ErrorCode::IpcInternalError, "Codex app-server did not answer model/list"))?;
+    result.ok_or_else(|| CoreError::reason(ErrorCode::IpcInternalError, format!("Codex app-server did not answer {method}")))
+}
+
+async fn discover_codex_models_via_cli(instance: &Value, env: &HashMap<String, String>) -> CoreResult<Value> {
+    let response = read_app_server(instance, env, "model/list", json!({ "limit": 200, "includeHidden": false })).await?;
     let data = response
         .get("result")
         .and_then(|r| r.get("data"))

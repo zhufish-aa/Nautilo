@@ -3,7 +3,6 @@ import { animate } from "framer-motion";
 import { useSettingsStore } from "../stores/settings";
 
 export const UI_EASE_OUT = [0.23, 1, 0.32, 1] as const;
-const easing = "cubic-bezier(0.23, 1, 0.32, 1)";
 export const UI_SPRING = { type:"spring" as const, duration:0.5, bounce:0.2 };
 
 const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
@@ -52,7 +51,10 @@ export function markOutgoingMessage(sessionId: string, messageId: string): void 
   outgoing.set(messageKey(sessionId, messageId), now);
 }
 
-export function useMessageEntrance(sessionId: string, messageId?: string) {
+export function useMessageEntrance(sessionId: string, messageId?: string, motion?: {
+  keyframes: Keyframe[];
+  options: KeyframeAnimationOptions;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const entrance = useRef<{ key: string; play: boolean }>();
   const reduced = useUiReducedMotion();
@@ -65,11 +67,11 @@ export function useMessageEntrance(sessionId: string, messageId?: string) {
     }
     const element = ref.current;
     if (!entrance.current.play || reduced || !element?.animate) return;
-    const animation = element.animate([
-      { opacity: 0.45, transform: "translateY(8px) scale(0.985)" },
+    const animation = element.animate(motion?.keyframes ?? [
+      { opacity: 0, transform: "translateY(16px) scale(0.98)" },
       { opacity: 1, transform: "translateY(0px) scale(1)" }
-    ], { duration: 200, easing });
+    ], motion?.options ?? { duration: 280, easing: "cubic-bezier(.22, 1, .36, 1)" });
     return () => animation.cancel();
-  }, [key, reduced]);
+  }, [key, reduced, motion]);
   return ref;
 }

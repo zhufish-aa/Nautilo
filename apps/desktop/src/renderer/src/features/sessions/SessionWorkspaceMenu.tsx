@@ -1,5 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { ArrowUpRight, Check, ChevronDown, FileDiff, Folder, GitBranch, GitFork, Globe, ListChecks, PanelRight, SquareTerminal, Users, Workflow } from "lucide-react";
+import { ArrowUpRight, Check, Ellipsis, FileDiff, Folder, GitBranch, GitFork, Globe, ListChecks, SquareTerminal, Users, Workflow, Wrench } from "lucide-react";
 import { useRef, type RefObject } from "react";
 import { useI18n } from "../../lib/i18n";
 import type { UiProject } from "../../lib/types";
@@ -16,7 +16,8 @@ const sessionViews = [
   { id: "goals", label: "sessions.workspace.goals", icon: ListChecks, key: "L" },
   { id: "dag", label: "sessions.header.dag", icon: GitFork, key: "P" },
   { id: "workflows", label: "nav.workflows", icon: Workflow, key: "W" },
-  { id: "agents", label: "sessions.workspace.agents", icon: Users, key: "A" }
+  { id: "agents", label: "sessions.workspace.agents", icon: Users, key: "A" },
+  { id: "tools", label: "sessions.workspace.tools", icon: Wrench, key: "I" }
 ] as const;
 
 type Entry = (typeof tools)[number] | (typeof sessionViews)[number];
@@ -29,7 +30,7 @@ export function SessionWorkspaceMenu({ project, openFolder, actions, trigger }: 
   actions: Actions;
   trigger: RefObject<HTMLButtonElement>;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const selection = useRef<{ run(): void; anchor: HTMLButtonElement }>();
   const workspace = t("sessions.workspace.title");
   function select(run: () => void): void {
@@ -44,7 +45,7 @@ export function SessionWorkspaceMenu({ project, openFolder, actions, trigger }: 
     const action = actions[entry.id];
     if (!action) return null;
     const { icon: Icon, key } = entry;
-    const label = t(entry.label);
+    const label = entry.id === "tools" ? (locale === "zh-CN" ? "本次会话工具" : "Session tools") : t(entry.label);
     const props = {
       className: "session-workspace-item",
       "data-shortcut": key,
@@ -67,9 +68,7 @@ export function SessionWorkspaceMenu({ project, openFolder, actions, trigger }: 
 
   return <Menu.Root modal={false}>
     <Menu.Trigger ref={trigger} type="button" className="session-workspace-trigger" aria-label={workspace} title={workspace}>
-      <PanelRight size={16} aria-hidden />
-      <span>{workspace}</span>
-      <ChevronDown size={12} className="session-workspace-chevron" aria-hidden />
+      <Ellipsis size={17} aria-hidden />
     </Menu.Trigger>
     <Menu.Portal>
       <Menu.Content className="session-workspace-menu" aria-label={workspace} align="end" sideOffset={7} collisionPadding={10}

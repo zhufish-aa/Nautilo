@@ -15,7 +15,9 @@ test('shared provider queue is visible and does not pretend to be approval or re
  locale='zh-CN';assert(render('provider_queued').includes('Agent 正忙，排队中'));locale='en';
 });
 test('startup stays visible before the CLI returns content and terminal states clear the indicator',()=>{
- assert(render('queued').includes('Request sent'));assert(render('starting').includes('Waiting for agent'));assert.equal(render('provider_queued','cancelled'),'');assert.equal(render('provider_queued','failed'),'');assert(render('thinking').includes('Thinking'));
+ const startup=render('starting');
+ assert(render('queued').includes('Request sent'));assert.match(startup,/>Waiting for agent</);assert.doesNotMatch(startup,/conversation-wait-time|0s/);
+ assert.equal(render('provider_queued','cancelled'),'');assert.equal(render('provider_queued','failed'),'');assert(render('thinking').includes('Thinking'));
 });
 
 const renderEvents=(events,lifecycle={status:'running',startedAt:'2026-01-01'})=>renderToStaticMarkup(React.createElement(exports.RunActivityIndicator,{lifecycle,events}));
@@ -31,19 +33,19 @@ test('Claude waiting for its first reasoning/text event has a thinking indicator
 test('completed tool and reasoning rows do not hide the next model wait',()=>{
  for(const event of [progress('tool_activity',{status:'done',toolName:'Read'}),progress('command',{status:'done'}),progress('reasoning',{streaming:false})]){
   const html=renderEvents([event]);
-  assert.match(html,/Thinking…/);
-  assert.match(html,/conversation-activity-pulse/);
+  assert.match(html,/>Thinking</);
+  assert.match(html,/conversation-wait-orbit/);
   assert.doesNotMatch(html,/data-activity-mark/);
  }
 });
 test('approval wait keeps its label visible without running effects',()=>{
  const html=renderEvents([],{status:'waiting_approval'});
  assert.match(html,/Waiting for your approval/);
- assert.doesNotMatch(html,/conversation-activity-pulse|data-activity-mark/);
+ assert.doesNotMatch(html,/conversation-wait-orbit|conversation-wait-sheen/);
 });
 test('live rows including grouped tools do not duplicate the indicator, and replies keep it hidden',()=>{
- for(const event of [progress('tool_activity',{status:'running'}),progress('reasoning',{streaming:true}),progress('message',{sender:'agent',streaming:true}),progress('message',{sender:'agent',streaming:false})])assert.equal(renderEvents([event]),'');
- const group=progress('tool_group',{items:[progress('command',{status:'running'})]});assert.equal(renderEvents([group]),'');
+ for(const event of [progress('tool_activity',{status:'running'}),progress('reasoning',{streaming:true}),progress('message',{sender:'agent',streaming:true}),progress('message',{sender:'agent',streaming:false})])assert.match(renderEvents([event]),/hidden="" aria-hidden="true"/);
+ const group=progress('tool_group',{items:[progress('command',{status:'running'})]});assert.match(renderEvents([group]),/hidden="" aria-hidden="true"/);
  assert(renderEvents([group],{status:'running',reason:'cancelling'}).includes('Stopping'));
  assert.equal(renderEvents([],{status:'completed'}),'');
 });

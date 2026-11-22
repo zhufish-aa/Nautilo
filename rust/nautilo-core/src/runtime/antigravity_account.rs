@@ -2,13 +2,49 @@
 //! The regular Antigravity Harness adapter remains a separate native runtime.
 use agenthub_plugin_sdk::process::{self, ProcessEvent, ProcessHandle, ProcessRequest};
 use serde_json::{json, Value};
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::{Path, PathBuf}, time::Duration};
 use tokio::{
     io::AsyncReadExt,
     net::TcpStream,
     sync::{watch, Mutex},
 };
 mod resources;
+
+fn materialize(directory: &Path) -> std::io::Result<()> {
+    for (name, contents) in resources::FILES {
+        let file = directory.join(name);
+        std::fs::create_dir_all(file.parent().unwrap())?;
+        if std::fs::read(&file).ok().as_deref() != Some(contents.as_bytes()) {
+            std::fs::write(&file, contents)?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn read_quota(directory: &Path, executable: &str, env: &HashMap<String, String>) -> anyhow::Result<Value> {
+    materialize(directory)?;
+    let node = std::env::var("AGENTHUB_NODE_PATH").unwrap_or_else(|_| "node".into());
+    let mut started = process::start(&ProcessRequest {
+        command: node,
+        args: vec![directory.join("quota.mjs").to_string_lossy().into(), executable.into()],
+        env: Some(env.clone()),
+        cwd: Some(directory.to_string_lossy().into()),
+        timeout_ms: Some(20_000),
+        max_output_bytes: Some(256 * 1024),
+        ..Default::default()
+    })?;
+    started.handle.end_stdin();
+    let mut output = String::new();
+    while let Some(event) = started.events.recv().await {
+        match event {
+            ProcessEvent::Stdout(text) => output.push_str(&text),
+            ProcessEvent::Exit { .. } => return Ok(serde_json::from_str(&output)?),
+            ProcessEvent::Timeout { .. } | ProcessEvent::Error(_) => break,
+            _ => {}
+        }
+    }
+    anyhow::bail!("Antigravity did not return account quota")
+}
 
 struct Worker {
     process: ProcessHandle,
@@ -63,13 +99,7 @@ impl AntigravityAccount {
         if let Some(worker) = worker.as_ref().filter(|worker| worker.process.is_alive()) {
             return Ok((worker.url.clone(), worker.key.clone()));
         }
-        for (name, contents) in resources::FILES {
-            let file = self.directory.join(name);
-            std::fs::create_dir_all(file.parent().unwrap())?;
-            if std::fs::read(&file).ok().as_deref() != Some(contents.as_bytes()) {
-                std::fs::write(&file, contents)?;
-            }
-        }
+        materialize(&self.directory)?;
         let node = std::env::var("AGENTHUB_NODE_PATH").unwrap_or_else(|_| "node".into());
         let mut started = process::start(&ProcessRequest {
             command: node,
@@ -145,9 +175,11 @@ impl AntigravityAccount {
         let response = tokio::select! {result=client.post(format!("{url}/chat/completions")).bearer_auth(key).json(body).send()=>result?,_=cancelled.changed()=>anyhow::bail!("Antigravity request cancelled"),_=socket.read(&mut disconnected)=>return Ok(())};
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let retry_after = response.headers().get(reqwest::header::RETRY_AFTER).and_then(|value| value.to_str().ok()).map(str::to_owned);
             let body: Value = response.json().await.unwrap_or(Value::Null);
             return Err(crate::runtime::account_auth::ModelRequestError {
                 status,
+                retry_after,
                 message: format!(
                     "Antigravity model request returned HTTP {status}: {}",
                     body["error"]["message"]

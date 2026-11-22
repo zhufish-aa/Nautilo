@@ -100,8 +100,7 @@ export function parseCodexApiModelList(value: unknown): ProviderModelCatalog {
   };
 }
 
-/** Uses Codex's documented app-server model/list endpoint for the effective local catalog. */
-async function discoverCodexModelsViaCli(instance: AgentInstance, env: Record<string, string>): Promise<ProviderModelCatalog> {
+export async function readCodexAppServer(instance: AgentInstance, env: Record<string, string>, method: string, params?: unknown): Promise<unknown> {
   const runtime = new ProcessRuntime();
   const invocation = resolveCodexInvocation(instance.executable, buildCodexAppServerArgs(instance, env), env.PATH);
   const process = runtime.start({
@@ -118,12 +117,11 @@ async function discoverCodexModelsViaCli(instance: AgentInstance, env: Record<st
     id: 0,
     params: CODEX_APP_SERVER_INITIALIZE_PARAMS
   })}\n`);
-  process.write(`${JSON.stringify({ method: "initialized" })}\n`);
-  process.write(`${JSON.stringify({
-    method: "model/list",
+  const request = JSON.stringify({
+    method,
     id: 1,
-    params: { limit: 200, includeHidden: false }
-  })}\n`);
+    params
+  });
 
   let stdout = "";
   let stderr = "";
@@ -137,26 +135,34 @@ async function discoverCodexModelsViaCli(instance: AgentInstance, env: Record<st
           if (!line.trim()) continue;
           let response: JsonRpcResponse;
           try { response = JSON.parse(line) as JsonRpcResponse; } catch { continue; }
+          if (response.id === 0) {
+            if (response.error) throw new Error("Codex app-server initialization failed");
+            process.write(`${JSON.stringify({ method: "initialized" })}\n${request}\n`);
+            continue;
+          }
           if (response.id !== 1) continue;
-          if (response.error) throw new Error(response.error.message || `Codex model/list failed (${response.error.code ?? "unknown"})`);
-          const catalog = parseCodexModelList(response.result);
+          if (response.error) throw new Error(response.error.message || `Codex ${method} failed (${response.error.code ?? "unknown"})`);
           await process.cancel();
-          return catalog;
+          return response.result;
         }
       } else if (event.kind === "stderr") {
         stderr = `${stderr}${event.text}`.slice(-8_192);
       } else if (event.kind === "timeout") {
-        throw new Error("Codex 模型列表读取超时，请检查登录或配置。" );
+        throw new Error(`Codex ${method} timed out`);
       } else if (event.kind === "error") {
         throw event.error;
       } else if (event.kind === "exit" && event.exitCode !== 0) {
         throw new Error(stderr.trim() || `Codex app-server exited with ${event.exitCode ?? "unknown"}`);
       }
     }
-    throw new Error(stderr.trim() || "Codex app-server 未返回模型列表。" );
+    throw new Error(stderr.trim() || `Codex app-server did not answer ${method}`);
   } finally {
     if (process.child.exitCode === null && !process.child.killed) await process.cancel().catch(() => undefined);
   }
+}
+
+async function discoverCodexModelsViaCli(instance: AgentInstance, env: Record<string, string>): Promise<ProviderModelCatalog> {
+  return parseCodexModelList(await readCodexAppServer(instance, env, "model/list", { limit: 200, includeHidden: false }));
 }
 
 export function parseCodexModelList(value: unknown): ProviderModelCatalog {

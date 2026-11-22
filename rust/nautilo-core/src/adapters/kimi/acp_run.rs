@@ -9,7 +9,7 @@ use agenthub_plugin_sdk::session_pool::SessionPool;
 use std::sync::{OnceLock, atomic::{AtomicBool, Ordering}};
 
 use crate::adapters::json_rpc_process::{JsonRpcProcessClient, JsonRpcProcessEvent};
-use crate::adapters::kimi::session_usage::read_kimi_session_usage;
+use crate::adapters::kimi::session_usage::{kimi_wire_path, read_kimi_session_usage, read_kimi_wire_turn};
 use crate::adapters::kimi::subagent_wire::KimiSubagentWireWatcher;
 use crate::adapters::runtime_mcp_bridge::start_runtime_mcp_bridge;
 use crate::adapters::{AdapterEvent, AdapterRun, AdapterStartRequest, TimeoutKind};
@@ -348,6 +348,12 @@ async fn run_acp_inner(
         wires.initialize().await; pipeline.wires = Some(wires);
     }
     apply_config(&rpc, &session_id, &session_response, request).await?;
+    let wire = kimi_wire_path(&session_id, kimi_home.as_deref()).await;
+    let wire_offset = match &wire {
+        Some(path) => tokio::fs::metadata(path).await.ok().map(|metadata| metadata.len()),
+        None if resume_session.is_none() => Some(0),
+        None => None,
+    };
     let _ = sender.send(AdapterEvent::Status { phase: "turn_started".to_string(), raw: None });
     let (prompt_id_num, prompt_result) = rpc.request_with_id(
         "session/prompt",
@@ -400,7 +406,7 @@ async fn run_acp_inner(
             JsonRpcProcessEvent::Request { id, method, params } => {
                 background::respond(rpc.clone(),id,method,params,request,&session_id);
             }
-            JsonRpcProcessEvent::Response { id, error, .. } if same_id(&id, &prompt_id) => {
+            JsonRpcProcessEvent::Response { id, result, error } if same_id(&id, &prompt_id) => {
                 for child_item in pipeline.poll().await {
                     if sender.send(child_item).is_err() {
                         return Ok(());
@@ -410,6 +416,20 @@ async fn run_acp_inner(
                     if sender.send(completed).is_err() {
                         return Ok(());
                     }
+                }
+                let mut usage = None;
+                if let Some(offset) = wire_offset {
+                    let wire = match wire {
+                        Some(path) => Some(path),
+                        None => kimi_wire_path(&session_id, kimi_home.as_deref()).await,
+                    };
+                    if let Some(path) = wire { usage = read_kimi_wire_turn(&path, offset).await; }
+                }
+                if let Some(usage) = usage.or_else(|| {
+                    let usage = agenthub_plugin_sdk::usage::acp_prompt_usage(&result.as_ref()?["usage"])?;
+                    Some(crate::adapters::event_from_json(&usage))
+                }) {
+                    let _ = sender.send(usage);
                 }
                 if !pipeline.usage_received {
                     let config_options = session_response.get("configOptions").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -442,7 +462,7 @@ async fn run_acp_inner(
                         .and_then(Value::as_i64)
                         .or(request.context_window)
                         .filter(|window| *window > 0);
-                    if let Some(fallback) = read_kimi_session_usage(&session_id, context_window, kimi_home.as_deref()).await {
+                    if let Some(fallback) = read_kimi_session_usage(&session_id, context_window, kimi_home.as_deref(), selected_model.as_deref()).await {
                         let _ = sender.send(fallback);
                     }
                 }

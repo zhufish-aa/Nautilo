@@ -77,7 +77,7 @@ pub struct RunContext {
 pub struct RunService {
     mcp_pool: std::sync::OnceLock<Arc<crate::runtime::mcp_pool::McpPool>>,
     pub request_logs: crate::runtime::request_log::RequestLogService,
-    account_gateways: crate::runtime::account_gateway::AccountGateways,
+    pub(crate) account_gateways: crate::runtime::account_gateway::AccountGateways,
     db: Arc<Mutex<Database>>,
     adapters: AdapterRegistry,
     events: Arc<EventService>,
@@ -713,6 +713,9 @@ impl RunService {
         };
         let background = self.session_callbacks(session, agent, &run, &context);
         let background_handoff = background.handoff;
+        let plan_permission = session["agentMode"] == "plan" && descriptor.as_ref()
+            .and_then(|descriptor| descriptor["permissionModes"].as_array())
+            .is_some_and(|modes| modes.iter().any(|mode| mode["value"] == "plan"));
         let mut request = AdapterStartRequest {
             native_terminal_live: None,
             instance: agent.clone(),
@@ -727,9 +730,9 @@ impl RunService {
             agent_mode: session.get("agentMode").and_then(Value::as_str).map(str::to_string),
             reasoning_effort,
             service_tier: session.get("serviceTier").and_then(Value::as_str).map(str::to_string),
-            permission_mode: session.get("permissionMode").and_then(Value::as_str).map(str::trim).filter(|mode| !mode.is_empty())
+            permission_mode: if plan_permission { Some("plan".into()) } else { session.get("permissionMode").and_then(Value::as_str).map(str::trim).filter(|mode| !mode.is_empty())
                 .or_else(|| agent.pointer("/providerOptions/permissionMode").and_then(Value::as_str).map(str::trim).filter(|mode| !mode.is_empty()))
-                .map(str::to_string),
+                .map(str::to_string) },
             context_window,
             env: Some(environment),
             timeout_ms: Some(if context.provider_command.as_deref()==Some("compact") {5 * 60_000} else {30 * 60_000}),
@@ -1068,7 +1071,9 @@ impl RunService {
                     "code": latest.get("failureCode").and_then(Value::as_str).unwrap_or("RUN_START_FAILED"),
                     "message": detail,
                     "connectionId": session["connectionId"],
-                    "retryable": !cancelled && latest["failureCode"] != "AGENT_NOT_AUTHENTICATED"
+                    "retryable": !matches!(latest["failureCode"].as_str(), Some(
+                        "AGENT_NOT_AUTHENTICATED" | "PROVIDER_SESSION_LOST" | "PROVIDER_FREE_QUOTA_EXHAUSTED"
+                    ))
                 }));
             }
             self.update_session_status(
@@ -1611,6 +1616,7 @@ impl RunService {
                 let repos = Repositories::new(&guard.raw);
                 if let Ok(Some(current)) = repos.runs().get(run_id) {
                     if matches!(current["status"].as_str(), Some("cancelling" | "cancelled")) { return None; }
+                    let _ = crate::application::connection_service::record_run_rate_limit(&guard.raw, &current, message);
                     let mut updated = current.as_object().cloned().unwrap_or_default();
                     updated.insert("status".to_string(), json!("failed"));
                     updated.insert("endedAt".to_string(), json!(now_iso()));
@@ -1618,7 +1624,16 @@ impl RunService {
                         .and_then(|id| repos.runtime_connections().get(id).ok().flatten())
                         .is_some_and(|connection| connection["kind"] == "login")
                         && crate::runtime::account_auth::is_authentication_error(message);
-                    updated.insert("failureCode".to_string(), json!(if authentication { "AGENT_NOT_AUTHENTICATED" } else { "PROVIDER_ERROR" }));
+                    let code = if authentication {
+                        "AGENT_NOT_AUTHENTICATED"
+                    } else if message.starts_with("Failed to send user message: not_found: trajectory not found:") {
+                        "PROVIDER_SESSION_LOST"
+                    } else if message.starts_with("OpenCode free usage limit reached.") {
+                        "PROVIDER_FREE_QUOTA_EXHAUSTED"
+                    } else {
+                        "PROVIDER_ERROR"
+                    };
+                    updated.insert("failureCode".to_string(), json!(code));
                     let _ = repos.runs().save(&Value::Object(updated));
                 }
                 None

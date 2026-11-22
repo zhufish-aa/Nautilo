@@ -234,7 +234,6 @@ pub struct ClaudeParseState {
     /// content_block index → block type (text vs thinking attribution).
     stream_blocks: HashMap<i64, String>,
     /// Latest single-request prompt size — the real context footprint.
-    last_context_used: Option<i64>,
     /// Sticky context window learned from result modelUsage.
     context_window: Option<i64>,
 }
@@ -403,7 +402,6 @@ fn parse_assistant(event: &Value, state: &mut ClaudeParseState, raw: &Value, sub
             + usage.get("cache_creation_input_tokens").and_then(number_of).unwrap_or(0);
         if input_tokens.is_some() || usage.get("cache_read_input_tokens").and_then(number_of).is_some() || usage.get("cache_creation_input_tokens").and_then(number_of).is_some() {
             let context_used = input_tokens.unwrap_or(0) + cached;
-            state.last_context_used = Some(context_used);
             events.push(AdapterEvent::Usage {
                 usage_scope: Some("context".to_string()),
                 usage_key: message.get("id").and_then(text_of),
@@ -483,7 +481,7 @@ fn parse_result(event: &Value, state: &mut ClaudeParseState, raw: &Value) -> Vec
             cached_input_tokens: usage.get("cache_read_input_tokens").and_then(number_of),
             output_tokens,
             reasoning_output_tokens: None,
-            context_used: state.last_context_used,
+            context_used: None,
             context_window,
             raw: Some(raw.clone()),
         });

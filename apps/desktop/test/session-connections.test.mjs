@@ -9,6 +9,8 @@ const api=protocol=>({kind:'api',enabled:true,protocol});
 test('account connections require exact supported harness',()=>{
  assert.equal(connectionSupportsAgent({kind:'login',enabled:true,harness:'codex'},agent('codex')),true);
  assert.equal(connectionSupportsAgent({kind:'login',enabled:true,harness:'codex'},agent('claude-code')),false);
+ assert.equal(connectionSupportsAgent({kind:'login',enabled:true,harness:'kimi-code'},agent('kimi-code')),true);
+ assert.equal(connectionSupportsAgent({kind:'login',enabled:true,harness:'kimi-code'},agent('codex')),false);
 });
 test('every built-in harness exposes the saved API connections for each supported wire',()=>{
  for(const harness of ['codex','claude-code','kimi-code','pi','omp','opencode','commandcode','trae']) {

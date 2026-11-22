@@ -19,8 +19,48 @@ const sampleConnections: RuntimeConnection[] = [
   { id: "sample-connection-anthropic", name: "Anthropic 连接 · 示例", kind: "api", revision: 1, enabled: true, protocol: "anthropic", baseUrl: "https://anthropic.example.invalid", hasCredential: false, models: [], createdAt: "2026-11-03T02:00:00Z", updatedAt: "2026-11-03T02:00:00Z" },
   { id: "sample-connection-login", name: "个人登录 · 示例", kind: "login", revision: 1, enabled: true, harness: "codex", loginProfileDirectory: "/sample/accounts/example-codex", hasCredential: false, models: [], createdAt: "2026-11-03T02:00:00Z", updatedAt: "2026-11-03T02:00:00Z" },
 ];
+const visualParams = new URLSearchParams(location.search);
+if (visualParams.get("section") === "accounts") {
+  const account = sampleConnections[2];
+  if (visualParams.has("longPath")) account.loginProfileDirectory = `/sample/accounts/${"long-path-segment/".repeat(15)}isolated-codex`;
+  account.models = sampleConnections[0].models?.slice(0, 2);
+  account.accountGateway = true;
+  account.accountMeta = {
+    accountEmail: "codex@example.invalid", subscriptionPlan: "Pro", workspaceName: "研发工作区",
+    authStatus: visualParams.has("unconfirmedLogin") ? "unverified" : "valid", lastVerifiedAt: new Date(Date.now() - 14 * 60_000).toISOString(), lastLatencyMs: 128,
+    lastCheckedAt: new Date(Date.now() - 14 * 60_000).toISOString(),
+    localUsage: { requestsToday: 12, tokens7d: 124800, cacheHitRate7d: 53, lastUsedAt: new Date(Date.now() - 3 * 60_000).toISOString(), lastUsedContext: "示例项目" },
+    referencedByHarnesses: ["opencode"], storageMeta: { configDir: account.loginProfileDirectory, authMethod: "cli_oauth", credentialUpdatedAt: account.updatedAt },
+  };
+  sampleConnections.push({ id: "sample-open-code", kind: "login", name: "OpenCode · 示例", harness: "opencode", enabled: true, nativeLogin: true, revision: 1, createdAt: account.createdAt, updatedAt: account.updatedAt,
+    accountMeta: { authStatus: "unverified", localUsage: { requestsToday: 0, tokens7d: 0 }, storageMeta: { authMethod: "console_oauth" } } });
+}
+if (new URLSearchParams(location.search).get("scenario") === "conversation-inspector") {
+  const date = "2026-11-03T02:00:00Z";
+  sampleConnections.push(
+    { id: "sample-claude", name: "Claude Code · 示例", kind: "login", revision: 1, enabled: true, harness: "claude-code", createdAt: date, updatedAt: date },
+    { id: "sample-agy", name: "Antigravity · 示例", kind: "login", revision: 1, enabled: true, harness: "antigravity", nativeLogin: true, createdAt: date, updatedAt: date }
+  );
+}
 export async function requestCore<T>(method: string, input?: unknown): Promise<T> {
   if (method === "connection.list") return structuredClone(sampleConnections) as T;
+  if (method === "connection.quota") {
+    if (visualParams.has("slowQuota")) await new Promise(resolve => setTimeout(resolve, 700));
+    if (visualParams.has("failQuota")) throw new Error("Fixture quota request failed");
+    const now = Date.now();
+    const reset = (minutes: number) => new Date(now + minutes * 60_000).toISOString();
+    const windows = [
+      { id: "primary", usedPercent: 35, windowMinutes: 300, resetsAt: reset(224) },
+      { id: "secondary", usedPercent: 41, windowMinutes: 10080, resetsAt: reset(9660) }
+    ];
+    if ((input as { connectionId?: string })?.connectionId === "sample-agy") {
+      return { windows: [
+        ...windows.map(window => ({ ...window, label: "Gemini" })),
+        { id: "claude-gpt-week", label: "Claude & GPT", usedPercent: 0, windowMinutes: 10080, resetsAt: reset(6552) }
+      ] } as T;
+    }
+    return { windows } as T;
+  }
   if (method === "connection.get" || method === "connection.models") {
     const params = input as { connectionId?: string; revision?: number } | undefined;
     const connection = sampleConnections.find((item) => item.id === params?.connectionId && (params?.revision === undefined || item.revision === params.revision));

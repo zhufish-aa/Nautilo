@@ -29,7 +29,7 @@ export function DelegationCard({ name, task, status, tone, running, cancelled, m
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string>();
-  const hasDetails = Boolean(input || output);
+  const hasDetails = Boolean(input || output || (native && task));
   const StatusIcon = running ? Loader2 : tone === "ok" ? Check : tone === "danger" || tone === "warn" ? AlertTriangle : cancelled ? X : CircleDashed;
   return <article className="delegation-card" aria-labelledby={titleId}>
     <header className="delegation-card-heading" title={time}>
@@ -42,7 +42,7 @@ export function DelegationCard({ name, task, status, tone, running, cancelled, m
         <StatusIcon size={13} className={running ? "motion-safe:animate-spin" : undefined} aria-hidden />{status}
       </span>
     </header>
-    {task && <div className="delegation-card-task">{task}</div>}
+    {task && !native && <div className="delegation-card-task">{task}</div>}
     {Boolean(meta?.length) && <div className="delegation-card-meta">{meta?.map((item, index) => <span key={`${index}-${item}`}>{item}</span>)}</div>}
     {(activity || result) && <p className="delegation-card-activity" title={result ?? activity} data-result={Boolean(result)}>{result ?? activity}</p>}
     {retryError && <p className="delegation-card-retry-error" role="alert">{retryError}</p>}
@@ -58,6 +58,7 @@ export function DelegationCard({ name, task, status, tone, running, cancelled, m
     {hasDetails && <div id={detailsId} className="delegation-card-details" hidden={!detailsOpen}>
       {detailsOpen && <>
         {toolName && <div className="delegation-card-tool">{toolName}</div>}
+        {native && task && task !== input && <pre aria-label={zh ? "任务说明" : "Task instructions"}>{task}</pre>}
         {input && <pre aria-label={zh ? "调用参数" : "Arguments"}>{input}</pre>}
         {output && <pre aria-label={zh ? "调用结果" : "Result"}>{output}</pre>}
       </>}

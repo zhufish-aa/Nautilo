@@ -1,8 +1,15 @@
 import type { RuntimeEvent } from "@agenthub/event-protocol";
 import type { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
+import type { UsageOverviewQuery, UsageSourceRow } from "@agenthub/schemas";
 type Row = Record<string, unknown>;
 export class EventRepository {
   constructor(private readonly db: DatabaseSync) {}
+  usage(input: UsageOverviewQuery): { rows: UsageSourceRow[] } {
+    const sql = readFileSync(new URL(import.meta.resolve("@agenthub/schemas/usage-source.sql")), "utf8");
+    const rows = this.db.prepare(sql).all(input.projectId ?? "", input.sessionId ?? "");
+    return { rows: rows.map(row => JSON.parse(String(row.data)) as UsageSourceRow) };
+  }
   nextSequence(sessionId?: string, runId?: string): number {
     if (!sessionId && !runId) return 1;
     const row = sessionId

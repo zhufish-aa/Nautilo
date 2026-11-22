@@ -154,6 +154,7 @@ impl Session {
             initialized["protocolVersion"] == 1,
             "Antigravity returned an unsupported ACP version"
         );
+        let can_load = initialized["agentCapabilities"]["loadSession"] == true;
         let method = if resume.is_some() {
             if initialized
                 .pointer("/agentCapabilities/sessionCapabilities/resume")
@@ -161,13 +162,7 @@ impl Session {
             {
                 "session/resume"
             } else {
-                anyhow::ensure!(
-                    initialized
-                        .pointer("/agentCapabilities/loadSession")
-                        .and_then(Value::as_bool)
-                        == Some(true),
-                    "Antigravity cannot resume this native session"
-                );
+                anyhow::ensure!(can_load, "Antigravity cannot resume this native session");
                 "session/load"
             }
         } else {
@@ -179,7 +174,16 @@ impl Session {
         }
         // session/load replays history. Already-rendered history is never a new turn.
         replay.store(resume.is_some(), std::sync::atomic::Ordering::Release);
-        let mut state = timed(result.rpc.request(method, params), 60).await?;
+        let mut state = match timed(result.rpc.request(method, params.clone()), 60).await {
+            Err(error)
+                if method == "session/resume"
+                    && can_load
+                    && error.to_string().contains("load it with session/load") =>
+            {
+                timed(result.rpc.request("session/load", params), 60).await?
+            }
+            response => response?,
+        };
         replay.store(false, std::sync::atomic::Ordering::Release);
         if let Some(id) = resume {
             if !state["sessionId"].is_string() {
@@ -225,8 +229,9 @@ impl Session {
             }else{future.await?};
             let cancelled=response["stopReason"]=="cancelled";
             for event in self.parser.lock().unwrap().finish(cancelled){sender.send(event)?;}
-            if response["usage"].is_object(){sender.send(json!({"kind":"usage","usageScope":"turn","inputTokensIncludesCache":true,
-                "inputTokens":response["usage"]["inputTokens"],"outputTokens":response["usage"]["outputTokens"],"cachedInputTokens":response["usage"]["cachedReadTokens"],"raw":response["usage"]}))?;}
+            if let Some(usage) = agenthub_plugin_sdk::usage::acp_prompt_usage(&response["usage"]) {
+                sender.send(usage)?;
+            }
             sender.send(json!({"kind":"status","phase":if cancelled{"cancelled"}else{"turn_completed"},"raw":response}))?;
             Ok(())
         }.await;

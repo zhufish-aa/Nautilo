@@ -1,7 +1,8 @@
 import { assistantModelStep } from "./assistant-model.js";
 import { ComposerDraftService } from "./composer-drafts.js";
 import { registerRemoteAccess } from "./remote-access.js";
-import { assistantRecords, saveAssistantRecord, assistantSessions, assistantExcerpts } from "../database/assistant-reads.js";
+import { assistantRecords, saveAssistantRecord, assistantSessions, assistantExcerpts, assistantDispatches } from "../database/assistant-reads.js";
+import { supportsOfficialWebSearch, executeOfficialWebSearch } from "../runtime/orchestration/official-web-search.js";
 import { TerminalService } from "../runtime/terminal-service.js";
 import { SourceControl } from "../runtime/source-control.js";
 import { sourceControlDirectory } from "./source-control.js";
@@ -106,6 +107,14 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   });
 
   gateway.register("assistant.records", async input => assistantRecords(services.database.connection.raw, input));
+  gateway.register("assistant.dispatches", async input => assistantDispatches(services.database.connection.raw, input));
+  gateway.register("assistant.search", async ({ query }) => {
+    if (typeof query !== "string" || !query.trim() || query.length > 1800)
+      throw new CoreError("IPC_INVALID_REQUEST", { reason: "Supply a public search query of 1 to 1800 characters" });
+    const source = services.agents.list().find(agent => agent.enabled && supportsOfficialWebSearch(agent, services.database));
+    if (!source) throw new CoreError("IPC_INVALID_REQUEST", { reason: "Enable Official web search in a Harness configuration first." });
+    return executeOfficialWebSearch({ providerId: source.providerId, name: "agenthub_web_search", arguments: { query, search_context_size: "low" } }, source, services.database, services.credentials);
+  });
   gateway.register("assistant.save", async input => saveAssistantRecord(services.database.connection.raw, input));
   gateway.register("assistant.modelStep", input => assistantModelStep(services, input));
   gateway.register("assistant.sessions", async input => assistantSessions(services.database.connection.raw, input));
@@ -121,6 +130,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("connection.upsert", async (input) => services.connections.upsert(input));
   gateway.register("connection.remove", async ({ connectionId }) => services.connections.remove(connectionId));
   gateway.register("connection.models", async (input) => services.connections.discover(input));
+  gateway.register("connection.quota", async (input) => services.connections.quota(input));
   const diagnosticRedaction = new RedactionService(() => services.credentials.secretValues());
   gateway.register("requestLog.list", async input => services.database.requestLogs.page(input));
   gateway.register("resource.inventory",async()=>services.resources.inventory());
@@ -142,7 +152,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   const composerDrafts = new ComposerDraftService(services.database, services.credentials);
   gateway.register("composerDraft.list", async () => composerDrafts.list());
   gateway.register("composerDraft.write", async input => composerDrafts.write(input));
-  gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0", features: {sourceControl:1,sourceControlHistory:1,sourceControlHistoryPaging:1,sourceControlEditing:1,terminalTabs:1,composerDrafts:1,taskRetry:1} }));
+  gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0", features: {sourceControl:2,sourceControlHistory:1,sourceControlHistoryPaging:1,sourceControlEditing:1,terminalTabs:1,composerDrafts:1,taskRetry:1} }));
   for (const method of ["templates", "template", "save", "validate", "start", "list", "get", "control", "plan.decide"] as const) {
     gateway.register(`workflow.${method}`, async () => {
       throw new CoreError("IPC_INVALID_REQUEST", { field: "backend", reason: "Workflows require the Rust daemon (health.features.workflows=1)." });
@@ -292,7 +302,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   });
   gateway.register("recovery.list", async () => services.recovery.list());
   gateway.register("audit.list", async (input) => services.audit.list(input));
-  gateway.register("metrics.get", async ({ projectId }) => services.metrics.snapshot(projectId));
+  gateway.register("metrics.get", async (input) => input.view === "usage" ? services.database.events.usage(input) : services.metrics.snapshot(input.projectId));
   gateway.register("diagnostics.export", async (input) => services.diagnostics.export(input));
   gateway.register("event.subscribe", async ({ projectRunId, sessionId }) => services.subscriptions.subscribe({ projectRunId, sessionId }));
   // A full replay re-reads the journal; cancel orphaned interaction requests

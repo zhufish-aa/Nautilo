@@ -1,6 +1,5 @@
 .policy-workspace { color: var(--ink); font: 500 14px/1.6 var(--app-font-sans); }
-.settings-layout[data-section="permissions"] .settings-content { padding: 28px 40px 24px; background: #fafafa; }
-.dark .settings-layout[data-section="permissions"] .settings-content { background: #171717; }
+.settings-layout[data-section="permissions"] .settings-content { padding: 28px 40px 24px; }
 .settings-layout[data-section="permissions"] .settings-content-inner { max-width: none; width: 100%; }
 .settings-layout[data-section="permissions"] .settings-content-inner > h1 { margin: 0 0 23px; font-size: 13px; font-weight: 500; color: var(--ink-2); }
 .settings-layout[data-section="permissions"] .settings-content-inner > h1::before { content: "设置　›　"; }

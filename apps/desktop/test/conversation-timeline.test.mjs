@@ -5,7 +5,7 @@ import ts from "typescript";
 
 const source = await readFile(new URL("../src/renderer/src/lib/conversation-timeline.ts", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
-const { conversationTimeline, conversationRows } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(compiled)}`);
+const { conversationTimeline, conversationRows, conversationRunSummaries } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(compiled)}`);
 const policySource = await readFile(new URL("../src/renderer/src/lib/orchestration-timeline-policy.ts", import.meta.url), "utf8");
 const policyCompiled = ts.transpileModule(policySource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 const { compactOrchestrationTimeline } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(policyCompiled)}`);
@@ -13,6 +13,31 @@ const event = (id, data) => ({ id, sessionId: "s", timestamp: "2026-11-03T00:00:
 const message = (id, text) => event(id, { kind: "message", sender: "agent", text });
 const tool = (id) => event(id, { kind: "tool_activity", toolName: "Read", status: "done" });
 const group = (id, items) => event(id, { kind: "tool_group", items, callCount: items.length, stepCount: items.length, running: false });
+
+test("steering keeps one run summary while placing the new work after the user input", () => {
+  const user = id => event(id, { kind: "message", sender: "user", text: id });
+  const before = { ...tool("before-steer"), runId: "r" };
+  const after = { ...tool("after-steer"), runId: "r" };
+  const next = { ...tool("next-run"), runId: "next" };
+  const rows = conversationRows([user("first"), before, user("steer"), after, user("queued"), next], true);
+  assert.deepEqual(rows.map(row => row.kind === "event" ? row.event.id : row.turn.events[0].id),
+    ["first", "before-steer", "steer", "after-steer", "queued", "next-run"]);
+  const summaries = conversationRunSummaries(rows);
+  assert.equal(summaries.get("turn-first"), summaries.get("turn-steer"));
+  assert.equal(summaries.get("steer"), summaries.get("turn-first"));
+  assert.equal(summaries.has("queued"), false);
+  assert.deepEqual(summaries.get("turn-first").events, [before, after]);
+  assert.notEqual(summaries.get("turn-queued"), summaries.get("turn-first"));
+});
+
+test("separate edit events for one path stay visible without the cumulative diff", () => {
+  const file = { path: "src/main.rs", changeType: "modified" };
+  const first = event("first", { kind: "file_change", files: [{ ...file, diff: "first patch" }] });
+  const read = tool("read");
+  const second = event("second", { kind: "file_change", files: [{ ...file, diff: "second patch" }] });
+  const snapshot = event("snapshot", { kind: "file_change", source: "provider", replace: true, files: [file] });
+  assert.deepEqual(conversationTimeline([group("files", [first, read, second, snapshot])]), [first, read, second]);
+});
 
 test("late background updates remain with their original turn while new replies keep their own rows",()=>{
   const user=(id)=>event(id,{kind:"message",sender:"user",text:id});
@@ -50,6 +75,18 @@ test("historical duration uses known timestamps without inventing missing or neg
   assert.equal(conversationRows([user, {...answer, timestamp:'2026-11-05T23:59:00Z'}], false)[1].turn.durationMs, undefined);
 });
 
+test("a persisted error ends its turn even while the next message is running", () => {
+  const user = event("u1", {kind:"message", sender:"user", text:"first"});
+  const failure = {...event("failed", {kind:"error", code:"PROVIDER_ERROR", message:"Session lost", retryable:false}),
+    runId:"r1", timestamp:"2026-11-03T00:00:03Z"};
+  const next = event("u2", {kind:"message", sender:"user", text:"next"});
+  const live = {...message("live", "working"), runId:"r2"};
+  const rows = conversationRows([user, failure, next, live], true);
+  assert.equal(rows[1].turn.completed, true);
+  assert.equal(rows[1].turn.durationMs, 3_000);
+  assert.equal(rows[3].turn.completed, false);
+});
+
 test("messages and tools retain chronological order and original references", () => {
   const before = message("m1", "First, I will read the file.");
   const read = tool("t1");
@@ -79,6 +116,19 @@ test("only redundant usage/transient completion rows are suppressed", () => {
     event("done", { kind: "activity", phase: "completed" }),
     event("complete", { kind: "run_status", run: { status: "completed" } }), failed, waiting
   ]), [failed, waiting]);
+});
+
+test("native UI updates only take up space for visible notices and authorization links", () => {
+  const notice = event("notice", { kind: "provider_ui", method: "notify", text: "Extension unavailable" });
+  const link = event("link", { kind: "provider_ui", method: "open_url", text: "", url: "https://example.test" });
+  const read = tool("read");
+  assert.deepEqual(conversationTimeline([
+    notice,
+    event("widget", { kind: "provider_ui", method: "setWidget", text: "Widget content" }),
+    event("empty", { kind: "provider_ui", method: "notify", text: "  " }),
+    read,
+    link,
+  ]), [notice, read, link]);
 });
 
 test("streaming patches change only their event identity, not historical rows", () => {

@@ -73,7 +73,10 @@ test('native discovery and saved connections support changing the next message w
     let savedExisting;
     let blockSwitch = false;
     w.agenthub = { core: { request: async ({ method, input }) => {
-      if (method === 'health.get') return { features: {} };
+      if (method === 'health.get') return { features: { workflowPlans: 1 } };
+      if (method === 'workflow.templates') return Array.from({ length: 4 }, (_, index) => ({
+        id: `workflow-${index}`, revision: 2, name: `已保存流程 ${index + 1}`, definition: { nodes: [{}, {}] }
+      }));
       if (method === 'connection.gateway') {
         enabledRoutes.push(input);
         return { ...account, accountGateway: true };
@@ -123,9 +126,20 @@ test('native discovery and saved connections support changing the next message w
     q.drafts.getState().setText('new:conversation', 'Test message');
     q.render();
     await settle(); await settle();
+    assert.equal(d.querySelector('.new-conversation h1').textContent, '在 Project 开始新任务');
+    const launch = [...d.querySelectorAll('.starter-launch > button')];
+    assert.equal(launch.length, 3, 'the starter shows at most three saved workflows');
+    assert.match(launch[0].textContent, /@ 已保存流程 1.*2 节点/);
+    launch[0].click();
+    await settle();
+    assert.equal(q.drafts.getState().drafts['new:conversation'].workflow.id, 'workflow-0');
+    assert.equal(d.querySelector('textarea').value, 'Test message');
+    assert.equal(d.activeElement, d.querySelector('textarea'));
+    d.querySelector('[aria-label="移除工作流引用"]').click();
+    await settle();
     const send = () => d.querySelector('.composer-send');
     const menu = () => d.querySelector('.composer-model-menu');
-    const openModels = async () => { d.querySelector('.composer-model-trigger').click(); await settle(); };
+    const openModels = async () => { const trigger = d.querySelector('.composer-model-trigger'); if (trigger.getAttribute('aria-expanded') !== 'true') trigger.click(); await settle(); };
     const chooseSource = async (trigger, label) => {
       trigger.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
       await settle();
@@ -135,7 +149,7 @@ test('native discovery and saved connections support changing the next message w
       await settle(); await settle();
     };
     assert.equal(send().disabled, false, 'the native CLI is usable without a managed account');
-    assert.match(d.querySelector('[aria-label="供应商或账号"]').textContent, /使用 Harness 原生配置/);
+    assert.equal(d.querySelector('.starter-context [aria-label="供应商或账号"]').textContent, '原生配置');
     assert.ok(nativeReads.includes('h'), 'native harnesses discover their own model catalog');
     await openModels();
     assert.equal(menu().querySelector('.model-menu-option').textContent, 'native-default');
@@ -152,8 +166,12 @@ test('native discovery and saved connections support changing the next message w
     await settle();
     assert.equal(menu().querySelectorAll('.model-menu-option').length, 1, 'a broad discovery result cannot expand configured models');
     assert.equal(menu().querySelector('.model-menu-option').textContent, 'deepseek/flash');
-    menu().querySelector('.model-menu-option').click();
+    const search = menu().querySelector('input');
+    search.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    assert.equal(d.getElementById(search.getAttribute('aria-activedescendant')).textContent, 'deepseek/flash');
+    search.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     await settle();
+    assert.equal(menu().querySelector('.model-menu-option[aria-selected="true"]').textContent, 'deepseek/flash');
     assert.equal(send().disabled, false, 'choosing a model preserves a valid provider binding');
     for (const label of ['Low', 'Medium', 'High', 'Extra High', 'Max']) {
       await openModels();
@@ -209,8 +227,9 @@ test('native discovery and saved connections support changing the next message w
     await settle();
     await openModels();
     await chooseSource(menu().querySelector('[aria-label="供应商或账号"]'), '使用 Harness 原生配置');
+    assert.equal(menu().querySelector('.model-menu-option').textContent, 'native-default');
     assert.equal(send().disabled, false);
-    assert.match(d.querySelector('[aria-label="供应商或账号"]').textContent, /使用 Harness 原生配置/);
+    assert.equal(d.querySelector('.starter-context [aria-label="供应商或账号"]').textContent, '原生配置');
     await openModels();
     assert.equal(menu().querySelectorAll('.model-menu-option').length, 1);
     assert.equal(menu().querySelector('.model-menu-option').textContent, 'native-default');
@@ -259,7 +278,10 @@ test('native discovery and saved connections support changing the next message w
     assert.equal(q.sessions.getState().sessions[0].connectionId, 'deepseek');
     assert.equal(q.sessions.getState().nextTurnModels.old.connectionId, 'account');
     assert.match(d.querySelector('.composer-model-trigger').title, /Antigravity.*gemini-flash/);
-    assert.equal(d.querySelector('[role="alertdialog"], [role="dialog"]'), null);
+    assert.doesNotMatch(d.querySelector('.composer-model-trigger').textContent, /Antigravity/);
+    assert.match(menu().querySelector('[aria-label="供应商或账号"]').textContent, /Antigravity/);
+    assert.equal(menu().querySelector('.model-menu-option').textContent, 'gemini-flash');
+    assert.equal(d.querySelector('[role="alertdialog"]'), null);
     assert.equal(send().disabled, true, 'draft is not sent as steering to the previous account');
     d.querySelector('textarea').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
     assert.equal(q.followUps.length, 0);

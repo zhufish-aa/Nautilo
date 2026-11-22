@@ -177,6 +177,18 @@ impl Fixture {
         router.register("provider.catalog", |_| async { Ok(json!([{"providerId":"test-harness","modeDiscovery":true,"permissionModes":[{"value":"workspace-write"},{"value":"read-only"}]}])) });
         router.register("provider.modes", |_| async { Ok(json!({"defaultMode":"standard","modes":[{"id":"standard","name":"Standard"},{"id":"custom-plugin-mode","name":"Custom plugin mode"},{"id":"broken-mode","broken":"not installed"}]})) });
         router.register("run.list", |_| async { Ok(json!([])) });
+        router.register("workflow.list", |input| async move {
+            assert_eq!(input["sessionId"], "session");
+            Ok(json!([{"id":"flow","name":"Review","status":"running","updatedAt":1}]))
+        });
+        router.register("workflow.get", |input| async move {
+            Ok(json!({
+                "sessionId":if input["runId"]=="flow" {"session"} else {"another-session"},
+                "status":"running",
+                "definition":{"name":"Review","nodes":[{"id":"scan","name":"Inspect"}]},
+                "instances":[{"id":"n1","nodeId":"scan","status":"running","attempt":1,"prompt":"private"}]
+            }))
+        });
         router.register("slashCommand.list", |_| async { Ok(json!([
             {"id":"client-compact","name":"/compact","execution":"client"},
             {"id":"native-compact","name":"/compact","execution":"provider","providerCommand":"compact"}
@@ -263,6 +275,14 @@ async fn snapshot_and_modes_are_authenticated_and_keep_provider_options() {
     let hello = rpc(&connection, "hello", json!({})).await;
     assert_eq!(hello["data"]["endpoint"]["id"], fixture.addr().id.to_string());
     assert!(hello["data"]["capabilities"].as_array().unwrap().contains(&json!("session.snapshot")));
+    assert!(hello["data"]["capabilities"].as_array().unwrap().contains(&json!("session.workflows")));
+    let workflows = rpc(&connection, "session.workflows", json!({"sessionId":"session"})).await;
+    assert_eq!(workflows["data"]["items"][0]["id"], "flow");
+    let workflow = rpc(&connection, "session.workflows", json!({"sessionId":"session","runId":"flow"})).await;
+    assert_eq!(workflow["data"]["instances"][0]["name"], "Inspect");
+    assert!(workflow["data"]["instances"][0].get("prompt").is_none());
+    let unrelated = rpc(&connection, "session.workflows", json!({"sessionId":"session","runId":"other"})).await;
+    assert_eq!(unrelated["error"]["code"], "WORKFLOW_NOT_IN_SESSION");
     let snapshot = rpc(&connection, "session.snapshot", json!({"sessionId":"session"})).await;
     assert_eq!(snapshot["ok"], true, "{snapshot}");
     assert_eq!(snapshot["data"]["approvals"].as_array().unwrap().len(), 1);
@@ -608,6 +628,48 @@ async fn mobile_history_preserves_stream_position_beyond_the_activity_window() {
     assert_eq!(history["items"][0]["value"]["timelineStartedAt"], "2026-11-14T01:00:01Z");
     assert_eq!(history["items"][0]["value"]["createdAt"], "2026-11-14T01:00:10Z");
     assert!(history["activity"].as_array().unwrap().iter().all(|v|v["sequence"].as_i64().unwrap() > 1));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_omp_history_returns_resumed_reply_under_the_new_user_turn() {
+    let fixture = Fixture::new().await;
+    let database = Database::open(&fixture.directory.join("test.sqlite")).unwrap();
+    let repos = Repositories::new(&database.raw);
+    let reply = |id, native, child| json!({"messageId":id,"providerMessageId":native,"subagentDispatchId":child,"text":"项目结构"});
+    for (sequence, run, kind, payload, background) in [
+        (1, "old", "run.started", json!({"userMessageId":"first"}), false),
+        (2, "old", "provider.runtime_ready", json!({"providerId":"omp","pid":101,"reused":true}), false),
+        (3, "old", "run.cancelled", json!({}), false),
+        (4, "resume", "run.started", json!({"userMessageId":"continue"}), false),
+        (5, "resume", "provider.runtime_ready", json!({"providerId":"omp","pid":202,"reused":false}), false),
+        (6, "old", "agent.message", reply("answer", "omp-message-3", Value::Null), true),
+        (7, "old", "agent.message", reply("new-format", "omp-message-11111111-1111-4111-8111-111111111111", Value::Null), true),
+        (8, "old", "agent.message", reply("child", "omp-message-4", json!("dispatch")), true),
+        (9, "resume", "run.completed", json!({}), false),
+        (10, "old", "agent.message", reply("late", "omp-message-5", Value::Null), true),
+    ] {
+        repos.events().append(&json!({"eventId":format!("omp-{sequence}"),"sequence":sequence,"runId":run,"sessionId":"session",
+            "timestamp":format!("2026-11-22T07:31:{sequence:02}Z"),"type":kind,"background":background,"payload":payload})).unwrap();
+    }
+    for (id, sequence) in [("answer", 6), ("new-format", 7), ("child", 8), ("late", 10)] {
+        repos.sessions().save_message(&json!({"id":id,"sessionId":"session","sender":"agent","runId":"old","background":true,
+            "createdAt":format!("2026-11-22T07:31:{sequence:02}Z"),"text":"项目结构"})).unwrap();
+    }
+    let desktop = repos.sessions().history("session", None).unwrap();
+    let mobile = fixture.service.repo.history("session", None, 10).unwrap();
+    for projection in [&desktop, &mobile] {
+        let items = projection["items"].as_array().unwrap();
+        assert_eq!(items[0]["value"]["id"], "answer");
+        assert_eq!(items[0]["value"]["runId"], "resume");
+        assert!(items[0]["value"].get("background").is_none());
+        assert!(items[1..].iter().all(|item| item["value"]["runId"] == "old"));
+    }
+    let receipt = mobile["activity"].as_array().unwrap().iter().find(|event| event["sequence"] == 6).unwrap();
+    assert_eq!(receipt["runId"], "resume");
+    assert_eq!(repos.sessions().message("session", "answer").unwrap().unwrap()["runId"], "old");
+    assert_eq!(repos.events().replay(Some("session"), None, None, None).unwrap()[5]["runId"], "old");
+    drop(database);
     fixture.shutdown().await;
 }
 

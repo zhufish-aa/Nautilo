@@ -18,7 +18,7 @@ export function Dialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  title: string;
+  title: ReactNode;
   description?: string;
   children: ReactNode;
   footer?: ReactNode;
@@ -59,7 +59,7 @@ export function Dialog({
                 animate={{ opacity: 1 }}
                 exit={{ opacity: reduceMotion ? 1 : 0 }}
                 transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.22, 1, 0.36, 1] }}
-                className={cn("fixed inset-0 z-40", presentation === "workspace" ? "bg-transparent" : "bg-black/20")}
+                className={cn("fixed inset-0 z-40", presentation === "workspace" ? "bg-transparent" : "ui-dialog-overlay")}
               />
             </DialogPrimitive.Overlay>
             <DialogPrimitive.Content

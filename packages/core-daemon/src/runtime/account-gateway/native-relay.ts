@@ -50,6 +50,8 @@ const assistantMatches = (message: Json | undefined, expected: string | undefine
   return content === expected;
 };
 
+export const ASSISTANT_SESSION_ID = "workspace-assistant";
+
 export class NativeRelay {
   url = "";
   readonly key = randomUUID();
@@ -98,7 +100,7 @@ export class NativeRelay {
     credentials: CredentialService,
     account: RuntimeConnection,
     identity: string,
-    outer: AdapterStartRequest,
+    outer: Pick<AdapterStartRequest, "cwd">,
   ): Promise<NativeRelay> {
     const relay = new NativeRelay(db, adapters, account, identity);
     relay.template = accountRequest(
@@ -220,7 +222,14 @@ export class NativeRelay {
     const body = await readRequest(req);
     const child = this.selectConversation(body);
     try { await child.complete(body, res); }
-    finally { this.pruneConversations(); }
+    finally {
+      if (this.isAssistant()) {
+        // Assistant steps carry their own context and never resume parked tools.
+        child.reusable = false;
+        await child.cancel();
+      }
+      this.pruneConversations();
+    }
   }
 
   private selectConversation(body: Json): NativeRelay {
@@ -378,7 +387,11 @@ export class NativeRelay {
     this.inflightHashes = undefined;
     this.inflightSignature = undefined;
   }
+  private isAssistant(): boolean {
+    return this.routeId.startsWith(`${ASSISTANT_SESSION_ID}:`);
+  }
   private checkpoint(): void {
+    if (this.isAssistant()) return;
     this.records.save(
       {
         id: this.identity,
@@ -402,7 +415,7 @@ function accountRequest(
   credentials: CredentialService,
   account: RuntimeConnection,
   identity: string,
-  outer: AdapterStartRequest,
+  outer: Pick<AdapterStartRequest, "cwd">,
 ): AdapterStartRequest {
   const provider = account.harness!;
   const adapter = adapters.get(provider);

@@ -16,6 +16,7 @@ import {
   FlaskConical,
   GitBranch,
   ImageIcon,
+  Info,
   Loader2,
   Pencil,
   Terminal,
@@ -31,6 +32,7 @@ import { cn, formatDateTime } from "../../lib/utils";
 import type { TimelineEvent } from "../../lib/types";
 import type { WorkflowMention } from "@agenthub/domain";
 import { WorkflowPlanCard } from "../sessions/WorkflowPlanCard";
+import { SourceControlDiffView } from "../sessions/SourceControlDiffView";
 import { StatusChip, Tag } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { ensureProjectRunHydrated, resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
@@ -105,9 +107,8 @@ export function TimelineViewport({
   const contentRef = useSurfaceEntrance<HTMLDivElement>(sessionKey, active);
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
-  const previousForceFollowKeyRef = useRef({ sessionKey, key: forceFollowKey });
-  const previousContentKeyRef = useRef<unknown>(contentKey);
-  const previousRowCountRef = useRef(rows.length);
+  const previousContent = useRef({ sessionKey, contentKey, rowCount: rows.length, forceFollowKey });
+  const tailMotion = useRef<Animation>();
   const virtualized = rows.length > 80;
   const reduced = useUiReducedMotion();
   const [currentLocation, setCurrentLocation] = useState(0);
@@ -154,6 +155,7 @@ export function TimelineViewport({
   }, [active, sessionKey]);
 
   const jumpToLocation = useCallback((location: ConversationLocation) => {
+    tailMotion.current?.cancel();
     pendingReading.current = undefined;
     const viewport = scrollRef.current;
     if (!viewport) return;
@@ -265,35 +267,24 @@ export function TimelineViewport({
     timelinePositions.set(sessionKey, { top: viewport.scrollTop, follow: false, rowKey: pending.key, offset: pending.offset });
   }, [keySequence, windowStart, windowEnd, active, sessionKey, virtualizer.getTotalSize()]);
 
-  // Event arrays are replaced for both appended events and streaming patches.
-  // The virtualizer re-measures rows, so a growing live turn changes the total
-  // height; while following, pin the view to the new tail.
   useLayoutEffect(() => {
-    if (contentKey === previousContentKeyRef.current) return;
-    previousContentKeyRef.current = contentKey;
+    const previous = previousContent.current;
+    previousContent.current = { sessionKey, contentKey, rowCount: rows.length, forceFollowKey };
+    const sent = previous.sessionKey === sessionKey && forceFollowKey !== undefined && forceFollowKey !== previous.forceFollowKey;
+    if (!active || !followTailRef.current || (!sent && previous.contentKey === contentKey && previous.rowCount === rows.length)) return;
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    const top = viewport.scrollTop;
     scrollToTail();
-  }, [contentKey, scrollToTail]);
-
-  // Rows are added when new turns start and removed on session switch. Keep
-  // the tail pinned while following even when the row count itself changes.
-  useLayoutEffect(() => {
-    if (rows.length === previousRowCountRef.current) return;
-    previousRowCountRef.current = rows.length;
-    scrollToTail();
-  }, [rows.length, scrollToTail]);
-
-  useLayoutEffect(() => {
-    const previous = previousForceFollowKeyRef.current;
-    previousForceFollowKeyRef.current = { sessionKey, key: forceFollowKey };
-    // Opening a cached conversation is not a newly sent message.
-    if (previous.sessionKey !== sessionKey || forceFollowKey === previous.key) return;
-    if (forceFollowKey === undefined) return;
-    pendingNavigation.current = undefined;
-    navigationLock.current = false;
-    followTailRef.current = true;
-    pendingReading.current = undefined;
-    scrollToTail();
-  }, [forceFollowKey, scrollToTail, sessionKey]);
+    const distance = Math.min(viewport.scrollTop - top, 48);
+    if (!sent || reduced || distance <= 1) return;
+    tailMotion.current?.cancel();
+    tailMotion.current = contentRef.current?.animate?.([
+      { transform: `translateY(${distance}px)` },
+      { transform: "translateY(0)" }
+    ], { duration: 220, easing: "cubic-bezier(.22, 1, .36, 1)" });
+  }, [active, contentKey, forceFollowKey, reduced, rows.length, scrollToTail, sessionKey]);
+  useLayoutEffect(() => () => tailMotion.current?.cancel(), [active, reduced, sessionKey]);
 
   // Child streams/Markdown workers can commit after the parent's event effect.
   // Observe actual content and viewport sizes, then pin once on the next frame.
@@ -349,15 +340,16 @@ export function TimelineViewport({
         saveReadingPosition(element);
       }}
       onWheel={(event) => {
+        tailMotion.current?.cancel();
         navigationLock.current = false;
         pendingNavigation.current = undefined;
         pendingReading.current = undefined;
         // Wheel input is the other explicit way to pause follow mode.
         if (event.deltaY < 0) followTailRef.current = false;
       }}
-      onPointerDown={() => { navigationLock.current = false; pendingNavigation.current = undefined; pendingReading.current = undefined; }}
+      onPointerDown={() => { tailMotion.current?.cancel(); navigationLock.current = false; pendingNavigation.current = undefined; pendingReading.current = undefined; }}
       onClickCapture={(event) => {
-        const trigger = event.target instanceof Element && event.target.closest("button.process-disclosure-row, button.conversation-process-toggle, button.conversation-file-change");
+        const trigger = event.target instanceof Element && event.target.closest("button.process-disclosure-row, button.conversation-process-toggle");
         if (!trigger || !event.currentTarget.contains(trigger)) return;
         // Reading a past detail is a manual navigation. Do not follow its expanding height back to the tail.
         navigationLock.current = true;
@@ -370,23 +362,25 @@ export function TimelineViewport({
       className={cn("relative h-full overflow-y-auto", className)}
       aria-live="polite"
     >
-      <div ref={contentRef} data-timeline-content="" style={{ height: virtualized ? totalSize : undefined, position: "relative", width: "100%" }}>
-        {(virtualized ? virtualizer.getVirtualItems() : rows.map((row, index) => ({ key: row.key, index, start: 0 }))).map((virtualRow) => (
-          <div
-            key={virtualRow.key}
-            ref={virtualized ? virtualizer.measureElement : undefined}
-            data-index={virtualRow.index}
-            style={{
-              position: virtualized ? "absolute" : "relative",
-              top: 0,
-              left: 0,
-              width: "100%",
-              transform: virtualized ? `translateY(${virtualRow.start}px)` : undefined
-            }}
-          >
-            {rows[virtualRow.index]?.render()}
-          </div>
-        ))}
+      <div className="overflow-clip">
+        <div ref={contentRef} data-timeline-content="" style={{ height: virtualized ? totalSize : undefined, position: "relative", width: "100%" }}>
+          {(virtualized ? virtualizer.getVirtualItems() : rows.map((row, index) => ({ key: row.key, index, start: 0 }))).map((virtualRow) => (
+            <div
+              key={virtualRow.key}
+              ref={virtualized ? virtualizer.measureElement : undefined}
+              data-index={virtualRow.index}
+              style={{
+                position: virtualized ? "absolute" : "relative",
+                top: 0,
+                left: 0,
+                width: "100%",
+                transform: virtualized ? `translateY(${virtualRow.start}px)` : undefined
+              }}
+            >
+              {rows[virtualRow.index]?.render()}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
     </div>
@@ -598,24 +592,12 @@ function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { 
   const zh = locale === "zh-CN";
   const label = toolActivityLabel(toolName, status, input, locale);
   if (isBrowserTool(toolName)) return <BrowserActivity name={toolName} status={status} input={input} output={output} zh={zh}/>;
+  const accessory = counts && <span className="flex gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>;
   return (
-    <article className="text-[13px]">
-      <button
-        type="button"
-        disabled={!details}
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={details ? open : undefined}
-        className="flex max-w-full items-center gap-2 rounded-md py-1 text-left text-ink-3 outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/50 disabled:cursor-default"
-      >
-        {status === "running" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />}
-        {status === "failed" && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
-        {status === "done" && <ToolActivityIcon name={toolName} input={input} />}
-        <span className="truncate" title={label}>{label}</span>
-        {counts && <span className="flex shrink-0 gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
-        {details && <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !open && "-rotate-90")} aria-hidden />}
-      </button>
-      {details && open && (
-        <div className="mt-2 overflow-hidden rounded-xl border border-line bg-card">
+    <ProcessDisclosure className="tool-activity-card" label={label} accessory={accessory}
+      icon={status === "failed" ? <AlertTriangle size={14} /> : <ToolActivityIcon name={toolName} input={input} />}
+      open={open} onToggle={details ? () => setOpen(value => !value) : undefined} running={status === "running"} failed={status === "failed"}>
+      <div className="overflow-hidden rounded-xl border border-line bg-card">
           {resolvedFileDiff && <ToolFileDiffView diff={resolvedFileDiff} locale={locale} />}
           {input && !resolvedFileDiff && <pre className="max-h-40 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2">{input}</pre>}
           {input && resolvedFileDiff && (
@@ -625,10 +607,18 @@ function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { 
             </details>
           )}
           {output && <pre className={cn("max-h-56 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2", (input || resolvedFileDiff) && "border-t border-line")}>{output}</pre>}
-        </div>
-      )}
-    </article>
+      </div>
+    </ProcessDisclosure>
   );
+}
+
+function ProviderCompatibilityNotice({ text, zh }: { text: string; zh: boolean }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  return <ProcessDisclosure className="provider-compatibility-note" icon={<Info size={14} />}
+    label={zh ? "扩展兼容性提示 · billion-context-pi" : "Extension compatibility · billion-context-pi"}
+    open={open} onToggle={() => setOpen(value => !value)}>
+    <div className="command-disclosure-output"><pre>{text}</pre></div>
+  </ProcessDisclosure>;
 }
 
 function UsageLine({ event, locale }: { event: TimelineEvent & { data: { kind: "usage" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
@@ -840,63 +830,35 @@ function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { ki
   </ProcessDisclosure>;
 }
 
-function FileChangeCard({
-  event,
-  t,
-  locale,
-  onViewDiff,
-  onOpenLocalFile
-}: {
+function FileChangeCard({ event, locale, t, onOpenLocalFile }: {
   event: TimelineEvent & { data: { kind: "file_change" } };
-  t: (k: MessageKey, v?: Record<string, string | number>) => string;
-  locale: string;
-  onViewDiff?: (path?: string) => void;
+  locale: "zh-CN" | "en-US";
+  t: (key: MessageKey, values?: Record<string, string | number>) => string;
   onOpenLocalFile?: (path: string) => void;
 }): JSX.Element {
-  const { files } = event.data;
-  const rows = files.map(file => ({ file, counts: file.comparisonUnavailable ? undefined : fileChangeCounts(file) }));
-  const totals = rows.reduce((sum, { counts }) => counts ? {
-    additions: sum.additions + counts.additions, deletions: sum.deletions + counts.deletions, known: sum.known + 1,
-  } : sum, { additions: 0, deletions: 0, known: 0 });
-  const columnStyles = {
-    "--conversation-added-width": `${Math.max(3, String(totals.additions).length + 1)}ch`,
-    "--conversation-removed-width": `${Math.max(3, String(totals.deletions).length + 1)}ch`,
-  } as CSSProperties;
-  const renderCounts = ({ additions, deletions }: { additions: number; deletions: number }) => <span className="conversation-file-counts">
-    <span className="conversation-file-added">+{additions}</span><span className="conversation-file-removed">−{deletions}</span>
-  </span>;
-  return (
-    <section className="conversation-file-changes" style={columnStyles}>
-      {event.data.source === "provider" && <header className="conversation-file-changes-header">
-        <span className="conversation-file-changes-title">{locale === "zh-CN" ? `本轮原生差异 · ${files.length} 个文件` : `Provider turn diff · ${files.length} files`}</span>
-        {totals.known > 0 && <span className="conversation-file-count-label">
-          {totals.known < files.length && (locale === "zh-CN" ? "已知变更" : "Known changes")}{renderCounts(totals)}
-        </span>}
-      </header>}
-      <ul className="conversation-file-changes-list">
-      {rows.map(({ file, counts }) => {
-        const basename = Math.max(file.path.lastIndexOf("/"), file.path.lastIndexOf("\\")) + 1;
-        const open = (): void => {
-          if (onViewDiff && (file.diff || !onOpenLocalFile)) onViewDiff(file.path);
-          else openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
-        };
-        return (
-          <li key={file.path}>
-            <button type="button" className="conversation-file-change" title={file.path} onClick={open}>
-              <FileCode2 size={15} className="conversation-file-change-icon" aria-hidden />
-              <span className="conversation-file-name-group">
-                {basename > 0 && <span className="conversation-file-directory">{file.path.slice(0, basename)}</span>}
-                <span className="conversation-file-name">{file.path.slice(basename)}</span>
-              </span>
-              {counts ? renderCounts(counts) : <span className="conversation-file-unavailable" title={file.reason}>{locale === "zh-CN" ? "无法比较" : "Unavailable"}</span>}
-              <ChevronRight size={13} className="conversation-file-change-arrow" aria-hidden />
-            </button>
-          </li>
-        );
-      })}
-      </ul>
-    </section>
-  );
+  const [openPath, setOpenPath] = useState<string>();
+  const zh = locale === "zh-CN";
+  return <div>{event.data.files.map(file => {
+    const expanded = file.path === openPath;
+    const counts = file.comparisonUnavailable ? undefined : fileChangeCounts(file);
+    const label = file.changeType === "added" ? (zh ? "已写入" : "Wrote")
+      : file.changeType === "deleted" ? (zh ? "已删除" : "Deleted") : (zh ? "已编辑" : "Edited");
+    const preview = file.path.split(/[\\/]/).at(-1) || file.path;
+    return <ProcessDisclosure key={file.path} className="file-activity" label={label} preview={<span className="file-activity-name">{preview}</span>}
+      previewTitle={file.path} retainPreview icon={file.changeType === "added" ? <FileCode2 size={14} /> : <Pencil size={14} />}
+      accessory={counts && <span className="flex gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
+      open={expanded} onToggle={() => setOpenPath(expanded ? undefined : file.path)}>
+      <div className="conversation-inline-diff">
+        {file.diff && !file.comparisonUnavailable
+          ? <SourceControlDiffView patch={file.diff} scope={`${event.id}:${file.path}`} locale={locale} />
+          : <p>{zh ? "这条记录没有可显示的差异。" : "No diff is available for this record."}</p>}
+        {file.changeType !== "deleted" && <button type="button" className="mt-2 text-xs text-ink-3 hover:text-ink"
+          onClick={() => openTimelineFile(file.path, t, onOpenLocalFile, "drawer")}>
+          {zh ? "预览文件" : "Preview file"}
+        </button>}
+      </div>
+    </ProcessDisclosure>;
+  })}</div>;
 }
 
 function VerificationCard({ event, t, locale }: { event: TimelineEvent & { data: { kind: "verification" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string }): JSX.Element {
@@ -1022,7 +984,6 @@ function HandoffCard({ event, t, locale, onOpenSession }: { event: TimelineEvent
 
 function TimelineEventViewImpl({
   event,
-  onViewDiff,
   onOpenSession,
   onEditMessage,
   onOpenSubagent,
@@ -1031,7 +992,6 @@ function TimelineEventViewImpl({
   showAuthor = true
 }: {
   event: TimelineEvent;
-  onViewDiff?: (path?: string) => void;
   onOpenSession?: (id: string) => void;
   onEditMessage?: (messageId: string, text: string, workflowRef?: WorkflowMention) => void;
   onOpenSubagent?: (eventId: string) => void;
@@ -1050,7 +1010,9 @@ function TimelineEventViewImpl({
       return <WorkflowPlanCard key={data.plan.id} plan={data.plan} runStatus={data.runStatus} onViewExecution={onOpenWorkflow}/>;
     case "provider_ui":
       if (data.method === "open_url" && data.url) return <a href={data.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 py-1 text-[13px] text-accent underline underline-offset-4" onClick={(event) => { const bridge = getBridge(); if (bridge) { event.preventDefault(); void bridge.shell.openExternal(data.url!).catch(() => {}); } }}>{data.text || (locale === "zh-CN" ? "打开授权链接" : "Open authorization link")} ↗</a>;
-      return data.method === "notify" ? <p className="whitespace-pre-wrap py-1 text-[13px] text-ink-2">{data.text}</p> : null;
+      if (data.method !== "notify" || !data.text.trim()) return null;
+      if (data.text.startsWith("[billion-context-pi] Unsupported host:")) return <ProviderCompatibilityNotice text={data.text} zh={locale === "zh-CN"} />;
+      return <p className="whitespace-pre-wrap py-1 text-[13px] text-ink-2">{data.text}</p>;
     case "activity":
       return <ActivityLine event={event as TimelineEvent & { data: { kind: "activity" } }} locale={locale} />;
     case "reasoning":
@@ -1064,7 +1026,7 @@ function TimelineEventViewImpl({
       return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
     }
     case "tool_group":
-        return <div className="space-y-1">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onViewDiff={onViewDiff} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenWorkflow={onOpenWorkflow} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />)}</div>;
+        return <div className="space-y-1">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenWorkflow={onOpenWorkflow} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />)}</div>;
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
     case "artifact":
@@ -1078,7 +1040,7 @@ function TimelineEventViewImpl({
     case "command":
       return <CommandCard event={event as TimelineEvent & { data: { kind: "command" } }} t={t} locale={locale} />;
     case "file_change":
-      return <FileChangeCard event={event as TimelineEvent & { data: { kind: "file_change" } }} t={t} locale={locale} onViewDiff={onViewDiff} onOpenLocalFile={onOpenLocalFile} />;
+      return <FileChangeCard event={event as TimelineEvent & { data: { kind: "file_change" } }} locale={locale} t={t} onOpenLocalFile={onOpenLocalFile} />;
     case "verification":
       return <VerificationCard event={event as TimelineEvent & { data: { kind: "verification" } }} t={t} locale={locale} />;
     case "git_merge":
@@ -1122,7 +1084,6 @@ function TimelineEventViewImpl({
 export const TimelineEventView = memo(
   TimelineEventViewImpl,
   (prev, next) => prev.event === next.event
-    && prev.onViewDiff === next.onViewDiff
     && prev.onOpenSession === next.onOpenSession
     && prev.onEditMessage === next.onEditMessage
     && prev.onOpenSubagent === next.onOpenSubagent

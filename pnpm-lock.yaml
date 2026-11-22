@@ -23,6 +23,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@agenthub/schemas':
+        specifier: workspace:*
+        version: link:../../packages/schemas
       '@aiden0z/pptx-renderer':
         specifier: 1.2.4
         version: 1.2.4(pdfjs-dist@5.7.284)
@@ -113,6 +116,9 @@ importers:
       xlsx:
         specifier: ^0.18.5
         version: 0.18.5
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
       zustand:
         specifier: ^5.0.3
         version: 5.0.14(@types/react@18.3.31)(react@18.3.1)

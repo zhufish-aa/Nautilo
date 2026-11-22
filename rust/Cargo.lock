@@ -157,6 +157,7 @@ dependencies = [
  "agenthub-plugin-sdk",
  "anyhow",
  "async-trait",
+ "chrono",
  "regex",
  "serde_json",
  "serde_yaml",

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Check, Eye, EyeOff, FileUp, Plus, Trash2, Wand2 } from "lucide-react";
+import { useLayoutEffect, useRef, useState, type ChangeEvent } from "react";
+import { Check, Eye, EyeOff, FileUp, Pencil, Plus, Trash2, Wand2 } from "lucide-react";
 import type {
   CapabilityKind,
   McpServerConfig,
@@ -9,6 +9,7 @@ import type {
 import { useI18n } from "../../lib/i18n";
 import { toDaemonProviderId, toUiProviderId } from "../../lib/core-mappers";
 import { useProviderMetas } from "../../lib/provider-catalog";
+import { capabilityOrigin, type CapabilityOriginKind } from "../../lib/capability-origin";
 import { cn } from "../../lib/utils";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -17,6 +18,13 @@ import { Switch } from "../../components/ui/Switch";
 import { TagInput } from "../../components/ui/TagInput";
 import { useProviderToolsStore } from "../../stores/provider-tools";
 import { toast } from "../../stores/toast";
+import { SkillDetails } from "./SkillDetails";
+import "./skill-dialog.css";
+import "./mcp-editor.css";
+
+export type CapabilityDialogState =
+  | { mode: "create" }
+  | { mode: "view" | "edit"; capability: ProviderCapability };
 
 interface KeyValueRow {
   key: string;
@@ -318,19 +326,22 @@ function Segmented<T extends string>({
 
 /** Shared add/edit dialog for a skill or MCP server capability. */
 export function CapabilityEditorDialog({
-  open,
-  onOpenChange,
-  capability,
+  state,
+  onChange,
+  onRemove,
+  originNames,
   defaultKind,
   defaultProviderId,
 }: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  capability?: ProviderCapability;
+  state: CapabilityDialogState | undefined;
+  onChange: (state: CapabilityDialogState | undefined) => void;
+  onRemove: (capability: ProviderCapability) => void;
+  originNames: Record<CapabilityOriginKind, string>;
   defaultKind?: CapabilityKind;
   defaultProviderId?: string;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const zh = locale === "zh-CN";
   const providers = useProviderMetas();
   const saveCapability = useProviderToolsStore((state) => state.save);
   const parseImport = useProviderToolsStore((state) => state.parseImport);
@@ -342,9 +353,18 @@ export function CapabilityEditorDialog({
   );
   const [quickText, setQuickText] = useState("");
   const [quickNote, setQuickNote] = useState<string | undefined>(undefined);
+  const [quickMode, setQuickMode] = useState<"form" | "paste" | "parsing" | "filled">("form");
+  const [runtimeTab, setRuntimeTab] = useState("");
+  const quickRequest = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const open = state !== undefined;
+  const capability = state && state.mode !== "create" ? state.capability : undefined;
+  const viewing = state?.mode === "view" ? state.capability : undefined;
+  const isSkill = (capability?.kind ?? defaultKind ?? form.kind) === "skill";
+  const showQuickFill = !isSkill && (quickMode === "paste" || quickMode === "parsing");
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    quickRequest.current++;
     if (open) {
       setForm(capability ? formFromCapability(capability) : { ...emptyForm(), kind: defaultKind ?? "skill", providerIds: defaultProviderId ? [defaultProviderId] : [] });
       setErrors({});
@@ -352,16 +372,22 @@ export function CapabilityEditorDialog({
       setImportedFileName(undefined);
       setQuickText("");
       setQuickNote(undefined);
+      setQuickMode("form");
+      setRuntimeTab("");
     }
   }, [open, capability, defaultKind, defaultProviderId]);
 
-  const patch = (changes: Partial<FormState>): void =>
+  const patch = (changes: Partial<FormState>): void => {
     setForm((prev) => ({ ...prev, ...changes }));
+    if (quickMode === "filled") setQuickMode("form");
+  };
 
   /** Fills the MCP half of the form from a pasted config block or launch command. */
   const applyQuickFill = async (): Promise<void> => {
     const text = quickText.trim();
-    if (!text) return;
+    if (!text || quickMode === "parsing") return;
+    const request = ++quickRequest.current;
+    setQuickMode("parsing");
     setQuickNote(undefined);
     try {
       // A config block starts with a brace; anything else is a shell command.
@@ -369,13 +395,16 @@ export function CapabilityEditorDialog({
         source: text.startsWith("{") ? "mcpJson" : "mcpCommand",
         text,
       });
+      if (request !== quickRequest.current) return;
       if (preview.mcpServers.length === 0) {
+        setQuickMode("paste");
         setQuickNote(
           preview.errors[0] ?? t("agents.tools.editor.quickFillNone"),
         );
         return;
       }
       if (preview.mcpServers.length > 1) {
+        setQuickMode("paste");
         setQuickNote(
           t("agents.tools.editor.quickFillMulti", {
             count: preview.mcpServers.length,
@@ -395,10 +424,15 @@ export function CapabilityEditorDialog({
         tags: prev.tags.length > 0 ? prev.tags : candidate.tags,
       }));
       setQuickText("");
+      setRuntimeTab("");
+      setQuickMode("filled");
       if (candidate.warnings.length > 0)
         toast.info(candidate.warnings.join(" · "));
     } catch (error) {
-      setQuickNote(messageOf(error));
+      if (request === quickRequest.current) {
+        setQuickMode("paste");
+        setQuickNote(messageOf(error));
+      }
     }
   };
 
@@ -461,6 +495,7 @@ export function CapabilityEditorDialog({
     });
 
   const save = async (): Promise<void> => {
+    if (saving) return;
     const nextErrors: FormErrors = {};
     if (!form.name.trim())
       nextErrors.name = t("agents.tools.editor.nameRequired");
@@ -494,6 +529,7 @@ export function CapabilityEditorDialog({
       tags: form.tags,
       enabled: form.enabled,
       providerIds: form.providerIds.map(toDaemonProviderId),
+      ...(capability?.origin ? { origin: capability.origin } : {}),
       createdAt: capability?.createdAt ?? now,
       updatedAt: now,
       ...(form.kind === "mcp"
@@ -537,7 +573,7 @@ export function CapabilityEditorDialog({
     try {
       await saveCapability(next);
       toast.success(t("agents.tools.savedToast", { name: next.name }));
-      onOpenChange(false);
+      onChange(undefined);
     } catch (error) {
       setErrors({
         form: error instanceof Error ? error.message : String(error),
@@ -547,38 +583,134 @@ export function CapabilityEditorDialog({
     }
   };
 
+  const origin = viewing && capabilityOrigin(viewing);
+  const sourceLabel = origin && [originNames[origin.kind], origin.kind !== "builtin" && origin.label]
+    .filter(Boolean)
+    .join(" · ");
+  const instructionLines = form.instructions ? form.instructions.split(/\r?\n/).length : 0;
+  const tagsField = (
+    <Field label={t("agents.tools.editor.tags")} className="skill-editor-tags">
+      <TagInput
+        aria-label={t("agents.tools.editor.tags")}
+        values={form.tags}
+        onChange={(tags) => patch({ tags })}
+        placeholder={t("agents.tools.editor.tagsPlaceholder")}
+      />
+    </Field>
+  );
+  const nameField = (
+    <Field label={t("agents.tools.editor.name")} htmlFor="capability-name" error={errors.name} className="skill-editor-required">
+      <Input id="capability-name" autoFocus={isSkill || !!capability} required value={form.name}
+        onChange={(event) => patch({ name: event.target.value })}
+        placeholder={isSkill ? (zh ? "例如：数据库助手" : "e.g. Database assistant") : (zh ? "例如：filesystem" : "e.g. filesystem")}
+      />
+    </Field>
+  );
+  const skillDescription = (
+    <Field label={t("agents.tools.editor.description")} htmlFor="capability-description">
+      <Textarea
+        id="capability-description"
+        rows={2}
+        value={form.description}
+        onChange={(event) => patch({ description: event.target.value })}
+        placeholder={zh ? "简述该 Skill 的用途与触发场景（显示在技能列表）" : "Describe what this skill does and when to use it. Shown in the skill list."}
+      />
+    </Field>
+  );
+  const mcpTarget = form.transport === "stdio" ? form.command : form.url;
+  const valid = Boolean(form.name.trim() && (isSkill ? form.instructions.trim() : mcpTarget.trim()));
+
+  const rowLabels = {
+    addLabel: t("agents.tools.editor.addRow"),
+    removeLabel: t("agents.tools.editor.removeRow"),
+  };
+  const runtimeTabs = form.transport === "stdio" ? [
+    {
+      id: "args", label: zh ? "启动参数" : "Arguments", count: compact(form.args).length,
+      content: <StringRows values={form.args} onChange={(args) => patch({ args })} placeholder={t("agents.tools.editor.argPlaceholder")} {...rowLabels} />,
+    },
+    {
+      id: "env", label: t("agents.tools.editor.env"), count: Object.keys(rowsToRecord(form.env)).length,
+      content: <KeyValueRows rows={form.env} onChange={(env) => patch({ env })} keyPlaceholder={t("agents.tools.editor.envKeyPlaceholder")} valuePlaceholder={t("agents.tools.editor.envValuePlaceholder")} {...rowLabels} />,
+    },
+    {
+      id: "envPassthrough", label: zh ? "环境传递" : "Pass-through", count: compact(form.envPassthrough).length,
+      content: <Field label={t("agents.tools.editor.envPassthrough")} hint={t("agents.tools.editor.envPassthroughHint")}>
+        <StringRows values={form.envPassthrough} onChange={(envPassthrough) => patch({ envPassthrough })} placeholder={t("agents.tools.editor.passthroughPlaceholder")} {...rowLabels} />
+      </Field>,
+    },
+    {
+      id: "cwd", label: t("agents.tools.editor.cwd"),
+      content: <Input aria-label={t("agents.tools.editor.cwd")} value={form.cwd} onChange={(event) => patch({ cwd: event.target.value })}
+        placeholder={t("agents.tools.editor.cwdPlaceholder")} spellCheck={false} className="font-mono" />,
+    },
+  ] : [
+    {
+      id: "headers", label: zh ? "请求头" : "Headers", count: Object.keys(rowsToRecord(form.headers)).length,
+      content: <KeyValueRows rows={form.headers} onChange={(headers) => patch({ headers })} keyPlaceholder={t("agents.tools.editor.headerKeyPlaceholder")} valuePlaceholder={t("agents.tools.editor.headerValuePlaceholder")} {...rowLabels} />,
+    },
+    {
+      id: "envHeaders", label: zh ? "环境请求头" : "Headers from environment", count: Object.keys(rowsToRecord(form.envHeaders)).length,
+      content: <Field label={t("agents.tools.editor.envHeaders")} hint={t("agents.tools.editor.envHeadersHint")}>
+        <KeyValueRows rows={form.envHeaders} onChange={(envHeaders) => patch({ envHeaders })} keyPlaceholder={t("agents.tools.editor.headerKeyPlaceholder")} valuePlaceholder={t("agents.tools.editor.envVarNamePlaceholder")} {...rowLabels} />
+      </Field>,
+    },
+    {
+      id: "bearer", label: zh ? "Bearer 凭证" : "Bearer token",
+      content: <Field label={t("agents.tools.editor.bearerToken")} hint={t("agents.tools.editor.bearerTokenHint")} htmlFor="capability-bearer">
+        <Input id="capability-bearer" value={form.bearerTokenEnvVar} onChange={(event) => patch({ bearerTokenEnvVar: event.target.value })}
+          placeholder={t("agents.tools.editor.bearerTokenPlaceholder")} spellCheck={false} className="font-mono" />
+      </Field>,
+    },
+  ];
+  const activeRuntimeTab = runtimeTabs.find((tab) => tab.id === runtimeTab) ?? runtimeTabs[0];
+
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!saving) onOpenChange(next);
+        if (!next && !saving) onChange(undefined);
       }}
-      title={
-        capability
-          ? t("agents.tools.editor.editTitle")
-          : t("agents.tools.editor.createTitle")
-      }
-      widthClass="max-w-4xl"
+      title={viewing ? <>
+        <span className="skill-dialog-name" title={viewing.name}>{viewing.name}</span>
+        <span className="skill-dialog-source" title={sourceLabel}>{sourceLabel}</span>
+      </> : isSkill
+        ? (capability ? (zh ? "编辑 Skill" : "Edit Skill") : (zh ? "添加 Skill" : "Add Skill"))
+        : (capability ? (zh ? "编辑 MCP 服务" : "Edit MCP server") : (zh ? "添加 MCP 服务" : "Add MCP server"))}
+      widthClass={isSkill ? "capability-editor-dialog skill-dialog" : "capability-editor-dialog mcp-editor-dialog"}
       footer={
+        viewing ? <>
+          <Button variant="ghost" size="sm" className="skill-dialog-remove" onClick={() => onRemove(viewing)}>
+            <Trash2 size={14} aria-hidden />
+            {t("common.remove")}
+          </Button>
+          <Button variant="primary" size="sm" onClick={() => onChange({ mode: "edit", capability: viewing })}>
+            <Pencil size={14} aria-hidden />
+            {t("common.edit")}
+          </Button>
+        </> :
         <>
           <Button
             variant="ghost"
-            onClick={() => onOpenChange(false)}
+            size="sm"
+            onClick={() => onChange(undefined)}
             disabled={saving}
           >
             {t("common.cancel")}
           </Button>
           <Button
             variant="primary"
+            size="sm"
             onClick={() => void save()}
-            disabled={saving}
+            disabled={saving || showQuickFill || !valid}
           >
             {t("common.save")}
           </Button>
         </>
       }
     >
-      <div className="space-y-6">
+      {viewing ? <SkillDetails key={viewing.id} capability={viewing} /> :
+      <div className={isSkill ? "skill-editor-form" : "skill-editor-form mcp-editor-form"}>
         {!defaultKind && <Field label={t("agents.tools.editor.kindLabel")}>
           <Segmented<CapabilityKind>
             ariaLabel={t("agents.tools.editor.kindLabel")}
@@ -591,48 +723,95 @@ export function CapabilityEditorDialog({
           />
         </Field>}
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <Field
-            label={t("agents.tools.editor.name")}
-            htmlFor="capability-name"
-            error={errors.name}
-          >
-            <Input
-              id="capability-name"
-              autoFocus
-              value={form.name}
-              onChange={(event) => patch({ name: event.target.value })}
-              placeholder={t("agents.tools.editor.namePlaceholder")}
-            />
-          </Field>
-          <Field label={t("agents.tools.editor.tags")}>
-            <TagInput
-              aria-label={t("agents.tools.editor.tags")}
-              values={form.tags}
-              onChange={(tags) => patch({ tags })}
-              placeholder={t("agents.tools.editor.tagsPlaceholder")}
-            />
-          </Field>
-        </div>
+        {!isSkill && !capability && <div className="mcp-editor-modes capability-underline-tabs" role="group" aria-label={zh ? "添加方式" : "Add method"}>
+          <button type="button" aria-pressed={!showQuickFill} disabled={quickMode === "parsing"} onClick={() => setQuickMode("form")}>
+            {zh ? "表单配置" : "Configure manually"}
+          </button>
+          <button type="button" aria-pressed={showQuickFill} onClick={() => setQuickMode("paste")} disabled={quickMode === "parsing"}>
+            {zh ? "从 JSON / 命令行快速填充" : "Fill from JSON / command"}
+          </button>
+        </div>}
 
-        <details className="text-sm text-ink-2">
-          <summary className="cursor-pointer">
-            {t("agents.tools.editor.description")}
-          </summary>
-          <div className="mt-4">
-            <Field
-              label={t("agents.tools.editor.description")}
-              htmlFor="capability-description"
-            >
-              <Textarea
-                id="capability-description"
-                value={form.description}
-                onChange={(event) => patch({ description: event.target.value })}
-                placeholder={t("agents.tools.editor.descriptionPlaceholder")}
-              />
+        {isSkill ? <>
+          <div className="skill-editor-fields">
+            {nameField}
+            <Field label={t("agents.tools.editor.source")} htmlFor="capability-source">
+              <Input id="capability-source" value={form.source} onChange={(event) => patch({ source: event.target.value })}
+                placeholder={t("agents.tools.editor.sourcePlaceholder")} />
             </Field>
           </div>
-        </details>
+          {skillDescription}{tagsField}
+        </> : showQuickFill ? (
+          <div className="mcp-quick-fill">
+            <Field label={zh ? "JSON 或启动命令" : "JSON or launch command"} htmlFor="capability-quick-fill" error={quickNote}>
+              <Textarea
+                id="capability-quick-fill"
+                rows={6}
+                value={quickText}
+                onChange={(event) => { setQuickText(event.target.value); setQuickNote(undefined); }}
+                placeholder={'{"mcpServers": {"example": {"command": "npx", "args": ["-y", "example-mcp"]}}}\n\nnpx -y example-mcp'}
+                spellCheck={false}
+                autoFocus
+                disabled={quickMode === "parsing"}
+                className="font-mono"
+              />
+            </Field>
+            <div className="mcp-quick-fill-actions">
+              {capability && <Button type="button" variant="ghost" size="sm" disabled={quickMode === "parsing"} onClick={() => setQuickMode("form")}>
+                {zh ? "返回表单" : "Back to form"}
+              </Button>}
+              <Button type="button" variant="outline" size="sm" disabled={!quickText.trim() || quickMode === "parsing"} onClick={() => void applyQuickFill()}>
+                <Wand2 size={14} aria-hidden />{quickMode === "parsing" ? (zh ? "正在解析…" : "Parsing…") : (zh ? "解析并填入表单" : "Parse and fill form")}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="mcp-editor-primary" data-filled={quickMode === "filled"}>
+              <div className="mcp-editor-connection">
+                {nameField}
+                <Field label={t("agents.tools.editor.transport")} className="mcp-editor-transport">
+                  <Segmented<McpTransport> ariaLabel={t("agents.tools.editor.transport")} value={form.transport}
+                    onChange={(transport) => { patch({ transport }); setRuntimeTab(""); }}
+                    options={[
+                      { value: "stdio", label: "STDIO" },
+                      { value: "http", label: zh ? "流式 HTTP" : "Streamable HTTP" },
+                    ]}
+                  />
+                </Field>
+              </div>
+              {form.transport === "stdio" ? (
+                <Field label={zh ? "启动命令" : "Launch command"} htmlFor="capability-command" error={errors.command}>
+                  <Input id="capability-command" required value={form.command} onChange={(event) => patch({ command: event.target.value })}
+                    placeholder="npx" spellCheck={false} className="font-mono" />
+                </Field>
+              ) : (
+                <Field label={zh ? "服务 URL" : "Server URL"} htmlFor="capability-url" error={errors.url}>
+                  <Input id="capability-url" required value={form.url} onChange={(event) => patch({ url: event.target.value })}
+                    placeholder="https://mcp.example.com/mcp" spellCheck={false} className="font-mono" />
+                </Field>
+              )}
+              <div className="mcp-editor-description">
+                <Field label={t("agents.tools.editor.description")} htmlFor="capability-description">
+                  <Input id="capability-description" value={form.description} onChange={(event) => patch({ description: event.target.value })}
+                    placeholder={zh ? "简述该 MCP 提供的工具能力" : "Describe what this server provides"} />
+                </Field>
+                {tagsField}
+              </div>
+            </div>
+            <section className="mcp-runtime" aria-label={zh ? "运行时参数" : "Runtime options"}>
+              <div className="mcp-runtime-tabs capability-underline-tabs" role="group" aria-label={zh ? "运行时参数" : "Runtime options"}>
+                {runtimeTabs.map((tab) => <button key={tab.id} type="button" aria-pressed={activeRuntimeTab.id === tab.id} onClick={() => setRuntimeTab(tab.id)}>
+                  {tab.label}{tab.count !== undefined && <span>{tab.count}</span>}
+                </button>)}
+                {capability && <button type="button" className="mcp-runtime-quick-fill" onClick={() => setQuickMode("paste")}>
+                  <Wand2 size={12} aria-hidden />{zh ? "快速填充" : "Quick fill"}
+                </button>}
+              </div>
+              <div className="mcp-runtime-content" key={activeRuntimeTab.id} data-filled={quickMode === "filled"}>{activeRuntimeTab.content}</div>
+            </section>
+          </>
+        )}
         {!defaultProviderId && <Field
           label={t("agents.tools.editor.providers")}
           hint={t("agents.tools.editor.providersHint")}
@@ -667,251 +846,44 @@ export function CapabilityEditorDialog({
           </div>
         </Field>}
 
-        {form.kind === "mcp" ? (
-          <div className="space-y-6 border-t border-line pt-6">
-            <details className="text-sm text-ink-2">
-              <summary className="cursor-pointer">
-                {t("agents.tools.editor.quickFill")}
-              </summary>
-              <div className="mt-4">
-                <Field
-                  label={t("agents.tools.editor.quickFill")}
-                  htmlFor="capability-quick-fill"
-                  hint={
-                    quickNote
-                      ? undefined
-                      : t("agents.tools.editor.quickFillHint")
-                  }
-                  error={quickNote}
-                >
-                  <Textarea
-                    id="capability-quick-fill"
-                    rows={3}
-                    value={quickText}
-                    onChange={(event) => setQuickText(event.target.value)}
-                    placeholder={t("agents.tools.editor.quickFillPlaceholder")}
-                    spellCheck={false}
-                    className="font-mono text-[13px]"
-                  />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void applyQuickFill()}
-                    disabled={!quickText.trim()}
-                  >
-                    <Wand2 className="h-3.5 w-3.5" aria-hidden />{" "}
-                    {t("agents.tools.editor.quickFillApply")}
-                  </Button>
-                </Field>
-              </div>
-            </details>
-            <Field label={t("agents.tools.editor.transport")}>
-              <Segmented<McpTransport>
-                ariaLabel={t("agents.tools.editor.transport")}
-                value={form.transport}
-                onChange={(transport) => patch({ transport })}
-                options={[
-                  {
-                    value: "stdio",
-                    label: t("agents.tools.editor.transportStdio"),
-                  },
-                  {
-                    value: "http",
-                    label: t("agents.tools.editor.transportHttp"),
-                  },
-                ]}
-              />
-            </Field>
-
-            {form.transport === "stdio" ? (
-              <>
-                <Field
-                  label={t("agents.tools.editor.command")}
-                  htmlFor="capability-command"
-                  error={errors.command}
-                >
-                  <Input
-                    id="capability-command"
-                    value={form.command}
-                    onChange={(event) => patch({ command: event.target.value })}
-                    placeholder={t("agents.tools.editor.commandPlaceholder")}
-                    spellCheck={false}
-                    className="font-mono text-[13px]"
-                  />
-                </Field>
-                <Field label={t("agents.tools.editor.args")}>
-                  <StringRows
-                    values={form.args}
-                    onChange={(args) => patch({ args })}
-                    placeholder={t("agents.tools.editor.argPlaceholder")}
-                    addLabel={t("agents.tools.editor.addRow")}
-                    removeLabel={t("agents.tools.editor.removeRow")}
-                  />
-                </Field>
-                <Field label={t("agents.tools.editor.env")}>
-                  <KeyValueRows
-                    rows={form.env}
-                    onChange={(env) => patch({ env })}
-                    keyPlaceholder={t("agents.tools.editor.envKeyPlaceholder")}
-                    valuePlaceholder={t(
-                      "agents.tools.editor.envValuePlaceholder",
-                    )}
-                    addLabel={t("agents.tools.editor.addRow")}
-                    removeLabel={t("agents.tools.editor.removeRow")}
-                  />
-                </Field>
-                <Field
-                  label={t("agents.tools.editor.envPassthrough")}
-                  hint={t("agents.tools.editor.envPassthroughHint")}
-                >
-                  <StringRows
-                    values={form.envPassthrough}
-                    onChange={(envPassthrough) => patch({ envPassthrough })}
-                    placeholder={t(
-                      "agents.tools.editor.passthroughPlaceholder",
-                    )}
-                    addLabel={t("agents.tools.editor.addRow")}
-                    removeLabel={t("agents.tools.editor.removeRow")}
-                  />
-                </Field>
-                <Field
-                  label={t("agents.tools.editor.cwd")}
-                  htmlFor="capability-cwd"
-                >
-                  <Input
-                    id="capability-cwd"
-                    value={form.cwd}
-                    onChange={(event) => patch({ cwd: event.target.value })}
-                    placeholder={t("agents.tools.editor.cwdPlaceholder")}
-                    spellCheck={false}
-                    className="font-mono text-[13px]"
-                  />
-                </Field>
-              </>
-            ) : (
-              <>
-                <Field
-                  label={t("agents.tools.editor.url")}
-                  htmlFor="capability-url"
-                  error={errors.url}
-                >
-                  <Input
-                    id="capability-url"
-                    value={form.url}
-                    onChange={(event) => patch({ url: event.target.value })}
-                    placeholder={t("agents.tools.editor.urlPlaceholder")}
-                    spellCheck={false}
-                    className="font-mono text-[13px]"
-                  />
-                </Field>
-                <Field
-                  label={t("agents.tools.editor.bearerToken")}
-                  htmlFor="capability-bearer"
-                  hint={t("agents.tools.editor.bearerTokenHint")}
-                >
-                  <Input
-                    id="capability-bearer"
-                    value={form.bearerTokenEnvVar}
-                    onChange={(event) =>
-                      patch({ bearerTokenEnvVar: event.target.value })
-                    }
-                    placeholder={t(
-                      "agents.tools.editor.bearerTokenPlaceholder",
-                    )}
-                    spellCheck={false}
-                    className="font-mono text-[13px]"
-                  />
-                </Field>
-                <Field label={t("agents.tools.editor.headers")}>
-                  <KeyValueRows
-                    rows={form.headers}
-                    onChange={(headers) => patch({ headers })}
-                    keyPlaceholder={t(
-                      "agents.tools.editor.headerKeyPlaceholder",
-                    )}
-                    valuePlaceholder={t(
-                      "agents.tools.editor.headerValuePlaceholder",
-                    )}
-                    addLabel={t("agents.tools.editor.addRow")}
-                    removeLabel={t("agents.tools.editor.removeRow")}
-                  />
-                </Field>
-                <Field
-                  label={t("agents.tools.editor.envHeaders")}
-                  hint={t("agents.tools.editor.envHeadersHint")}
-                >
-                  <KeyValueRows
-                    rows={form.envHeaders}
-                    onChange={(envHeaders) => patch({ envHeaders })}
-                    keyPlaceholder={t(
-                      "agents.tools.editor.headerKeyPlaceholder",
-                    )}
-                    valuePlaceholder={t(
-                      "agents.tools.editor.envVarNamePlaceholder",
-                    )}
-                    addLabel={t("agents.tools.editor.addRow")}
-                    removeLabel={t("agents.tools.editor.removeRow")}
-                  />
-                </Field>
-              </>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-6 border-t border-line pt-6">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <FileUp className="h-3.5 w-3.5" aria-hidden />{" "}
-                {t("agents.tools.editor.importFile")}
-              </Button>
-              {importedFileName && (
-                <span className="text-xs text-ink-3">
-                  {t("agents.tools.editor.importedFile", {
-                    name: importedFileName,
-                  })}
+        {isSkill && (
+          <div>
+            <div className="skill-code-panel skill-code-editor">
+              <div className="skill-code-toolbar">
+                <label htmlFor="capability-instructions">Instructions</label>
+                <span className="skill-code-stat">Markdown</span>
+                <span className="skill-code-stat skill-code-editor-count">
+                  {zh ? `${instructionLines} 行` : `${instructionLines} lines`}
                 </span>
-              )}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".md,.markdown"
-                className="hidden"
-                tabIndex={-1}
-                aria-hidden
-                onChange={onFileChosen}
-              />
-            </div>
-            <Field
-              label={t("agents.tools.editor.instructions")}
-              htmlFor="capability-instructions"
-              error={errors.instructions}
-            >
-              <Textarea
+                <button
+                  type="button"
+                  className="skill-code-action"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <FileUp size={14} aria-hidden />
+                  {zh ? "导入 .md 文件" : "Import .md file"}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".md,.markdown"
+                  hidden
+                  onChange={onFileChosen}
+                />
+              </div>
+              <textarea
                 id="capability-instructions"
-                rows={12}
+                required
                 value={form.instructions}
-                onChange={(event) =>
-                  patch({ instructions: event.target.value })
-                }
+                onChange={(event) => patch({ instructions: event.target.value })}
                 placeholder={t("agents.tools.editor.instructionsPlaceholder")}
                 spellCheck={false}
-                className="font-mono text-[13px] leading-relaxed"
               />
-            </Field>
-            <Field
-              label={t("agents.tools.editor.source")}
-              htmlFor="capability-source"
-            >
-              <Input
-                id="capability-source"
-                value={form.source}
-                onChange={(event) => patch({ source: event.target.value })}
-                placeholder={t("agents.tools.editor.sourcePlaceholder")}
-              />
-            </Field>
+            </div>
+            {importedFileName && <p className="skill-editor-import-note" role="status">
+              {t("agents.tools.editor.importedFile", { name: importedFileName })}
+            </p>}
+            {errors.instructions && <p role="alert" className="mt-1.5 text-xs text-danger">{errors.instructions}</p>}
           </div>
         )}
 
@@ -936,7 +908,7 @@ export function CapabilityEditorDialog({
             {errors.form}
           </p>
         )}
-      </div>
+      </div>}
     </Dialog>
   );
 }

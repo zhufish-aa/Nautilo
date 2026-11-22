@@ -31,9 +31,11 @@ export function useResourceSync(open: boolean, kind: "mcp" | "skill") {
       if (version !== generation.current) return;
       setInventory(inv);
       setHistory(h);
+      setPlan(undefined);
+      setSelected(current => current.filter(id => inv.resources.some(resource => resource.kind === kind && resource.id === id)));
       setTarget(
         (current) =>
-          current ||
+          inv.targets.find(t => t.id === current && (kind === "mcp" || t.skillDirectory))?.id ||
           inv.targets.find((t) =>
             kind === "skill" ? t.skillDirectory : t.mcpPath,
           )?.id ||

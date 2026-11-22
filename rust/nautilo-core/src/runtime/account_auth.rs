@@ -9,7 +9,7 @@ use serde_json::Value;
 /// A native provider's HTTP rejection, retaining its status through the local
 /// model endpoint. In particular, quota responses must stay HTTP 429.
 #[derive(Debug)]
-pub struct ModelRequestError { pub status: u16, pub message: String }
+pub struct ModelRequestError { pub status: u16, pub message: String, pub retry_after: Option<String> }
 impl std::fmt::Display for ModelRequestError {
     fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { write!(f,"{}",self.message) }
 }

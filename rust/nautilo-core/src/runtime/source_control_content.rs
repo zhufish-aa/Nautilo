@@ -2,7 +2,6 @@
 use super::{checked, file_token, git, required};
 use crate::runtime::git::source_control_io::git_bytes;
 use serde_json::{json, Value};
-use std::path::Path;
 
 const LIMIT: usize = 1024 * 1024;
 pub(super) fn numstat(raw:&str)->anyhow::Result<std::collections::HashMap<String,Value>>{
@@ -19,6 +18,28 @@ pub(super) fn numstat(raw:&str)->anyhow::Result<std::collections::HashMap<String
 pub(super) struct TextVersion {
     pub text: Option<String>,
     pub reason: Option<&'static str>,
+}
+pub(super) async fn staged_rename_source(root: &str, name: &str) -> anyhow::Result<Option<String>> {
+    // Match git status's rename configuration while comparing HEAD with the index only.
+    let config = git(root, &["config", "--get-regexp", "^status\\.(renames|renamelimit)$"], None, 8192).await?;
+    if config.code != 0 && config.code != 1 { anyhow::bail!("{}", config.stderr); }
+    let overrides = config.stdout.lines().filter_map(|line| line.split_once(' '))
+        .map(|(key, value)| format!("diff.{}={value}", key.trim_start_matches("status.")))
+        .collect::<Vec<_>>();
+    let mut args = Vec::new();
+    for setting in &overrides { args.extend(["-c", setting.as_str()]); }
+    args.extend(["diff", "--cached", "--no-ext-diff", "--no-textconv", "--name-status", "-z", "--diff-filter=RC", "--"]);
+    let records = checked(root, &args, None).await?;
+    let mut fields = records.split_terminator('\0');
+    while fields.next().is_some() {
+        let original = fields.next().ok_or_else(|| anyhow::anyhow!("Git 重命名记录不完整"))?;
+        let destination = fields.next().ok_or_else(|| anyhow::anyhow!("Git 重命名记录不完整"))?;
+        if destination == name {
+            super::path(original)?;
+            return Ok(Some(original.to_string()));
+        }
+    }
+    Ok(None)
 }
 impl TextVersion {
     fn empty() -> Self { Self { text: Some(String::new()), reason: None } }
@@ -62,8 +83,7 @@ async fn index_text(root: &str, name: &str, stage: &str) -> anyhow::Result<TextV
 async fn working_text(root: &str, name: &str) -> anyhow::Result<TextVersion> {
     use std::io::Read;
     // Verifies parent junctions before reading; never follows a file symlink.
-    file_token(root, name).await?;
-    let target = Path::new(root).join(name);
+    let target = super::verified_worktree_path(root, name)?;
     let metadata = match std::fs::symlink_metadata(&target) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(TextVersion::empty()),
@@ -78,10 +98,12 @@ async fn working_text(root: &str, name: &str) -> anyhow::Result<TextVersion> {
     let truncated = bytes.len() > LIMIT;
     Ok(TextVersion::from_bytes(bytes, truncated))
 }
-pub(super) async fn identity(root: &str, name: &str, change: &Value, source: &str) -> anyhow::Result<String> {
-    let head = git(root, &["rev-parse", "--verify", "--quiet", "HEAD"], None, 8192).await?;
-    let index = checked(root, &["ls-files", "--stage", "-z", "--", name, change["originalPath"].as_str().unwrap_or(name)], None).await?;
-    let working = if source == "worktree" && change["submodule"] != true { file_token(root, name).await? } else { String::new() };
+pub(super) async fn identity(root: &str, name: &str, change: &Value, working: &str) -> anyhow::Result<String> {
+    let index_args = ["ls-files", "--stage", "-z", "--", name, change["originalPath"].as_str().unwrap_or(name)];
+    let (head, index) = tokio::try_join!(
+        git(root, &["rev-parse", "--verify", "--quiet", "HEAD"], None, 8192),
+        checked(root, &index_args, None),
+    )?;
     Ok(super::hash(format!("{}\0{}\0{}", head.stdout, index, working)))
 }
 pub(super) async fn attach(root: &str, change: &Value, expected: &str, mut diff: Value) -> anyhow::Result<Value> {
@@ -89,13 +111,16 @@ pub(super) async fn attach(root: &str, change: &Value, expected: &str, mut diff:
     let source = required(&diff, "source")?;
     if change["submodule"] == true { diff["previewReason"] = json!("submodule"); return Ok(diff); }
     let (before, after) = if source == "index" {
-        let head = git(root, &["rev-parse", "--verify", "--quiet", "HEAD"], None, 8192).await?;
-        let revision = (head.code == 0).then(|| head.stdout.trim());
-        (tree_text(root, revision, change["originalPath"].as_str().unwrap_or(name)).await?, index_text(root, name, "0").await?)
+        tokio::try_join!(async {
+            let head = git(root, &["rev-parse", "--verify", "--quiet", "HEAD"], None, 8192).await?;
+            let revision = (head.code == 0).then(|| head.stdout.trim());
+            tree_text(root, revision, change["originalPath"].as_str().unwrap_or(name)).await
+        }, index_text(root, name, "0"))?
     } else {
-        (index_text(root, name, if change["conflict"] == true { "2" } else { "0" }).await?, working_text(root, name).await?)
+        tokio::try_join!(index_text(root, name, if change["conflict"] == true { "2" } else { "0" }), working_text(root, name))?
     };
-    if expected != identity(root, name, change, source).await? { anyhow::bail!("文件内容已改变，正在等待最新差异，请重试。"); }
+    let working = if source == "worktree" { file_token(root, name).await? } else { String::new() };
+    if expected != identity(root, name, change, &working).await? { anyhow::bail!("文件内容已改变，正在等待最新差异，请重试。"); }
     if let Some(reason) = before.reason.or(after.reason) { diff["previewReason"] = json!(reason); }
     else { diff["before"] = json!(before.text); diff["after"] = json!(after.text); }
     Ok(diff)

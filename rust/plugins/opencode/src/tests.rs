@@ -1027,6 +1027,19 @@ async fn custom_single_process_path_still_has_real_process_cancellation() {
 }
 
 #[tokio::test]
+async fn free_quota_limit_finishes_instead_of_waiting_for_the_reset() {
+    let f = Fixture::new();
+    let turn = f.start("quota", "local", None).await;
+    f.emit(vec![json!({"type":"session.status","properties":{
+        "sessionID":turn.session,"status":{"type":"retry","attempt":1,
+        "message":"Free usage exceeded, subscribe to Go","action":{"reason":"free_tier_limit"},"next":u64::MAX}
+    }})]).await;
+    let events = turn.finish(1).await;
+    assert!(events.iter().any(|event| event["message"] == "OpenCode free usage limit reached."));
+    f.plugin.dispose().await;
+}
+
+#[tokio::test]
 async fn parallel_and_nested_children_use_exact_task_metadata_instead_of_arrival_order() {
     let f = Fixture::new();
     let turn = f.start("root", "local", None).await;

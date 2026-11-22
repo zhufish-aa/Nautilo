@@ -69,7 +69,7 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
     "question" -> Icons.Outlined.HelpOutline; else -> Icons.Outlined.Build
 }
 
-@Composable private fun ProcessDisclosure(id: String, label: String, preview: String, icon: ImageVector,
+@Composable internal fun ProcessDisclosure(id: String, label: String, preview: String, icon: ImageVector,
     running: Boolean = false, failed: Boolean = false, retainPreview: Boolean = false, enabled: Boolean = true, followPreviewTail: Boolean = false,
     content: @Composable () -> Unit) {
     var open by rememberSaveable(id) { mutableStateOf(false) }
@@ -197,7 +197,7 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
                 if (item.running) NSpinner(Modifier.size(13.dp))
                 Text(when (sub.text("status", activityStatus(item))) { "running" -> if (sub.optBoolean("background")) "后台运行中" else "执行中"; "failed" -> "未完成"; else -> "已完成" }, fontSize = 12.sp, color = Secondary)
             }
-            sub.text("task").takeIf(String::isNotBlank)?.let { Text(it, fontSize = 14.sp, lineHeight = 23.sp) }
+            sub.text("task").takeIf(String::isNotBlank)?.let { CollapsedEventText("查看任务说明", it) }
             sub.text("model").takeIf(String::isNotBlank)?.let { Text(it, fontSize = 12.sp, color = Secondary) }
             if (item.detail.isNotBlank() || sub.objects("activities").isNotEmpty()) {
                 NTextButton({ open = !open }) { Text(if (open) "收起活动" else "查看活动", fontSize = 12.sp) }

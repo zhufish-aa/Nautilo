@@ -27,7 +27,7 @@ export function connectionCanBeSelected(connection: RuntimeConnection, instance:
 export function connectionSupportsAgent(connection: RuntimeConnection, instance: AgentInstanceConfig): boolean {
   if (!connection.enabled || instance.baseArgs.length > 0 || instance.profile?.trim()) return false;
   if (instance.providerId === "antigravity") return connection.kind === "login" && connection.harness === "antigravity" && connection.nativeLogin === true;
-  if (connection.kind === "login") return connection.accountGateway === true || (["codex", "claude-code", "opencode"].includes(instance.providerId) && connection.harness === instance.providerId);
+  if (connection.kind === "login") return connection.accountGateway === true || (["codex", "claude-code", "opencode", "kimi-code"].includes(instance.providerId) && connection.harness === instance.providerId);
   // A provider plugin owns its native API configuration. There is no CLI allowlist.
   return ["responses", "chat", "anthropic"].includes(connection.protocol ?? "");
 }

@@ -1,8 +1,8 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { UI_EASE_OUT, useUiReducedMotion } from "../../lib/ui-motion";
-import { Orbit, BarChart3, Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Trash2, Workflow } from "lucide-react";
+import { Orbit, BarChart3, Boxes, Puzzle, ChevronDown, FileText, Folder, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings, Trash2, Workflow } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { NautiloMark } from "../ui/IdentityAvatar";
 import { cn, formatRelativeTime } from "../../lib/utils";
@@ -21,13 +21,16 @@ import { AddProjectDialog } from "../../features/projects/AddProjectDialog";
 import { Dialog } from "../ui/Dialog";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
+import { Tooltip } from "../ui/Tooltip";
 
 const rowClass = "sidebar-command flex h-9 w-full min-w-0 items-center gap-2.5 rounded-lg px-3 text-left text-[13px] text-ink transition-colors hover:bg-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50";
 
 /** One navigation surface: commands, projects, session history and settings. */
-export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean; onCollapse?: () => void }): JSX.Element {
+export function Sidebar({ onToggle }: { onToggle: (expand: boolean) => void }): JSX.Element {
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
+  const expandLabel = zh ? "展开侧栏" : "Expand sidebar";
+  const collapseLabel = zh ? "收起侧栏" : "Collapse sidebar";
   const location = useLocation();
   const reducedMotion = useUiReducedMotion();
   const isNewConversation = location.pathname === "/sessions" && new URLSearchParams(location.search).get("new") === "1";
@@ -100,10 +103,7 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
     if (!open) {
       setQuery("");
       setSearchLimit(60);
-      requestAnimationFrame(() => {
-        if (collapsed) document.getElementById("sidebar-expand")?.focus();
-        else searchTrigger.current?.focus();
-      });
+      requestAnimationFrame(() => searchTrigger.current?.focus());
     }
   };
 
@@ -138,46 +138,63 @@ export function Sidebar({ collapsed = false, onCollapse }: { collapsed?: boolean
     }
   };
 
+  const command = (label: string, element: ReactElement) => <Tooltip content={label} side="right">{element}</Tooltip>;
+
   return (
     <>
-      <nav id="workspace-sidebar" aria-label={t("nav.section")} hidden={collapsed}
-        className={cn("sidebar-rail relative z-20 min-w-0 shrink-0 flex-col", collapsed ? "hidden" : "flex")}>
+      <nav id="workspace-sidebar" aria-label={t("nav.section")} className="sidebar-rail relative z-20 flex min-w-0 shrink-0 flex-col">
         <div className="sidebar-brand-row">
           <div className="sidebar-wordmark"><NautiloMark /><div><strong>Nautilo</strong><span>{zh ? "本地 Agent 工作台" : "Local agent workspace"}</span></div></div>
-          {onCollapse && <button id="sidebar-collapse" type="button" onClick={onCollapse} aria-label={zh ? "收起侧栏" : "Collapse sidebar"} title={zh ? "收起侧栏" : "Collapse sidebar"} aria-expanded="true" aria-controls="workspace-sidebar"
-            className="rounded-md p-1.5 text-ink-2 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"><PanelLeftClose className="h-4 w-4" aria-hidden /></button>}
+          <Tooltip content={expandLabel} side="right">
+            <button id="sidebar-expand" type="button" onClick={() => onToggle(true)} aria-label={expandLabel} aria-expanded={false} aria-controls="workspace-sidebar"
+              className="rounded-md p-1.5 text-ink-2 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
+              <PanelLeftOpen className="h-4 w-4" aria-hidden />
+            </button>
+          </Tooltip>
+          <Tooltip content={collapseLabel} side="bottom">
+            <button id="sidebar-collapse" type="button" onClick={() => onToggle(false)} aria-label={collapseLabel} aria-expanded={true} aria-controls="workspace-sidebar"
+              className="rounded-md p-1.5 text-ink-2 hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
+              <PanelLeftClose className="h-4 w-4" aria-hidden />
+            </button>
+          </Tooltip>
         </div>
         <div className="sidebar-primary-nav">
-          <NavLink to="/assistant" className={({isActive}) => cn(rowClass, isActive && "bg-card-hover font-medium")}>
+          {command(zh ? "助手" : "Assistant", <NavLink to="/assistant" className={rowClass}>
             {location.pathname === "/assistant" && activeSurface}
             <Orbit className="h-4 w-4 shrink-0" aria-hidden />{zh ? "助手" : "Assistant"}
-          </NavLink>
-          <button className={rowClass} aria-current={isNewConversation ? "page" : undefined} onClick={() => newConversation()} data-tour="sessions-new" title={zh ? "新会话 · Ctrl/⌘ N" : "New chat · Ctrl/⌘ N"}>
+          </NavLink>)}
+          {command(zh ? "新会话 · Ctrl/⌘ N" : "New chat · Ctrl/⌘ N", <button className={rowClass} aria-current={isNewConversation ? "page" : undefined} onClick={() => newConversation()} data-tour="sessions-new">
             {isNewConversation && activeSurface}
             <Plus className="h-4 w-4 shrink-0" aria-hidden />{zh ? "新建任务" : "New task"}
-          </button>
-          <button ref={searchTrigger} className={rowClass} onClick={() => setSearchOpen(true)} title={zh ? "搜索 · Ctrl/⌘ K" : "Search · Ctrl/⌘ K"}>
+          </button>)}
+          {command(zh ? "搜索 · Ctrl/⌘ K" : "Search · Ctrl/⌘ K", <button ref={searchTrigger} className={rowClass} onClick={() => setSearchOpen(true)}>
             <Search className="h-4 w-4 shrink-0" aria-hidden />{zh ? "搜索" : "Search"}
-          </button>
+          </button>)}
         </div>
         <div className="sidebar-feature-nav">
-          <NavLink to="/workflows" className={rowClass}>
+          {command(zh ? "工作流" : "Workflows", <NavLink to="/workflows" className={rowClass}>
             {location.pathname === "/workflows" && activeSurface}
             <Workflow size={16} aria-hidden/>{zh ? "工作流" : "Workflows"}
-          </NavLink>
-          <NavLink to="/settings?section=agents" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Boxes size={16} />{zh ? "Harness 管理" : "Harnesses"}</NavLink>
-          <NavLink to="/settings?section=skills" state={{ returnTo: location.pathname + location.search }} className={rowClass}><Puzzle size={16} />{zh ? "技能与连接器" : "Skills & connectors"}</NavLink>
-          <NavLink to="/runs" className={rowClass}>
+          </NavLink>)}
+          {command(zh ? "Harness 管理" : "Harnesses", <NavLink to="/agents" className={rowClass}>
+            {location.pathname === "/agents" && activeSurface}
+            <Boxes size={16} aria-hidden />{zh ? "Harness 管理" : "Harnesses"}
+          </NavLink>)}
+          {command(zh ? "技能与连接器" : "Skills & connectors", <NavLink to="/skills" className={rowClass}>
+            {(location.pathname === "/skills" || location.pathname === "/skills/mcp") && activeSurface}
+            <Puzzle size={16} aria-hidden />{zh ? "技能与连接器" : "Skills & connectors"}
+          </NavLink>)}
+          {command(t("runsPage.title"), <NavLink to="/runs" className={rowClass}>
             {location.pathname === "/runs" && activeSurface}
             <BarChart3 size={16} aria-hidden/>{t("runsPage.title")}{attentionCount > 0 && <span className="sidebar-run-count">{attentionCount}</span>}
-          </NavLink>
+          </NavLink>)}
         </div>
         <div className="sidebar-project-history" data-nav="sessions">
           <div className="sidebar-section-heading"><span>{zh ? "项目与任务" : "Projects & tasks"}</span><button onClick={() => setAddProjectOpen(true)} aria-label={t("projects.addTitle")}><Plus size={15} /></button></div>
           <SessionListPanel embedded activeSessionId={location.pathname === "/assistant" || new URLSearchParams(location.search).get("new") === "1" ? undefined : activeSessionId} onSelect={selectSession} onNew={newConversation} onDelete={setDeletingSession} />
         </div>
         <div className="mx-3 mt-2 border-t border-line/60 py-3">
-          <NavLink to="/settings" state={{ returnTo: location.pathname + location.search }} data-nav="settings" className={rowClass}><Settings className="h-4 w-4 shrink-0" aria-hidden />{t("nav.settings")}</NavLink>
+          {command(t("nav.settings"), <NavLink to="/settings" state={{ returnTo: location.pathname + location.search }} data-nav="settings" className={rowClass}><Settings className="h-4 w-4 shrink-0" aria-hidden />{t("nav.settings")}</NavLink>)}
         </div>
       </nav>
       <Dialog open={searchOpen} onOpenChange={closeSearch} title={zh ? "搜索" : "Search"} widthClass="max-w-[660px]" footer={<p className="mr-auto text-xs text-ink-3">{zh ? "↑ ↓ 选择　 Enter 打开　 Esc 关闭" : "↑ ↓ Select　 Enter Open　 Esc Close"}</p>}>

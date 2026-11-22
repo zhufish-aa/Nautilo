@@ -19,8 +19,9 @@ async function within<T>(promise: Promise<T>, ms = 15_000): Promise<T> {
   finally { if (timer) clearTimeout(timer); }
 }
 const makeReport = (id: string, version: string, scope: ServiceDiagnostic["scope"]): ServiceDiagnostic => ({ subjectId: id, configurationVersion: version, scope, state: "passed", checkedAt: new Date().toISOString(), elapsedMs: 0, steps: [] });
-function step(report: ServiceDiagnostic, id: DiagnosticStage, state: DiagnosticState, started: number, error?: ProbeError): void {
-  report.steps.push({ id, state, elapsedMs: Math.round(performance.now() - started), ...(error ? { code: error.code, message: error.message.slice(0, 1600) } : {}) });
+function step(report: ServiceDiagnostic, id: DiagnosticStage, state: DiagnosticState, started: number, error?: ProbeError, description?: string): void {
+  const message = error?.message ?? description;
+  report.steps.push({ id, state, elapsedMs: Math.round(performance.now() - started), ...(error ? { code: error.code } : {}), ...(message ? { message: message.slice(0, 1600) } : {}) });
   if (state === "failed" || state === "warning" && report.state !== "failed") report.state = state;
 }
 
@@ -146,7 +147,7 @@ export async function diagnoseMcp(capability: ProviderCapability): Promise<Servi
     const version = text(init.protocolVersion);
     if (!version) throw new ProbeError("PROTOCOL_ERROR", "The initialize response has no protocol version.");
     await rpc.initialized(version); report.protocolVersion = version; report.serverName = text(object(init.serverInfo).name) || undefined;
-    step(report,phase,"passed",phaseStarted);
+    step(report,phase,"passed",phaseStarted,undefined,text(init.instructions).trim() || text(object(init.serverInfo).description));
     phase = "tools"; phaseStarted = performance.now();
     if (!object(init.capabilities).tools) step(report,phase,"warning",phaseStarted,new ProbeError("NO_TOOLS_CAPABILITY","This MCP server does not advertise tools; it may provide resources or prompts instead."));
     else {

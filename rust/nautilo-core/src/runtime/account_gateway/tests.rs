@@ -43,6 +43,15 @@ impl NativeProbe {
                 }
                 let text = if request.prompt.contains("BRANCH_REPLY") { format!("BRANCH_{sequence}") }
                     else if request.prompt.contains("PARALLEL_A") { "A".into() } else if request.prompt.contains("PARALLEL_B") { "B".into() } else { "DONE".into() };
+                if request.prompt.contains("USAGE_SAMPLE") {
+                    let _ = tx.send(AdapterEvent::Usage {
+                        usage_scope: Some("turn".into()), usage_key: None,
+                        input_tokens_includes_cache: Some(false), cache_creation_input_tokens: Some(20),
+                        input_tokens: Some(20), output_tokens: Some(3), cached_input_tokens: Some(80),
+                        reported_cost: None, estimated_cost: None, currency: None, reasoning_output_tokens: None,
+                        context_used: None, context_window: None, raw: None,
+                    });
+                }
                 let _ = tx.send(AdapterEvent::Message { text, phase:Some("final".into()), message_id:None, subagent_dispatch_id:None, raw:None });
                 let _ = tx.send(AdapterEvent::Exit { exit_code:Some(0), signal:None });
             };
@@ -50,6 +59,16 @@ impl NativeProbe {
         });
         Ok(AdapterRun::new(rx, move || Box::pin(async move { let _ = cancel.send(true); cancelled_request.notify_one(); }), |_| {}))
     }
+}
+
+#[tokio::test]
+async fn account_gateway_preserves_total_prompt_and_separates_cache_reads() {
+    let f = Fixture::new().await;
+    let (status, response) = f.post(json!({"messages":[{"role":"user","content":"USAGE_SAMPLE"}]})).await;
+    assert_eq!(status, 200);
+    assert_eq!(response["usage"]["prompt_tokens"], 120);
+    assert_eq!(response["usage"]["prompt_tokens_details"]["cached_tokens"], 80);
+    f.close().await;
 }
 
 #[tokio::test]

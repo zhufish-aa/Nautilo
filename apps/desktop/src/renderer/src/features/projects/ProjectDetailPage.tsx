@@ -170,7 +170,7 @@ export function ProjectDetailPage(): JSX.Element {
           <p className="mt-2 break-all font-mono text-sm text-ink-3">{project.rootPath}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {coreFeatures.sourceControl === 1 && <Button variant="outline" onClick={() => setSourceControlOpen(true)}><GitBranch className="h-4 w-4" aria-hidden />{zh ? "源码管理" : "Source control"}</Button>}
+          {coreFeatures.sourceControl && <Button variant="outline" onClick={() => setSourceControlOpen(true)}><GitBranch className="h-4 w-4" aria-hidden />{zh ? "源码管理" : "Source control"}</Button>}
           <Button
             variant="outline"
             onClick={() => void handleRescan()}
@@ -191,7 +191,7 @@ export function ProjectDetailPage(): JSX.Element {
           </Button>
         </div>
       </header>
-      {sourceControlOpen && coreFeatures.sourceControl === 1 && <div className="scm-project-panel"><SourceControlDrawer open onClose={() => setSourceControlOpen(false)} projectId={project.id} /></div>}
+      {sourceControlOpen && coreFeatures.sourceControl && <div className="scm-project-panel"><SourceControlDrawer open onClose={() => setSourceControlOpen(false)} projectId={project.id} /></div>}
       {error && (
         <div
           role="alert"

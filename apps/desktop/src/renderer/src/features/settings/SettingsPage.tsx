@@ -43,7 +43,6 @@ import { NAV_ENTRIES } from "../../components/layout/nav";
 import { listThemes, SYSTEM_THEME_ID } from "../../lib/themes";
 import { HarnessPanel } from "../agents/HarnessPanel";
 import { TeamsPage } from "../teams/TeamsPage";
-import { TeamEditorPage } from "../teams/TeamEditorPage";
 import { ProvidersPanel } from "../agents/ProvidersPanel";
 import { ProviderToolsPanel } from "../agents/ProviderToolsPanel";
 import { PluginMarketPanel } from "../agents/PluginMarketPanel";
@@ -232,8 +231,8 @@ export function SettingsPage(): JSX.Element {
   const isCustomTheme = !basicThemes.some((item) => item.id === theme);
 
   return (
-    <div className="settings-layout flex h-full min-h-0 w-full overflow-hidden bg-panel" data-section={section}>
-      <aside className="settings-sidebar flex w-[220px] shrink-0 flex-col border-r border-line px-3 py-4 max-[760px]:w-[176px] max-[560px]:w-[60px] max-[560px]:px-2">
+    <div className="settings-layout flex h-full min-h-0 w-full overflow-hidden" data-section={section}>
+      <aside className="settings-sidebar flex shrink-0 flex-col">
         <button
           type="button"
           onClick={() => navigate(returnTo)}
@@ -260,12 +259,7 @@ export function SettingsPage(): JSX.Element {
                 onClick={() => chooseSection(id)}
                 aria-current={activeGroup === id ? "page" : undefined}
                 aria-label={zh ? chinese : en}
-                className={cn(
-                  "flex min-h-10 w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent max-[560px]:justify-center max-[560px]:px-0",
-                  activeGroup === id
-                    ? "bg-card-hover font-medium text-ink"
-                    : "text-ink-2 hover:bg-card-hover/70 hover:text-ink",
-                )}
+                className="flex w-full items-center text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent max-[560px]:justify-center"
               >
                 {activeGroup === id && <motion.span layoutId="settings-nav-active" className="nav-active-surface" aria-hidden
                   transition={{ duration: reducedMotion ? 0 : 0.18, ease: UI_EASE_OUT }} />}
@@ -283,7 +277,7 @@ export function SettingsPage(): JSX.Element {
       </aside>
       <div
         ref={contentRef}
-        className="settings-content min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain bg-card px-8 py-10 max-[760px]:px-5 max-[560px]:px-4"
+        className="settings-content workspace-stage min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain"
       >
         <div
           ref={sectionRef}
@@ -296,9 +290,9 @@ export function SettingsPage(): JSX.Element {
               : "max-w-[760px]",
           )}
         >
-          <h1 className="mb-8 text-[25px] font-semibold tracking-tight text-ink outline-none">
+          {section !== "teams" && section !== "skills" && section !== "mcp" && section !== "plugins" && <h1 className="mb-8 text-[25px] font-semibold tracking-tight text-ink outline-none">
             {zh ? activeItem.zh : activeItem.en}
-          </h1>
+          </h1>}
 
           {section === "usage" && <div className="settings-panel-card"><UsagePanel /></div>}
           {section === "remote" && <RemoteAccessPanel />}
@@ -470,13 +464,10 @@ export function SettingsPage(): JSX.Element {
           {section === "accounts" && <div className="settings-panel-card"><ConnectionsPanel /></div>}
 
           {section === "agents" && <div className="settings-panel-card"><HarnessPanel /></div>}
-          {section === "teams" && <div className="settings-panel-card">{searchParams.get("team") ? <TeamEditorPage teamIdOverride={searchParams.get("team")!} backTo="/settings?section=teams" /> : <TeamsPage embedded />}</div>}
+          {section === "teams" && <TeamsPage embedded />}
 
-          {(section === "skills" || section === "mcp") && (
-            <div className="settings-panel-card">
-              <ProviderToolsPanel kind={section === "skills" ? "skill" : "mcp"} />
-            </div>
-          )}
+          {section === "skills" && <ProviderToolsPanel key="skills" />}
+          {section === "mcp" && <ProviderToolsPanel key="mcp" kind="mcp" />}
           {section === "plugins" && <PluginMarketPanel />}
 
           {permissionsVisited.current && (

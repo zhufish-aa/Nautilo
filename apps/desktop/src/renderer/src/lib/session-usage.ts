@@ -2,6 +2,7 @@
 export interface UsageSnapshot {
   usageScope?: "context" | "turn" | "session";
   usageKey?: string;
+  totalTokens?: number;
   inputTokens?: number;
   cachedInputTokens?: number;
   cacheCreationInputTokens?: number;
@@ -39,20 +40,49 @@ export interface UsageTotals {
 }
 export const knownUsageNumber = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+
+export function promptCacheRates(snapshots: readonly UsageSnapshot[], antigravityAgents: ReadonlySet<string>) {
+  let latest: number | undefined;
+  let readSum = 0;
+  let promptSum = 0;
+  for (const snapshot of snapshots) {
+    latest = undefined;
+    const input = knownUsageNumber(snapshot.inputTokens);
+    const read = knownUsageNumber(snapshot.cachedInputTokens);
+    const write = knownUsageNumber(snapshot.cacheCreationInputTokens);
+    if (input === undefined || read === undefined) continue;
+
+    let prompt = snapshot.inputTokensIncludesCache === true ? input
+      : snapshot.inputTokensIncludesCache === false && write !== undefined ? input + read + write : undefined;
+    // Earlier Antigravity records mislabeled uncached input as inclusive.
+    // Only correct the old label when a cache subset larger than the input proves it wrong.
+    if (snapshot.inputTokensIncludesCache === true && read > input
+      && snapshot.agentInstanceId && antigravityAgents.has(snapshot.agentInstanceId)) {
+      prompt = input + read + (write ?? 0);
+    }
+    if (!prompt || read > prompt) continue;
+    latest = Math.round(100 * read / prompt);
+    readSum += read;
+    promptSum += prompt;
+  }
+  return latest === undefined ? undefined : { hit: latest, average: Math.round(100 * readSum / promptSum) };
+}
+
 const sumKnown = (values: Array<number | undefined>): number | undefined => {
   const known = values.filter((v): v is number => v !== undefined);
   return known.length ? known.reduce((a, b) => a + b, 0) : undefined;
 };
 export function snapshotTotal(value: UsageSnapshot): number | undefined {
   const input = knownUsageNumber(value.inputTokens), output = knownUsageNumber(value.outputTokens);
-  if (input === undefined || output === undefined) return undefined;
+  const explicit = knownUsageNumber(value.totalTokens);
+  if (input === undefined || output === undefined) return explicit;
   if (value.inputTokensIncludesCache === true) return input + output;
   if (value.inputTokensIncludesCache === false) {
     const read = knownUsageNumber(value.cachedInputTokens), write = knownUsageNumber(value.cacheCreationInputTokens);
-    return read === undefined || write === undefined ? undefined : input + output + read + write;
+    return read === undefined || write === undefined ? explicit : input + output + read + write;
   }
   // Unknown input semantics must not double count cache tokens.
-  return undefined;
+  return explicit;
 }
 /** Native usage IDs are only unique inside a connection revision (or legacy Agent). */
 export function usageSnapshotKey(value: UsageSnapshot, event: Pick<UsageEvent, "runId">): string | undefined {

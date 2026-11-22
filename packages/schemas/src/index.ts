@@ -8,6 +8,7 @@ import type {
 
 export type * from "./assistant.js";
 export type * from "./service-diagnostics.js";
+export type * from "./usage-overview.js";
 
 export const schemaVersion = 1 as const;
 

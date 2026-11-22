@@ -87,7 +87,7 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "nautilo-management-"));
     platform: "browser",
     format: "iife",
     jsx: "automatic",
-    loader: { ".css": "empty", ".png": "dataurl", ".ttf": "dataurl" },
+    loader: { ".css": "empty", ".png": "dataurl", ".svg": "dataurl", ".ttf": "dataurl" },
     nodePaths: [path.join(desktop, "node_modules")],
     define: { "process.env.NODE_ENV": '"test"' },
     plugins: [
@@ -155,6 +155,9 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "nautilo-management-"));
     id: "m",
     displayName: "前端工程师",
     agentInstanceId: "a",
+    connectionId: "team-account",
+    connectionRevision: 1,
+    model: "fixture-model",
     role,
     allowedTaskTypes: ["code"],
     maxConcurrentTasks: 1,
@@ -174,6 +177,7 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "nautilo-management-"));
     instances: [
       {
         id: "a",
+        configurationKind: "harness",
         displayName: "Codex",
         providerId: "codex",
         enabled: true,
@@ -186,6 +190,13 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "nautilo-management-"));
       }
     ],
     modelCatalogs: { a: { models: [], source: "provider_cli" } }
+  });
+  qa.connections.setState({
+    hydrate: async () => {},
+    connections: [{
+      id: "team-account", name: "测试账号", kind: "login", harness: "codex", revision: 1, enabled: true,
+      models: [{ id: "fixture-model", reasoningEfforts: [] }], createdAt: now, updatedAt: now
+    }]
   });
   await sleep(100);
   await check("project list uses one real route and shows ready status", () => {
@@ -499,7 +510,31 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "nautilo-management-"));
     await click("取消", dialog());
     await sleep(200);
   });
-  await route("/teams/team");
+  await check("team search and selection keep the workbench mounted and expose saved member details", async () => {
+    await route("/teams");
+    const other = { ...team, id: "other", name: "测试团队", members: [] };
+    qa.teams.setState({ teams: [team, other] });
+    await sleep(50);
+    const workspace = d.querySelector(".team-workspace");
+    assert.equal(workspace.querySelector(".team-detail-heading h2").textContent, team.name);
+    assert(!workspace.querySelector(".team-issues"));
+    assert.match(workspace.querySelector(".team-roster-route").textContent, /测试账号.*fixture-model/);
+    const disclosure = workspace.querySelector('button[aria-expanded="false"]');
+    disclosure.click();
+    await sleep(50);
+    assert.equal(disclosure.getAttribute("aria-expanded"), "true");
+    assert.match(workspace.querySelector(".team-roster-disclosure pre").textContent, /遵循项目约定/);
+    await input("team-search", other.name);
+    assert.equal(workspace.querySelectorAll(".team-sidebar-item").length, 1);
+    workspace.querySelector(".team-sidebar-item").click();
+    await sleep(100);
+    assert.equal(d.querySelector(".team-workspace"), workspace);
+    assert.equal(workspace.querySelector(".team-detail-heading h2").textContent, other.name);
+    assert(workspace.querySelector(".team-issues"));
+    assert(find("添加首位成员", workspace));
+    qa.teams.setState({ teams: [team] });
+    await route("/teams/team");
+  });
   await check(
     "team edit saves once instead of one request per keystroke; failure rolls back",
     async () => {

@@ -42,8 +42,11 @@ export function conversationTimeline(events: readonly TimelineEvent[]): Timeline
       const data = event.data;
       if (data.kind === "tool_group") visit(data.items);
       else if (data.kind === "usage") continue;
+      else if (data.kind === "file_change" && data.source === "provider" && data.replace) continue;
       else if (data.kind === "activity" && data.phase !== "stopped") continue;
       else if (data.kind === "run_status" && data.run.status === "completed") continue;
+      else if (data.kind === "provider_ui" && !(data.method === "notify" && data.text.trim())
+        && !(data.method === "open_url" && data.url)) continue;
       else rows.push(event);
     }
   };
@@ -121,10 +124,48 @@ export interface ConversationTurn {
 
 export type ConversationRow = { kind: "event"; event: TimelineEvent } | { kind: "turn"; turn: ConversationTurn };
 
+/** Steering splits the visible activity around its user bubble but keeps one
+ * status and one collapse control for the native run. */
+export function conversationRunSummaries(rows: readonly ConversationRow[]): Map<string, ConversationTurn> {
+  const byTurn = new Map<string, ConversationTurn>();
+  const byRun = new Map<string, ConversationTurn>();
+  let previous: ConversationTurn | undefined;
+  const inputs: TimelineEvent[] = [];
+  for (const row of rows) {
+    if (row.kind === "event") {
+      if (row.event.data.kind === "message" && row.event.data.sender === "user") inputs.push(row.event);
+      continue;
+    }
+    const turn = row.turn;
+    const runIds = new Set(turn.events.flatMap(event => event.runId && !event.background ? [event.runId] : []));
+    const runId = runIds.size === 1 ? runIds.values().next().value : undefined;
+    const first = runId ? byRun.get(runId) : undefined;
+    if (first) {
+      first.events = first.events.concat(turn.events);
+      first.completed &&= turn.completed;
+      first.result = turn.result ?? first.result;
+      if (turn.durationMs !== undefined) first.durationMs = Math.max(first.durationMs ?? 0, turn.durationMs);
+      byTurn.set(turn.id, first);
+      if (first === previous) {
+        for (const event of inputs) byTurn.set(event.id, first);
+      }
+      previous = first;
+    } else {
+      const summary = { ...turn };
+      if (runId) byRun.set(runId, summary);
+      byTurn.set(turn.id, summary);
+      previous = summary;
+    }
+    inputs.length = 0;
+  }
+  return byTurn;
+}
+
 /** Keep a turn expanded until its final output finishes, then separate the result. */
 export function conversationRows(events: readonly TimelineEvent[], running: boolean): ConversationRow[] {
   const rows: ConversationRow[] = [];
   const timings = new Map<string, { start?: number; end?: number }>();
+  const finishedRuns = new Set<string>();
   const recordTiming = (event: TimelineEvent): void => {
     if (event.data.kind === "tool_group") { event.data.items.forEach(recordTiming); return; }
     if (!event.runId || event.background) return;
@@ -134,16 +175,15 @@ export function conversationRows(events: readonly TimelineEvent[], running: bool
     const start = data.kind === "run_status" && data.run.startedAt ? Date.parse(data.run.startedAt)
       : data.kind === "activity" && data.phase === "starting" ? time : undefined;
     if (start !== undefined && Number.isFinite(start)) timing.start = Math.min(timing.start ?? start, start);
-    if (Number.isFinite(time) && (data.kind === "activity" && ["completed", "stopped"].includes(data.phase)
-      || data.kind === "run_status" && ["completed", "failed", "cancelled"].includes(data.run.status))) timing.end = Math.max(timing.end ?? time, time);
+    if (data.kind === "error" || data.kind === "activity" && ["completed", "stopped"].includes(data.phase)
+      || data.kind === "run_status" && ["completed", "failed", "cancelled"].includes(data.run.status)) {
+      finishedRuns.add(event.runId);
+      if (Number.isFinite(time)) timing.end = Math.max(timing.end ?? time, time);
+    }
     timings.set(event.runId, timing);
   };
   events.forEach(recordTiming);
   const turnStarts = new Map<string, number>();
-  const finishedRuns = new Set(events.filter((event) => event.runId && (
-    event.data.kind === "activity" && ["completed", "stopped"].includes(event.data.phase)
-    || event.data.kind === "run_status" && ["completed", "failed", "cancelled"].includes(event.data.run.status)
-  )).map((event) => event.runId));
   let turn: TimelineEvent[] = [];
   let turnId = "";
   const origins=new Map<string,TimelineEvent[]>();
@@ -170,7 +210,7 @@ export function conversationRows(events: readonly TimelineEvent[], running: bool
     if(row.kind!=="turn")continue;
     const turn=row.turn.events;
     const last=index===rows.length-1;
-    const lastRunId = [...turn].reverse().find((event) => event.runId)?.runId;
+    const lastRunId = [...turn].reverse().find((event) => !event.background && event.runId)?.runId;
     const streaming = turn.some((event) => !event.background && event.data.kind === "message" && event.data.streaming);
     const completed = !streaming && (!running || Boolean(lastRunId && finishedRuns.has(lastRunId)) || (!last && !lastRunId));
     const lastContent = [...turn].reverse().find((event) => !["activity", "run_status", "error", "approval", "workflow_plan"].includes(event.data.kind));

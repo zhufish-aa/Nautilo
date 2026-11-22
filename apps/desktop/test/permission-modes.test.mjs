@@ -64,3 +64,14 @@ test('Antigravity declares both name and description for each supported UI local
     }
   }
 });
+
+test('Trae inherits its profile by default and marks bypass permissions as full access', () => {
+  locale = 'zh-CN';
+  const manifest = JSON.parse(readFileSync(new URL('../../../rust/plugins/trae/agenthub-plugin.json', import.meta.url), 'utf8'));
+  catalog = [manifest.descriptor];
+  const options = permissionModesFor('trae');
+  assert.equal(options.map(mode => mode.value).join(','), 'inherit,default,auto,bypass_permissions');
+  assert.match(render(options), /TRAE 原生配置/);
+  assert.match(render([options[1]]), /请求批准/);
+  assert.match(render([options[3]]), /data-danger="true"/);
+});

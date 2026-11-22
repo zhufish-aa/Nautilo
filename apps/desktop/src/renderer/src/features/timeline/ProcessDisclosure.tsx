@@ -4,7 +4,7 @@ import { useUiReducedMotion } from "../../lib/ui-motion";
 import "./ProcessDisclosure.css";
 
 export function ProcessDisclosure({ icon, label, badge, preview, previewTitle, accessory, monospace, open, onToggle, running, failed, children, className = "", retainPreview = false, followPreviewTail = false }: {
-  icon: ReactNode; label: string; badge?: string; preview?: ReactNode; previewTitle?: string; accessory?: ReactNode; monospace?: boolean; open: boolean; onToggle: () => void;
+  icon: ReactNode; label: string; badge?: string; preview?: ReactNode; previewTitle?: string; accessory?: ReactNode; monospace?: boolean; open: boolean; onToggle?: () => void;
   running?: boolean; failed?: boolean; children?: ReactNode; className?: string;
   retainPreview?: boolean; followPreviewTail?: boolean;
 }): JSX.Element {
@@ -38,13 +38,14 @@ export function ProcessDisclosure({ icon, label, badge, preview, previewTitle, a
     return () => observer.disconnect();
   }, [followPreviewTail, open, Boolean(preview)]);
   return <div className={`process-disclosure ${className}`} data-open={open || undefined} data-running={active || undefined} data-failed={failed || undefined} data-reduced={reducedMotion || undefined}>
-    <button ref={trigger} type="button" className="process-disclosure-row" aria-expanded={open} aria-controls={contentId} onClick={onToggle}>
+    <button ref={trigger} type="button" className="process-disclosure-row" disabled={!onToggle}
+      aria-expanded={onToggle ? open : undefined} aria-controls={onToggle ? contentId : undefined} onClick={onToggle}>
       <span className="conversation-step-icon process-disclosure-leading" data-activity-mark={active || undefined} aria-hidden>{icon}</span>
-      <span className="process-disclosure-label" data-activity-sweep={active && !reducedMotion ? label : undefined}>{label}</span>
+      <span className="process-disclosure-label" title={label} data-activity-sweep={active && !reducedMotion ? label : undefined}>{label}</span>
       {badge && <span className="process-disclosure-badge">{badge}</span>}
       {(!open || retainPreview) && preview && <><span className="process-disclosure-dot" aria-hidden>·</span><span ref={previewRef} className="process-disclosure-preview" data-monospace={monospace || undefined} data-follow-tail={followPreviewTail || undefined} title={previewTitle ?? (typeof preview === "string" ? preview : undefined)}>{preview}</span></>}
       {accessory && <span className="process-disclosure-accessory">{accessory}</span>}
-      <ChevronRight size={13} className="process-disclosure-chevron" aria-hidden />
+      {onToggle && <ChevronRight size={13} className="process-disclosure-chevron" aria-hidden />}
     </button>
     <div ref={fold} id={contentId} className="process-disclosure-fold" aria-hidden={!open || undefined}
       onTransitionEnd={event => {

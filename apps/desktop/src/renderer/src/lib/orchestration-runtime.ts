@@ -117,14 +117,21 @@ function appendPendingMessage(sessionId: string, text: string, attachments: Desk
   return messageId;
 }
 
-function replaceSessionTimeline(sessionId: string, timeline: TimelineEvent[]): void {
+function replaceSessionTimeline(sessionId: string, timeline: TimelineEvent[], runtimeEvents: RuntimeEvent[] = []): void {
   const pending = pendingMessages.get(sessionId);
   if (pending) {
     for (const event of timeline) {
       if (event.data.kind === "message" && event.data.messageId) pending.delete(event.data.messageId);
     }
     if (!pending.size) pendingMessages.delete(sessionId);
-    else timeline = [...timeline, ...pending.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sequence - b.sequence);
+    else {
+      // A tool burst can span an input that has not appeared in the history
+      // snapshot yet. Insert the bubble between its steps before regrouping.
+      const outgoing = [...pending.values()];
+      positionDeliveredInputs(outgoing, runtimeEvents);
+      const rows = timeline.flatMap(event => event.data.kind === "tool_group" ? event.data.items : [event]);
+      timeline = groupToolTimeline([...rows, ...outgoing].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sequence - b.sequence));
+    }
   }
   useSessionsStore.getState()._replaceEvents(sessionId, timeline);
 }
@@ -1261,7 +1268,7 @@ function applyStandaloneDeltas(sessionId: string, events: RuntimeEvent[]): boole
     // delta payload carries the full text so far — replace, don't append.
     next[index] = { ...next[index], data: { ...row, text: event.payload.text } };
   }
-  if (next) replaceSessionTimeline(sessionId, next);
+  if (next) store._replaceEvents(sessionId, next);
   return true;
 }
 
@@ -1270,7 +1277,7 @@ function renderStandaloneCache(sessionId: string): void {
   const messages = standaloneMessageCache.get(sessionId) ?? [];
   const artifacts = standaloneArtifactCache.get(sessionId) ?? [];
   const store = useSessionsStore.getState();
-  replaceSessionTimeline(sessionId, buildStandaloneTimeline(messages, events, artifacts));
+  replaceSessionTimeline(sessionId, buildStandaloneTimeline(messages, events, artifacts), events);
   store._replaceContextUsage(sessionId, latestContextUsage(events));
   useUsageStore.getState().ingest(sessionId, events);
   store._replaceArtifacts(sessionId, artifacts.flatMap(toUiArtifact));
@@ -1571,7 +1578,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     const messageRevisionChanged = refreshed && (!cached || refreshed.messages !== cached.messages);
     const timelineDirty = needed && (feed.hasNew || projectSessionRenderedEvents.get(session.id) !== feed.events || messageRevisionChanged || artifactsChanged || !projectSessionBuilt.has(session.id));
     if (timelineDirty) {
-      replaceSessionTimeline(session.id, buildTimeline(detail.messages, feed.events, projectRun, team, tasks, sessionArtifacts, verifications, session.id === projectRun.mainSessionId));
+      replaceSessionTimeline(session.id, buildTimeline(detail.messages, feed.events, projectRun, team, tasks, sessionArtifacts, verifications, session.id === projectRun.mainSessionId), feed.events);
       store._replaceContextUsage(session.id, latestContextUsage(feed.events));
       useUsageStore.getState().ingest(session.id, feed.events);
       store._replaceRawLog(session.id, buildRawLog(feed.events, sessionArtifacts));
@@ -1809,6 +1816,7 @@ function needsStandalonePersistenceSync(events: RuntimeEvent[]): boolean {
   // Message/terminal syncs still load the final raw diff artifact.
   return events.some((event) => event.type === "agent.message"
     || event.type === "workflow.message"
+    || event.type === "session.follow_up_steered"
     || event.type === "session.native_history_synced"
     || event.type === "session.title_changed"
     || (event.type === "artifact.created" && event.payload.kind !== "diff")
@@ -1951,15 +1959,30 @@ function appendRuntimeEvents(
   events: RuntimeEvent[],
   mapPayload: (event: RuntimeEvent) => TimelinePayload | undefined
 ): void {
-  // Persisted agent messages per run. A run's text segments flush (and
-  // persist) in order, so only the first N delta segments of a run are
-  // already rendered as persisted messages — later segments of the same run
-  // must still stream. (Deduping per run id would mute every segment after
-  // the first tool call.)
+  // Older streams use their order within the run to match saved segments.
   const persistedSegmentsByRun = new Map<string, number>();
   for (const message of messages) {
     if (message.sender !== "agent" || !message.runId) continue;
     persistedSegmentsByRun.set(message.runId, (persistedSegmentsByRun.get(message.runId) ?? 0) + 1);
+  }
+  // OMP replies can complete out of order. Match each stream to its own receipt.
+  const ompMessageId = /^omp-message-[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/;
+  const savedRows = new Map<string, number>();
+  for (const [index, row] of timeline.entries()) {
+    if (row.data.kind === "message" && row.data.sender === "agent" && row.data.messageId) {
+      savedRows.set(row.data.messageId, index);
+    }
+  }
+  const savedOmpStreams = new Map<string, number>();
+  for (const event of events) {
+    if (event.type !== "agent.message" || event.payload.subagentDispatchId) continue;
+    const { providerMessageId, messageId } = event.payload;
+    if (!providerMessageId || !ompMessageId.test(providerMessageId)) continue;
+    const index = savedRows.get(messageId);
+    if (index === undefined || timeline[index].runId !== event.runId) continue;
+    const key = `${event.runId ?? "session"}:${providerMessageId}`;
+    savedOmpStreams.set(key, index);
+    timeline[index] = { ...timeline[index], id: `agent-message-${key}` };
   }
   const hiddenCompletions = hiddenCompletionRunIds(messages);
   const hiddenInternalRuns = hiddenInternalRunIds(messages);
@@ -1970,6 +1993,7 @@ function appendRuntimeEvents(
     .filter((event) => event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled")
     .map((event) => [String(event.runId ?? ""), event.eventId]));
   const streaming = new Map<string, number>();
+  const positionedOmpStreams = new Set<string>();
   const deltaSegments = new Map<string, string[]>();
   const reasoning = new Map<string, number>();
   const latestReasoning = new Map<string, string>();
@@ -2072,7 +2096,7 @@ function appendRuntimeEvents(
       continue;
     }
     const nativeDiff = nativeDiffs.get(JSON.stringify([event.sessionId, event.runId]));
-    if (nativeDiff && (event.type === "file.changed" || (event.type === "run.diff_updated" && nativeDiff !== event))) continue;
+    if (event.type === "run.diff_updated" && nativeDiff !== event) continue;
     if (subagentDispatchIdOf(event)) continue;
     if (hiddenInternalRuns.has(runId)) continue;
     if ((event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled")
@@ -2084,27 +2108,37 @@ function appendRuntimeEvents(
       // thinking_summary in this path, so without this the row would stay
       // "thinking…" forever).
       finishLatestReasoning(runId);
-      // Skip exactly the delta segments that already have a persisted
-      // message (segments flush in order); anything newer keeps streaming.
-      let order = deltaSegments.get(runId);
-      if (!order) {
-        order = [];
-        deltaSegments.set(runId, order);
-      }
-      let segmentIndex = order.indexOf(event.payload.messageId);
-      if (segmentIndex === -1) {
-        order.push(event.payload.messageId);
-        segmentIndex = order.length - 1;
-      }
-      if (segmentIndex < (persistedSegmentsByRun.get(runId) ?? 0)) continue;
       const key = `${runId}:${event.payload.messageId}`;
+      const saved = savedOmpStreams.get(key);
+      if (saved !== undefined) {
+        if (!positionedOmpStreams.has(key)) {
+          timeline[saved] = { ...timeline[saved], timestamp: event.timestamp, sequence: event.sequence };
+          positionedOmpStreams.add(key);
+        }
+        continue;
+      }
+      let rowId = `agent-message-${key}`;
+      if (!ompMessageId.test(event.payload.messageId)) {
+        let order = deltaSegments.get(runId);
+        if (!order) {
+          order = [];
+          deltaSegments.set(runId, order);
+        }
+        let segmentIndex = order.indexOf(event.payload.messageId);
+        if (segmentIndex === -1) {
+          order.push(event.payload.messageId);
+          segmentIndex = order.length - 1;
+        }
+        if (segmentIndex < (persistedSegmentsByRun.get(runId) ?? 0)) continue;
+        rowId = `agent-message-${runId}-${segmentIndex}`;
+      }
       const index = streaming.get(key);
       // Delta payloads are cumulative (the daemon accumulates chunk text when
       // coalescing), so each event REPLACES the row text — appending would
       // duplicate everything.
       if (index === undefined) {
         const row = push(event, { kind: "message", sender: "agent", text: event.payload.text, streaming: true, messageId: event.payload.messageId });
-        timeline[row] = { ...timeline[row], id: `agent-message-${runId}-${segmentIndex}` };
+        timeline[row] = { ...timeline[row], id: rowId };
         streaming.set(key, row);
         streamingMessageRows.set(row, runId);
       } else {
@@ -2430,7 +2464,9 @@ function runtimePayload(
     kind: "file_change", source: "provider", replace: true, files: parseProviderDiff(event.payload.diff)
   };
   if (event.type === "file.changed") {
-    const file = changedFiles.get(JSON.stringify([event.sessionId, event.runId, event.payload.path]));
+    // The artifact can cover every edit in the run. An individual event's
+    // own patch must keep its own line counts and place in the conversation.
+    const file = event.payload.diff ? undefined : changedFiles.get(JSON.stringify([event.sessionId, event.runId, event.payload.path]));
     return {
       kind: "file_change",
       files: [file

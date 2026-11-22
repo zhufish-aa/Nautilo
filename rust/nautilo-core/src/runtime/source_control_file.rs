@@ -88,7 +88,7 @@ pub(super) async fn read(root:&str,name:&str,allow_missing:bool)->anyhow::Result
     if capture(root,name).await?.token!=captured.token{anyhow::bail!("文件内容已改变，请重新读取；当前编辑尚未保存。");}
     Ok(result)
 }
-struct TempFile(PathBuf);
+pub(super) struct TempFile(pub(super) PathBuf);
 impl Drop for TempFile{fn drop(&mut self){
     #[cfg(windows)]if let Ok(metadata)=std::fs::symlink_metadata(&self.0){if metadata.is_file()&&metadata.permissions().readonly(){let mut permissions=metadata.permissions();permissions.set_readonly(false);let _=std::fs::set_permissions(&self.0,permissions);}}
     let _=std::fs::remove_file(&self.0);

@@ -9,6 +9,25 @@ function valueOf(value: unknown, keys: string[]): unknown {
 export function normalizeJson(value: unknown): AdapterEvent[] {
   if (!value || typeof value !== "object") return [];
   const type = String(valueOf(value, ["type", "event", "kind"]) ?? "");
+  const usage = value as Record<string, unknown>;
+  const scope = usage.usageScope;
+  if (type === "usage" && (scope === "context" || scope === "turn" || scope === "session")) {
+    const number = (field: string) => {
+      const count = usage[field];
+      return typeof count === "number" && Number.isFinite(count) && count >= 0 ? count : undefined;
+    };
+    return [{
+      kind: "usage", usageScope: scope,
+      usageKey: typeof usage.usageKey === "string" ? usage.usageKey : undefined,
+      inputTokensIncludesCache: typeof usage.inputTokensIncludesCache === "boolean" ? usage.inputTokensIncludesCache : undefined,
+      inputTokens: number("inputTokens"), cachedInputTokens: number("cachedInputTokens"),
+      cacheCreationInputTokens: number("cacheCreationInputTokens"), outputTokens: number("outputTokens"),
+      reasoningOutputTokens: number("reasoningOutputTokens"),
+      contextUsed: number("contextUsed"), contextWindow: number("contextWindow"),
+      reportedCost: number("reportedCost"), estimatedCost: number("estimatedCost"),
+      currency: typeof usage.currency === "string" ? usage.currency : undefined, raw: value
+    }];
+  }
   const text = valueOf(value, ["text", "message", "content", "delta"]);
   const tool = valueOf(value, ["tool", "tool_name", "name"]);
   const path = valueOf(value, ["path", "file", "file_path"]);

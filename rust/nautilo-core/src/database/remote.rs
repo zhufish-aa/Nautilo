@@ -1,4 +1,4 @@
-use super::{repositories::JsonRepository, Database, Repositories};
+use super::{history_projection::recover_legacy_omp_replies, repositories::JsonRepository, Database, Repositories};
 use crate::errors::now_iso;
 use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension};
@@ -390,6 +390,15 @@ impl RemoteRepository {
                 if let Some(first) = first { item["value"]["timelineStartedAt"] = first["timestamp"].clone(); }
             }
         }
+        let recovered = recover_legacy_omp_replies(&snapshot, session, &mut items)?;
+        for item in &mut items {
+            let message = &mut item["value"];
+            if let Some((_, sequence)) = message["id"].as_str().and_then(|id| recovered.get(id)) {
+                message["sequence"] = json!(sequence);
+                // A reused legacy ID can also point at the previous run's first delta.
+                message.as_object_mut().unwrap().remove("timelineStartedAt");
+            }
+        }
         let sequence: i64 = snapshot.query_row(
             "SELECT COALESCE(MAX(sequence),0) FROM runtime_events WHERE session_id=?1",
             [session],
@@ -411,7 +420,16 @@ impl RemoteRepository {
             if size > 2_000_000 {
                 break;
             }
-            activity.push(serde_json::from_str::<Value>(&raw)?);
+            let mut event = serde_json::from_str::<Value>(&raw)?;
+            if event["type"] == "agent.message" {
+                if let Some((run, sequence)) = event["payload"]["messageId"].as_str().and_then(|id| recovered.get(id)) {
+                    if event["sequence"] == *sequence {
+                        event["runId"] = json!(run);
+                        event.as_object_mut().unwrap().remove("background");
+                    }
+                }
+            }
+            activity.push(event);
         }
         activity.reverse();
         let usage = usage::read(&snapshot, session, sequence)?;

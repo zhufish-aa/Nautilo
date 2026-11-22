@@ -1,9 +1,10 @@
 import type { RemoteSettings } from "@agenthub/schemas";
-import { ChevronDown, Globe2 } from "lucide-react";
+import { ChevronDown, RefreshCw } from "lucide-react";
 import { Button } from "../../../components/ui/Button";
 import { Switch } from "../../../components/ui/Switch";
 import { relaySettingsError } from "./remote-network-settings";
-import { RelayNodeSelect } from "./RelayNodeSelect";
+import { RelayNodeSelect, type useRelayCatalog } from "./RelayNodeSelect";
+import { RemoteCopyButton } from "./RemoteCopyButton";
 
 export function RemoteNetworkSettings({
   settings,
@@ -11,6 +12,7 @@ export function RemoteNetworkSettings({
   dirty,
   busy,
   zh,
+  measurements,
   update,
   save,
 }: {
@@ -19,31 +21,29 @@ export function RemoteNetworkSettings({
   dirty: boolean;
   busy: boolean;
   zh: boolean;
+  measurements: ReturnType<typeof useRelayCatalog>;
   update(values: Partial<RemoteSettings>): void;
   save(next: RemoteSettings): Promise<void>;
 }) {
   const relayError = relaySettingsError(settings, zh);
   return (
-    <details className="remote-network">
-      <summary>
-        <span>
-          <Globe2 size={17} />
-          {zh ? "连接设置" : "Connection settings"}
-        </span>
-        <ChevronDown size={16} />
-      </summary>
-      <div className="remote-network-body">
+    <section className="remote-network remote-panel" aria-labelledby="remote-network-title">
+      <header className="remote-panel-heading">
+        <h3 id="remote-network-title">{zh ? "连接与中继设置" : "Connection and relay settings"}</h3>
+      </header>
+      <div className="remote-network-fields">
         <label>
           {zh ? "电脑名称" : "Computer name"}
           <input
             value={settings.deviceName}
             maxLength={120}
+            disabled={busy}
             onChange={(e) => update({ deviceName: e.target.value })}
           />
         </label>
         <label>
           {zh ? "网络方式" : "Network mode"}
-          <select
+          <span className="remote-mode-select"><select
             value={settings.relayMode === "local" ? "direct" : settings.relayMode}
             disabled={busy}
             onChange={(e) => {
@@ -58,13 +58,26 @@ export function RemoteNetworkSettings({
             <option value="direct">{zh ? "仅直连 · 跨网络 NAT 打洞" : "Direct only · cross-network NAT traversal"}</option>
             <option value="custom">{zh ? "中继 · 公共或自定义节点" : "Relay · public or custom nodes"}</option>
             <option value="lan">{zh ? "局域网离线 · 关闭互联网辅助" : "Offline LAN · no Internet assistance"}</option>
-          </select>
+          </select><ChevronDown size={14} aria-hidden /></span>
         </label>
-        {settings.relayMode === "custom" && <RelayNodeSelect urls={settings.relayUrls} zh={zh} disabled={busy} onChange={relayUrls => update({ relayUrls })} />}
+      </div>
+      <div className="remote-network-routes">
+        {settings.enabled && settings.relayMode !== "custom" && settings.relayMode !== "lan" &&
+          <div className="relay-picker-label">
+            <div><strong>{zh ? "节点测速" : "Relay latency"}</strong>
+              <span>{zh ? "电脑 → 节点 · HTTPS" : "PC → relay · HTTPS"}</span></div>
+            <Button size="sm" variant="outline" className="relay-probe-button" disabled={busy || measurements.loading}
+              onClick={() => void measurements.refresh()} aria-busy={measurements.loading}>
+              <RefreshCw size={13} aria-hidden />{zh ? "重新测速" : "Retest latency"}
+            </Button>
+          </div>}
+        {settings.relayMode === "custom" && <RelayNodeSelect urls={settings.relayUrls} zh={zh} disabled={busy} measurements={measurements} onChange={relayUrls => update({ relayUrls })} />}
         {(settings.relayMode === "direct" || settings.relayMode === "local") && (
           <label className="remote-full-width">
             {zh ? "打洞辅助节点（可选，留空使用公共节点）" : "Rendezvous nodes (optional)"}
             <textarea
+              rows={2}
+              disabled={busy}
               value={settings.relayUrls.join("\n")}
               onChange={(e) =>
                 update({
@@ -75,7 +88,7 @@ export function RemoteNetworkSettings({
             />
           </label>
         )}
-        {relayError && <p className="remote-error remote-full-width" role="alert">{relayError}</p>}
+        {relayError && <p className="remote-network-error" role="alert">{relayError}</p>}
         {settings.relayMode === "automatic" && (
           <p className="remote-network-note">
             {zh
@@ -98,6 +111,8 @@ export function RemoteNetworkSettings({
               : "Uses the selected relay without direct attempts. Device cards show the actual phone-to-PC connection latency."}
           </p>
         )}
+      </div>
+      <div className="remote-network-system">
         <div className="remote-awake">
           <span>
             {zh
@@ -105,6 +120,8 @@ export function RemoteNetworkSettings({
               : "Keep computer awake while remote access is on"}
           </span>
           <Switch
+            aria-label={zh ? "保持电脑唤醒" : "Keep computer awake"}
+            disabled={busy}
             checked={settings.keepAwake}
             onCheckedChange={(keepAwake) => update({ keepAwake })}
           />
@@ -112,18 +129,16 @@ export function RemoteNetworkSettings({
         {endpointId && (
           <div className="remote-endpoint">
             <span>{zh ? "设备 ID" : "Device ID"}</span>
-            <code>{endpointId}</code>
+            <code title={endpointId}>{endpointId}</code>
+            <RemoteCopyButton value={endpointId} label={zh ? "复制设备 ID" : "Copy device ID"} zh={zh} />
           </div>
         )}
-        <div className="remote-save">
-          <Button
-            disabled={busy || !dirty || !settings.deviceName.trim() || !!relayError}
-            onClick={() => void save(settings)}
-          >
-            {zh ? "保存设置" : "Save settings"}
-          </Button>
-        </div>
       </div>
-    </details>
+      <footer className="remote-save">
+        <Button type="button" variant="primary" size="sm" disabled={busy || !dirty || !settings.deviceName.trim() || !!relayError} onClick={() => void save(settings)}>
+          {zh ? "保存设置" : "Save settings"}
+        </Button>
+      </footer>
+    </section>
   );
 }

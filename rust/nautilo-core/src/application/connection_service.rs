@@ -11,6 +11,11 @@ use crate::errors::{invalid, not_found, now_iso, CoreResult};
 use crate::runtime::security::CredentialService;
 use crate::runtime::security::environment_policy::{build_environment, isolate_login_profile, login_profile_directory, provider_environment_passthrough};
 
+mod quota;
+mod metadata;
+mod usage;
+pub(crate) use metadata::{record_rate_limit, record_run_rate_limit};
+
 pub fn version_key(id: &str, revision: u64) -> String { format!("{id}:{revision}") }
 pub fn credential_key(id: &str, revision: u64) -> String { format!("connection:{id}:{revision}") }
 
@@ -25,9 +30,14 @@ impl ConnectionService {
     pub fn get(&self, id: &str, revision: Option<u64>) -> CoreResult<Value> {
         let db = self.db.lock().unwrap();
         let head = head(&db.raw, id)?;
-        let mut value = match revision { Some(revision) => version(&db.raw, id, revision)?, None => head.clone() };
+        let mut value = match revision { Some(revision) if head["revision"].as_u64() != Some(revision) => version(&db.raw, id, revision)?, _ => head.clone() };
         value["enabled"] = head["enabled"].clone();
         public_connection(&db.raw, value)
+    }
+    pub fn detail(&self, id: &str, revision: Option<u64>) -> CoreResult<Value> {
+        let mut connection = self.get(id, revision)?;
+        metadata::add_detail(&self.db.lock().unwrap().raw, &mut connection)?;
+        Ok(connection)
     }
     pub fn upsert(&self, input: &Value) -> CoreResult<Value> {
         let mut connection = validate_connection(&input["connection"])?;
@@ -67,6 +77,11 @@ impl ConnectionService {
         let outcome: CoreResult<()> = (|| {
             // INSERT, never upsert: old versions and their credentials cannot change.
             db.raw.execute("INSERT INTO runtime_connection_versions(id,data,updated_at) VALUES(?1,?2,?3)", params![version_key(&id,next),connection.to_string(),now]).map_err(db_fail)?;
+            if api_key.is_none() && !clear {
+                if let Some(previous) = current.as_ref().filter(|previous| ["protocol","baseUrl","harness","loginProfileDirectory","nativeLogin"].iter().all(|key| previous.get(*key) == connection.get(*key))) {
+                    if let Some(health) = previous.get("connectionHealth") { connection["connectionHealth"] = health.clone(); }
+                }
+            }
             repos.runtime_connections().save(&connection, &now)?;
             if let Some(encrypted) = &encrypted { repos.credentials().save(&credential_key(&id,next), encrypted)?; }
             Ok(())
@@ -97,7 +112,7 @@ impl ConnectionService {
         Ok(json!({"removed":true}))
     }
     pub async fn models(&self, input: &Value) -> CoreResult<Value> {
-        match self.discover_models(input, true).await {
+        match self.discover_models(input, true, true).await {
             Ok(catalog) => Ok(catalog),
             Err(_) => Ok(json!({"providerId":format!("connection:{}",input["connectionId"].as_str().unwrap_or("")),"models":[],"source":"unavailable","fetchedAt":now_iso(),"warning":"Connection model discovery failed. Check endpoint, protocol, credentials and harness compatibility."})),
         }
@@ -120,7 +135,7 @@ impl ConnectionService {
             step(&mut result,"credential","passed",Instant::now(),None,None);
         }
         let catalog_start = Instant::now();
-        match tokio::time::timeout(std::time::Duration::from_secs(30), self.discover_models(input, false)).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), self.discover_models(input, false, true)).await {
             Ok(Ok(catalog)) if catalog["source"] != "unavailable" && catalog["warning"].as_str().is_none() => {
                 let count = catalog["models"].as_array().map_or(0,Vec::len);
                 result["modelCount"] = json!(count);
@@ -135,9 +150,23 @@ impl ConnectionService {
             }
             Err(_) => step(&mut result,"catalog","failed",catalog_start,Some("TIMEOUT"),Some("Model discovery did not finish within 30 seconds.")),
         }
-        Ok(finish(result,started))
+        let result = finish(result,started);
+        let id = connection["id"].as_str().unwrap();
+        let revision = connection["revision"].as_u64().unwrap();
+        let db = self.db.lock().unwrap();
+        metadata::update_health(&db.raw, id, revision, |health| {
+            health["lastCheckedAt"] = result["checkedAt"].clone();
+            health["lastLatencyMs"] = result["elapsedMs"].clone();
+            if result["state"] == "passed" {
+                health["lastVerifiedAt"] = result["checkedAt"].clone();
+                health.as_object_mut().unwrap().remove("lastErrorSummary");
+            } else if let Some(code) = result["steps"].as_array().and_then(|steps| steps.iter().rev().find_map(|step| step.get("code"))) {
+                health["lastErrorSummary"] = code.clone();
+            }
+        })?;
+        Ok(result)
     }
-    async fn discover_models(&self, input: &Value, merge_configured: bool) -> CoreResult<Value> {
+    pub(crate) async fn discover_models(&self, input: &Value, merge_configured: bool, force_refresh: bool) -> CoreResult<Value> {
         let id = input["connectionId"].as_str().unwrap_or("");
         let connection = self.get(id, input["revision"].as_u64())?;
         if connection["enabled"] != true { return Err(invalid("connectionId", "Connection is disabled")); }
@@ -150,11 +179,17 @@ impl ConnectionService {
             catalog["providerId"] = json!(format!("connection:{id}"));
             return Ok(if merge_configured { merge_instance_model_config(&catalog, connection.get("models")) } else { catalog });
         }
+        let (agent, env) = self.login_probe(&connection, input["agentInstanceId"].as_str())?;
+        self.adapters.list_models_with_refresh(&agent, Some(&json!({"env":env})), force_refresh).await
+    }
+
+    fn login_probe(&self, connection: &Value, agent_instance_id: Option<&str>) -> CoreResult<(Value, HashMap<String, String>)> {
+        let id = connection["id"].as_str().unwrap();
         let harness = connection["harness"].as_str().ok_or_else(|| invalid("harness", "Missing login harness"))?;
         let configured = {
             let db = self.db.lock().unwrap();
             let agents = Repositories::new(&db.raw).agents();
-            if let Some(id) = input["agentInstanceId"].as_str() {
+            if let Some(id) = agent_instance_id {
                 let agent = agents.get(id)?.ok_or_else(|| not_found("harness", id))?;
                 if agent["providerId"] != harness { return Err(invalid("harness", "Account and harness must match")); }
                 Some(agent)
@@ -167,13 +202,13 @@ impl ConnectionService {
         let descriptor = self.adapters.get(harness)?.descriptor();
         let executable = configured.as_ref().and_then(|agent| agent["executable"].as_str())
             .or_else(|| descriptor["defaultExecutable"].as_str())
-            .ok_or_else(|| invalid("executable", "Install the account's harness to discover models"))?;
+            .ok_or_else(|| invalid("executable", "Install the account's harness"))?;
         let probe = json!({"id":format!("connection-models:{id}"),"providerId":harness,"displayName":harness,
             "executable":executable,"baseArgs":[],"enabled":true,"capabilities":[]});
-        let agent = apply_connection(&probe, &connection)?;
-        let env = connection_environment_with_descriptor(&agent, &connection, &self.credentials,
+        let agent = apply_connection(&probe, connection)?;
+        let env = connection_environment_with_descriptor(&agent, connection, &self.credentials,
             build_environment(None, provider_environment_passthrough(&agent, Some(&descriptor))), Some(&descriptor))?;
-        self.adapters.list_models_with_refresh(&agent, Some(&json!({"env":env})), true).await
+        Ok((agent, env))
     }
 }
 fn public_connection(db: &Connection, mut value: Value) -> CoreResult<Value> {
@@ -182,6 +217,8 @@ fn public_connection(db: &Connection, mut value: Value) -> CoreResult<Value> {
     value["hasCredential"] = json!(has);
     let settings=Repositories::new(db).integration_settings().get("integration-settings")?.unwrap_or(Value::Null);
     value["accountGateway"] = json!(value["kind"]=="login"&&settings["gateway"]["enabled"]==true&&settings["gateway"]["connectionIds"].as_array().is_some_and(|ids|ids.contains(&value["id"])));
+    let health = value.as_object_mut().unwrap().remove("connectionHealth").unwrap_or(Value::Null);
+    value["accountMeta"] = metadata::snapshot(&value, &health);
     Ok(value)
 }
 fn head(db: &Connection, id: &str) -> CoreResult<Value> { Repositories::new(db).runtime_connections().get(id)?.ok_or_else(|| not_found("connection",id)) }
@@ -390,6 +427,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn kimi_login_connections_keep_separate_native_profiles() {
+        for id in ["kimi-first", "kimi-second"] {
+            let directory = std::env::temp_dir().join(id);
+            let account = validate_connection(&json!({
+                "id": id, "name": id, "kind": "login", "enabled": true, "harness": "kimi-code",
+                "loginProfileDirectory": directory
+            })).unwrap();
+            let agent = apply_connection(&json!({"providerId":"kimi-code","baseArgs":[]}), &account).unwrap();
+            let env = isolate_login_profile(&agent, HashMap::from([
+                ("KIMI_CODE_HOME".into(), "another-account".into()),
+                ("KIMI_CODE_API_KEY".into(), "not-for-this-account".into()),
+                ("KIMI_SHELL_PATH".into(), "configured-shell".into()),
+            ])).unwrap();
+            assert_eq!(env["KIMI_CODE_HOME"], directory.to_string_lossy());
+            assert!(!env.contains_key("KIMI_CODE_API_KEY"));
+            assert_eq!(env["KIMI_SHELL_PATH"], "configured-shell");
+            assert!(agent["providerOptions"]["baseUrl"].is_null());
+        }
+    }
+
+    #[test]
     fn opencode_isolated_accounts_pin_native_identity_and_preserve_configuration() {
         let (service, dir) = fixture();
         for id in ["first-opencode", "second-opencode"] {
@@ -460,6 +518,67 @@ mod tests {
         (ConnectionService::new(db,credentials,AdapterRegistry::with_builtins()),dir)
     }
     fn provider(id: &str) -> Value { json!({"id":id,"name":"Provider","kind":"api","enabled":true,"protocol":"anthropic","baseUrl":"https://provider.example/v1","models":[{"id":"claude-test","reasoningEfforts":["none"],"pricing":{"input":2.0}}]}) }
+    #[test]
+    fn account_metadata_survives_reopen_without_disclosing_login_credentials() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let (service, dir) = fixture();
+        let login = dir.join("fixture-account");
+        std::fs::create_dir(&login).unwrap();
+        let token = |claims: Value| format!("header.{}.fixture", URL_SAFE_NO_PAD.encode(claims.to_string()));
+        let access = token(json!({"exp":(chrono::Utc::now()+chrono::Duration::days(2)).timestamp()}));
+        let id = token(json!({"https://api.openai.com/profile":{"email":"fixture@example.invalid"},"https://api.openai.com/auth":{"chatgpt_plan_type":"pro"}}));
+        std::fs::write(login.join("auth.json"), json!({"tokens":{"access_token":access,"id_token":id,"refresh_token":"fixture-secret"}}).to_string()).unwrap();
+        std::fs::write(login.join(".nautilo-verified-login.json"), json!({"providerId":"codex","lastVerifiedAt":now_iso()}).to_string()).unwrap();
+        service.upsert(&json!({"connection":{"id":"fixture","name":"Fixture","kind":"login","enabled":true,"harness":"codex","loginProfileDirectory":login}})).unwrap();
+        {
+            let db = service.db.lock().unwrap();
+            let run = json!({"connectionId":"fixture","connectionRevision":1});
+            record_run_rate_limit(&db.raw,&run,"HTTP 429\nRetry-After: 30").unwrap();
+            record_run_rate_limit(&db.raw,&run,"HTTP 429").unwrap();
+        }
+        drop(service);
+        let db = Arc::new(Mutex::new(Database::open(&dir.join("test.sqlite")).unwrap()));
+        let service = ConnectionService::new(db.clone(), Arc::new(CredentialService::new(db.clone(),&dir)), AdapterRegistry::with_builtins());
+        let connection = service.detail("fixture", Some(1)).unwrap();
+        let meta = &connection["accountMeta"];
+        assert_eq!(meta["authStatus"],"valid");
+        assert_eq!(meta["accountEmail"],"fixture@example.invalid");
+        assert_eq!(meta["subscriptionPlan"],"pro");
+        assert_eq!(meta["localUsage"],json!({"requestsToday":0,"tokens7d":0}));
+        let until = chrono::DateTime::parse_from_rfc3339(meta["rateLimitedUntil"].as_str().unwrap()).unwrap();
+        let remaining = until.timestamp() - chrono::Utc::now().timestamp();
+        assert!((1..=30).contains(&remaining));
+        assert!(!connection.to_string().contains("fixture-secret"));
+        assert!(!connection.to_string().contains(&access));
+        drop(service); drop(db); std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn account_usage_counts_turns_once_and_deltas_native_counters() {
+        let (service, dir) = fixture();
+        service.upsert(&json!({"connection":provider("account")})).unwrap();
+        let now = now_iso();
+        let earlier = metadata::iso(chrono::Utc::now()-chrono::Duration::days(8));
+        {
+            let db = service.db.lock().unwrap();
+            db.raw.execute("INSERT INTO projects VALUES('p',?1,?2)",params![json!({"name":"Fixture project"}).to_string(),now]).unwrap();
+            db.raw.execute("INSERT INTO sessions VALUES('s','p','member','{}',?1)",[&now]).unwrap();
+            for (id,time) in [("old",&earlier),("session",&now),("turn",&now)] {
+                db.raw.execute("INSERT INTO runs VALUES(?1,'s',?2,?3)",params![id,json!({"connectionId":"account","startedAt":time}).to_string(),time]).unwrap();
+            }
+            for (index,run,scope,input,output,cached) in [(1,"old","session",200,20,50),(2,"session","session",230,25,60),(3,"turn","turn",5,0,0),(4,"turn","turn",50,9,30),(5,"turn","context",9000,0,0)] {
+                let event = json!({"type":"usage.updated","payload":{"usageScope":scope,"usageKey":"fixture-thread","connectionId":"account","connectionRevision":1,"agentInstanceId":"fixture-agent","inputTokens":input,"outputTokens":output,"cachedInputTokens":cached,"inputTokensIncludesCache":true}});
+                db.raw.execute("INSERT INTO runtime_events VALUES(?1,?2,'s',NULL,?3,?4,?5)",params![index.to_string(),index,run,event.to_string(),now]).unwrap();
+            }
+        }
+        let account = service.detail("account", None).unwrap();
+        let usage = &account["accountMeta"]["localUsage"];
+        assert_eq!(usage["requestsToday"],2);
+        assert_eq!(usage["tokens7d"],94);
+        assert_eq!(usage["cacheHitRate7d"],50.0);
+        assert_eq!(usage["lastUsedContext"],"Fixture project");
+        drop(service); std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn antigravity_binds_the_official_unified_account_without_redirecting_native_storage() {
         let (service, dir) = fixture();

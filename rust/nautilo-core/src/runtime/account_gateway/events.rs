@@ -65,11 +65,20 @@ impl Route {
                 }
                 Some(AdapterEvent::Usage {
                     input_tokens,
+                    input_tokens_includes_cache,
                     output_tokens,
                     cached_input_tokens,
+                    cache_creation_input_tokens,
                     reasoning_output_tokens,
                     ..
                 }) => {
+                    let input_tokens = input_tokens.map(|input| {
+                        if input_tokens_includes_cache == Some(false) {
+                            input + cached_input_tokens.unwrap_or(0) + cache_creation_input_tokens.unwrap_or(0)
+                        } else {
+                            input
+                        }
+                    });
                     let _ = tx.send(json!({"usage": {
                         "prompt_tokens": input_tokens,
                         "completion_tokens": output_tokens,

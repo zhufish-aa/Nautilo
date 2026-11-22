@@ -22,3 +22,9 @@ test("API key and network failures keep their own recovery guidance", () => {
   assert.equal(present("PROVIDER_ERROR", "Connection error", true, { kind: "login" }).loginRequired, undefined);
   assert.equal(present("PROVIDER_ERROR", "409 NATIVE_CONVERSATION_DIVERGED", true, { kind: "login" }).loginRequired, undefined);
 });
+
+test("missing Antigravity history and exhausted OpenCode free quota explain how to continue", () => {
+  assert.match(present("PROVIDER_ERROR", "Failed to send user message: not_found: trajectory not found: example", true).description, /新建会话/);
+  assert.match(present("PROVIDER_SESSION_LOST", "missing", false).description, /new conversation/);
+  assert.match(present("PROVIDER_FREE_QUOTA_EXHAUSTED", "exhausted", true).title, /免费额度已用完/);
+});

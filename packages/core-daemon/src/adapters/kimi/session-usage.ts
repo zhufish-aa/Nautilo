@@ -1,7 +1,7 @@
-import { open, readdir, stat } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { parse } from "smol-toml";
 import type { AdapterEvent } from "../types.js";
 
 const MAX_READ_BYTES = 8 * 1024 * 1024;
@@ -10,64 +10,78 @@ const MAX_READ_BYTES = 8 * 1024 * 1024;
 export async function readKimiSessionUsage(
   providerSessionId: string,
   contextWindow: number | undefined,
-  kimiHome = process.env.KIMI_CODE_HOME || join(homedir(), ".kimi-code")
+  kimiHome?: string,
+  model?: string
 ): Promise<AdapterEvent | undefined> {
-  // The wire log's maxTokens is the REMAINING context, so the denominator
-  // must be the window the CLI itself runs with — its own config.toml, not
-  // the desktop's model catalog (catalogs go stale: K3-256k catalogs 256k
-  // while the CLI runs k3 at 1M, which clamped every reading to 0).
-  const window = readCliConfiguredWindow(kimiHome) ?? contextWindow;
-  if (!window) return undefined;
-  const wirePath = await findWirePath(join(kimiHome, "sessions"), providerSessionId);
+  const root = kimiHome || process.env.KIMI_CODE_HOME || join(homedir(), ".kimi-code");
+  const wirePath = await findWirePath(join(root, "sessions"), providerSessionId);
   if (!wirePath) return undefined;
-  const text = await readTail(wirePath);
-  const used = parseKimiWireContextUsed(text, window);
-  return used === undefined ? undefined : { kind: "usage", usageScope: "context", contextUsed: used, contextWindow: window };
+  const measured = parseKimiWireContext(await readTail(wirePath));
+  if (!measured) return undefined;
+  return { kind: "usage", usageScope: "context",
+    contextWindow: await readCliConfiguredWindow(root, model) ?? contextWindow, ...measured };
 }
 
-/** Reads `max_context_size` from the CLI's own config.toml (plain line scan;
- * the file is small and the key is top-level). */
-function readCliConfiguredWindow(kimiHome: string): number | undefined {
-  let text: string;
+async function readCliConfiguredWindow(kimiHome: string, model?: string): Promise<number | undefined> {
   try {
-    text = readFileSync(join(kimiHome, "config.toml"), "utf8");
+    const config = parse(await readFile(join(kimiHome, "config.toml"), "utf8"));
+    const id = model ?? (typeof config.default_model === "string" ? config.default_model : "");
+    const limit = finiteNumber(record(record(config.models)[id]).max_context_size);
+    return limit && limit > 0 ? limit : undefined;
   } catch {
     return undefined;
   }
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("#") || !trimmed.startsWith("max_context_size")) continue;
-    const value = Number(trimmed.split("=")[1]?.trim().replace(/^"|"$/g, ""));
-    if (Number.isFinite(value) && value > 0) return value;
+}
+
+export function parseKimiWireContext(text: string): { contextUsed: number; cachedInputTokens?: number } | undefined {
+  for (const line of text.split(/\r?\n/).reverse()) {
+    if (!line.trim()) continue;
+    let event: Record<string, unknown>;
+    try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    if (event.type === "token_counting.measured" || event.type === "token_counting.turn_recorded") {
+      const tokens = finiteNumber(event.tokens);
+      return tokens === undefined ? undefined : { contextUsed: tokens };
+    }
+    if (event.type !== "usage.record" || event.usageScope === "session") continue;
+    const usage = record(event.usage);
+    const input = finiteNumber(usage.inputOther);
+    const read = finiteNumber(usage.inputCacheRead);
+    const write = finiteNumber(usage.inputCacheCreation);
+    const output = finiteNumber(usage.output);
+    if (input === undefined || read === undefined || write === undefined || output === undefined) return undefined;
+    return { contextUsed: input + read + write + output, cachedInputTokens: read };
   }
   return undefined;
 }
 
-export function parseKimiWireContextUsed(text: string, contextWindow: number): number | undefined {
-  let used: number | undefined;
-  let sawRequest = false;
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let event: Record<string, unknown>;
-    try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-    if (event.type === "llm.request") {
-      const maxTokens = finiteNumber(event.maxTokens);
-      if (maxTokens !== undefined) {
-        used = Math.max(0, contextWindow - maxTokens);
-        sawRequest = true;
-      }
-      continue;
-    }
-    if (event.type !== "usage.record" || !sawRequest) continue;
-    const usage = record(event.usage);
-    const increment = ["inputOther", "inputCacheRead", "inputCacheCreation", "output"]
-      .map((key) => finiteNumber(usage[key]) ?? 0)
-      .reduce((sum, value) => sum + value, 0);
-    used = (used ?? 0) + increment;
-  }
-  return used === undefined ? undefined : Math.min(contextWindow, Math.max(0, Math.round(used)));
+export async function kimiWirePath(id: string, kimiHome?: string): Promise<string | undefined> {
+  return findWirePath(join(kimiHome || process.env.KIMI_CODE_HOME || join(homedir(), ".kimi-code"), "sessions"), id);
 }
 
+export async function readKimiWireTurn(path: string, offset: number): Promise<AdapterEvent | undefined> {
+  const handle = await open(path, "r").catch(() => undefined);
+  if (!handle) return undefined;
+  try {
+    const length = (await handle.stat()).size - offset;
+    if (length <= 0 || length > MAX_READ_BYTES) return undefined;
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    const reports = buffer.toString("utf8", 0, bytesRead).split(/\r?\n/).flatMap(line => {
+      try {
+        const value = record(JSON.parse(line) as unknown);
+        return value.type === "usage.record" && value.usageScope === "turn" ? [record(value.usage)] : [];
+      } catch { return []; }
+    });
+    if (!reports.length) return undefined;
+    const sum = (field: string) => {
+      const counts = reports.map(usage => finiteNumber(usage[field]));
+      return counts.every(count => count !== undefined) ? counts.reduce((total, count) => total + count, 0) : undefined;
+    };
+    return { kind: "usage", usageScope: "turn", inputTokensIncludesCache: false,
+      inputTokens: sum("inputOther"), cachedInputTokens: sum("inputCacheRead"),
+      cacheCreationInputTokens: sum("inputCacheCreation"), outputTokens: sum("output") };
+  } finally { await handle.close(); }
+}
 async function findWirePath(sessionsRoot: string, providerSessionId: string): Promise<string | undefined> {
   let workspaces: string[];
   try { workspaces = await readdir(sessionsRoot); } catch { return undefined; }
@@ -101,5 +115,5 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function finiteNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }

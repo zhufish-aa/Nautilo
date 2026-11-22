@@ -19,8 +19,7 @@ function usable(agent: AgentInstance) {
   return (
     agent.enabled &&
     agent.providerOptions?.configurationKind === "harness" &&
-    !agent.baseArgs.length &&
-    !agent.profile?.trim()
+    agent.status !== "disabled"
   );
 }
 function compatible(agent: AgentInstance, c: RuntimeConnection) {
@@ -28,7 +27,7 @@ function compatible(agent: AgentInstance, c: RuntimeConnection) {
     c.enabled &&
     (c.kind === "login"
       ? c.harness === agent.providerId
-      : c.hasCredential !== false && c.models?.some((m) => m.enabled !== false))
+      : c.hasCredential !== false && (!c.models?.length || c.models.some((m) => m.enabled !== false)))
   );
 }
 export async function workspace(core: CoreRequest) {
@@ -45,12 +44,14 @@ export async function workspace(core: CoreRequest) {
         id: a.id,
         name: a.displayName,
         connections: connections.filter((c) => compatible(a, c)).map((c) => c.id),
+        models: a.models?.filter((m) => m.enabled !== false).map((m) => m.id),
       })),
     connections: connections
       .filter((c) => c.enabled)
       .map((c) => ({
         id: c.id,
         name: c.name,
+        revision: c.revision,
         models: c.models?.filter((m) => m.enabled !== false).map((m) => m.id),
       })),
   };
@@ -68,24 +69,26 @@ export async function deliver(
   save: () => Promise<void>,
   guard: () => void,
   changed: (sessionId: string) => void,
+  messageId: string = "msg_" + randomUUID(),
 ) {
   let target: Session;
   let projectName: string;
   const creating = method === "create_session";
   let busy = false;
   if (creating) {
-    const projectId = arg(args.projectId, "project"),
-      instance = arg(args.harnessId, "harness"),
-      connectionId = arg(args.connectionId, "connection");
+    const projectId = arg(args.projectId, "project");
+    const instance = arg(args.harnessId, "harness");
+    const connectionId = args.connectionId === undefined ? undefined : arg(args.connectionId, "connection");
     const title = arg(args.title, "title", 120);
     const catalog = await workspace(core);
     const project = catalog.projects.find((p) => p.id === projectId);
     const harness = catalog.harnesses.find((a) => a.id === instance);
     const connection = catalog.connections.find((c) => c.id === connectionId);
-    if (!project || !harness?.connections.includes(connectionId) || !connection)
+    if (!project || !harness || (connectionId && (!connection || !harness.connections.includes(connectionId))))
       throw Error("项目、Harness 或兼容连接已不可用，请重新读取工作区。");
-    const model = typeof args.model === "string" ? args.model : connection.models?.[0];
-    if (model && connection.models?.length && !connection.models.includes(model))
+    const models = connection ? connection.models : harness.models;
+    const model = typeof args.model === "string" ? args.model : connection?.models?.[0];
+    if (model && models?.length && !models.includes(model))
       throw Error("所选执行模型未启用。");
     // Reserve the target and delivery identity in the journal before either external action.
     const now = new Date().toISOString();
@@ -95,6 +98,7 @@ export async function deliver(
       memberId: instance,
       agentInstanceId: instance,
       connectionId,
+      connectionRevision: connection?.revision,
       model,
       title,
       status: "idle",
@@ -118,7 +122,7 @@ export async function deliver(
   }
   const previous = turn.receipts.find(
     (r) =>
-      r.task === task && (r.sessionId === target.id || (creating && r.created && r.project === projectName)),
+      r.task === task && (r.sessionId === target.id || (creating && r.created && r.project === projectName && r.title === target.title)),
   );
   if (previous) return previous;
   guard();
@@ -129,7 +133,7 @@ export async function deliver(
     task,
     created: creating,
     delivery: "pending",
-    messageId: "msg_" + randomUUID(),
+    messageId,
   };
   turn.receipts.push(receipt);
   await save();
@@ -137,7 +141,9 @@ export async function deliver(
     guard();
     if (creating) await core("session.upsert", target);
     guard();
-    if (busy) {
+    if (!task) {
+      receipt.delivery = "sent";
+    } else if (busy) {
       await core("session.followUp", {
         sessionId: target.id,
         text: task,

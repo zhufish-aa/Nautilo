@@ -10,6 +10,7 @@ import { useAgentsStore } from "../../src/renderer/src/stores/agents";
 import { useTeamsStore } from "../../src/renderer/src/stores/teams";
 import { useSettingsStore } from "../../src/renderer/src/stores/settings";
 import { useProviderToolsStore } from "../../src/renderer/src/stores/provider-tools";
+import { useUsageStore } from "../../src/renderer/src/stores/usage";
 import type { TimelineEvent, TimelinePayload, UiSession, UiProject, AgentInstanceConfig, UiTeam } from "../../src/renderer/src/lib/types";
 import type { ProviderCapability } from "@agenthub/domain";
 import "./visual.css";
@@ -18,7 +19,8 @@ const now = "2026-11-03T02:00:00Z";
 const params = new URLSearchParams(location.search);
 const scenario = params.get("scenario") ?? "home";
 const section = params.get("section") ?? "appearance";
-const traceScenario = scenario === "conversation-trace";
+const inspectorScenario = scenario === "conversation-inspector";
+const traceScenario = scenario === "conversation-trace" || inspectorScenario;
 useSettingsStore.setState({ onboardingCompleted: true, locale: "zh-CN", theme: params.get("theme") === "dark" ? "dark" : "light", reduceMotion: !traceScenario || params.has("reduceMotion"), collapsedProjects: ["website"], hiddenNav: [] });
 localStorage.setItem("nautilo.sidebar.collapsed", String(params.get("collapsed") === "1"));
 useProjectsStore.setState({ projects: [
@@ -37,12 +39,24 @@ useProviderToolsStore.setState({ tools: [
   { id: "sample-skill", name: "代码审查", description: "检查代码变更和回归风险。", kind: "skill", enabled: true, tags: ["review"], providerIds: ["codex"], skill: { instructions: "这是一条界面示例，不执行工具。" }, createdAt: now, updatedAt: now },
   { id: "sample-mcp", name: "项目文档", description: "MCP JSON 导入示例。", kind: "mcp", enabled: false, tags: [], providerIds: ["codex"], mcp: { transport: "stdio", command: "sample-mcp-not-installed", args: [] }, createdAt: now, updatedAt: now }
 ] satisfies ProviderCapability[], loaded: true, loading: false, error: null });
-const sessions = [
+const sessions: UiSession[] = [
   { id: "export", title: "修复导出按钮", projectId: "nautilo", mode: "code", target: { type: "agent", instanceId: "sample-codex", teamId: "sample-team" }, status: "idle", unreadCount: 0, createdAt: now, updatedAt: now },
   { id: "docs", title: "整理需求文档", projectId: "nautilo", mode: "work", target: { type: "agent", instanceId: "sample-codex" }, status: "idle", unreadCount: 0, createdAt: now, updatedAt: now },
   { id: "website-task", title: "导出方案", projectId: "website", target: { type: "agent", instanceId: "sample-codex" }, status: "idle", unreadCount: 0, createdAt: now, updatedAt: now },
   { id: "idea", title: "临时想法", projectId: "removed-sample", target: { type: "agent", instanceId: "sample-codex" }, status: "idle", unreadCount: 0, createdAt: now, updatedAt: now }
 ] satisfies UiSession[];
+if (inspectorScenario) {
+  Object.assign(sessions[0], { connectionId: "sample-connection-login", connectionRevision: 1, model: "example-chat" });
+  sessions.push({ ...sessions[0], id: "example-review", title: "独立检查导出逻辑 · apps/desktop/src/renderer/src/features/sessions/ConversationWorkspaceWithAnExtremelyLongTitle.tsx", parentSessionId: "export",
+    target: { type: "member", teamId: "sample-team", memberId: "reviewer" }, status: "completed" });
+  sessions.push({ ...sessions[1], id: "example-check", title: "交叉核对测试结果", parentSessionId: "export", status: "completed" });
+  useUsageStore.setState({ summaries: { export: {
+    totalTokens: 31_620, accountedTurns: 2, unclassifiedEvents: 0, snapshots: [
+      { usageScope: "turn", inputTokens: 14_000, cachedInputTokens: 11_000, inputTokensIncludesCache: true, outputTokens: 610, connectionId: "sample-connection-login" },
+      { usageScope: "turn", inputTokens: 16_000, cachedInputTokens: 13_000, inputTokensIncludesCache: true, outputTokens: 1010, connectionId: "sample-connection-login" }
+    ]
+  } } });
+}
 const conversation: TimelinePayload[] = [
   { kind: "message", sender: "user", text: "为导出按钮增加加载反馈。" },
   { kind: "message", sender: "agent", text: "我先检查导出入口。" },
@@ -99,10 +113,10 @@ function exampleTrace(): TimelineEvent[] {
 
 useSessionsStore.setState({ sessions, activeSessionId: scenario === "conversation" || scenario === "approval" || traceScenario ? "export" : undefined,
   events: { export: traceScenario ? exampleTrace() : conversation.map((data, index) => ({ id: `example-${index}`, sessionId: "export", sequence: index + 1, timestamp: now, data })) },
-  contextUsage: { export: { contextUsed: 28000, contextWindow: 100000 } }
+  contextUsage: { export: inspectorScenario ? { contextUsed: 443_200, contextWindow: 1_048_576, cachedInputTokens: 440_000 } : { contextUsed: 28000, contextWindow: 100000 } }
 });
 const routes: Record<string, string> = { home: "/sessions?new=1", conversation: "/sessions?session=export", "conversation-trace": "/sessions?session=export", approval: "/sessions?session=export", projects: "/projects", team: "/teams/sample-team", settings: `/settings?section=${encodeURIComponent(section)}`, skills: "/settings?section=skills", search: "/sessions?new=1" };
-if (!location.hash) location.hash = routes[scenario] ?? routes.home;
+if (!location.hash) location.hash = routes[inspectorScenario ? "conversation-trace" : scenario] ?? routes.home;
 createRoot(document.getElementById("root")!).render(<HashRouter><I18nProvider><App /></I18nProvider></HashRouter>);
 const marker = document.createElement("div");
 marker.textContent = "界面测试 · 示例数据 · 未连接CLI";

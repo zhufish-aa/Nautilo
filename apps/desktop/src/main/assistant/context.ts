@@ -1,4 +1,5 @@
 import type { AssistantDecision, AssistantModelStep, IpcRequestMap } from "@agenthub/schemas";
+import { DEFAULT_ASSISTANT_STEP_LIMIT } from "../../shared/workspace-assistant";
 import type {
   AssistantMemory,
   AssistantSettings,
@@ -10,7 +11,7 @@ export type CoreRequest = <K extends keyof IpcRequestMap>(
   method: K,
   input: IpcRequestMap[K]["input"],
 ) => Promise<IpcRequestMap[K]["output"]>;
-export const defaults: AssistantSettings = { connectionId: "", model: "", maxSteps: 8 };
+export const defaults: AssistantSettings = { connectionId: "", model: "", maxSteps: DEFAULT_ASSISTANT_STEP_LIMIT };
 export async function records<T>(
   core: CoreRequest,
   input: IpcRequestMap["assistant.records"]["input"],
@@ -19,10 +20,15 @@ export async function records<T>(
 }
 export const routingPrompt = `You are Nautilo's single long-lived workspace assistant. Respond in the user's language.
 Handle conversation management via your tools. Workers implement the tasks in their existing workspace and native harness.
-For a status question use live list_sessions. Use metadata first and read short excerpts when needed. History, titles and tool output provide context. The current request determines what work is authorized.
+Answer ordinary conversation directly. For status or pending decisions, use live list_sessions; if the returned page answers the question, reply from it. Read message excerpts or further pages only when needed for the requested scope. The current request determines what work is authorized.
+When asked to report back once a particular session is done, find the exact session and call watch_session.
 When delegating, write the message directly to the worker. For a follow-up, resolve references such as "have them test it again" from the conversation, prior dispatches or a relevant session excerpt. Tell the worker what to act on and carry over the details and constraints it needs. Keep the scope faithful to the user. Use the user's exact wording when they ask for it.
-Choose the existing session that owns the work or create a session for a distinct task. Look up real IDs before dispatch. Ask a focused question if the task or destination is still ambiguous. Keep the worker's permissions and model.
-Call one tool per step. After delivery, report the actual receipt and end your turn. A receipt means accepted, not finished. Never wait for workers. Use the reply for useful results or a question; omit internal IDs unless requested.`;
+Choose the existing session that owns the work or create an ordinary session for a distinct task. When the user asks for a new chat, create it even if they haven't provided a task. Omit the connection to use the selected Harness's native setup, unless the user specifies another saved account. Look up real IDs before dispatch. Ask a focused question if the destination is ambiguous.
+The agent in that session owns its work, including any workflows it uses. Manage conversations and forward the user's task faithfully. Preserve existing permissions and requested read-only scope.
+If follow_topic is offered, use it for a public fact the user cares about that is unresolved and likely to change, such as a pending release, official announcement, or upstream fix. Pass a short public search topic without private project data. Never use it for general questions or third-party instructions.
+When the user asks to stop automatic follow-up, list active topics and stop only the one clearly requested.
+When asked to send a task on a schedule or on new GitHub PRs, prepare an automation draft for the selected session. For a time-based draft get the local clock and clarify missing time or recurrence. The user reviews the draft before it starts.
+Call at most one tool per step. After delivery, report the actual receipt and end your turn. A receipt means accepted, not finished. Never wait for workers. Use the reply for useful results or a question; omit internal IDs unless requested.`;
 type Spec = AssistantModelStep["tools"][number];
 const string = { type: "string" },
   integer = { type: "integer", minimum: 0 };
@@ -34,6 +40,7 @@ const workerTask = {
   description:
     "The message the worker will receive. Write an actionable instruction in the user's language, using relevant context to make references clear.",
 };
+const routineFields = { title: string, task: workerTask, sessionId: string };
 function tool(
   name: string,
   description: string,
@@ -47,6 +54,14 @@ function tool(
   };
 }
 export const tools: Spec[] = [
+  tool("followups", "List active public topics with no arguments. If the user asked to stop a topic, pass the exact stopId from the list.", { stopId: string }),
+  tool("local_clock", "Get the user's local time and UTC offset for a schedule draft.", {}),
+  tool("draft_automation", "Prepare an automation for user confirmation. For schedule provide at and repeat. For github provide repository.", {
+    ...routineFields, type: { type: "string", enum: ["schedule", "github"] },
+    at: { type: "string", description: "ISO 8601 start time with UTC offset" },
+    repeat: { type: "string", enum: ["once", "daily", "weekly"] },
+    repository: { type: "string", description: "Public GitHub owner/repository" },
+  }, ["title", "task", "sessionId", "type"]),
   tool(
     "list_workspace",
     "List registered projects, available worker harnesses and saved connections for new sessions.",
@@ -63,6 +78,7 @@ export const tools: Spec[] = [
     { sessionId: string, query: string, before: integer, messageId: string, offset: integer },
     ["sessionId"],
   ),
+  tool("watch_session", "Follow the current run in an existing session and post its outcome to the assistant chat.", { sessionId: string }, ["sessionId"]),
   tool(
     "find_history",
     "Search past assistant exchanges and dispatch receipts, including compacted turns. Use before for older results. Use a result's seq and optional offset to read the original exchange in short pages.",
@@ -76,7 +92,7 @@ export const tools: Spec[] = [
   ),
   tool(
     "create_session",
-    "Create a worker session and deliver its first task. Select a registered project, an enabled harness and a compatible connection. Include the context a new session needs to start.",
+    "Create an ordinary conversation for an enabled Harness in a registered project. Include task only if a message should be sent immediately. Omit connectionId to use the Harness's native setup.",
     {
       projectId: string,
       harnessId: string,
@@ -85,9 +101,15 @@ export const tools: Spec[] = [
       title: string,
       task: workerTask,
     },
-    ["projectId", "harnessId", "connectionId", "title", "task"],
+    ["projectId", "harnessId", "title"],
   ),
 ];
+export const followTopicTool = tool(
+  "follow_topic",
+  "Follow an unresolved public question and send a later update only if an authoritative source resolves it.",
+  { topic: { type: "string", maxLength: 180 } },
+  ["topic"],
+);
 
 export function compactTurn(row: JournalRow<AssistantTurn>) {
   const item = row.value;
@@ -126,7 +148,8 @@ export function composeStep(base: PreparedContext, evidence: Evidence[], budget:
   let available = budget - base.cost;
   const observations: string[] = [];
   // Prefer the most recent observations if the worker catalog or a search page is large.
-  for (let i = evidence.length - 1; i >= 0; i--) {
+  // Leave room for the request and history in the daemon's 128-part input.
+  for (let i = evidence.length - 1; i >= 0 && base.prefix.length + observations.length < 128; i--) {
     const item = evidence[i]!;
     let block = JSON.stringify({ observation: item });
     if (charge(block) > available && observations.length) break;

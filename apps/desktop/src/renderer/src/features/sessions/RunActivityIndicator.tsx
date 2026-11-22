@@ -1,12 +1,54 @@
 import { useEffect, useMemo, useState } from "react";
 import { Activity } from "lucide-react";
+import { StageActivityPill } from "../../components/layout/StageActivityPill";
 import { useI18n } from "../../lib/i18n";
-import type { RunLifecycle, TimelineEvent } from "../../lib/types";
+import type { RunLifecycle, TimelineEvent, TimelinePayload } from "../../lib/types";
+import { useWorkflowsStore } from "../../stores/workflows";
 
 interface RunActivityIndicatorProps {
   lifecycle?: RunLifecycle;
   events: TimelineEvent[];
   waitingForDelegates?: boolean;
+}
+
+export function SessionActivityPill({ lifecycle, events, waitingForDelegates, foreground, orchestration }: RunActivityIndicatorProps & {
+  foreground?: RunLifecycle;
+  orchestration?: RunLifecycle;
+}): JSX.Element {
+  const zh = useI18n().locale === "zh-CN";
+  const { runningPlan, completed } = useMemo(() => {
+    let runningPlan: Extract<TimelinePayload, { kind: "workflow_plan" }> | undefined;
+    const completed: string[] = [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const data = events[index].data;
+      if (data.kind !== "workflow_plan" || !data.plan.runId) continue;
+      if (data.runStatus === "running" || data.runStatus === "finalizing") runningPlan ??= data;
+      if (data.runStatus === "completed") completed.push(data.plan.runId);
+    }
+    return { runningPlan, completed };
+  }, [events]);
+  const workflowId = runningPlan?.plan.runId;
+  const workflowStart = useWorkflowsStore(state => workflowId ? state.runs.find(run => run.id === workflowId)?.createdAt : undefined);
+  const completedIds = [...completed];
+  if (foreground?.status === "completed") completedIds.push("foreground");
+  if (orchestration?.status === "completed") completedIds.push("delegates");
+
+  if (runningPlan && workflowId) return <StageActivityPill activity={{ id: workflowId, label: runningPlan.runStatus === "finalizing"
+    ? (zh ? "工作流收尾中" : "Finishing workflow")
+    : runningPlan.plan.template.name, startedAt: workflowStart }} completed={completedIds} />;
+  if (lifecycle?.status !== "running") return <StageActivityPill completed={completedIds} />;
+
+  const latest = latestProgressEvent(events, lifecycle.startedAt);
+  const label = lifecycle.reason === "cancelling" ? (zh ? "正在停止…" : "Stopping…")
+    : lifecycle.reason === "verifying" ? (zh ? "正在验收" : "Verifying")
+    : waitingForDelegates ? (zh ? "等待协作任务" : "Waiting for collaborators")
+    : latest?.data.kind === "command" && latest.data.status === "running" ? (zh ? "正在运行命令" : "Running a command")
+    : progressLabel(latest, zh);
+  return <StageActivityPill activity={{
+    id: lifecycle === foreground ? "foreground" : "delegates",
+    label,
+    startedAt: lifecycle.startedAt ? Date.parse(lifecycle.startedAt) : undefined
+  }} completed={completedIds} />;
 }
 
 /** Live, provider-neutral progress derived only from persisted runtime events. */
@@ -26,34 +68,41 @@ export function RunActivityIndicator({ lifecycle, events, waitingForDelegates = 
       setElapsedSeconds(0);
       return;
     }
-    const startedAt = latest ? new Date(latest.timestamp).getTime() : Date.now();
-    const update = (): void => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    const startedAt = Date.parse(latest?.timestamp ?? "") || Date.now();
+    let timer = 0;
+    const update = (): void => {
+      const elapsed = Math.max(0, Date.now() - startedAt);
+      setElapsedSeconds(Math.floor(elapsed / 1000));
+      timer = window.setTimeout(update, 1000 - elapsed % 1000);
+    };
     update();
-    const timer = window.setInterval(update, 1_000);
-    return () => window.clearInterval(timer);
+    return () => window.clearTimeout(timer);
   }, [visible, latest?.id, latest?.timestamp]);
 
   // A CLI need not expose reasoning text to show that its turn is in flight.
   // Only suppress this line when a dedicated row is displaying live progress;
   // a completed tool/reasoning row must not hide the next model wait.
-  if (!visible) return null;
+  if (!active) return null;
   const working = lifecycle?.status === "running";
   const zh = locale === "zh-CN";
-  const label = lifecycle?.reason === "cancelling"
+  const label = (lifecycle?.reason === "cancelling"
     ? (zh ? "正在停止…" : "Stopping…")
     : waitingForDelegates
     ? (zh ? "等待协作任务" : "Waiting for collaborators")
     : lifecycle?.status === "waiting_approval"
     ? (zh ? "等待你的批准" : "Waiting for your approval")
-    : progressLabel(latest, zh);
+    : progressLabel(latest, zh)).replace(/…$/, "");
 
   return (
-    <div role="status" className="conversation-run-wait flex items-center py-1 text-[13px] text-ink-3">
-      <span className={`conversation-step-icon${working ? " conversation-activity-pulse" : ""}`} aria-hidden>
-        {!working && <Activity size={14} />}
+    <div role="status" className="conversation-run-wait" hidden={!visible} aria-hidden={!visible || undefined}>
+      {working ? <span className="conversation-wait-orbit" aria-hidden /> : <Activity size={14} aria-hidden />}
+      <span className="conversation-wait-label">
+        {label}
+        {working && <span className="conversation-wait-sheen" data-label={label} aria-hidden />}
       </span>
-      <span className="min-w-0 truncate">{label}</span>
-      <span aria-hidden="true" className="ml-auto shrink-0 text-xs tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+      {elapsedSeconds > 0 && <span className="conversation-wait-time" aria-hidden>
+        <span className="conversation-wait-divider">·</span>{formatElapsed(elapsedSeconds, zh)}
+      </span>}
     </div>
   );
 }
@@ -103,7 +152,13 @@ function progressLabel(event: TimelineEvent | undefined, zh: boolean): string {
   return zh ? "Agent 正在处理…" : "Agent is working…";
 }
 
-function formatElapsed(seconds: number): string {
+function formatElapsed(seconds: number, zh: boolean): string {
+  if (zh) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor(seconds % 3600 / 60);
+    const rest = seconds % 60;
+    return `${hours ? `${hours}小时` : ""}${minutes ? `${minutes}分` : ""}${rest ? `${rest}秒` : ""}`;
+  }
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;

@@ -4,13 +4,17 @@ import type {ContextUsage} from "./types";
 /** Context capacity and occupancy are independent, last-known observations.
  * Accounting snapshots deliberately cannot erase either of them. */
 export function latestContextUsage(events:readonly RuntimeEvent[]):ContextUsage|undefined {
-  let contextUsed:number|undefined,contextWindow:number|undefined;
+  let contextUsed:number|undefined,contextWindow:number|undefined,cachedInputTokens:number|undefined;
   for(let index=events.length-1;index>=0;index--){
     const event=events[index];if(event.type!=="usage.updated")continue;
     const value=event.payload;
-    if(contextUsed===undefined&&typeof value.contextUsed==="number"&&Number.isSafeInteger(value.contextUsed)&&value.contextUsed>=0)contextUsed=value.contextUsed;
+    if(contextUsed===undefined&&typeof value.contextUsed==="number"&&Number.isSafeInteger(value.contextUsed)&&value.contextUsed>=0){
+      contextUsed=value.contextUsed;
+      const cached=value.cachedInputTokens;
+      if(value.usageScope==="context"&&typeof cached==="number"&&Number.isSafeInteger(cached)&&cached>=0&&cached<=contextUsed)cachedInputTokens=cached;
+    }
     if(contextWindow===undefined&&typeof value.contextWindow==="number"&&Number.isSafeInteger(value.contextWindow)&&value.contextWindow>0)contextWindow=value.contextWindow;
     if(contextUsed!==undefined&&contextWindow!==undefined)break;
   }
-  return contextUsed!==undefined||contextWindow!==undefined?{contextUsed,contextWindow}:undefined;
+  return contextUsed!==undefined||contextWindow!==undefined?{contextUsed,contextWindow,...(cachedInputTokens===undefined?{}:{cachedInputTokens})}:undefined;
 }

@@ -31,9 +31,12 @@ export async function buildRust(release=false) {
   const env=rustEnvironment();
   console.log(`Rust toolchain: ${env.RUSTUP_TOOLCHAIN}`);
   await run('cargo',['build','--workspace',...(release?['--release']:[])],{cwd:join(workspace,'rust'),env});
-  await run(process.execPath,[join(workspace,'scripts','sync-rust-plugins.mjs'),...(release?['--release']:[])],{cwd:workspace,env});
   return env;
 }
 if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  try {await buildRust(process.argv.includes('--release'));}catch(error){console.error(error.message);process.exitCode=1;}
+  try {
+    const release=process.argv.includes('--release');
+    const env=await buildRust(release);
+    await run(process.execPath,[join(workspace,'scripts','sync-rust-plugins.mjs'),...(release?['--release']:[])],{cwd:workspace,env});
+  }catch(error){console.error(error.message);process.exitCode=1;}
 }

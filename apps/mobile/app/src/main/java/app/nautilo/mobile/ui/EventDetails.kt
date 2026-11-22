@@ -2,7 +2,10 @@ package app.nautilo.mobile.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -39,9 +42,20 @@ internal fun usesEventCard(item: ActivityItem): Boolean = item.kind in setOf("pr
         val uri = LocalUriHandler.current
         val raw = item.payload.optJSONObject("raw")
         val text = item.payload.text("text").ifBlank { raw?.text("instructions").orEmpty() }
-        if (item.payload.text("method") == "open_url") NTextButton({ raw?.text("url")?.let(uri::openUri) }) {
-            Text(text.ifBlank { "打开授权链接" }, fontSize = 13.sp); Icon(Icons.Outlined.OpenInNew, null, Modifier.padding(start = 5.dp).size(14.dp))
-        } else if (text.isNotBlank()) Text(text, Modifier.padding(vertical = 5.dp), fontSize = 13.sp, lineHeight = 21.sp, color = Secondary)
+        when {
+            item.payload.text("method") == "open_url" -> NTextButton({ raw?.text("url")?.let(uri::openUri) }) {
+                Text(text.ifBlank { "打开授权链接" }, fontSize = 13.sp)
+                Icon(Icons.Outlined.OpenInNew, null, Modifier.padding(start = 5.dp).size(14.dp))
+            }
+            text.startsWith("[billion-context-pi] Unsupported host:") ->
+                ProcessDisclosure(item.id, "扩展兼容性提示 · billion-context-pi", "", Icons.Outlined.Info) {
+                    SelectionContainer {
+                        Text(text, Modifier.fillMaxWidth().heightIn(max = 200.dp).verticalScroll(rememberScrollState()),
+                            fontSize = 13.sp, lineHeight = 20.sp, color = Secondary)
+                    }
+                }
+            text.isNotBlank() -> Text(text, Modifier.padding(vertical = 5.dp), fontSize = 13.sp, lineHeight = 21.sp, color = Secondary)
+        }
         return
     }
     var expanded by rememberSaveable(item.id) { mutableStateOf(item.kind in setOf("plan", "recovery", "provider_ui", "error", "handoff")) }
@@ -63,6 +77,20 @@ internal fun usesEventCard(item: ActivityItem): Boolean = item.kind in setOf("pr
                 }
             }
             if (expanded) Box(Modifier.padding(top = 7.dp, bottom = 10.dp)) { EventDetails(item) }
+        }
+    }
+}
+
+@Composable internal fun CollapsedEventText(label: String, detail: String) {
+    var expanded by rememberSaveable(detail) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        NTextButton({ expanded = !expanded }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(15.dp), tint = Secondary)
+            Text(label, Modifier.padding(start = 5.dp), fontSize = 13.sp, color = Secondary)
+        }
+        if (expanded) SelectionContainer {
+            Text(detail, Modifier.fillMaxWidth().heightIn(max = 200.dp).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+                fontSize = 13.sp, lineHeight = 20.sp, color = Secondary)
         }
     }
 }

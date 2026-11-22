@@ -15,10 +15,18 @@ function tempDir(t, prefix) {
   return directory;
 }
 
-const FAKE_TRAE_CLI = `const args = process.argv.slice(2);
+const FAKE_TRAE_CLI = `import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
 if (args.includes("--version")) { console.log("trae-cli 0.3.0"); process.exit(0); }
 if (args.includes("--help")) { console.log("usage: trae-cli\\n\\ncommands:\\n  run          Run a task\\n  interactive  Interactive mode"); process.exit(0); }
-if (args[0] === "run") { console.log("Task result: " + args[1]); process.exit(0); }
+if (args[0] === "run") {
+  console.log('@nautilo-event:{"kind":"nautilo_ready"}');
+  writeFileSync(process.env.NAUTILO_TRAE_TRAJECTORY, JSON.stringify({
+    success: true, final_result: "Task result: hello",
+    llm_interactions: [{ provider:"openai", response:{ usage:{ input_tokens:100, output_tokens:5, cache_read_input_tokens:80, cache_creation_input_tokens:0 } } }]
+  }));
+  process.exit(0);
+}
 process.exit(1);
 `;
 
@@ -46,7 +54,8 @@ function handle(msg) {
     notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "world" } } });
     notify("session/update", { sessionId, update: { sessionUpdate: "tool_call", toolCallId: "call-1", title: "edit_file", status: "completed", rawInput: { path: "a.ts", old_string: "a", new_string: "b" }, rawOutput: "done" } });
     notify("session/update", { sessionId, update: { sessionUpdate: "usage_update", used: 1200, size: 200000 } });
-    return send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+    return send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn",
+      usage: { inputTokens: 100, cachedReadTokens: 800, outputTokens: 20, totalTokens: 920 } } });
   }
 }
 process.stdin.on("data", (chunk) => {
@@ -76,7 +85,7 @@ test("the trae plugin installs and registers the provider", async (t) => {
   assert.equal(record.status, "loaded", record.error);
   const adapter = adapters.get("trae");
   assert.equal(adapter.constructor.name, "TraePluginAdapter");
-  assert.equal(adapter.descriptor.defaultExecutable, "traecli");
+  assert.equal(adapter.descriptor.defaultExecutable, "trae-cli");
 
   await service.uninstall("trae");
   assert.ok(!adapters.has("trae"));
@@ -98,10 +107,14 @@ test("the trae plugin drives trae-agent in plain-text mode", async (t) => {
   assert.equal(detection.installed, true, detection.error);
 
   const events = [];
-  for await (const event of adapter.start({ instance, prompt: "hello", cwd: bin, env: {} }).events) events.push(event);
-  assert.equal(events[0].kind, "status");
+  for await (const event of adapter.start({ instance, prompt: "hello", cwd: bin, localSessionId: "test-trae",
+    env: { NAUTILO_CONNECTION_DIRECTORY: bin } }).events) events.push(event);
+  assert.equal(events[0].kind, "status", events[0].error?.message);
   const message = events.find((event) => event.kind === "message");
+  assert.ok(message, events.find(event => event.kind === "error")?.error?.message);
   assert.match(message.text, /Task result: hello/);
+  assert.equal(events.find(event => event.kind === "usage" && event.usageScope === "context")?.contextUsed, 100);
+  assert.equal(events.find(event => event.kind === "usage" && event.usageScope === "turn")?.cachedInputTokens, 80);
   assert.equal(events.at(-1).kind, "exit");
   assert.equal(events.at(-1).exitCode, 0);
 });
@@ -135,6 +148,11 @@ test("the trae plugin drives traecli over ACP with streaming, tools, usage and r
   const usage = started.find((event) => event.kind === "usage");
   assert.equal(usage.contextUsed, 1200);
   assert.equal(usage.contextWindow, 200000);
+  assert.equal(usage.usageScope, "context");
+  const turnUsage = started.find(event => event.kind === "usage" && event.usageScope === "turn");
+  assert.equal(turnUsage.cachedInputTokens, 800);
+  assert.equal(turnUsage.inputTokensIncludesCache, false);
+  assert.equal(turnUsage.cacheCreationInputTokens, 0);
   assert.ok(started.some((event) => event.kind === "status" && event.phase === "turn_completed"));
   assert.equal(started.at(-1).kind, "exit");
   assert.equal(started.at(-1).exitCode, 0);
@@ -167,7 +185,7 @@ test("the trae plugin parses ACP updates and builds trae-agent args", async (t) 
 
   const state = { messageId: "m", thinkingId: "th", toolNames: new Map(), toolCalls: new Map() };
   const usage = parseTraeAcpUpdate({ sessionUpdate: "usage_update", used: 42, size: 128000 }, state);
-  assert.deepEqual(usage, [{ kind: "usage", contextUsed: 42, contextWindow: 128000, raw: usage[0].raw }]);
+  assert.deepEqual(usage, [{ kind: "usage", usageScope: "context", contextUsed: 42, contextWindow: 128000, raw: usage[0].raw }]);
 
   const commands = parseTraeAcpUpdate({ sessionUpdate: "available_commands_update", availableCommands: [{ name: "review", description: "Review code", input: { hint: "PR" } }] }, state);
   assert.equal(commands[0].kind, "commands");

@@ -7,6 +7,9 @@ import ts from 'typescript';
 const require = createRequire(import.meta.url);
 const source = await readFile(new URL('../src/renderer/src/features/settings/AccountConnectDialog.tsx', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+const harnessSource = await readFile(new URL('../src/shared/account-harnesses.ts', import.meta.url), 'utf8');
+const harnesses = {};
+new Function('exports', ts.transpileModule(harnessSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText)(harnesses);
 
 function fixture(connections, locale = 'zh-CN') {
   const states = [], refs = [], added = [], selected = [], closed = [];
@@ -27,7 +30,8 @@ function fixture(connections, locale = 'zh-CN') {
     if (id.endsWith('/i18n')) return { useI18n: () => ({ locale }) };
     if (id.endsWith('/connections')) return { useConnectionsStore: { getState: () => ({ connections }) } };
     if (id.endsWith('/bridge')) return { getBridge: () => { loginCalls++; return undefined; } };
-    if (id === './account-connect') return { ACCOUNT_HARNESSES: ['codex', 'claude-code', 'antigravity'], accountHarnessName: id => id };
+    if (id.endsWith('/account-harnesses')) return harnesses;
+    if (id === './account-connect') return { accountHarnessName: id => id };
     return new Proxy({}, { get: (_, key) => key });
   }, module, module.exports);
   const render = () => {
@@ -64,12 +68,12 @@ for (const nativeLogin of [true, undefined]) test(`an existing Antigravity conne
   assert.deepEqual(f.added, []);
 });
 
-test('an existing Antigravity connection does not block choosing another account harness', () => {
+for (const harness of ['codex', 'kimi-code']) test(`an existing Antigravity connection does not block choosing ${harness}`, () => {
   const f = fixture([{ kind: 'login', harness: 'antigravity', name: 'Google' }], 'en-US');
   const buttons = elements(f.render()).filter(node => node.type === 'button');
   buttons.find(node => node.key === 'antigravity').props.onClick();
   assert.match(text(f.render()), /No account was added or sign-in verified/);
-  buttons.find(node => node.key === 'codex').props.onClick();
+  buttons.find(node => node.key === harness).props.onClick();
   assert.equal(f.loginCalls, 1);
   assert.doesNotMatch(text(f.render()), /No account was added or sign-in verified/);
   assert.deepEqual(f.added, []);

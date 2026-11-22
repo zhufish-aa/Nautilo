@@ -17,7 +17,7 @@ export function assertConnectionCompatible(connection: RuntimeConnection, agent:
   if (agent.baseArgs.length || agent.profile) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "Independent connections require standard CLI arguments and no CLI profile" });
   if (agent.providerId === "antigravity" && (connection.kind !== "login" || connection.harness !== "antigravity" || !connection.nativeLogin)) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "Select an official Antigravity Google login account" });
   const supported = connection.kind === "login"
-    ? connection.accountGateway===true || connection.harness === agent.providerId && ["codex", "claude-code", "antigravity", "opencode"].includes(agent.providerId)
+    ? connection.accountGateway===true || connection.harness === agent.providerId && ["codex", "claude-code", "antigravity", "opencode", "kimi-code"].includes(agent.providerId)
     : ["responses", "chat", "anthropic"].includes(connection.protocol ?? "");
   if (!supported) throw new CoreError("IPC_INVALID_REQUEST", { field: "connectionId", reason: "This harness does not support the selected connection protocol or login identity" });
 }

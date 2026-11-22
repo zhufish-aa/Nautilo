@@ -34,6 +34,7 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
         CREATE INDEX IF NOT EXISTS idx_project_runs_project ON project_runs(project_id, updated_at DESC);
         CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, member_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sessions_connection ON sessions(json_extract(data,'$.connectionId'));
         CREATE TRIGGER IF NOT EXISTS delete_session_draft AFTER DELETE ON sessions BEGIN DELETE FROM composer_drafts WHERE id=OLD.id; END;
         CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
@@ -41,6 +42,7 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
         CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(project_run_id, updated_at);
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_runs_connection_start ON runs(json_extract(data,'$.connectionId'),json_extract(data,'$.startedAt') DESC);
         CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(json_extract(data,'$.workflow.runId'),json_extract(data,'$.workflow.instanceId'),json_extract(data,'$.workflow.attempt'));
         CREATE INDEX IF NOT EXISTS idx_runs_queue_key ON runs(json_extract(data,'$.queueKey'));
         CREATE TABLE IF NOT EXISTS runtime_events (event_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, session_id TEXT, project_run_id TEXT, run_id TEXT, data TEXT NOT NULL, timestamp TEXT NOT NULL);

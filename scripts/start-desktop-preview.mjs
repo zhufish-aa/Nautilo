@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, mkdirSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync } from 'node:fs';
 import { access, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -11,12 +11,29 @@ Object.assign(process.env, developmentEnvironment());
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const desktopRequire = createRequire(join(workspace, 'apps', 'desktop', 'package.json'));
+const nativeBuild = resolve(workspace, process.env.CARGO_TARGET_DIR ?? 'rust/target', 'x86_64-pc-windows-gnu', 'debug');
+process.env.AGENTHUB_CORE_PATH ||= join(nativeBuild, 'nautilo-core.exe');
+process.env.AGENTHUB_DEV_PLUGIN_DIR ||= join(workspace, 'rust', 'plugins');
+if (process.platform === 'win32' && process.env.NAUTILO_DEV_STORAGE && !process.env.ESBUILD_BINARY_PATH) {
+  const viteRequire = createRequire(desktopRequire.resolve('vite/package.json'));
+  const { version } = viteRequire('esbuild/package.json');
+  const cachedEsbuild = join(process.env.NAUTILO_DEV_STORAGE, 'tools', `esbuild-${version}.exe`);
+  if (existsSync(cachedEsbuild)) process.env.ESBUILD_BINARY_PATH = cachedEsbuild;
+}
+
+if (!process.argv.includes('--prepare-only')) {
+  try {
+    await access(process.env.AGENTHUB_CORE_PATH);
+    await access(join(dirname(process.env.AGENTHUB_CORE_PATH), 'agenthub-plugin-deepseek.exe'));
+  } catch (error) {
+    throw new Error(`Native development files are missing: ${error.path}. Run pnpm dev:desktop to build them.`);
+  }
+}
 
 async function prepareElectron() {
   const packagePath = desktopRequire.resolve('electron/package.json');
   const { version } = JSON.parse(await readFile(packagePath, 'utf8'));
   const source = join(dirname(packagePath), 'dist');
-  if (!process.env.AGENTHUB_CORE_PATH) throw new Error('The Rust runtime path is not configured. Use the CMD launcher.');
   const target = join(dirname(process.env.AGENTHUB_CORE_PATH), `electron-${version}`);
   const marker = join(target, '.nautilo-runtime-ready');
   try {

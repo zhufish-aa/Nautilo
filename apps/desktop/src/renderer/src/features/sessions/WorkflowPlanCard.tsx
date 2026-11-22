@@ -1,27 +1,36 @@
 import { useRef, useState } from "react";
-import { Check, ChevronDown, Clock3, PanelRightOpen, Play, RotateCcw, Workflow, X } from "lucide-react";
+import { Check, Clock3, PanelRightOpen, Play, RotateCcw, Square, Workflow, X } from "lucide-react";
 import { create } from "zustand";
 import type { WorkflowPlan, WorkflowPlanAssignment } from "@agenthub/domain";
+import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { requestCore } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
+import { useUiReducedMotion } from "../../lib/ui-motion";
 import { useAgentsStore } from "../../stores/agents";
 import { useComposerDraftsStore } from "../../stores/composer-drafts";
 import { connectionModelKey, useConnectionsStore } from "../../stores/connections";
 import { useSessionsStore } from "../../stores/sessions";
+import { ProcessDisclosure } from "../timeline/ProcessDisclosure";
+import { nodeTone } from "../workflows/workflow-model";
 import { SessionModelControl, type ComposerConfiguration } from "./SessionModelControl";
 import "./workflow-plan.css";
 
 type Assignments = Record<string, WorkflowPlanAssignment>;
 const NO_EDITS: Assignments = {};
 const usePlanEdits = create<{ edits: Record<string, Assignments> }>(() => ({ edits: {} }));
-const executionLabels: Record<string, [string, string]> = {
-  running: ["执行中", "Running"], paused: ["已暂停", "Paused"], finalizing: ["收尾中", "Finalizing"],
-  completed: ["已完成", "Completed"], failed: ["执行失败", "Failed"], cancelled: ["已停止", "Stopped"],
-  needs_decision: ["待处理", "Needs attention"]
+const executionLabels: Record<string, readonly [string, string, string]> = {
+  running: ["执行中", "Running", "indigo"],
+  paused: ["已暂停", "Paused", "amber"],
+  finalizing: ["收尾中", "Finalizing", "indigo"],
+  completed: ["已完成", "Completed", "emerald"],
+  failed: ["执行失败", "Failed", "danger"],
+  cancelled: ["已停止", "Stopped", "neutral"],
+  needs_decision: ["待处理", "Needs attention", "amber"]
 };
 
 export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: WorkflowPlan; runStatus?: string; onViewExecution?: (id: string) => void }) {
   const zh = useI18n().locale === "zh-CN";
+  const reducedMotion = useUiReducedMotion();
   const instances = useAgentsStore(state => state.instances);
   const modelCatalogs = useAgentsStore(state => state.modelCatalogs);
   const connectionCatalogs = useConnectionsStore(state => state.modelCatalogs);
@@ -65,42 +74,66 @@ export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: W
       setBusy(undefined);
     }
   };
-  const StatusIcon = pending ? Clock3 : shown.status === "approved" ? Check : X;
-  const execution = shown.runId && runStatus ? executionLabels[runStatus]?.[zh ? 0 : 1] : undefined;
-  const status = pending ? (zh ? "待确认" : "Awaiting approval")
-    : shown.status === "approved" ? execution ?? (zh ? "已确认" : "Approved") : (zh ? "已拒绝" : "Rejected");
+  const execution = shown.runId && runStatus ? executionLabels[runStatus] : undefined;
+  const [statusZh, statusEn, tone] = pending ? ["待确认", "Awaiting approval", "amber"]
+    : shown.status === "approved" ? execution ?? ["已确认", "Approved", "neutral"] : ["已拒绝", "Rejected", "danger"];
+  const pulse = pending || tone === "indigo";
+  const StatusIcon = tone === "danger" ? X : tone === "amber" ? Clock3 : execution && runStatus === "cancelled" ? Square : Check;
+  const rows = shown.nodes.map(node => {
+    const assignment = selected(node.key, node.assignment);
+    return { node, assignment, instance: instances.find(item => item.id === assignment.agentInstanceId) };
+  });
+  const harnesses = new Map<string, string>();
+  for (const { instance } of rows) {
+    if (instance && !harnesses.has(instance.providerId)) harnesses.set(instance.providerId, instance.displayName);
+  }
+  const teamLabel = [...harnesses.values()].join(" · ") + (harnesses.size > 1 ? (zh ? " 协同" : " working together") : "");
   return (
-    <article className="conversation-workflow-plan" data-status={shown.status} aria-label={zh ? "工作流执行计划" : "Workflow execution plan"}>
-      <header className="workflow-plan-heading">
-        <span className="workflow-plan-mark"><Workflow size={17} aria-hidden /></span>
-        <div className="workflow-plan-title">
-          <small>{zh ? "执行计划" : "Execution plan"} · {zh ? `${shown.nodes.length} 个执行项` : `${shown.nodes.length} assignments`}</small>
-          <h3>{shown.template.name}</h3>
+    <article className="conversation-workflow-plan" data-status={shown.status} data-reduced={reducedMotion || undefined} aria-label={zh ? "工作流执行计划" : "Workflow execution plan"}>
+      <header className="workflow-plan-header" data-tone={tone}>
+        <div className="workflow-plan-heading">
+          <span className="workflow-plan-mark"><Workflow size={17} aria-hidden /></span>
+          <div className="workflow-plan-title">
+            <small>{zh ? "执行计划" : "Execution plan"} · {zh ? `${shown.nodes.length} 个执行项` : `${shown.nodes.length} assignments`}</small>
+            <h3>{shown.template.name}</h3>
+          </div>
+          <span className="workflow-plan-status" role="status">
+            {pulse ? <span className="workflow-plan-status-dot" aria-hidden /> : <StatusIcon size={12} aria-hidden />}
+            {zh ? statusZh : statusEn}
+          </span>
         </div>
-        <span className="workflow-plan-status" role="status"><StatusIcon size={12} aria-hidden />{status}</span>
+        {shown.summary && <p className="workflow-plan-summary">{shown.summary}</p>}
       </header>
-      {shown.summary && <p className="workflow-plan-summary">{shown.summary}</p>}
-      {!!shown.nodes.length && <ul className="workflow-plan-steps">
-        {shown.nodes.map(node => {
-          const assignment = selected(node.key, node.assignment);
-          const instance = instances.find(item => item.id === assignment.agentInstanceId);
+      {!!rows.length && <ol className="workflow-plan-steps">
+        {rows.map(({ node, assignment, instance }, index) => {
           const defaultModel = zh ? "默认模型" : "Default model";
           const modelCatalog = assignment.connectionId && assignment.connectionRevision
             ? connectionCatalogs[connectionModelKey(assignment.connectionId, assignment.connectionRevision)]
             : modelCatalogs[assignment.agentInstanceId];
-          const modelName = modelCatalog?.models.find(model => model.id === assignment.model)?.displayName;
+          const harnessName = instance?.displayName ?? assignment.agentInstanceId;
+          const modelName = modelCatalog?.models.find(model => model.id === assignment.model)?.displayName || assignment.model || defaultModel;
+          const context = [node.scope, node.memberName !== node.role ? node.memberName : undefined].filter(Boolean).join(" · ");
           const open = expanded === node.key;
           const configure = (patch: ComposerConfiguration) => mutate(node.key, {
             ...assignment, ...patch,
             ...("connectionId" in patch && !patch.connectionId ? { connectionId: null, connectionRevision: null } : {})
           });
-          return <li key={node.key}>
-            <button type="button" className="workflow-plan-step" aria-expanded={open} onClick={() => setExpanded(open ? undefined : node.key)}>
-              <span><strong>{node.name}</strong><small>{[node.scope, node.memberName || node.role].filter(Boolean).join(" · ")}</small></span>
-              <span><strong>{instance?.displayName ?? assignment.agentInstanceId}</strong><small>{modelName || assignment.model || defaultModel}</small></span>
-              <ChevronDown size={15} aria-hidden />
-            </button>
-            {open && <div className="workflow-plan-step-body">
+          return <li key={node.key} data-tone={nodeTone({ id: node.key, kind: "agent", role: node.role })}>
+            <ProcessDisclosure
+              className="workflow-plan-step"
+              icon={<><span className="workflow-plan-index">{String(index + 1).padStart(2, "0")}</span><span className="workflow-plan-role-dot" /></>}
+              label={node.name}
+              badge={node.role}
+              preview={context}
+              retainPreview
+              open={open}
+              onToggle={() => setExpanded(open ? undefined : node.key)}
+              accessory={<span className="workflow-plan-assignment">
+                {instance && <ProviderAvatar providerId={instance.providerId} size="sm" />}
+                <span className="workflow-plan-harness" title={harnessName}>{harnessName}</span>
+                <span className="workflow-plan-model" title={modelName}>{modelName}</span>
+              </span>}
+            >
               {node.task && <p className="workflow-plan-task">{node.task}</p>}
               {pending && <div className="workflow-plan-configuration">
                 <label><span>Harness</span><select aria-label={zh ? `${node.name}的 Harness` : `Harness for ${node.name}`}
@@ -120,22 +153,30 @@ export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: W
                   onChange: configure
                 }}/>
               </div>}
-            </div>}
+            </ProcessDisclosure>
           </li>;
         })}
-      </ul>}
+      </ol>}
       {error && <p role="alert" className="workflow-plan-error">{error}</p>}
       {(pending || shown.runId && onViewExecution || shown.status === "rejected" && !archived) && <footer className="workflow-plan-footer">
-        {pending ? <>
-          <button type="button" disabled={!!busy || archived} onClick={() => void decide("reject")}>{busy === "reject" ? (zh ? "正在拒绝…" : "Rejecting…") : (zh ? "拒绝" : "Reject")}</button>
-          <button type="button" className="workflow-plan-confirm" disabled={!!busy || archived} onClick={() => void decide("approve")}>
-            <Play size={13} aria-hidden />{busy === "approve" ? (zh ? "正在启动…" : "Starting…") : (zh ? "确认执行" : "Approve and run")}
-          </button>
-        </> : shown.runId && onViewExecution ? <button type="button" onClick={() => onViewExecution(shown.runId!)}>
-          <PanelRightOpen size={14} aria-hidden />{zh ? "查看执行" : "View execution"}
-        </button> : <button type="button" onClick={() => useComposerDraftsStore.getState().setWorkflow(plan.sessionId, plan.template)}>
-          <RotateCcw size={13} aria-hidden />{zh ? "重新引用" : "Reference again"}
-        </button>}
+        {harnesses.size > 0 && <div className="workflow-plan-team">
+          <span className="workflow-plan-team-icons" aria-hidden>
+            {Array.from(harnesses.keys(), providerId => <ProviderAvatar key={providerId} providerId={providerId} size="sm" />)}
+          </span>
+          <span className="workflow-plan-team-label" title={teamLabel}>{teamLabel}</span>
+        </div>}
+        <div className="workflow-plan-actions">
+          {pending ? <>
+            <button type="button" disabled={!!busy || archived} onClick={() => void decide("reject")}>{busy === "reject" ? (zh ? "正在拒绝…" : "Rejecting…") : (zh ? "拒绝" : "Reject")}</button>
+            <button type="button" className="workflow-plan-confirm" disabled={!!busy || archived} onClick={() => void decide("approve")}>
+              <Play size={13} aria-hidden />{busy === "approve" ? (zh ? "正在启动…" : "Starting…") : (zh ? "确认执行" : "Approve and run")}
+            </button>
+          </> : shown.runId && onViewExecution ? <button type="button" className="workflow-plan-view" onClick={() => onViewExecution(shown.runId!)}>
+            <PanelRightOpen size={14} aria-hidden />{zh ? "查看执行" : "View execution"}
+          </button> : <button type="button" onClick={() => useComposerDraftsStore.getState().setWorkflow(plan.sessionId, plan.template)}>
+            <RotateCcw size={13} aria-hidden />{zh ? "重新引用" : "Reference again"}
+          </button>}
+        </div>
       </footer>}
     </article>
   );

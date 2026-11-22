@@ -19,9 +19,9 @@ export function PermissionModeSelect({ value, options, onChange, disabled }: {
   const { locale } = useI18n();
   const zh = locale === "zh-CN";
   const selected = options.find((option) => option.value === value);
-  const fullAccess = (mode: string): boolean => ["full-access", "bypassPermissions", "danger-full-access"].includes(mode);
+  const fullAccess = (mode: string): boolean => ["full-access", "bypassPermissions", "bypass_permissions", "danger-full-access"].includes(mode);
   const labelFor = (option: PermissionModeOption): string => option.name?.[locale] || option.name?.[zh ? "en-US" : "zh-CN"] || option.value;
-  const permissionLabel = value === "default" ? (zh ? "默认权限" : "Default permissions") : selected ? labelFor(selected) : value;
+  const permissionLabel = selected ? labelFor(selected) : value === "default" ? (zh ? "默认权限" : "Default permissions") : value;
   const Icon = fullAccess(value) ? ShieldAlert : ShieldCheck;
   return <Select.Root value={value} onValueChange={onChange} disabled={disabled || !options.length}>
     <Select.Trigger className="permission-trigger" data-danger={fullAccess(value)} aria-label={zh ? "权限模式" : "Permission mode"} aria-description={permissionLabel} title={permissionLabel}>
@@ -70,5 +70,7 @@ export function SessionPermissionControl({ sessionId, disabled }: { sessionId: s
     catch (error) { toast.error(error instanceof Error ? error.message : String(error)); }
     finally { setSaving(false); }
   };
-  return <PermissionModeSelect value={session.permissionMode ?? instance.permissionMode ?? "default"} options={permissionModesFor(instance.providerId)} onChange={(value) => void change(value)} disabled={disabled || saving} />;
+  const modes = permissionModesFor(instance.providerId);
+  const fallback = modes.some((mode) => mode.value === "inherit") ? "inherit" : "default";
+  return <PermissionModeSelect value={session.permissionMode ?? instance.permissionMode ?? fallback} options={modes} onChange={(value) => void change(value)} disabled={disabled || saving} />;
 }

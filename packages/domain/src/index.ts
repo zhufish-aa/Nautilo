@@ -166,6 +166,25 @@ export interface DiagnosticExportResult {
   eventCount: number;
 }
 
+export interface AccountEnrichedMeta {
+  accountEmail?: string;
+  accountLabel?: string;
+  accountExternalId?: string;
+  subscriptionPlan?: string;
+  workspaceName?: string;
+  authStatus?: "valid" | "expiring" | "expired" | "unverified" | "error";
+  tokenExpiresAt?: string;
+  lastVerifiedAt?: string;
+  lastCheckedAt?: string;
+  lastLatencyMs?: number;
+  lastErrorSummary?: string;
+  rateLimitedUntil?: string;
+  lastRateLimitReason?: string;
+  localUsage?: { requestsToday: number; tokens7d: number; cacheHitRate7d?: number; lastUsedAt?: string; lastUsedContext?: string };
+  referencedByHarnesses?: string[];
+  storageMeta?: { configDir?: string; authMethod?: "system_keyring" | "cli_oauth" | "console_oauth"; credentialUpdatedAt?: string };
+}
+
 /** Reusable authentication/endpoint connection, independent of CLI instances. */
 export interface RuntimeConnection {
   id: string;
@@ -186,8 +205,9 @@ export interface RuntimeConnection {
   hasCredential?: boolean;
   /** Computed from explicit gateway settings; never a stored credential. */
   accountGateway?: boolean;
+  accountMeta?: AccountEnrichedMeta;
 }
-export type RuntimeConnectionInput = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential" | "accountGateway">;
+export type RuntimeConnectionInput = Omit<RuntimeConnection, "revision" | "createdAt" | "updatedAt" | "hasCredential" | "accountGateway" | "accountMeta">;
 
 export interface AgentInstance {
   id: AgentInstanceId;

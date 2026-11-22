@@ -5,11 +5,15 @@ import { parse, stringify } from "smol-toml";
 import { inheritNativeResources } from "@agenthub/provider-sdk";
 import type { AdapterStartRequest } from "../types.js";
 
+export function usesKimiApiConnection(instance: AdapterStartRequest["instance"]): boolean {
+  return Boolean(instance.providerOptions?.runtimeConnectionId && instance.providerOptions.baseUrl);
+}
+
 /** Kimi owns its native provider config; keys stay in the invocation env. */
 export function prepareKimiConnection(request: AdapterStartRequest): Record<string, string | undefined> {
   const env = { ...request.env };
   const options = request.instance.providerOptions;
-  if (!options?.runtimeConnectionId) return env;
+  if (!options || !usesKimiApiConnection(request.instance)) return env;
   if (!env.NAUTILO_CONNECTION_DIRECTORY) throw new Error("API connection directory is missing");
   const directory = join(env.NAUTILO_CONNECTION_DIRECTORY, "kimi-code");
   const native = env.KIMI_CODE_HOME || process.env.KIMI_CODE_HOME || join(homedir(), ".kimi-code");
