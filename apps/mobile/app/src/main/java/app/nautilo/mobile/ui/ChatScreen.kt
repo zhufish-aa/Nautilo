@@ -93,7 +93,7 @@ import kotlinx.coroutines.launch
                 item("end") { Spacer(Modifier.height(2.dp)) }
             }
             if (!atBottom) NFloatingActionButton(onClick = { follow = true; scope.launch { list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = Color.White, contentColor = Ink) { Icon(Icons.Outlined.ArrowDownward, "回到最新消息", Modifier.size(18.dp)) }
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = MobilePalette.floating, contentColor = Ink) { Icon(Icons.Outlined.ArrowDownward, "回到最新消息", Modifier.size(18.dp)) }
         }
         Composer(state, model, { showModels = true }, { showModes = true }) { follow = true }
     }
@@ -111,7 +111,7 @@ import kotlinx.coroutines.launch
 @Composable internal fun MessageRow(message: ChatMessage, sessionId: String = "", retry: () -> Unit) {
     if (message.sender == "user") Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         MessageArrival(message.id, message.delivery != "sent") {
-            NPanel(shape = RoundedCornerShape(22.dp), color = Color(0xFFF0F0F0), modifier = Modifier.widthIn(max = 330.dp)) {
+            NPanel(shape = RoundedCornerShape(22.dp), color = Selection, modifier = Modifier.widthIn(max = 330.dp)) {
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     message.attachments.forEach { attachment ->
                         if (attachment.isImage) AttachmentImage(attachment, sessionId)
@@ -157,7 +157,7 @@ import kotlinx.coroutines.launch
             onModes = if ("session.modes" in state.capabilities) modes else null,
             onStop = if (active && state.connected && !state.readOnly) model::cancelRun else null,
             focusedContent = { if (active) Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp).padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                NChip(selected = queue, onClick = { queue = !queue }, label = { Text(if (queue) "下一轮发送" else "立即引导", fontSize = 12.sp) }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Color(0xFFF0F0F0), selectedLabelColor = Ink))
+                NChip(selected = queue, onClick = { queue = !queue }, label = { Text(if (queue) "下一轮发送" else "立即引导", fontSize = 12.sp) })
                 Spacer(Modifier.weight(1f))
                 NTextButton(onClick = model::cancelRun, enabled = state.connected && !state.readOnly) { Text("停止生成", fontSize = 12.sp, color = Ink) }
             } })

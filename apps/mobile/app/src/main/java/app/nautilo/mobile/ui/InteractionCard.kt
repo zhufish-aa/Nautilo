@@ -45,11 +45,11 @@ import java.time.Instant
             while (deadline != null) { seconds = ((deadline - System.currentTimeMillis() + 999) / 1000).coerceAtLeast(0); kotlinx.coroutines.delay(1000) }
         }
     }
-    NPanel(shape = RoundedCornerShape(22.dp), border = BorderStroke(1.dp, Line), color = Color.White) {
+    NPanel(shape = RoundedCornerShape(22.dp), border = BorderStroke(1.dp, Line), color = MobilePalette.card) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.padding(start = 8.dp), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (questions.size == 1) questions.first().text("question") else request.text("title", "需要你的回答"), Modifier.weight(1f).padding(top = 6.dp), fontSize = 16.sp, lineHeight = 25.sp, fontWeight = FontWeight.SemiBold)
-                seconds?.let { Text("${it}秒", Modifier.padding(top = 7.dp).background(Color(0xFFF7F2E9), RoundedCornerShape(20.dp)).padding(horizontal = 7.dp, vertical = 2.dp), fontSize = 12.sp, color = Color(0xFFAA7829)) }
+                seconds?.let { Text("${it}秒", Modifier.padding(top = 7.dp).background(MobilePalette.amber.copy(alpha = .11f), RoundedCornerShape(20.dp)).padding(horizontal = 7.dp, vertical = 2.dp), fontSize = 12.sp, color = MobilePalette.amber) }
                 NIconButton(cancel, enabled = !disabled && !submitting, modifier = Modifier.size(32.dp)) { Icon(Icons.Outlined.Close, "跳过", Modifier.size(16.dp), tint = Secondary) }
             }
             request.optJSONObject("plan")?.text("content")?.takeIf(String::isNotBlank)?.let { Markdown(it) }
@@ -67,10 +67,10 @@ import java.time.Instant
                         val current = selections[id].orEmpty()
                         selections[id] = if (question.optBoolean("multiSelect")) if (selected) current - label else current + label else setOf(label)
                         if (!question.optBoolean("multiSelect")) texts[id] = ""
-                    }, enabled = !disabled && !submitting, color = if (selected) Selection else Color.White, shape = RoundedCornerShape(12.dp)) {
+                    }, enabled = !disabled && !submitting, color = if (selected) Selection else MobilePalette.card, shape = RoundedCornerShape(12.dp)) {
                         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-                            NPanel(color = if (selected || index == 0) Ink else Selection, shape = RoundedCornerShape(6.dp)) {
-                                Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) { Text("${index + 1}", fontSize = 12.sp, color = if (selected || index == 0) Color.White else Secondary) }
+                            NPanel(color = if (selected || index == 0) MobilePalette.primary else Selection, shape = RoundedCornerShape(6.dp)) {
+                                Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) { Text("${index + 1}", fontSize = 12.sp, color = if (selected || index == 0) MobilePalette.onPrimary else Secondary) }
                             }
                             Column(Modifier.weight(1f)) {
                                 Text(label, fontSize = 15.sp, lineHeight = 23.sp, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
@@ -149,7 +149,7 @@ import java.time.Instant
     val resolve: (String) -> Unit = { decision ->
         if (!submitting) { submitting = true; model.approve(request.text("id"), decision, selectedScope) { submitting = false } }
     }
-    NPanel(shape = RoundedCornerShape(18.dp), border = BorderStroke(1.dp, Line), color = Color.White) {
+    NPanel(shape = RoundedCornerShape(18.dp), border = BorderStroke(1.dp, Line), color = MobilePalette.card) {
         Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Icon(Icons.Outlined.VerifiedUser, null, Modifier.size(18.dp), tint = Accent)

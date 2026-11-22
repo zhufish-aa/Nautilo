@@ -50,11 +50,14 @@ internal val LocalFileOpener = staticCompositionLocalOf<((FileReference) -> Unit
 
 @Composable fun Markdown(text: String, modifier: Modifier = Modifier, fontSize: Float = 17f, lineHeight: Float = 28f, color: Color = Ink) {
     val open = LocalFileOpener.current
-    AndroidView(factory = { MarkdownView(it, fontSize, lineHeight, color.toArgb()) }, modifier = modifier.fillMaxWidth(), update = { it.onFileOpen = open; it.render(text) })
+    val palette = MobilePalette
+    androidx.compose.runtime.key(palette) {
+        AndroidView(factory = { MarkdownView(it, fontSize, lineHeight, color.toArgb(), palette) }, modifier = modifier.fillMaxWidth(), update = { it.onFileOpen = open; it.render(text) })
+    }
 }
 
 /** Native table cells remain selectable and wide tables scroll independently of the conversation. */
-internal class MarkdownView(context: Context, private val bodySize: Float = 17f, private val bodyLineHeight: Float = 28f, private val bodyColor: Int = Ink.toArgb()) : LinearLayout(context) {
+internal class MarkdownView(context: Context, private val bodySize: Float = 17f, private val bodyLineHeight: Float = 28f, private val bodyColor: Int = LightMobileColors.ink.toArgb(), private val colors: MobileColors = LightMobileColors) : LinearLayout(context) {
     var onFileOpen: ((FileReference) -> Unit)? = null
     private val markwon = Markwon.builder(context)
         .usePlugin(StrikethroughPlugin.create())
@@ -64,16 +67,16 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
                 builder.extensions(listOf(TablesExtension.create()))
             }
             override fun configureTheme(builder: MarkwonTheme.Builder) {
-                builder.linkColor(Ink.toArgb()).isLinkUnderlined(true)
-                    .codeBackgroundColor(Selection.toArgb()).codeTextColor(Ink.toArgb())
+                builder.linkColor(colors.ink.toArgb()).isLinkUnderlined(true)
+                    .codeBackgroundColor(colors.inset.toArgb()).codeTextColor(colors.ink.toArgb())
                     .codeTypeface(resources.getFont(app.nautilo.mobile.R.font.nautilo_code))
                     .codeTextSize((15 * resources.displayMetrics.scaledDensity).toInt())
                     .headingTypeface(readingTypeface(context, 600))
                     .headingTextSizeMultipliers(floatArrayOf(1.45f, 1.28f, 1.14f, 1.06f, 1f, 1f))
                     .headingBreakHeight(0).headingBreakColor(android.graphics.Color.TRANSPARENT)
-                    .blockMargin(dp(18)).bulletWidth(dp(4)).listItemColor(Ink.toArgb())
-                    .blockQuoteColor(Line.toArgb()).blockQuoteWidth(dp(3))
-                    .thematicBreakColor(Line.toArgb()).thematicBreakHeight(dp(1))
+                    .blockMargin(dp(18)).bulletWidth(dp(4)).listItemColor(colors.ink.toArgb())
+                    .blockQuoteColor(colors.divider.toArgb()).blockQuoteWidth(dp(3))
+                    .thematicBreakColor(colors.divider.toArgb()).thematicBreakHeight(dp(1))
             }
         }).build()
     private var source: String? = null
@@ -103,9 +106,9 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
         blocks.forEachIndexed { index, block ->
             val old = getChildAt(index)
             val view = when (block) {
-                is Table -> (old as? MarkdownTable ?: MarkdownTable(context)).also { it.onCell = ::linkFiles; it.setTable(block) }
-                is CodeBlock -> (old as? MarkdownCodeBlock ?: MarkdownCodeBlock(context)).also { it.setCode(block.code, block.language) }
-                else -> (old as? TextView ?: textView(context).apply { readingStyle(bodySize, bodyLineHeight); setTextColor(bodyColor) }).also {
+                is Table -> (old as? MarkdownTable ?: MarkdownTable(context, colors)).also { it.onCell = ::linkFiles; it.setTable(block) }
+                is CodeBlock -> (old as? MarkdownCodeBlock ?: MarkdownCodeBlock(context, colors)).also { it.setCode(block.code, block.language) }
+                else -> (old as? TextView ?: textView(context, colors.ink.toArgb()).apply { readingStyle(bodySize, bodyLineHeight); setTextColor(bodyColor) }).also {
                     markwon.setParsedMarkdown(it, block as Spanned)
                     linkFiles(it)
                 }
@@ -124,7 +127,7 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
         fun link(start: Int, end: Int, reference: FileReference) {
             text.setSpan(object : ClickableSpan() {
                 override fun onClick(widget: View) { onFileOpen?.invoke(reference) }
-                override fun updateDrawState(ds: TextPaint) { ds.color = Ink.toArgb(); ds.isUnderlineText = true }
+                override fun updateDrawState(ds: TextPaint) { ds.color = colors.ink.toArgb(); ds.isUnderlineText = true }
             }, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         text.getSpans(0, text.length, URLSpan::class.java).forEach { span ->
@@ -142,10 +145,10 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
     }
 
     internal companion object {
-        fun textView(context: Context) = TextView(context).apply {
+        fun textView(context: Context, ink: Int) = TextView(context).apply {
             readingStyle()
-            setTextColor(Ink.toArgb())
-            setLinkTextColor(Ink.toArgb())
+            setTextColor(ink)
+            setLinkTextColor(ink)
             setTextIsSelectable(true)
             movementMethod = LinkMovementMethod.getInstance()
             setPadding(0, 0, 0, 0)
@@ -156,7 +159,7 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
 private data class CodeBlock(val code: String, val language: String)
 
 /** A quiet code surface, with a real copy action and independent horizontal scrolling. */
-private class MarkdownCodeBlock(context: Context) : LinearLayout(context) {
+private class MarkdownCodeBlock(context: Context, private val colors: MobileColors) : LinearLayout(context) {
     private val label = TextView(context)
     private val copy = TextView(context)
     private val codeView = TextView(context)
@@ -165,11 +168,11 @@ private class MarkdownCodeBlock(context: Context) : LinearLayout(context) {
     init {
         orientation = VERTICAL
         clipToOutline = true
-        background = GradientDrawable().apply { setColor(0xFFF7F7F7.toInt()); cornerRadius = dp(12).toFloat() }
+        background = GradientDrawable().apply { setColor(this@MarkdownCodeBlock.colors.inset.toArgb()); cornerRadius = dp(12).toFloat() }
         val header = LinearLayout(context).apply { orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(16), 0, dp(6), 0) }
-        label.readingStyle(12f, 18f, 500); label.setTextColor(Secondary.toArgb())
+        label.readingStyle(12f, 18f, 500); label.setTextColor(colors.secondary.toArgb())
         copy.readingStyle(12f, 18f); copy.text = "复制代码"; copy.contentDescription = "复制代码"
-        copy.gravity = Gravity.CENTER; copy.setTextColor(Secondary.toArgb()); copy.setPadding(dp(10), 0, dp(10), 0)
+        copy.gravity = Gravity.CENTER; copy.setTextColor(colors.secondary.toArgb()); copy.setPadding(dp(10), 0, dp(10), 0)
         copy.setOnClickListener { (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("代码", original)) }
         header.addView(label, LayoutParams(0, dp(42), 1f)); header.addView(copy, LayoutParams(LayoutParams.WRAP_CONTENT, dp(42)))
         label.gravity = Gravity.CENTER_VERTICAL
@@ -177,7 +180,7 @@ private class MarkdownCodeBlock(context: Context) : LinearLayout(context) {
         val scroll = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER }
         codeView.readingStyle(14f, 22f)
         codeView.typeface = resources.getFont(app.nautilo.mobile.R.font.nautilo_code)
-        codeView.setTextColor(Ink.toArgb()); codeView.setTextIsSelectable(true)
+        codeView.setTextColor(colors.ink.toArgb()); codeView.setTextIsSelectable(true)
         codeView.setPadding(dp(16), 0, dp(16), dp(16))
         scroll.addView(codeView, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         addView(scroll, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
@@ -189,14 +192,14 @@ private class MarkdownCodeBlock(context: Context) : LinearLayout(context) {
             "javascript" -> "js"; "typescript" -> "ts"; "python" -> "py"; "kotlin" -> "kt"
             "rust" -> "rs"; "shell", "bash", "powershell" -> "sh"; else -> language
         }
-        val highlighted = if (code.length <= 40_000) highlightCode(code, "snippet.$extension") else androidx.compose.ui.text.AnnotatedString(code)
+        val highlighted = if (code.length <= 40_000) highlightCode(code, "snippet.$extension", dark = colors.dark) else androidx.compose.ui.text.AnnotatedString(code)
         codeView.text = SpannableString(code).apply {
             highlighted.spanStyles.forEach { span -> setSpan(ForegroundColorSpan(span.item.color.toArgb()), span.start, span.end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE) }
         }
     }
 }
 
-private class MarkdownTable(context: Context) : HorizontalScrollView(context) {
+private class MarkdownTable(context: Context, private val colors: MobileColors) : HorizontalScrollView(context) {
     var onCell: ((TextView) -> Unit)? = null
     private val table = TableLayout(context)
     private var parsed: Table? = null
@@ -207,10 +210,14 @@ private class MarkdownTable(context: Context) : HorizontalScrollView(context) {
         isHorizontalScrollBarEnabled = true
         overScrollMode = View.OVER_SCROLL_NEVER
         clipToOutline = true
-        background = GradientDrawable().apply { setColor(0xFFFFFFFF.toInt()); cornerRadius = dp(12).toFloat(); setStroke(dp(1), Line.toArgb()) }
+        background = GradientDrawable().apply {
+            setColor(this@MarkdownTable.colors.card.toArgb())
+            cornerRadius = dp(12).toFloat()
+            setStroke(dp(1), this@MarkdownTable.colors.divider.toArgb())
+        }
         table.orientation = LinearLayout.VERTICAL
         table.showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
-        table.dividerDrawable = GradientDrawable().apply { setColor(Line.toArgb()); setSize(1, dp(1)) }
+        table.dividerDrawable = GradientDrawable().apply { setColor(this@MarkdownTable.colors.divider.toArgb()); setSize(1, dp(1)) }
         addView(table, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
     }
     fun setTable(value: Table) { parsed = value; updateCells() }
@@ -236,9 +243,9 @@ private class MarkdownTable(context: Context) : HorizontalScrollView(context) {
         }
         rows.forEachIndexed { r, row ->
             val rowView = (table.getChildAt(r) as? TableRow) ?: TableRow(context).also { table.addView(it) }
-            rowView.setBackgroundColor(if (row.header()) 0xFFF7F7F7.toInt() else android.graphics.Color.TRANSPARENT)
+            rowView.setBackgroundColor(if (row.header()) colors.inset.toArgb() else android.graphics.Color.TRANSPARENT)
             row.columns().forEachIndexed { c, cell ->
-                val text = (rowView.getChildAt(c) as? TextView) ?: MarkdownView.textView(context).also {
+                val text = (rowView.getChildAt(c) as? TextView) ?: MarkdownView.textView(context, colors.ink.toArgb()).also {
                     it.setOnTouchListener(TableLinkTouch())
                     rowView.addView(it)
                 }

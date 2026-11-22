@@ -4,13 +4,26 @@ import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
@@ -24,11 +37,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-internal val MotionEase = CubicBezierEasing(.2f, .8f, .2f, 1f)
+internal val MotionEase = CubicBezierEasing(.22f, 1f, .36f, 1f)
 internal val LocalNautiloMotion = staticCompositionLocalOf { true }
 
 /** One observer per theme, rather than one Android settings read per control. */
 @Composable internal fun ProvideNautiloMotion(content: @Composable () -> Unit) {
+    val parentAllowsMotion = LocalNautiloMotion.current
     val resolver = LocalContext.current.contentResolver
     fun enabled() = runCatching { Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f }.getOrDefault(true)
     var motion by remember(resolver) { mutableStateOf(enabled()) }
@@ -39,32 +53,35 @@ internal val LocalNautiloMotion = staticCompositionLocalOf { true }
         resolver.registerContentObserver(Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE), false, observer)
         onDispose { resolver.unregisterContentObserver(observer) }
     }
-    CompositionLocalProvider(LocalNautiloMotion provides motion, content = content)
+    CompositionLocalProvider(LocalNautiloMotion provides (parentAllowsMotion && motion), content = content)
 }
 
-@Composable internal fun rememberEntranceProgress(key: Any?, animate: Boolean = true): Animatable<Float, androidx.compose.animation.core.AnimationVector1D> {
+@Composable internal fun rememberEntranceProgress(key: Any?, animate: Boolean = true, delayMs: Int = 0): Animatable<Float, androidx.compose.animation.core.AnimationVector1D> {
     val motion = LocalNautiloMotion.current
     val progress = remember(key) { Animatable(if (motion && animate) 0f else 1f) }
     LaunchedEffect(key, motion) {
         if (!motion) progress.snapTo(1f)
-        else if (progress.value < 1f) progress.animateTo(1f, tween(200, easing = MotionEase))
+        else if (progress.value < 1f) progress.animateTo(1f, tween(200, delayMillis = delayMs, easing = MotionEase))
     }
     return progress
 }
 
-/** Only the current page exists. There are no outgoing controls to intercept taps. */
-@Composable internal fun MotionPage(key: Any?, content: @Composable () -> Unit) {
-    val progress = rememberEntranceProgress(key)
-    Box(Modifier.graphicsLayer {
-        translationY = (1f - progress.value) * 6.dp.toPx()
-    }, propagateMinConstraints = true) { content() }
+@Composable internal fun MotionPage(page: CreationPicker?, content: @Composable (CreationPicker?) -> Unit) {
+    val motion = LocalNautiloMotion.current
+    AnimatedContent(targetState = page, modifier = Modifier.fillMaxWidth().height(422.dp), transitionSpec = {
+        val direction = if (targetState == null) -1 else 1
+        if (motion) {
+            slideInHorizontally(tween(240, easing = MotionEase)) { it * direction }
+                .togetherWith(slideOutHorizontally(tween(220, easing = MotionEase)) { -it * direction })
+        } else fadeIn(tween(0)).togetherWith(fadeOut(tween(0)))
+    }, label = "configuration-page") { current -> content(current) }
 }
 
 /** Small, one-time arrivals; streamed text updates keep their existing view. */
-@Composable internal fun MotionArrival(key: Any?, animate: Boolean, distance: Dp = 5.dp, content: @Composable () -> Unit) {
-    val progress = rememberEntranceProgress(key, animate)
+@Composable internal fun MotionArrival(key: Any?, animate: Boolean, distance: Dp = 5.dp, delayMs: Int = 0, content: @Composable () -> Unit) {
+    val progress = rememberEntranceProgress(key, animate, delayMs)
     Box(Modifier.graphicsLayer {
-        alpha = .65f + .35f * progress.value
+        alpha = progress.value
         translationY = (1f - progress.value) * distance.toPx()
     }, propagateMinConstraints = true) { content() }
 }
@@ -89,6 +106,26 @@ internal val LocalNautiloMotion = staticCompositionLocalOf { true }
             scaleX = .65f + .35f * progress
             scaleY = scaleX
             transformOrigin = TransformOrigin.Center
-        }, tint = Ink)
+        }, tint = Accent)
+    }
+}
+
+@Composable internal fun HostSignal(online: Boolean, modifier: Modifier = Modifier) {
+    val green = MobilePalette.green
+    Box(modifier.size(14.dp), contentAlignment = Alignment.Center) {
+        if (online && LocalNautiloMotion.current) {
+            val wave = rememberInfiniteTransition(label = "host-signal")
+            for (phase in 0..1) {
+                val expansion = wave.animateFloat(0f, 1f,
+                    infiniteRepeatable(tween(2100, easing = MotionEase), initialStartOffset = androidx.compose.animation.core.StartOffset(phase * 720)),
+                    label = "host-wave")
+                Box(Modifier.size(7.dp).graphicsLayer {
+                    scaleX = 1f + expansion.value * 1.4f
+                    scaleY = scaleX
+                    alpha = .35f * (1f - expansion.value)
+                }.border(1.dp, green, CircleShape))
+            }
+        }
+        Dot(online)
     }
 }

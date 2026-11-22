@@ -1,5 +1,6 @@
 package app.nautilo.mobile
 
+import android.content.res.Configuration
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.OnBackPressedDispatcherOwner
 import androidx.activity.compose.LocalActivityResultRegistryOwner
@@ -16,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -51,13 +53,14 @@ class MobileDesignSnapshotTest {
         runs = listOf(RunInfo("run", "completed", "2026-11-14T01:00:00Z", "2026-11-14T01:13:14Z")),
         messages = listOf(ChatMessage("question", "user", "这轮回归结果怎么样？", ""), ChatMessage("answer", "agent", answer, "", runId = "run")))
 
-    private fun render(state: MobileState, name: String) {
+    private fun render(state: MobileState, name: String, dark: Boolean = false, still: Boolean = false) {
         val model = Mockito.mock(MobileViewModel::class.java)
         Mockito.`when`(model.state).thenReturn(MutableStateFlow(state))
         val owner = PreviewOwner()
         val view = ComposeView(paparazzi.context).apply { setContent {
             CompositionLocalProvider(LocalOnBackPressedDispatcherOwner provides owner,
-                LocalActivityResultRegistryOwner provides owner, LocalLifecycleOwner provides owner) {
+                LocalActivityResultRegistryOwner provides owner, LocalLifecycleOwner provides owner,
+                LocalConfiguration provides previewTheme(dark), LocalNautiloMotion provides !still) {
                 NautiloApp(model, null, {})
             }
         } }
@@ -104,6 +107,18 @@ class MobileDesignSnapshotTest {
     @Test fun quietNewConversation() = render(state("").copy(screen = Screen.NewConversation,
         setup = json("agents" to org.json.JSONArray().put(json("id" to "codex", "name" to "Codex"))),
         newModels = listOf(json("id" to "gpt-6.1-sol", "displayName" to "GPT-6.1"))), "new-conversation")
+
+    @Test fun projectsAndWorkspaceSurfacesInBothThemes() {
+        val base = state("").copy(host = Host("pc", "Nautilo PC", json()), latency = 28, sessions = listOf(state("").session!!),
+            setup = json("agents" to org.json.JSONArray().put(json("id" to "codex", "name" to "Codex"))))
+        for (dark in listOf(false, true)) {
+            val theme = if (dark) "dark" else "light"
+            render(base.copy(screen = Screen.Projects), "projects-$theme", dark, still = true)
+            render(base.copy(screen = Screen.Workspace), "workspace-$theme", dark, still = true)
+            render(base.copy(screen = Screen.NewConversation, newModels = listOf(json("id" to "gpt-6.1-sol", "displayName" to "GPT-6.1 Sol",
+                "reasoningEfforts" to org.json.JSONArray(listOf("low", "high", "max")), "defaultReasoningEffort" to "max"))), "new-conversation-$theme", dark, still = true)
+        }
+    }
 
     @Test fun questionMatchesDesktopCard() = render(state("").copy(messages = emptyList(), runs = emptyList(),
         interactions = listOf(json("id" to "question", "kind" to "question", "title" to "界面偏好", "status" to "pending",
@@ -210,19 +225,20 @@ class MobileDesignSnapshotTest {
         paparazzi.gif(view, name = "chat-photo-preview", start = 0, end = 1000, fps = 10)
     }
 
-    private fun configurationPanel(name: String, height: Int, fontScale: Float) {
+    private fun configurationPanel(name: String, height: Int, fontScale: Float, dark: Boolean = false) {
         val model = Mockito.mock(MobileViewModel::class.java)
         val values = listOf("GPT-6.1-Sol", "GPT-6-Astra", "GPT-6.1 Terra", "GPT-6-Sol", "GPT-6-Luna", "GPT-5.6-Sol", "GPT-6.1-Sol Mini", "GPT-6-Sol Fast")
         val state = state("").copy(session = state("").session!!.copy(model = "model-4", connectionId = "account"),
-            setup = json("connections" to org.json.JSONArray().put(json("id" to "account", "name" to "Codex 账号 2", "kind" to "login"))),
+            setup = json("connections" to org.json.JSONArray().put(json("id" to "account", "name" to "Codex 账号 2", "kind" to "login")),
+                "agents" to org.json.JSONArray().put(json("id" to "codex", "name" to "Codex"))),
             models = values.mapIndexed { index, value -> json("id" to "model-$index", "displayName" to value,
                 "reasoningEfforts" to org.json.JSONArray(listOf("low", "medium", "high", "xhigh", "max"))) })
         val view = ComposeView(paparazzi.context).apply { setContent {
-            CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, fontScale)) {
+            CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, fontScale), LocalConfiguration provides previewTheme(dark)) {
                 NautiloTheme {
-                    Box(Modifier.fillMaxSize().background(Color(0xFFEDEDED)).padding(top = 36.dp, bottom = 28.dp), contentAlignment = Alignment.BottomCenter) {
+                    Box(Modifier.fillMaxSize().background(MobilePalette.canvas).padding(top = 36.dp, bottom = 28.dp), contentAlignment = Alignment.BottomCenter) {
                         SessionConfigurationEditor(state, model, {}) { content ->
-                            Column(Modifier.fillMaxWidth().height(height.dp).background(Color.White, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).padding(top = 14.dp)) { content() }
+                            Column(Modifier.fillMaxWidth().height(height.dp).background(MobilePalette.sheet, RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)).padding(top = 14.dp)) { content() }
                         }
                     }
                 }
@@ -230,7 +246,10 @@ class MobileDesignSnapshotTest {
         } }
         paparazzi.gif(view, name = name, start = 0, end = 1000, fps = 10)
     }
-    @Test fun modelActionsRemainVisibleInNormalSheet() = configurationPanel("model-settings-safe", 640, 1f)
+    @Test fun modelActionsRemainVisibleInNormalSheet() {
+        configurationPanel("model-settings-safe", 438, 1f)
+        configurationPanel("model-settings-dark", 438, 1f, dark = true)
+    }
     @Test fun modelActionsRemainVisibleWithKeyboardAndLargeText() = configurationPanel("model-settings-short-large", 380, 1.4f)
 
     @Test fun activeConversationKeepsCommentaryBeforeLaterTools() {
@@ -252,7 +271,8 @@ class MobileDesignSnapshotTest {
                 NautiloTheme {
                     Box(Modifier.fillMaxSize().background(Color(0xFFEDEDED)).padding(bottom = 28.dp), contentAlignment = Alignment.BottomCenter) {
                         Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).background(Color.White, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).padding(top = 14.dp)) {
-                            NewConversationSettingsContent("DeepSeek Harness", "DeepSeek API", "DeepSeek V4", "最高", true, cancel = {}, done = {}, choose = {})
+                            NewConversationSettingsContent("DeepSeek Harness", "DeepSeek API", "DeepSeek V4", "max", true,
+                                efforts = listOf("low", "medium", "high", "max"), onEffortChange = {}, cancel = {}, done = {}, choose = {})
                         }
                     }
                 }
@@ -270,7 +290,7 @@ class MobileDesignSnapshotTest {
                 NautiloTheme {
                     Box(Modifier.fillMaxSize().background(Color(0xFFEDEDED)).padding(bottom = 28.dp), contentAlignment = Alignment.BottomCenter) {
                         Column(Modifier.fillMaxWidth().height(560.dp).background(Color.White, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).padding(top = 14.dp)) {
-                            CreationChoiceContent(CreationPicker.Harness, state, "", "0", "", "", "", refresh = {}, newProject = {}, dismiss = {}, select = {})
+                            CreationChoiceContent(CreationPicker.Harness, state, "0", refresh = {}, newProject = {}, dismiss = {}, select = {})
                         }
                     }
                 }
@@ -278,6 +298,10 @@ class MobileDesignSnapshotTest {
         } }
         paparazzi.gif(view, name = "harness-picker-footer", start = 0, end = 1000, fps = 10)
     }
+}
+
+@Composable private fun previewTheme(dark: Boolean) = Configuration(LocalConfiguration.current).apply {
+    uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or if (dark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
 }
 
 /** Advances actual frames and writes the unmodified final Android-rendered bitmap. */

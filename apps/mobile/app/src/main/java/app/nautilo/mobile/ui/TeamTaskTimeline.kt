@@ -57,9 +57,10 @@ import org.json.JSONObject
 }
 
 @Composable private fun TaskOnRail(task: TeamTask, tasks: List<TeamTask>, open: (TeamTask) -> Unit, retry: ((TeamTask) -> Unit)?, connected: Boolean) {
+    val line = TeamLine
     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
         Box(Modifier.width(26.dp).fillMaxHeight().drawBehind {
-            if (connected) drawLine(TeamLine, Offset(12.dp.toPx(), 30.dp.toPx()), Offset(12.dp.toPx(), size.height), 1.dp.toPx())
+            if (connected) drawLine(line, Offset(12.dp.toPx(), 30.dp.toPx()), Offset(12.dp.toPx(), size.height), 1.dp.toPx())
         }, contentAlignment = Alignment.TopCenter) { TaskMarker(task, Modifier.padding(top = 11.dp)) }
         Box(Modifier.weight(1f).padding(start = 6.dp, bottom = 9.dp)) { TeamTaskCard(task, tasks, open, retry) }
     }
@@ -67,20 +68,21 @@ import org.json.JSONObject
 
 /** Parallel siblings attach to one bracket, never to a child-to-child arrow. */
 @Composable private fun ParallelTasks(parallel: List<TeamTask>, tasks: List<TeamTask>, open: (TeamTask) -> Unit, retry: ((TeamTask) -> Unit)?) {
+    val palette = MobilePalette
     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).testTag("parallel:${parallel.joinToString(":") { it.id }}")) {
         Box(Modifier.width(26.dp).fillMaxHeight().drawBehind {
-            drawLine(TeamLine, Offset(12.dp.toPx(), 0f), Offset(12.dp.toPx(), size.height), 1.dp.toPx())
+            drawLine(palette.divider, Offset(12.dp.toPx(), 0f), Offset(12.dp.toPx(), size.height), 1.dp.toPx())
         })
         val centers = remember(parallel.map { it.id }) { mutableStateMapOf<String, Float>() }
         val density = LocalDensity.current
-        Column(Modifier.weight(1f).padding(start = 6.dp).background(Color(0xFFF4F4F2), RoundedCornerShape(14.dp))
-            .border(.6.dp, Color(0xFFE4E4E1), RoundedCornerShape(14.dp)).padding(8.dp)
+        Column(Modifier.weight(1f).padding(start = 6.dp).background(palette.group, RoundedCornerShape(14.dp))
+            .border(.6.dp, palette.divider, RoundedCornerShape(14.dp)).padding(8.dp)
             .drawBehind {
                 val points = parallel.mapNotNull { centers[it.id] }
                 if (points.isNotEmpty()) {
                     val x = 3.dp.toPx()
-                    drawLine(Color(0xFFB7B7B4), Offset(x, points.first()), Offset(x, points.last()), 1.dp.toPx())
-                    points.forEach { y -> drawLine(Color(0xFFB7B7B4), Offset(x, y), Offset(17.dp.toPx(), y), 1.dp.toPx()) }
+                    drawLine(palette.muted, Offset(x, points.first()), Offset(x, points.last()), 1.dp.toPx())
+                    points.forEach { y -> drawLine(palette.muted, Offset(x, y), Offset(17.dp.toPx(), y), 1.dp.toPx()) }
                 }
             }, verticalArrangement = Arrangement.spacedBy(9.dp)) {
             parallel.forEach { task ->
@@ -95,20 +97,21 @@ import org.json.JSONObject
 }
 
 @Composable private fun StageJunction(fork: Boolean, label: String? = null) {
+    val palette = MobilePalette
     Row(Modifier.fillMaxWidth().height(if (label == null) 22.dp else 25.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Canvas(Modifier.width(26.dp).fillMaxHeight()) {
             val x = 12.dp.toPx(); val y = size.height / 2; val radius = 11.dp.toPx()
-            drawLine(TeamLine, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
-            drawCircle(Color(0xFFECECE9), radius, Offset(x, y))
+            drawLine(palette.divider, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
+            drawCircle(palette.inset, radius, Offset(x, y))
             val p = Path().apply {
                 if (fork) { moveTo(x, y - 5.dp.toPx()); lineTo(x, y); lineTo(x - 5.dp.toPx(), y + 5.dp.toPx()); moveTo(x, y); lineTo(x + 5.dp.toPx(), y + 5.dp.toPx()) }
                 else { moveTo(x - 5.dp.toPx(), y - 5.dp.toPx()); lineTo(x, y); lineTo(x, y + 5.dp.toPx()); moveTo(x + 5.dp.toPx(), y - 5.dp.toPx()); lineTo(x, y) }
             }
-            drawPath(p, TeamText, style = Stroke(1.4.dp.toPx(), cap = StrokeCap.Round))
+            drawPath(p, palette.ink, style = Stroke(1.4.dp.toPx(), cap = StrokeCap.Round))
         }
         label?.let { Text(it, fontSize = 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium, color = TeamSecondary,
-            modifier = Modifier.background(Color(0xFFEEEEEB), CircleShape).padding(horizontal = 11.dp, vertical = 3.dp)) }
+            modifier = Modifier.background(palette.inset, CircleShape).padding(horizontal = 11.dp, vertical = 3.dp)) }
     }
 }
 

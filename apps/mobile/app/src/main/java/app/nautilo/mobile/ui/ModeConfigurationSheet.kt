@@ -65,7 +65,7 @@ internal fun JSONObject.localized(key: String): String = optJSONObject(key)?.let
 }
 
 @Composable private fun ModeRow(title: String, detail: String, selected: Boolean, enabled: Boolean, choose: () -> Unit) {
-    NPanel(choose, enabled = enabled, color = if (selected) Selection else Color.White) {
+    NPanel(choose, enabled = enabled, color = if (selected) Selection else MobilePalette.card) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(title, fontSize = 16.sp, lineHeight = 24.sp, color = if (enabled || selected) Ink else Secondary)

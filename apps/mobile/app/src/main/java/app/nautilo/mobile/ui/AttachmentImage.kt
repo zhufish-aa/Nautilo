@@ -74,7 +74,7 @@ internal val LocalAttachmentImageLoader = staticCompositionLocalOf<AttachmentIma
 @Composable private fun AttachmentImageViewer(file: File, name: String, close: () -> Unit) {
     val bitmap by produceState<Bitmap?>(null, file) { value = withContext(Dispatchers.IO) { decodeAttachmentImage(file, 2048) } }
     Dialog(close, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        Column(Modifier.fillMaxSize().background(Color.White).statusBarsPadding().navigationBarsPadding()) {
+        Column(Modifier.fillMaxSize().background(MobilePalette.canvas).statusBarsPadding().navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 ActionIcon(Icons.Outlined.Close, "关闭图片", click = close)
                 Text(name, Modifier.weight(1f).padding(horizontal = 8.dp), maxLines = 1, fontSize = 15.sp)

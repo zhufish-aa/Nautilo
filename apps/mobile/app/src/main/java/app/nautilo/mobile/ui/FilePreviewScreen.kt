@@ -57,7 +57,7 @@ import java.nio.charset.CodingErrorAction
         value = withContext(Dispatchers.Default) { previewText(file.bytes) }
     }
     val markdown = file.path.substringAfterLast('.').lowercase() in listOf("md", "markdown")
-    Column(Modifier.fillMaxSize().background(Color.White)) {
+    Column(Modifier.fillMaxSize().background(MobilePalette.canvas)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(start = 6.dp)) {
                 Text(file.path.replace('\\', '/').substringBeforeLast('/', "文件预览"), fontSize = 11.sp, color = Secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -111,10 +111,11 @@ internal fun previewText(bytes: ByteArray): String? {
 }
 
 @Composable private fun CodeFilePreview(text: String, path: String, line: Int?, wrap: Boolean) {
+    val dark = MobilePalette.dark
     val rows = remember(text) { previewCodeRows(text) }
     val list = rememberLazyListState()
-    val result by produceState<Pair<String, AnnotatedString>?>(null, text, path) {
-        value = if (text.length <= 200_000) withContext(Dispatchers.Default) { text to highlightCode(text, path) } else null
+    val result by produceState<Pair<String, AnnotatedString>?>(null, text, path, dark) {
+        value = if (text.length <= 200_000) withContext(Dispatchers.Default) { text to highlightCode(text, path, dark = dark) } else null
     }
     val highlighted = result?.takeIf { it.first === text }?.second
     LaunchedEffect(path, line) { if (line != null) list.scrollToItem(rows.indexOfFirst { it.line == line }.coerceAtLeast(0)) }
@@ -128,9 +129,9 @@ internal fun previewText(bytes: ByteArray): String? {
         LazyColumn(Modifier.fillMaxSize().testTag("file-preview-code"), state = list, contentPadding = PaddingValues(vertical = 10.dp)) {
             itemsIndexed(rows) { _, row ->
                 val content = row.text
-                val colored by produceState(AnnotatedString(content), highlighted, content, path) {
+                val colored by produceState(AnnotatedString(content), highlighted, content, path, dark) {
                     value = highlighted?.subSequence(row.offset, row.offset + content.length)
-                        ?: if (text.length > 200_000) withContext(Dispatchers.Default) { highlightCode(content, path) } else AnnotatedString(content)
+                        ?: if (text.length > 200_000) withContext(Dispatchers.Default) { highlightCode(content, path, dark = dark) } else AnnotatedString(content)
                 }
                 Row(Modifier.fillMaxWidth().background(if (line == row.line) Selection else Color.Transparent).padding(end = 12.dp).padding(vertical = 1.dp), verticalAlignment = Alignment.Top) {
                     Text(if (row.continuation) "↳" else "${row.line}", Modifier.width(gutter).padding(end = 12.dp), color = if (line == row.line) Ink else Secondary, fontFamily = CodeFont, fontSize = 12.sp, lineHeight = 22.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)

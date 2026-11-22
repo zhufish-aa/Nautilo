@@ -31,7 +31,7 @@ import app.nautilo.mobile.data.*
     var newFolder by rememberSaveable { mutableStateOf(false) }
     var folderName by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(Unit) { model.browse() }
-    NSheet(onDismissRequest = close, containerColor = Color(0xFFFFFFFF)) {
+    NSheet(onDismissRequest = close) {
         Column(Modifier.fillMaxWidth().heightIn(max = 700.dp).padding(horizontal = 22.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("新建项目", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))

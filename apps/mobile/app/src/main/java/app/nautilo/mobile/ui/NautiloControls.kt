@@ -2,9 +2,10 @@
 package app.nautilo.mobile.ui
 
 import androidx.compose.animation.core.*
-import androidx.compose.animation.animateColorAsState
-import kotlin.math.abs
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -18,19 +19,19 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
@@ -44,32 +45,29 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 
-private class SurfaceColor(var value: Color)
-
 /** App-owned controls. Geometry, color, type and pressed states do not follow a device skin. */
 @Composable fun NPanel(onClick: (() -> Unit)? = null, modifier: Modifier = Modifier, enabled: Boolean = true,
-    shape: Shape = RoundedCornerShape(12.dp), color: Color = Color.White, contentColor: Color = Ink,
+    shape: Shape = RoundedCornerShape(12.dp), color: Color = MobilePalette.card, contentColor: Color = Ink,
     shadowElevation: Dp = 0.dp, tonalElevation: Dp = 0.dp, border: BorderStroke? = null,
     interactionSource: MutableInteractionSource? = null, content: @Composable () -> Unit) {
     val ownInteraction = remember { MutableInteractionSource() }
     val interaction = interactionSource ?: ownInteraction
     val pressed by interaction.collectIsPressedAsState()
     val motion = LocalNautiloMotion.current
-    val lastColor = remember { SurfaceColor(color) }
-    // Text contrast changes immediately when a pill switches black/white.
-    val invertContrast = abs(lastColor.value.luminance() - color.luminance()) > .35f
-    SideEffect { lastColor.value = color }
-    val pressedColor = if (color.alpha == 0f) Selection else lerp(color, if (color.luminance() < .4f) Color.White else Ink, .07f)
-    val surfaceColor by animateColorAsState(if (pressed && onClick != null && enabled) pressedColor else color,
-        tween(if (motion && !invertContrast) 120 else 0, easing = MotionEase), label = "surface-color")
-    val contentScale by animateFloatAsState(if (pressed && onClick != null && enabled) .97f else 1f,
-        if (motion) spring(dampingRatio = .78f, stiffness = 800f) else snap(), label = "surface-press")
-    var surface = modifier.shadow(shadowElevation, shape).clip(shape).background(surfaceColor)
-    if (border != null) surface = surface.border(border, shape)
+    val colors = MobilePalette
+    val active = pressed && onClick != null && enabled
+    val surfaceColor = if (!active) color else if (color == colors.primary) colors.pressed
+        else if (color.alpha == 0f) colors.tint else lerp(color, colors.ink, .06f)
+    val contentScale = animateFloatAsState(if (active && motion) if (shape == CircleShape) .94f else .985f else 1f,
+        tween(if (motion) 120 else 0, easing = MotionEase), label = "surface-press")
+    var surface = modifier
     if (onClick != null) surface = surface.clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
     CompositionLocalProvider(LocalContentColor provides contentColor) {
         Box(surface, propagateMinConstraints = true) {
-            Box(Modifier.graphicsLayer { scaleX = contentScale; scaleY = contentScale }, propagateMinConstraints = true) { content() }
+            var layer = Modifier.graphicsLayer { scaleX = contentScale.value; scaleY = contentScale.value }
+                .shadow(shadowElevation, shape).clip(shape).background(surfaceColor)
+            if (border != null) layer = layer.border(border, shape)
+            Box(layer, propagateMinConstraints = true) { content() }
         }
     }
 }
@@ -77,8 +75,8 @@ private class SurfaceColor(var value: Color)
 @Composable fun NButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     shape: Shape = RoundedCornerShape(12.dp), colors: ButtonColors? = null, contentPadding: PaddingValues = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
     content: @Composable RowScope.() -> Unit) {
-    val background = if (enabled) colors?.containerColor ?: Ink else Selection
-    val foreground = if (enabled) colors?.contentColor ?: Color.White else Secondary
+    val background = if (enabled) colors?.containerColor ?: MobilePalette.primary else MobilePalette.inset
+    val foreground = if (enabled) colors?.contentColor ?: MobilePalette.onPrimary else Secondary
     NPanel(onClick, modifier.widthIn(min = 64.dp).heightIn(min = 44.dp), enabled, shape, background, foreground) {
         CompositionLocalProvider(LocalTextStyle provides MaterialTheme.typography.labelLarge) {
             Row(Modifier.padding(contentPadding), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center, content = content)
@@ -94,7 +92,7 @@ private class SurfaceColor(var value: Color)
 @Composable fun NOutlinedButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     shape: Shape = RoundedCornerShape(12.dp), content: @Composable RowScope.() -> Unit) {
     NButton(onClick, modifier.border(1.dp, Line, shape), enabled, shape,
-        ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Ink), content = content)
+        ButtonDefaults.buttonColors(containerColor = MobilePalette.card, contentColor = Ink), content = content)
 }
 
 @Composable fun NIconButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
@@ -107,8 +105,8 @@ private class SurfaceColor(var value: Color)
 @Composable fun NFilledIconButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     colors: IconButtonColors? = null, shape: Shape = CircleShape, interactionSource: MutableInteractionSource? = null, content: @Composable () -> Unit) {
     NPanel(onClick, modifier.size(40.dp), enabled, shape,
-        if (enabled) colors?.containerColor ?: Ink else colors?.disabledContainerColor ?: Selection,
-        if (enabled) colors?.contentColor ?: Color.White else Secondary, interactionSource = interactionSource) {
+        if (enabled) colors?.containerColor ?: MobilePalette.primary else colors?.disabledContainerColor ?: MobilePalette.inset,
+        if (enabled) colors?.contentColor ?: MobilePalette.onPrimary else colors?.disabledContentColor ?: Secondary, interactionSource = interactionSource) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
     }
 }
@@ -122,13 +120,13 @@ private class SurfaceColor(var value: Color)
     var focused by remember { mutableStateOf(false) }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(7.dp)) {
         if (label != null) CompositionLocalProvider(LocalTextStyle provides MaterialTheme.typography.bodySmall, LocalContentColor provides Secondary) { label() }
-        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(shape).background(Color.White)
-            .border(1.dp, if (focused) Ink.copy(alpha = .65f) else Line, shape).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(shape).background(MobilePalette.inset)
+            .border(1.dp, if (focused) Accent.copy(alpha = .48f) else Line, shape).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             leadingIcon?.let { Box(Modifier.padding(end = 10.dp)) { it() } }
             BasicTextField(value, onValueChange, enabled = enabled, singleLine = singleLine, minLines = minLines, maxLines = maxLines,
                 visualTransformation = visualTransformation, keyboardOptions = keyboardOptions, keyboardActions = keyboardActions,
                 textStyle = TextStyle(fontFamily = UiFont, fontSize = 16.sp, lineHeight = 25.sp, color = if (enabled) Ink else Secondary),
-                cursorBrush = androidx.compose.ui.graphics.SolidColor(Ink), modifier = Modifier.weight(1f).padding(vertical = 11.dp).onFocusChanged { focused = it.isFocused },
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(Accent), modifier = Modifier.weight(1f).padding(vertical = 11.dp).onFocusChanged { focused = it.isFocused },
                 decorationBox = { field -> Box { if (value.isEmpty()) CompositionLocalProvider(LocalContentColor provides Secondary) { placeholder?.invoke() }; field() } })
             trailingIcon?.let { Box(Modifier.padding(start = 8.dp)) { it() } }
         }
@@ -137,39 +135,53 @@ private class SurfaceColor(var value: Color)
 
 @Composable fun NChip(selected: Boolean, onClick: () -> Unit, label: @Composable () -> Unit, modifier: Modifier = Modifier,
     colors: SelectableChipColors? = null, enabled: Boolean = true) {
-    NPanel(onClick, modifier, enabled, RoundedCornerShape(10.dp), if (selected) Selection else Color.White, border = BorderStroke(1.dp, if (selected) Ink.copy(alpha = .25f) else Line)) {
+    NPanel(onClick, modifier, enabled, RoundedCornerShape(10.dp), if (selected) Selection else MobilePalette.card, border = BorderStroke(1.dp, if (selected) Accent.copy(alpha = .25f) else Line)) {
         Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), contentAlignment = Alignment.Center) { label() }
     }
 }
 
 @Composable fun NDivider(modifier: Modifier = Modifier, thickness: Dp = 1.dp, color: Color = Line) { Box(modifier.fillMaxWidth().height(thickness).background(color)) }
 @Composable fun NSpinner(modifier: Modifier = Modifier, strokeWidth: Dp = 1.8.dp, color: Color = Ink) {
-    val transition = rememberInfiniteTransition(label = "loading")
-    val angle by transition.animateFloat(0f, 360f, infiniteRepeatable(tween(850, easing = LinearEasing)), label = "loading-rotation")
-    Canvas(modifier.sizeIn(minWidth = 14.dp, minHeight = 14.dp).rotate(angle)) { drawArc(color, 0f, 260f, false, style = Stroke(strokeWidth.toPx(), cap = StrokeCap.Round)) }
+    val angle = if (LocalNautiloMotion.current) rememberInfiniteTransition(label = "loading")
+        .animateFloat(0f, 360f, infiniteRepeatable(tween(850, easing = LinearEasing)), label = "loading-rotation") else null
+    Canvas(modifier.sizeIn(minWidth = 14.dp, minHeight = 14.dp).graphicsLayer { rotationZ = angle?.value ?: 0f }) {
+        val stroke = strokeWidth.toPx()
+        drawArc(color, 0f, 115f, false, topLeft = androidx.compose.ui.geometry.Offset(stroke, stroke),
+            size = androidx.compose.ui.geometry.Size(size.width - stroke * 2, size.height - stroke * 2),
+            style = Stroke(stroke, cap = StrokeCap.Round))
+    }
 }
 @Composable fun NProgress(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "progress")
-    val offset by transition.animateFloat(-.3f, 1f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "progress-position")
-    Canvas(modifier.fillMaxWidth().height(2.dp)) {
-        drawRect(Line); drawRect(Ink, topLeft = androidx.compose.ui.geometry.Offset(size.width * offset, 0f), size = androidx.compose.ui.geometry.Size(size.width * .3f, size.height))
+    val progress = if (LocalNautiloMotion.current) rememberInfiniteTransition(label = "progress")
+        .animateFloat(-1f, 3.34f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "progress-position") else null
+    Box(modifier.fillMaxWidth().height(2.dp).clip(RectangleShape).background(Line)) {
+        Box(Modifier.fillMaxWidth(.3f).fillMaxHeight().graphicsLayer { translationX = size.width * (progress?.value ?: 0f) }.background(Accent))
     }
 }
 
-@Composable fun NFloatingActionButton(onClick: () -> Unit, modifier: Modifier = Modifier, containerColor: Color = Color.White,
+@Composable fun NFloatingActionButton(onClick: () -> Unit, modifier: Modifier = Modifier, containerColor: Color = MobilePalette.card,
     contentColor: Color = Ink, content: @Composable () -> Unit) {
     NPanel(onClick, modifier.size(44.dp), shape = CircleShape, color = containerColor, contentColor = contentColor, shadowElevation = 3.dp, border = BorderStroke(.5.dp, Line)) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
     }
 }
 
-/** Custom app sheet: plain white panel, compact geometry and explicit dismissal. */
-@Composable fun NSheet(onDismissRequest: () -> Unit, containerColor: Color = Color.White, content: @Composable ColumnScope.() -> Unit) {
+/** The sheet and its picker pages share one inset-aware Android window. */
+@Composable fun NSheet(onDismissRequest: () -> Unit, containerColor: Color = MobilePalette.sheet, content: @Composable ColumnScope.() -> Unit) {
     val hostRoot = LocalView.current.rootView
+    val palette = MobilePalette
+    val motion = LocalNautiloMotion.current
+    val dismiss by rememberUpdatedState(onDismissRequest)
+    val blur = with(LocalDensity.current) { 6.dp.roundToPx() }
     // Compose 1.7's false branch ignores actual window measure specs and uses
     // screenHeightDp. Keep the normal measuring branch, with a full-size window.
     Dialog(onDismissRequest, properties = DialogProperties(usePlatformDefaultWidth = true, decorFitsSystemWindows = false)) {
-        val entrance = rememberEntranceProgress(Unit)
+        val entrance = remember { Animatable(if (motion) 0f else 1f) }
+        LaunchedEffect(motion) {
+            if (motion) entrance.animateTo(1f, tween(320, easing = MotionEase)) else entrance.snapTo(1f)
+        }
+        var drag by remember { mutableFloatStateOf(0f) }
+        val settle = remember { Animatable(0f) }
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
         val sizeWindow = remember(window) { Runnable {
             window?.apply {
@@ -181,9 +193,18 @@ private class SurfaceColor(var value: Color)
         // Dialog.updateParameters runs after its children and restores WRAP_CONTENT.
         // Queue after that update on every recomposition, including picker changes.
         SideEffect { window?.decorView?.removeCallbacks(sizeWindow); window?.decorView?.post(sizeWindow) }
-        DisposableEffect(window, hostRoot) {
+        DisposableEffect(window, hostRoot, blur) {
             // Set before the first draw, rather than in the posted size correction.
-            window?.apply { setDimAmount(0f); attributes = attributes.apply { windowAnimations = 0 } }
+            window?.apply {
+                setDimAmount(0f)
+                attributes = attributes.apply {
+                    windowAnimations = 0
+                    if (android.os.Build.VERSION.SDK_INT >= 31 && windowManager.isCrossWindowBlurEnabled) {
+                        blurBehindRadius = blur
+                        flags = flags or android.view.WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                    }
+                }
+            }
             sizeWindow.run()
             val decor = window?.decorView
             val observer = decor?.viewTreeObserver
@@ -204,21 +225,51 @@ private class SurfaceColor(var value: Color)
             }
         }
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
-            Box(Modifier.matchParentSize().drawBehind { drawRect(Color.Black.copy(alpha = .3f * entrance.value)) }.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDismissRequest))
+            Box(Modifier.matchParentSize().graphicsLayer {
+                alpha = (entrance.value * 1.45f).coerceAtMost(1f) * (1f - drag / size.height.coerceAtLeast(1f)).coerceAtLeast(0f)
+            }.background(palette.veil))
             val safePadding = WindowInsets.safeDrawing.asPaddingValues()
             BoxWithConstraints(Modifier.fillMaxSize().padding(safePadding).consumeWindowInsets(safePadding), contentAlignment = Alignment.BottomCenter) {
-                Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().heightIn(max = maxHeight * .92f).testTag("app-sheet")
-                    .graphicsLayer {
-                        // Full-width and opaque from frame one. Stretch upward
-                        // from the bottom; the footer stays inside the viewport.
-                        scaleY = .96f + .04f * entrance.value
-                        transformOrigin = TransformOrigin(.5f, 1f)
+                val density = LocalDensity.current
+                val threshold = with(density) { 88.dp.toPx() }
+                val fling = with(density) { 850.dp.toPx() }
+                val travel = with(density) { maxHeight.toPx() }
+                val sheetHeight = maxHeight * .92f
+                val shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)
+                val dismissTap = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = dismiss)
+                if (maxWidth > 640.dp) {
+                    val gutter = (maxWidth - 640.dp) / 2
+                    Spacer(Modifier.align(Alignment.CenterStart).width(gutter).fillMaxHeight().then(dismissTap))
+                    Spacer(Modifier.align(Alignment.CenterEnd).width(gutter).fillMaxHeight().then(dismissTap))
+                }
+                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Spacer(Modifier.fillMaxWidth().weight(1f).then(dismissTap))
+                    Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().heightIn(max = sheetHeight).testTag("app-sheet")
+                        .graphicsLayer {
+                            // Raise the surface from the bottom edge while keeping the
+                            // footer inside the safe area throughout the entrance.
+                            transformOrigin = TransformOrigin(.5f, 1f)
+                            scaleY = .94f + .06f * entrance.value
+                            translationY = drag
+                        }
+                        .background(containerColor, shape).border(1.dp, palette.edge, shape)) {
+                        Box(Modifier.fillMaxWidth().height(30.dp).testTag("sheet-grab-handle")
+                            .draggable(rememberDraggableState { delta -> drag = (drag + delta).coerceAtLeast(0f) },
+                                Orientation.Vertical, onDragStarted = { settle.stop() }, onDragStopped = { velocity ->
+                                    val close = drag >= threshold || (drag > 0f && velocity > fling)
+                                    if (motion) {
+                                        settle.snapTo(drag)
+                                        if (close) settle.animateTo(travel, tween(160, easing = MotionEase)) { drag = value }
+                                        else settle.animateTo(0f, spring(dampingRatio = .8f, stiffness = 550f), velocity) { drag = value.coerceAtLeast(0f) }
+                                    }
+                                    if (close) dismiss()
+                                    drag = 0f
+                                }), contentAlignment = Alignment.Center) {
+                            Box(Modifier.size(36.dp, 4.dp).background(palette.secondary.copy(alpha = .35f), CircleShape))
+                        }
+                        content()
                     }
-                    .background(containerColor, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
-                    // A hit-test barrier, not a clickable parent that merges all
-                    // fields/list semantics and competes with their tap handlers.
-                    .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }
-                    .padding(top = 14.dp), content = content)
+                }
             }
         }
     }

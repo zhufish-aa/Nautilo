@@ -30,11 +30,11 @@ import kotlinx.coroutines.withContext
 
 internal data class ColoredDiffLine(val line: DiffLine, val text: AnnotatedString)
 
-internal fun coloredLines(lines: List<DiffLine>, path: String): List<ColoredDiffLine> {
+internal fun coloredLines(lines: List<DiffLine>, path: String, dark: Boolean = false): List<ColoredDiffLine> {
     val old = lines.filter { it.kind in listOf(DiffKind.Context, DiffKind.Removed) }
     val new = lines.filter { it.kind in listOf(DiffKind.Context, DiffKind.Added) }
     fun side(values: List<DiffLine>): Map<DiffLine, AnnotatedString> {
-        val highlighted = highlightCode(values.joinToString("\n") { it.text }, path)
+        val highlighted = highlightCode(values.joinToString("\n") { it.text }, path, dark = dark)
         var offset = 0
         return values.associateWith { row -> highlighted.subSequence(offset, offset + row.text.length).also { offset += row.text.length + 1 } }
     }
@@ -62,14 +62,15 @@ internal fun coloredLines(lines: List<DiffLine>, path: String): List<ColoredDiff
         if (mode == "file") source.text("after").lines().mapIndexed { i, text -> DiffLine(DiffKind.Context, text, newNumber = i + 1) }
         else change.lines
     }
-    val coloredResult by produceState<Pair<List<DiffLine>, List<ColoredDiffLine>>?>(null, lines, state.diffPath) {
-        value = withContext(Dispatchers.Default) { lines to coloredLines(lines, state.diffPath) }
+    val palette = MobilePalette
+    val coloredResult by produceState<Pair<List<DiffLine>, List<ColoredDiffLine>>?>(null, lines, state.diffPath, palette.dark) {
+        value = withContext(Dispatchers.Default) { lines to coloredLines(lines, state.diffPath, palette.dark) }
     }
     val colored = coloredResult?.takeIf { it.first === lines }?.second
     val hunks = remember(lines) { lines.indices.filter { lines[it].kind == DiffKind.Hunk } }
     val currentHunk by remember(hunks) { derivedStateOf { hunks.indexOfLast { it <= list.firstVisibleItemIndex }.coerceAtLeast(0) } }
     Column(Modifier.fillMaxSize()) {
-        NPanel(color = Color.White.copy(alpha = .85f), shape = RoundedCornerShape(20.dp), modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        NPanel(color = palette.floating, shape = RoundedCornerShape(20.dp), modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     FileTypeIcon(change.path, large = true)
@@ -91,7 +92,7 @@ internal fun coloredLines(lines: List<DiffLine>, path: String): List<ColoredDiff
         }
         if (colored == null) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { NSpinner(Modifier.size(24.dp), strokeWidth = 2.dp) }
         else if (lines.isEmpty()) Box(Modifier.weight(1f)) { EmptyView(Icons.Outlined.Difference, if (change.verifiedDiff) "没有内容差异" else "原生 Harness 未提供差异内容") }
-        else NPanel(color = Color.White, shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp), modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
+        else NPanel(color = palette.card, shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp), modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
             BoxWithConstraints {
                 val codeWidth = if (wrap) maxWidth else maxOf(maxWidth, ((lines.maxOfOrNull { it.text.length } ?: 0) * 8 + 110).coerceAtMost(12000).dp)
                 Box(if (wrap) Modifier else Modifier.horizontalScroll(rememberScrollState())) {
@@ -118,7 +119,13 @@ internal fun coloredLines(lines: List<DiffLine>, path: String): List<ColoredDiff
 
 @Composable private fun DiffCodeRow(row: ColoredDiffLine, wrap: Boolean) {
     val line = row.line
-    val background = when (line.kind) { DiffKind.Added -> Color(0xFFEAF6EE); DiffKind.Removed -> Color(0xFFFCEEEF); DiffKind.Hunk -> Color(0xFFF5F5F5); else -> Color.White }
+    val palette = MobilePalette
+    val background = when (line.kind) {
+        DiffKind.Added -> androidx.compose.ui.graphics.lerp(palette.card, palette.green, .09f)
+        DiffKind.Removed -> androidx.compose.ui.graphics.lerp(palette.card, palette.danger, .09f)
+        DiffKind.Hunk -> palette.group
+        else -> palette.card
+    }
     Row(Modifier.fillMaxWidth().background(background).padding(vertical = if (line.kind == DiffKind.Hunk) 9.dp else 3.dp), verticalAlignment = Alignment.Top) {
         if (line.kind == DiffKind.Hunk) Text(line.text, Modifier.padding(horizontal = 14.dp), fontFamily = CodeFont, fontSize = 11.sp, lineHeight = 18.sp, color = Secondary)
         else {
@@ -133,8 +140,8 @@ internal fun coloredLines(lines: List<DiffLine>, path: String): List<ColoredDiff
 }
 
 @Composable internal fun CompactChoice(text: String, selected: Boolean, click: () -> Unit) {
-    NPanel(onClick = click, color = if (selected) Ink else Selection, shape = RoundedCornerShape(10.dp)) {
-        Text(text, Modifier.padding(horizontal = 13.dp, vertical = 9.dp), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = if (selected) Color.White else Ink)
+    NPanel(onClick = click, color = if (selected) MobilePalette.primary else Selection, shape = RoundedCornerShape(10.dp)) {
+        Text(text, Modifier.padding(horizontal = 13.dp, vertical = 9.dp), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = if (selected) MobilePalette.onPrimary else Ink)
     }
 }
 @Composable internal fun ChangeCount(added: Int, removed: Int) {

@@ -33,7 +33,10 @@ class ConfigurationSheetTest {
         }
         compose.onNodeWithTag("session-config-cancel").assertIsDisplayed()
         compose.onNodeWithTag("session-config-apply").assertIsDisplayed()
-        compose.onNodeWithTag("session-config-models").performScrollToNode(hasText("推理强度"))
+        compose.onNodeWithText("模型", substring = false).performClick()
+        compose.onNodeWithTag("creation-choice-list").performScrollToNode(hasText("模型 20"))
+        compose.onNodeWithContentDescription("返回设置").performClick()
+        compose.onNodeWithText("推理强度").performScrollTo()
         compose.onNodeWithTag("session-config-apply").assertIsDisplayed()
         compose.onNodeWithTag("session-config-cancel").performTouchInput { click() }
         assertTrue(closed)

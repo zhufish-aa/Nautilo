@@ -27,9 +27,9 @@ internal fun teamSelectionName(id: String, state: MobileState): String = if (id.
     var query by remember { mutableStateOf("") }
     Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).padding(horizontal = 20.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("协作团队", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            ActionIcon(Icons.Outlined.ArrowBack, "返回设置", click = close)
+            Text("协作团队", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             ActionIcon(Icons.Outlined.Refresh, "刷新团队", !state.setupLoading, refresh)
-            ActionIcon(Icons.Outlined.Close, "关闭团队选择", click = close)
         }
         if (state.setupLoading) NProgress(Modifier.fillMaxWidth())
         if (teams.size > 6) NField(query, { query = it }, singleLine = true, placeholder = { Text("搜索团队") },

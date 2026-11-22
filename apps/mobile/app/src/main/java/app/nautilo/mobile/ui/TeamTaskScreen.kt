@@ -32,10 +32,10 @@ import kotlinx.coroutines.delay
 import java.time.Duration
 import java.time.Instant
 
-internal val TeamCanvas = Color(0xFFFAFAF9)
-internal val TeamText = Color(0xFF161616)
-internal val TeamSecondary = Color(0xFF595959)
-internal val TeamLine = Color(0xFFDADAD8)
+internal val TeamCanvas: Color @Composable get() = MobilePalette.canvas
+internal val TeamText: Color @Composable get() = Ink
+internal val TeamSecondary: Color @Composable get() = Secondary
+internal val TeamLine: Color @Composable get() = Line
 
 @Composable fun TeamTaskScreen(state: MobileState, model: MobileViewModel) = TeamTaskContent(
     state.teamTasks, state.session?.title.orEmpty(), state.teamTasksLoading, state.teamTasksError, state.teamTasksCancelling,
@@ -115,7 +115,7 @@ internal val TeamLine = Color(0xFFDADAD8)
         }
         val progress by animateFloatAsState(if (snapshot.tasks.isEmpty()) 0f else snapshot.completed.toFloat() / snapshot.tasks.size,
             tween(if (LocalNautiloMotion.current) 260 else 0), label = "team-progress")
-        Box(Modifier.fillMaxWidth().padding(top = 9.dp).height(8.dp).clip(CircleShape).background(Color(0xFFE4E4E2))) {
+        Box(Modifier.fillMaxWidth().padding(top = 9.dp).height(8.dp).clip(CircleShape).background(MobilePalette.inset)) {
             Box(Modifier.fillMaxHeight().fillMaxWidth(progress.coerceIn(0f, 1f)).background(TeamText, CircleShape))
         }
         Row(Modifier.fillMaxWidth().padding(top = 12.dp).height(43.dp), verticalAlignment = Alignment.Bottom) {
@@ -200,7 +200,7 @@ internal val TeamLine = Color(0xFFDADAD8)
 @Composable private fun TeamMembers(snapshot: TeamTaskSnapshot) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), contentPadding = PaddingValues(vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(snapshot.members, key = { it.id }) { member ->
-            NPanel(shape = RoundedCornerShape(14.dp), border = BorderStroke(.7.dp, TeamLine), color = Color.White) {
+            NPanel(shape = RoundedCornerShape(14.dp), border = BorderStroke(.7.dp, TeamLine), color = MobilePalette.card) {
                 Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         TeamHarnessMark(member, Modifier.size(32.dp))

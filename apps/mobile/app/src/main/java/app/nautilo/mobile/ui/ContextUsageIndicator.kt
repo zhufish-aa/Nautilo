@@ -91,10 +91,12 @@ internal fun tokenLabel(value: Long?): String {
         }
         usage.percentage?.let { percent ->
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                val track = Line
+                val fill = if (percent >= 90) Danger else Accent
                 Canvas(Modifier.weight(1f).height(4.dp)) {
                     val stroke = 4.dp.toPx()
-                    drawLine(Line, Offset(0f, center.y), Offset(size.width, center.y), stroke, StrokeCap.Round)
-                    if (percent > 0) drawLine(if (percent >= 90) Danger else Ink, Offset(0f, center.y), Offset(size.width * percent / 100, center.y), stroke, StrokeCap.Round)
+                    drawLine(track, Offset(0f, center.y), Offset(size.width, center.y), stroke, StrokeCap.Round)
+                    if (percent > 0) drawLine(fill, Offset(0f, center.y), Offset(size.width * percent / 100, center.y), stroke, StrokeCap.Round)
                 }
                 Text("${kotlin.math.round(percent).toInt()}%", fontSize = 13.sp, color = Ink, fontWeight = FontWeight.Medium)
             }

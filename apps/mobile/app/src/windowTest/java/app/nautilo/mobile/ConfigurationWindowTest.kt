@@ -173,12 +173,12 @@ class ConfigurationWindowTest {
             SideEffect { root = view.rootView }
             NautiloTheme { ProcessActivity(current.value) }
         }
-        compose.onNodeWithText("最初的思考").assertIsDisplayed()
-        compose.onNodeWithText("最新的思考").assertDoesNotExist()
-        compose.runOnUiThread { current.value = current.value.copy(detail = "最初的思考\n\n最新的思考\n\n刚刚补充的内容") }
         compose.onNodeWithText("最新的思考").assertIsDisplayed()
+        compose.onNodeWithText("最初的思考").assertDoesNotExist()
+        compose.runOnUiThread { current.value = current.value.copy(detail = "最初的思考\n\n最新的思考\n\n刚刚补充的内容") }
+        compose.onNodeWithText("刚刚补充的内容").assertIsDisplayed()
         compose.runOnUiThread { current.value = current.value.copy(running = false) }
-        compose.onNodeWithText("最初的思考").assertIsDisplayed()
+        compose.onNodeWithText("刚刚补充的内容").assertIsDisplayed()
         compose.onNodeWithText("思考").performClick()
         fun collect(view: View): List<android.widget.TextView> = when (view) {
             is android.widget.TextView -> listOf(view)
@@ -190,7 +190,7 @@ class ConfigurationWindowTest {
             assertTrue(full.indexOf("最初的思考") < full.indexOf("刚刚补充的内容"))
         }
         compose.onNodeWithText("思考").performClick()
-        compose.onNodeWithText("最初的思考").assertIsDisplayed()
+        compose.onNodeWithText("刚刚补充的内容").assertIsDisplayed()
     }
 
     @Test fun pickedPhotoShowsThumbnailAndCanBeRemovedWithoutSending() {
@@ -439,7 +439,12 @@ class ConfigurationWindowTest {
             }
         }
         assertButtonWithinActualWindow("session-config-apply")
-        compose.onNodeWithTag("session-config-models").performScrollToNode(hasText("推理强度"))
+        val original = ShadowDialog.getLatestDialog()
+        compose.onNodeWithText("模型", substring = false).performClick()
+        compose.onNodeWithTag("creation-choice-list").performScrollToNode(hasText("模型 20"))
+        assertSame(original, ShadowDialog.getLatestDialog())
+        compose.onNodeWithContentDescription("返回设置").performClick()
+        compose.onNodeWithText("推理强度").performScrollTo()
         assertButtonWithinActualWindow("session-config-cancel")
         assertButtonWithinActualWindow("session-config-apply")
     }
@@ -447,7 +452,8 @@ class ConfigurationWindowTest {
     @Test fun newSessionOverviewHasWorkingFooterInTheRealWindow() {
         var done = false
         compose.setContent { NautiloTheme { NSheet({}) {
-            NewConversationSettingsContent("DeepSeek Harness", "原生配置", "DeepSeek V4", "最高", true, cancel = {}, done = { done = true }, choose = {})
+            NewConversationSettingsContent("DeepSeek Harness", "原生配置", "DeepSeek V4", "max", true,
+                efforts = listOf("low", "high", "max"), onEffortChange = {}, cancel = {}, done = { done = true }, choose = {})
         } } }
         assertButtonWithinActualWindow("new-config-cancel")
         assertButtonWithinActualWindow("new-config-apply")
@@ -455,10 +461,27 @@ class ConfigurationWindowTest {
         compose.runOnIdle { assertTrue(done) }
     }
 
+    @Test fun engineOpensOneSheetAndEffortChangesInlineBeforeDraggingItClosed() {
+        val base = state().copy(screen = Screen.NewConversation, projects = listOf(Project("project", "Nautilo")),
+            session = state().session!!.copy(agentId = "agent-0"), newModels = state().models, connected = true)
+        compose.setContent { NautiloTheme { NewConversationScreen(base, model) } }
+        compose.onNodeWithTag("starter-engine").performClick()
+        compose.waitForIdle()
+        val original = ShadowDialog.getLatestDialog()
+        assertNotNull(original)
+        compose.onNodeWithText("高", substring = false).performClick().assertIsSelected()
+        assertSame(original, ShadowDialog.getLatestDialog())
+        compose.onNodeWithTag("sheet-grab-handle").performTouchInput {
+            swipe(center, center + Offset(0f, height * 6f), durationMillis = 220)
+        }
+        compose.onNodeWithTag("app-sheet").assertDoesNotExist()
+        compose.onNodeWithTag("starter-engine").assertIsDisplayed()
+    }
+
     @Test fun harnessPickerScrollsToLastOptionWithoutLosingCancel() {
         var selected = ""
         compose.setContent { NautiloTheme {
-            CreationChoiceSheet(CreationPicker.Harness, state(), "", "agent-0", "", "", "", {}, {}, {}) { selected = it }
+            CreationChoiceSheet(CreationPicker.Harness, state(), "agent-0", {}, {}, {}) { selected = it }
         } }
         assertButtonWithinActualWindow("creation-choice-cancel")
         compose.onNodeWithTag("creation-choice-list").performScrollToNode(hasText("Harness 15"))

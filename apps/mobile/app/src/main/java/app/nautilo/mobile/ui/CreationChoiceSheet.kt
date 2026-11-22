@@ -20,23 +20,23 @@ import androidx.compose.ui.unit.sp
 import app.nautilo.mobile.MobileState
 import app.nautilo.mobile.data.*
 
-enum class CreationPicker { Project, Harness, Connection, Model, Effort, Team }
+enum class CreationPicker { Project, Harness, Connection, Model, Team }
 
 @Composable fun CreationChoiceSheet(
-    field: CreationPicker, state: MobileState, project: String, agent: String, connection: String, model: String, effort: String,
-    refresh: () -> Unit, newProject: () -> Unit, dismiss: () -> Unit, team: String = "", select: (String) -> Unit
+    field: CreationPicker, state: MobileState, selected: String,
+    refresh: () -> Unit, newProject: () -> Unit, dismiss: () -> Unit, select: (String) -> Unit
 ) {
-    NSheet(onDismissRequest = dismiss, containerColor = Color.White) {
-        CreationChoiceContent(field, state, project, agent, connection, model, effort, refresh, newProject, dismiss, team, select)
+    NSheet(onDismissRequest = dismiss) {
+        CreationChoiceContent(field, state, selected, refresh, newProject, dismiss, select = select)
     }
 }
 
 @Composable internal fun CreationChoiceContent(
-    field: CreationPicker, state: MobileState, project: String, agent: String, connection: String, model: String, effort: String,
-    refresh: () -> Unit, newProject: () -> Unit, dismiss: () -> Unit, team: String = "", select: (String) -> Unit
+    field: CreationPicker, state: MobileState, selected: String,
+    refresh: () -> Unit, newProject: () -> Unit, dismiss: () -> Unit, selectionEnabled: Boolean = true, select: (String) -> Unit
 ) {
     if (field == CreationPicker.Team) {
-        TeamChoiceContent(state, team, refresh, dismiss, select)
+        TeamChoiceContent(state, selected, refresh, dismiss, select)
         return
     }
     var query by remember { mutableStateOf("") }
@@ -45,17 +45,15 @@ enum class CreationPicker { Project, Harness, Connection, Model, Effort, Team }
         CreationPicker.Harness -> state.setup.objects("agents").map { it.text("id") to it.text("name") }
         CreationPicker.Connection -> listOf("" to "使用 Harness 原生配置") + state.setup.objects("connections").map { it.text("id") to it.text("name") }
         CreationPicker.Model -> state.newModels.map { it.text("id") to it.text("displayName", it.text("id")) }
-        CreationPicker.Effort -> state.newModels.find { it.text("id") == model }?.strings("reasoningEfforts").orEmpty().map { it to effortName(it) }
         CreationPicker.Team -> emptyList()
     }
-    val selected = when(field) { CreationPicker.Project -> project; CreationPicker.Harness -> agent; CreationPicker.Connection -> connection; CreationPicker.Model -> model; CreationPicker.Effort -> effort; CreationPicker.Team -> team }
-    val icon = when(field) { CreationPicker.Project -> Icons.Outlined.FolderOpen; CreationPicker.Harness -> Icons.Outlined.ViewInAr; CreationPicker.Connection -> Icons.Outlined.PersonOutline; CreationPicker.Model -> Icons.Outlined.Layers; CreationPicker.Effort -> Icons.Outlined.Psychology; CreationPicker.Team -> Icons.Outlined.Groups }
-        Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).padding(horizontal = 20.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    val icon = when(field) { CreationPicker.Project -> Icons.Outlined.FolderOpen; CreationPicker.Harness -> Icons.Outlined.ViewInAr; CreationPicker.Connection -> Icons.Outlined.PersonOutline; CreationPicker.Model -> Icons.Outlined.Layers; CreationPicker.Team -> Icons.Outlined.Groups }
+        Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).padding(horizontal = 20.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(when(field) { CreationPicker.Project -> "选择项目"; CreationPicker.Harness -> "选择 Harness"; CreationPicker.Connection -> "账号与供应商"; CreationPicker.Model -> "选择模型"; CreationPicker.Effort -> "推理强度"; CreationPicker.Team -> "协作团队" }, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                ActionIcon(Icons.Outlined.ArrowBack, "返回设置", click = dismiss)
+                Text(when(field) { CreationPicker.Project -> "选择项目"; CreationPicker.Harness -> "选择 Harness"; CreationPicker.Connection -> "账号与供应商"; CreationPicker.Model -> "选择模型"; CreationPicker.Team -> "协作团队" }, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                 if (field == CreationPicker.Model) ActionIcon(Icons.Outlined.Refresh, "刷新模型", !state.catalogLoading, refresh)
                 if (field == CreationPicker.Project) NTextButton(onClick = newProject) { Icon(Icons.Outlined.Add, null, Modifier.size(17.dp)); Text("新建项目", fontSize = 13.sp) }
-                ActionIcon(Icons.Outlined.Close, "关闭选择", click = dismiss)
             }
             if (field == CreationPicker.Model && state.catalogLoading) NProgress(Modifier.fillMaxWidth())
             LazyColumn(Modifier.weight(1f, fill = false).testTag("creation-choice-list"), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -63,7 +61,7 @@ enum class CreationPicker { Project, Harness, Connection, Model, Effort, Team }
                     NField(query, { query = it }, placeholder = { Text("搜索", fontSize = 14.sp, lineHeight = 20.sp) }, leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(18.dp)) }, singleLine = true, shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth())
                 }
                 items(choices.filter { it.second.contains(query, ignoreCase = true) }, key = { it.first }) { (id, title) ->
-                    NPanel(onClick = { select(id) }, color = if (selected == id) Selection else Color.Transparent, shape = RoundedCornerShape(14.dp)) {
+                    NPanel(onClick = { select(id) }, enabled = selectionEnabled, color = if (selected == id) Selection else Color.Transparent, shape = RoundedCornerShape(14.dp)) {
                         Row(Modifier.fillMaxWidth().heightIn(min = 49.dp).padding(horizontal = 13.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Icon(icon, null, Modifier.size(19.dp), tint = if (selected == id) Ink else ComposerSecondary)
                             Text(title, fontSize = 14.sp, lineHeight = 22.sp, fontWeight = if (selected == id) FontWeight.Medium else FontWeight.Normal, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)

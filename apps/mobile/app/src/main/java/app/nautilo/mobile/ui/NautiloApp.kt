@@ -4,15 +4,19 @@ package app.nautilo.mobile.ui
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.unit.dp
@@ -47,16 +51,18 @@ import com.journeyapps.barcodescanner.ScanOptions
     BackHandler(state.screen != Screen.Projects) { goBack() }
     NautiloTheme {
         val motion = LocalNautiloMotion.current
+        val palette = MobilePalette
+        val projectList = rememberLazyListState()
+        val projectScrolled by remember { derivedStateOf { projectList.canScrollBackward } }
+        val headerLine = animateFloatAsState(if (projectScrolled) 1f else 0f, tween(if (motion) 150 else 0), label = "projects-divider")
         val imageLoader: AttachmentImageLoader = remember(model, state.host?.id) { { attachment, session -> model.attachmentImage(attachment, session) } }
       CompositionLocalProvider(LocalFileOpener provides { reference -> model.previewFile(reference) }, LocalAttachmentImageLoader provides imageLoader) {
-        Column(Modifier.fillMaxSize().background(when (state.screen) {
-            Screen.NewConversation, Screen.Chat -> androidx.compose.ui.graphics.SolidColor(ChatBackground)
-            Screen.TeamTasks -> androidx.compose.ui.graphics.SolidColor(TeamCanvas)
-            else -> Backdrop
-        }).statusBarsPadding().navigationBarsPadding()) {
+        Column(Modifier.fillMaxSize().background(if (state.screen == Screen.TeamTasks) TeamCanvas else palette.canvas)
+            .statusBarsPadding().navigationBarsPadding()) {
             if (state.screen != Screen.NewConversation) {
-            Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                ActionIcon(if (state.screen == Screen.Projects) Icons.Outlined.Menu else Icons.Outlined.ArrowBack, "返回") {
+            Row(Modifier.fillMaxWidth().height(56.dp).background(palette.chrome).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                ActionIcon(if (state.screen == Screen.Projects) Icons.Outlined.Menu else Icons.Outlined.ArrowBack,
+                    if (state.screen == Screen.Projects) "电脑连接" else "返回") {
                     if (state.screen == Screen.Projects) model.navigate(Screen.Computers)
                     else goBack()
                 }
@@ -71,14 +77,21 @@ import com.journeyapps.barcodescanner.ScanOptions
                         Screen.NewConversation -> "新会话"
                         Screen.ProjectFiles -> state.fileProject?.name ?: "项目文件"
                         Screen.FilePreview -> state.filePreview.path.replace('\\','/').substringAfterLast('/')
-                    }, fontSize = if (state.screen in listOf(Screen.Projects, Screen.TeamTasks)) 23.sp else 18.sp,
-                        fontWeight = if (state.screen == Screen.TeamTasks) FontWeight.SemiBold else FontWeight.Medium,
+                    }, fontSize = if (state.screen in listOf(Screen.Projects, Screen.TeamTasks)) 20.sp else 18.sp,
+                        fontWeight = if (state.screen in listOf(Screen.Projects, Screen.TeamTasks)) FontWeight.SemiBold else FontWeight.Medium,
                         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 }
                 when (state.screen) {
                     Screen.Projects -> {
-                        ActionIcon(Icons.Outlined.Search, "搜索会话") { menu = true }
-                        ActionIcon(Icons.Outlined.Edit, "新建会话") { if (state.host == null) pairSheet = true else model.beginConversation() }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            NPanel({ menu = true }, Modifier.size(36.dp), shape = CircleShape, color = palette.inset) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.Search, "搜索会话", Modifier.size(18.dp), tint = Secondary) }
+                            }
+                            NPanel({ if (state.host == null) pairSheet = true else model.beginConversation() },
+                                Modifier.size(36.dp), shape = CircleShape, color = Selection) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.Add, "新建会话", Modifier.size(20.dp), tint = Accent) }
+                            }
+                        }
                     }
                     Screen.Chat -> {
                         ContextUsageIndicator(state, model::compactContext)
@@ -96,9 +109,10 @@ import com.journeyapps.barcodescanner.ScanOptions
                     }
                 }
             }
+            if (state.screen == Screen.Projects) NDivider(Modifier.graphicsLayer { alpha = headerLine.value })
             }
             val notice = state.error.ifBlank { state.syncIssue.ifBlank { state.connectionIssue } }
-            AnimatedVisibility(notice.isNotEmpty(), enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+            AnimatedVisibility(notice.isNotEmpty(), enter = fadeIn(tween(if (motion) 150 else 0)), exit = fadeOut(tween(if (motion) 110 else 0))) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Info, null, Modifier.size(16.dp), tint = Danger)
                     Text(notice, color = Danger, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
@@ -109,7 +123,7 @@ import com.journeyapps.barcodescanner.ScanOptions
                 fadeIn(tween(if (motion) 180 else 0)).togetherWith(fadeOut(tween(if (motion) 100 else 0)))
             }, label = "page") { screen ->
                 when (screen) {
-                    Screen.Projects -> ProjectsScreen(state, model, menu, { menu = false }, { pairSheet = true })
+                    Screen.Projects -> ProjectsScreen(state, model, menu, { menu = false }, { pairSheet = true }, projectList)
                     Screen.NewConversation -> NewConversationScreen(state, model)
                     Screen.Chat -> ChatScreen(state, model)
                     Screen.TeamTasks -> TeamTaskScreen(state, model)
@@ -121,7 +135,7 @@ import com.journeyapps.barcodescanner.ScanOptions
                 }
             }
         }
-        if (pairSheet) NSheet(onDismissRequest = { pairSheet = false }, containerColor = androidx.compose.ui.graphics.Color.White) {
+        if (pairSheet) NSheet(onDismissRequest = { pairSheet = false }) {
             Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 Text("连接电脑", style = MaterialTheme.typography.titleLarge)
                 Text("在电脑 Nautilo 的远程连接设置中生成配对码", color = Secondary, fontSize = 14.sp)

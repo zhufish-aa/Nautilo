@@ -24,7 +24,7 @@ import app.nautilo.mobile.data.Host
     var remove by remember { mutableStateOf<Host?>(null) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         if (state.pairing) item {
-            NPanel(shape = RoundedCornerShape(20.dp), color = Color.White) {
+            NPanel(shape = RoundedCornerShape(20.dp), color = MobilePalette.card) {
                 Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                     Text("在电脑上确认连接", style = MaterialTheme.typography.titleLarge)
                     Text("确认两端显示的数字相同", color = Secondary)
@@ -40,7 +40,7 @@ import app.nautilo.mobile.data.Host
         }
         items(state.hosts, key = { it.id }) { host ->
             val current = host.id == state.host?.id
-            NPanel(shape = RoundedCornerShape(24.dp), color = Color.White, border = BorderStroke(1.dp, Line)) {
+            NPanel(shape = RoundedCornerShape(24.dp), color = MobilePalette.card, border = BorderStroke(1.dp, Line)) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(48.dp).background(Selection.copy(alpha = .6f), RoundedCornerShape(15.dp)), contentAlignment = Alignment.Center) {
@@ -55,7 +55,7 @@ import app.nautilo.mobile.data.Host
                         }
                         ActionIcon(Icons.Outlined.LinkOff, "移除配对") { remove = host }
                     }
-                    if (current) NPanel(shape = RoundedCornerShape(16.dp), color = Color(0xFFF7F7F7)) {
+                    if (current) NPanel(shape = RoundedCornerShape(16.dp), color = MobilePalette.group) {
                         Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                             InfoRow("系统", state.system.let { when(it) { "macos" -> "macOS"; "windows" -> "Windows"; "linux" -> "Linux"; else -> "—" } })
                             InfoRow("连接", if (state.connected) when(state.path) { "direct" -> "P2P 直连"; "relay" -> "加密中继"; "mixed" -> "直连 / 中继"; else -> "端到端加密" } else "未连接")
@@ -71,7 +71,7 @@ import app.nautilo.mobile.data.Host
             }
         }
         item {
-            NPanel(onClick = pair, shape = RoundedCornerShape(18.dp), color = Color.White, border = BorderStroke(1.dp, Line)) {
+            NPanel(onClick = pair, shape = RoundedCornerShape(18.dp), color = MobilePalette.card, border = BorderStroke(1.dp, Line)) {
                 Row(Modifier.fillMaxWidth().padding(19.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Add, null, Modifier.size(23.dp))
                     Text(if (state.hosts.isEmpty()) "连接我的电脑" else "连接另一台电脑", Modifier.weight(1f).padding(start = 16.dp), fontSize = 15.sp)

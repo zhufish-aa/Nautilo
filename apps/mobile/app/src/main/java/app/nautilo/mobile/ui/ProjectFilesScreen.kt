@@ -29,7 +29,7 @@ import kotlinx.coroutines.delay
     LaunchedEffect(query) {
         if (query != appliedQuery) { delay(250); appliedQuery = query; model.browseProjectFiles(folder, query = query) }
     }
-    Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White).padding(horizontal = 16.dp)) {
+    Column(Modifier.fillMaxSize().background(MobilePalette.canvas).padding(horizontal = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (!state.projectFiles.isNull("parent")) ActionIcon(Icons.Outlined.ArrowUpward, "上一级目录") { open(state.projectFiles.text("parent")) }
             Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
