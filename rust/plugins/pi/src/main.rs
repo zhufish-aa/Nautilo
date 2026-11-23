@@ -5,6 +5,7 @@
 
 mod native_experience;
 mod history;
+mod thinking_stream;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -392,12 +393,32 @@ struct PiParseState {
     usage: agenthub_plugin_sdk::usage::TurnUsage,
     message_sequence: u32,
     current_message_id: Option<String>,
-    current_thinking_id: Option<String>,
+    thinking: thinking_stream::ThinkingStreams,
     streamed_text: bool,
-    streamed_thinking: bool,
     last_assistant_stop_reason: Option<String>,
     model_error: bool,
     tool_args: HashMap<String, (String, Value)>,
+}
+
+impl PiParseState {
+    fn start_message(&mut self) {
+        self.message_sequence += 1;
+        // The daemon remembers native origins across turns and worker restarts.
+        // A process-local counter can therefore attach a new reply to an old run.
+        // Allocate once per stream, not per event/run callback: idle callbacks
+        // must retain the same identity until this message actually finishes.
+        let id = Uuid::new_v4();
+        self.current_message_id = Some(format!("pi-message-{id}"));
+        self.streamed_text = false;
+        self.thinking.clear();
+    }
+
+    fn ensure_message(&mut self) {
+        // Native commands can send a complete assistant message without start.
+        if self.current_message_id.is_none() {
+            self.start_message();
+        }
+    }
 }
 
 fn pi_file_diff(name: &str, args: &Value) -> Option<Value> {
@@ -448,7 +469,12 @@ fn tool_result_text(value: &Value) -> String {
 mod subagents;
 
 fn parse_pi_rpc_event(value: &Value, state: &mut PiParseState) -> Vec<Value> {
-    let mut events = parse_pi_rpc_event_inner(value,state);
+    let mut events = if value["type"] == "tool_execution_start" {
+        state.thinking.finish_unindexed(value)
+    } else {
+        vec![]
+    };
+    events.extend(parse_pi_rpc_event_inner(value,state));
     if value["type"] == "tool_execution_update" || value["type"] == "tool_execution_end" {
         let name = value["toolName"].as_str().or_else(||state.tool_args.get(value["toolCallId"].as_str().unwrap_or("")).map(|(name,_)|name.as_str())).unwrap_or("").to_string();
         events.extend(subagents::child_events(value,&name,&mut state.child_snapshots));
@@ -464,17 +490,14 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
             if message.get("role").and_then(Value::as_str) != Some("assistant") {
                 return vec![];
             }
-            state.message_sequence += 1;
-            state.current_message_id = Some(format!("pi-message-{}", state.message_sequence));
-            state.current_thinking_id = Some(format!("pi-thinking-{}", state.message_sequence));
-            state.streamed_text = false;
-            state.streamed_thinking = false;
+            state.start_message();
             vec![]
         }
         "message_update" => {
             let delta = value.get("assistantMessageEvent").cloned().unwrap_or(Value::Null);
             match delta.get("type").and_then(Value::as_str) {
                 Some("text_delta") => {
+                    state.ensure_message();
                     state.streamed_text = true;
                     vec![json!({
                         "kind": "message",
@@ -484,16 +507,11 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
                         "raw": value
                     })]
                 }
-                Some("thinking_delta") => {
-                    state.streamed_thinking = true;
-                    vec![json!({
-                        "kind": "thinking",
-                        "text": delta.get("delta").and_then(Value::as_str).unwrap_or(""),
-                        "phase": "delta",
-                        "messageId": state.current_thinking_id.clone().map(Value::String).unwrap_or(Value::Null),
-                        "raw": value
-                    })]
+                Some("thinking_start" | "thinking_delta" | "thinking_end") => {
+                    state.ensure_message();
+                    state.thinking.update(&delta, value)
                 }
+                Some("toolcall_start") => state.thinking.finish_unindexed(value),
                 Some("error") => {
                     state.model_error = true;
                     vec![json!({
@@ -511,6 +529,7 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
             if message.get("role").and_then(Value::as_str) != Some("assistant") {
                 return vec![];
             }
+            state.ensure_message();
             let content = message.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
             let stop_reason = message.get("stopReason").and_then(Value::as_str).map(str::to_string);
             state.last_assistant_stop_reason = stop_reason.clone();
@@ -532,31 +551,7 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
                     }));
                 }
             }
-            let thinking: String = content
-                    .iter()
-                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("thinking"))
-                    .filter_map(|part| part.get("thinking").and_then(Value::as_str))
-                    .collect();
-            if !state.streamed_thinking {
-                if !thinking.is_empty() {
-                    events.push(json!({
-                        "kind": "thinking",
-                        "text": thinking,
-                        "phase": "delta",
-                        "messageId": state.current_thinking_id.clone().map(Value::String).unwrap_or(Value::Null),
-                        "raw": value
-                    }));
-                }
-            }
-            if state.streamed_thinking || content.iter().any(|part| part.get("type").and_then(Value::as_str) == Some("thinking")) {
-                events.push(json!({
-                    "kind": "thinking",
-                    "text": thinking,
-                    "phase": "completed",
-                    "messageId": state.current_thinking_id.clone().map(Value::String).unwrap_or(Value::Null),
-                    "raw": value
-                }));
-            }
+            events.extend(state.thinking.finish_message(&content, value));
             events.push(json!({
                 "kind": "message",
                 "text": "",
@@ -599,6 +594,9 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
                         .unwrap_or_else(|| format!("Pi assistant stopped with {}", stop_reason.unwrap_or_else(|| "an unknown model error".to_string())))
                 }));
             }
+            // Only a native message boundary releases the identity. A user
+            // turn boundary can arrive while a late/idle stream is still open.
+            state.current_message_id = None;
             events
         }
         "tool_execution_start" => {
@@ -1456,7 +1454,7 @@ fn handle_rpc_value(
             let _ = sender.send(json!({
                 "kind": "message",
                 "phase": "completed",
-                "messageId": "pi-compact",
+                "messageId": format!("pi-compact:{prompt_id}"),
                 "text": if nothing { "当前 Pi 会话没有可压缩的旧内容，无需压缩。" } else { "Pi 会话压缩完成。" },
                 "raw": value
             }));
@@ -1660,6 +1658,9 @@ fn copy_recursive(source: &std::path::Path, target: &std::path::Path) -> std::io
 async fn main() {
     agenthub_plugin_sdk::serve(PiPlugin::new()).await;
 }
+#[cfg(test)]
+mod stream_identity_tests;
+
 #[cfg(test)]
 mod audit_tests {
     use super::*;

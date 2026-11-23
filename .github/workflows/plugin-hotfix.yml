@@ -1,0 +1,176 @@
+name: Build Pi and Trae plugin hotfix
+
+on:
+  push:
+    branches: ['release/plugins-pi-trae-*']
+  workflow_dispatch:
+    inputs:
+      plugin_version:
+        description: Numeric plugin version (independent of desktop)
+        default: '0.2.18'
+        required: true
+        type: string
+      min_app_version:
+        description: Minimum compatible desktop version (informational in current hosts)
+        default: '0.2.16'
+        required: true
+        type: string
+      release_repository:
+        description: Future plugin-only asset repository (this workflow does not publish)
+        default: zhufish-aa/nautilo-provider-registry
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-hotfix-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PLUGIN_VERSION: ${{ inputs.plugin_version || '0.2.18' }}
+  MIN_APP_VERSION: ${{ inputs.min_app_version || '0.2.16' }}
+  RELEASE_REPOSITORY: ${{ inputs.release_repository || 'zhufish-aa/nautilo-provider-registry' }}
+  RUSTUP_TOOLCHAIN: stable
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  build:
+    name: Test and package plugins (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win32-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-gnu
+          - platform: darwin-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: darwin-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify isolated packaging scripts
+        run: node --test scripts/test/plugin-hotfix.test.mjs
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup target add ${{ matrix.target }} --toolchain stable
+      - name: Set up Windows linker
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -LiteralPath $env:GITHUB_PATH -Value 'C:\msys64\mingw64\bin'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          key: plugin-hotfix-${{ matrix.platform }}
+          cache-on-failure: true
+      - name: Test Pi and Trae, build only their release binaries, and package
+        # On Windows the default PowerShell PATH uses the same native tar as
+        # the desktop release. Git Bash's tar mistakes D:\ for a remote host.
+        run: node scripts/plugin-hotfix.mjs build --platform '${{ matrix.platform }}' --output build/plugin-hotfix-packages
+      # GitHub OIDC provenance signs the package digests. This is not OS
+      # Authenticode/Developer ID signing and uses no long-lived signing key.
+      - name: Attest plugin package provenance
+        id: provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: build/plugin-hotfix-packages/*.tgz
+      - name: Retain verification bundle
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" 'build/plugin-hotfix-packages/provenance-${{ matrix.platform }}.json'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-hotfix-${{ matrix.platform }}-packages
+          path: build/plugin-hotfix-packages/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  assemble:
+    name: Verify eight packages and prepare registry candidate
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: plugin-hotfix-*-packages
+          path: build/plugin-hotfix-input
+          merge-multiple: true
+      - name: Read current marketplace (no writes)
+        uses: actions/checkout@v4
+        with:
+          repository: zhufish-aa/nautilo-provider-registry
+          ref: main
+          path: build/plugin-hotfix-registry
+          persist-credentials: false
+      - name: Verify original package attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for package in build/plugin-hotfix-input/*.tgz; do
+            gh attestation verify "$package" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/plugin-hotfix.yml"
+          done
+      - name: Assemble plugin-only candidate
+        run: |
+          node scripts/plugin-hotfix.mjs assemble \
+            --version "$PLUGIN_VERSION" --min-app-version "$MIN_APP_VERSION" \
+            --release-repository "$RELEASE_REPOSITORY" \
+            --input build/plugin-hotfix-input \
+            --registry build/plugin-hotfix-registry/registry.json \
+            --output build/plugin-hotfix-verified
+          cp build/plugin-hotfix-input/provenance-*.json build/plugin-hotfix-verified/
+      - name: Attest the verified checksums and registry candidate
+        id: provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            build/plugin-hotfix-verified/registry.candidate.json
+            build/plugin-hotfix-verified/plugin-hotfix-manifest.json
+            build/plugin-hotfix-verified/SHA256SUMS.txt
+      - name: Retain candidate verification bundle
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" build/plugin-hotfix-verified/provenance-candidate.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-hotfix-${{ env.PLUGIN_VERSION }}-verified
+          path: build/plugin-hotfix-verified/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Record publication boundary
+        run: |
+          echo '## Plugin packages ready for separate review' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No desktop build, Release creation, asset upload, registry write or latest-release change was performed.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Publish verified plugin assets to the registry repository only after authorization. Recheck the current registry digest before applying registry.candidate.json.' >> "$GITHUB_STEP_SUMMARY"
