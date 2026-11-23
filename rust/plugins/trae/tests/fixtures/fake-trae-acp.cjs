@@ -6,9 +6,10 @@ if (args.includes('--help')) { console.log('  acp  ACP server\n  exec  Run non-i
 const emit = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
 const log = method => fs.appendFileSync(process.env.NAUTILO_TRAE_FIXTURE_LOG, JSON.stringify({ pid: process.pid, method }) + '\n');
 const result = (id, value) => emit({ id, result: value });
-const update = (type, text, sessionId = 'fixture-session') => emit({ method: 'session/update', params: {
-  sessionId, update: { sessionUpdate: type, content: { type: 'text', text } },
+const notify = (update, sessionId = 'fixture-session') => emit({ method: 'session/update', params: {
+  sessionId, update,
 }});
+const update = (type, text, sessionId) => notify({ sessionUpdate: type, content: { type: 'text', text } }, sessionId);
 let pending;
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on('line', text => {
@@ -25,8 +26,25 @@ lines.on('line', text => {
   } else if (method === 'session/prompt') {
     const prompt = params.prompt.map(item => item.text).join('');
     update('agent_message_chunk', 'OTHER SESSION MUST NOT APPEAR', 'other-session');
-    update('agent_thought_chunk', 'thought:' + prompt);
-    update('agent_message_chunk', 'reply:' + prompt);
+    if (prompt === 'first' || prompt === 'second') {
+      const toolCallId = 'read:' + prompt;
+      update('agent_thought_chunk', '');
+      update('agent_thought_chunk', 'before:' + prompt);
+      update('agent_thought_chunk', ' one');
+      notify({ sessionUpdate: 'tool_call', toolCallId, title: 'Read file', status: 'in_progress', rawInput: { path: 'a.txt' } });
+      update('agent_thought_chunk', 'after:' + prompt);
+      notify({ sessionUpdate: 'tool_call_update', toolCallId, status: 'in_progress', rawInput: { path: 'b.txt' } });
+      update('agent_thought_chunk', ' two');
+      notify({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', rawOutput: 'done' });
+      update('agent_message_chunk', 'reply:' + prompt);
+      update('agent_thought_chunk', 'more:' + prompt);
+      notify({ sessionUpdate: 'tool_call_update', toolCallId, status: 'in_progress', rawInput: { path: 'late.txt' } });
+      update('agent_message_chunk', '');
+      update('agent_thought_chunk', ' three');
+    } else {
+      update('agent_thought_chunk', 'thought:' + prompt);
+      update('agent_message_chunk', 'reply:' + prompt);
+    }
     if (prompt === 'hold') { pending = id; return; }
     if (prompt === 'oversized') { process.stdout.write('x'.repeat(65536)); pending = id; return; }
     result(id, { stopReason: 'end_turn' });

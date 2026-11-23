@@ -637,9 +637,38 @@ async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSen
 #[derive(Default)]
 struct TraeAcpParseState {
     message_id: String,
-    thinking_id: String,
+    thinking_id_prefix: String,
+    thinking_sequence: usize,
+    thinking_id: Option<String>,
     tool_names: HashMap<String, String>,
     tool_calls: HashMap<String, Value>,
+}
+
+impl TraeAcpParseState {
+    fn new(run_id: &str) -> Self {
+        Self {
+            message_id: format!("trae-message:{run_id}"),
+            thinking_id_prefix: format!("trae-thinking:{run_id}"),
+            ..Default::default()
+        }
+    }
+
+    fn open_thinking(&mut self) -> &str {
+        self.thinking_id.get_or_insert_with(|| {
+            self.thinking_sequence += 1;
+            format!("{}:{}", self.thinking_id_prefix, self.thinking_sequence)
+        })
+    }
+
+    fn finish_thinking(&mut self) -> Option<Value> {
+        self.thinking_id.take().map(|id| {
+            json!({"kind":"thinking","phase":"completed","messageId":id,"text":""})
+        })
+    }
+
+    fn after_thinking(&mut self, event: Value) -> Vec<Value> {
+        self.finish_thinking().into_iter().chain([event]).collect()
+    }
 }
 
 fn trajectory_usage(trajectory: &Value) -> Vec<Value> {
@@ -979,13 +1008,8 @@ async fn execute_acp_turn(
         id
     };
     let _ = sender.send(json!({"kind":"status","phase":"turn_started"}));
-    let mut state = TraeAcpParseState {
-        message_id: format!("trae-message:{run_id}"),
-        thinking_id: format!("trae-thinking:{run_id}"),
-        ..Default::default()
-    };
+    let mut state = TraeAcpParseState::new(run_id);
     let mut message_streamed = false;
-    let mut thinking_streamed = false;
 
     while let Some(event) = next_acp_event(rpc, idle).await? {
         match event {
@@ -993,7 +1017,6 @@ async fn execute_acp_turn(
                 let update = params.get("update").cloned().unwrap_or(Value::Null);
                 for item in parse_trae_acp_update(&update, &mut state) {
                     message_streamed |= item["kind"] == "message";
-                    thinking_streamed |= item["kind"] == "thinking";
                     if sender.send(item).is_err() { return Ok(130); }
                 }
             }
@@ -1019,8 +1042,8 @@ async fn execute_acp_turn(
                 if message_streamed {
                     let _ = sender.send(json!({"kind":"message","phase":"completed","messageId":state.message_id,"text":""}));
                 }
-                if thinking_streamed {
-                    let _ = sender.send(json!({"kind":"thinking","phase":"completed","messageId":state.thinking_id,"text":""}));
+                if let Some(thinking) = state.finish_thinking() {
+                    let _ = sender.send(thinking);
                 }
                 if let Some(usage) = result.as_ref().and_then(|value| agenthub_plugin_sdk::usage::acp_prompt_usage(&value["usage"])) {
                     let _ = sender.send(usage);
@@ -1431,14 +1454,14 @@ fn parse_trae_acp_update(value: &Value, state: &mut TraeAcpParseState) -> Vec<Va
         "agent_message_chunk" => {
             let content = value.get("content").cloned().unwrap_or(Value::Null);
             if content.get("type").and_then(Value::as_str) == Some("text") {
-                if let Some(chunk) = content.get("text").and_then(Value::as_str) {
-                    return vec![json!({
+                if let Some(chunk) = content.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                    return state.after_thinking(json!({
                         "kind": "message",
                         "phase": "delta",
                         "messageId": state.message_id,
                         "text": chunk,
                         "raw": value
-                    })];
+                    }));
                 }
             }
             vec![]
@@ -1450,7 +1473,7 @@ fn parse_trae_acp_update(value: &Value, state: &mut TraeAcpParseState) -> Vec<Va
                     return vec![json!({
                         "kind": "thinking",
                         "phase": "delta",
-                        "messageId": state.thinking_id,
+                        "messageId": state.open_thinking(),
                         "text": chunk,
                         "raw": value
                     })];
@@ -1480,23 +1503,24 @@ fn parse_tool_call(update: &Value, state: &mut TraeAcpParseState) -> Vec<Value> 
     let output = update.get("rawOutput").and_then(printable).or_else(|| update.get("content").and_then(printable));
 
     if let Some(call_id) = &call_id {
-        let previous = state.tool_calls.remove(call_id);
-        let previous_input = previous.as_ref().and_then(|p| p.get("input").cloned());
+        let previous = state.tool_calls.get(call_id);
+        if previous.is_some_and(|p| p["phase"] == "completed") {
+            return vec![];
+        }
+        let first = previous.is_none();
+        let previous_input = previous.and_then(|p| p.get("input").cloned());
         let merged_input = match (&input, previous_input.as_ref()) {
             (Some(current), previous) => Some(merge_tool_input(previous, current)),
             (None, previous) => previous.cloned(),
         };
         let next_identity = merged_input.as_ref().and_then(tool_input_identity);
-        let previous_identity = previous
-            .as_ref()
-            .and_then(|p| p.get("inputIdentity").cloned())
-            .and_then(|v| v.as_str().map(str::to_string));
-        let duplicate = previous.as_ref().is_some_and(|p| p.get("phase").and_then(Value::as_str) == Some("completed"))
-            || (!completed
-                && previous.as_ref().is_some_and(|p| p.get("phase").and_then(Value::as_str) == Some("started"))
-                && previous_identity == next_identity);
+        let previous_identity = previous.and_then(|p| p["inputIdentity"].as_str());
+        let duplicate = !first && !completed && previous_identity == next_identity.as_deref();
+        // Only the first event starts this tool. Input changes are updates, so
+        // the host won't treat them as new boundaries for a later thought.
+        let phase = if completed { "completed" } else if first { "started" } else { "updated" };
         let mut next = Map::new();
-        next.insert("phase".to_string(), json!(if completed { "completed" } else { "started" }));
+        next.insert("phase".to_string(), json!(phase));
         next.insert("input".to_string(), merged_input.clone().unwrap_or(Value::Null));
         next.insert("inputIdentity".to_string(), next_identity.map(Value::String).unwrap_or(Value::Null));
         next.insert(
@@ -1507,19 +1531,22 @@ fn parse_tool_call(update: &Value, state: &mut TraeAcpParseState) -> Vec<Value> 
         if duplicate {
             return vec![];
         }
-        return vec![json!({
+        let event = json!({
             "kind": "tool",
             "callId": call_id,
             "name": name,
-            "phase": if completed { "completed" } else { "started" },
+            "phase": phase,
             "input": merged_input.unwrap_or(Value::Null),
             "output": output.map(Value::String).unwrap_or(Value::Null),
             "success": status != "failed",
             "fileDiff": file_diff(&name, input.as_ref()).unwrap_or(Value::Null),
             "raw": update
-        })];
+        });
+        // If ACP omits a start, the first completion still separates the
+        // surrounding thoughts. Regular completions and late updates do not.
+        return if first { state.after_thinking(event) } else { vec![event] };
     }
-    vec![json!({
+    let event = json!({
         "kind": "tool",
         "callId": call_id.map(Value::String).unwrap_or(Value::Null),
         "name": name,
@@ -1529,7 +1556,8 @@ fn parse_tool_call(update: &Value, state: &mut TraeAcpParseState) -> Vec<Value> 
         "success": status != "failed",
         "fileDiff": file_diff(&name, input.as_ref()).unwrap_or(Value::Null),
         "raw": update
-    })]
+    });
+    if update["sessionUpdate"] == "tool_call" { state.after_thinking(event) } else { vec![event] }
 }
 
 #[tokio::main]

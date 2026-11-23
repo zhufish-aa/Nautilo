@@ -7,7 +7,7 @@ on:
     inputs:
       plugin_version:
         description: Numeric plugin version (independent of desktop)
-        default: '0.2.17'
+        default: '0.2.18'
         required: true
         type: string
       min_app_version:
@@ -29,7 +29,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PLUGIN_VERSION: ${{ inputs.plugin_version || '0.2.17' }}
+  PLUGIN_VERSION: ${{ inputs.plugin_version || '0.2.18' }}
   MIN_APP_VERSION: ${{ inputs.min_app_version || '0.2.16' }}
   RELEASE_REPOSITORY: ${{ inputs.release_repository || 'zhufish-aa/nautilo-provider-registry' }}
   RUSTUP_TOOLCHAIN: stable

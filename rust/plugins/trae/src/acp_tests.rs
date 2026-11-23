@@ -60,8 +60,42 @@ fn assert_stream(events: &[Value], kind: &str, id: &str, text: &str) {
     assert_eq!(stream[1]["messageId"], id);
 }
 
+fn assert_thought_segments(events: &[Value], run_id: &str, prompt: &str) {
+    let before = format!("trae-thinking:{run_id}:1");
+    let after = format!("trae-thinking:{run_id}:2");
+    let more = format!("trae-thinking:{run_id}:3");
+    let tool = format!("read:{prompt}");
+    let reply = format!("trae-message:{run_id}");
+    let recorded: Vec<_> = events.iter().filter_map(|event| {
+        let kind = event["kind"].as_str()?;
+        let phase = event["phase"].as_str()?;
+        if kind == "tool" {
+            Some((kind, phase, event["callId"].as_str()?, ""))
+        } else if kind == "thinking" || (kind == "message" && phase == "delta") {
+            Some((kind, phase, event["messageId"].as_str()?, event["text"].as_str()?))
+        } else {
+            None
+        }
+    }).collect();
+    assert_eq!(recorded, [
+        ("thinking", "delta", before.as_str(), format!("before:{prompt}").as_str()),
+        ("thinking", "delta", before.as_str(), " one"),
+        ("thinking", "completed", before.as_str(), ""),
+        ("tool", "started", tool.as_str(), ""),
+        ("thinking", "delta", after.as_str(), format!("after:{prompt}").as_str()),
+        ("tool", "updated", tool.as_str(), ""),
+        ("thinking", "delta", after.as_str(), " two"),
+        ("tool", "completed", tool.as_str(), ""),
+        ("thinking", "completed", after.as_str(), ""),
+        ("message", "delta", reply.as_str(), format!("reply:{prompt}").as_str()),
+        ("thinking", "delta", more.as_str(), format!("more:{prompt}").as_str()),
+        ("thinking", "delta", more.as_str(), " three"),
+        ("thinking", "completed", more.as_str(), ""),
+    ], "{events:?}");
+}
+
 #[tokio::test]
-async fn two_acp_prompts_share_worker_without_replay_or_stream_id_aliasing() {
+async fn two_acp_prompts_share_worker_and_split_thoughts_without_replay_or_id_aliasing() {
     let fixture = Fixture::new();
     let plugin = TraePlugin::new();
     let first = events_until_exit(plugin.start("turn-a", fixture.request("first", false), Some("fixture-session".into())).await.unwrap()).await;
@@ -73,10 +107,29 @@ async fn two_acp_prompts_share_worker_without_replay_or_stream_id_aliasing() {
     assert_eq!(runtime_ready(&first)["pid"], runtime_ready(&second)["pid"]);
     assert_stream(&first, "message", "trae-message:turn-a", "reply:first");
     assert_stream(&second, "message", "trae-message:turn-b", "reply:second");
-    assert_stream(&first, "thinking", "trae-thinking:turn-a", "thought:first");
-    assert_stream(&second, "thinking", "trae-thinking:turn-b", "thought:second");
+    assert_thought_segments(&first, "turn-a", "first");
+    assert_thought_segments(&second, "turn-b", "second");
     assert_eq!(fixture.methods(), ["initialize", "session/load", "session/prompt", "session/prompt"]);
     plugin.dispose().await;
+}
+
+#[test]
+fn thought_boundaries_do_not_emit_duplicate_or_phantom_completions() {
+    let mut state = TraeAcpParseState::new("turn");
+    let tool = |id, status| json!({"sessionUpdate":"tool_call_update","toolCallId":id,"status":status});
+    let thought = |text| json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":text}});
+    assert_eq!(parse_trae_acp_update(&tool("early", "in_progress"), &mut state).len(), 1);
+    assert!(parse_trae_acp_update(&thought(""), &mut state).is_empty());
+    assert!(state.finish_thinking().is_none());
+    let delta = parse_trae_acp_update(&thought("thinking"), &mut state);
+    let completed_only = parse_trae_acp_update(&tool("no-start", "completed"), &mut state);
+    assert_eq!(completed_only.len(), 2);
+    assert_eq!(completed_only[0]["kind"], "thinking");
+    assert_eq!(completed_only[0]["phase"], "completed");
+    assert_eq!(completed_only[0]["messageId"], delta[0]["messageId"]);
+    assert_eq!(completed_only[1]["kind"], "tool");
+    assert!(parse_trae_acp_update(&tool("no-start", "completed"), &mut state).is_empty());
+    assert!(state.finish_thinking().is_none());
 }
 
 #[tokio::test]

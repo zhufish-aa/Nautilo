@@ -64,6 +64,48 @@ fn complete_only_assistant_messages_also_get_distinct_stream_identities() {
     assert_eq!(second_id, stream_id(&second, "message", "completed"));
 }
 
+#[test]
+fn unindexed_thinking_starts_and_tool_execution_close_only_the_current_legacy_block() {
+    let mut state = PiParseState::default();
+    start(&mut state);
+    let first = delta(&mut state, "thinking_delta");
+    let next_start = parse_pi_rpc_event(&json!({"type":"message_update","assistantMessageEvent": {
+        "type":"thinking_start"
+    }}), &mut state);
+    let dismissed = stream_id(&next_start, "thinking", "completed");
+    assert_eq!(dismissed, first["messageId"].as_str().unwrap());
+    let second = delta(&mut state, "thinking_delta");
+    let tool = parse_pi_rpc_event(&json!({"type":"tool_execution_start","toolName":"read","toolCallId":"read","args":{}}), &mut state);
+    assert_eq!(stream_id(&tool, "thinking", "completed"), second["messageId"].as_str().unwrap());
+    assert_eq!(tool[1]["kind"], "tool");
+    let late_end = parse_pi_rpc_event(&json!({"type":"message_update","assistantMessageEvent": {
+        "type":"thinking_end","content":"reply"
+    }}), &mut state);
+    assert!(late_end.is_empty());
+    let third = delta(&mut state, "thinking_delta");
+    assert_ne!(first["messageId"], second["messageId"]);
+    assert_ne!(second["messageId"], third["messageId"]);
+    let end = parse_pi_rpc_event(&json!({"type":"message_end","message":{"role":"assistant","content":[
+        {"type":"thinking","thinking":"reply"},{"type":"thinking","thinking":"reply"},{"type":"thinking","thinking":"reply"}
+    ]}}), &mut state);
+    assert_eq!(stream_id(&end, "thinking", "completed"), third["messageId"].as_str().unwrap());
+    assert_eq!(end.iter().filter(|event| event["kind"] == "thinking").count(), 1);
+}
+
+#[test]
+fn indexed_thought_blocks_can_interleave_without_stealing_each_others_ids() {
+    let mut state = PiParseState::default();
+    start(&mut state);
+    let thinking_delta = |state: &mut PiParseState, index: u32| parse_pi_rpc_event(&json!({
+        "type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"part","contentIndex":index}
+    }), state).remove(0);
+    let first = thinking_delta(&mut state, 0);
+    let second = thinking_delta(&mut state, 2);
+    assert_ne!(first["messageId"], second["messageId"]);
+    assert_eq!(thinking_delta(&mut state, 0)["messageId"], first["messageId"]);
+    assert_eq!(thinking_delta(&mut state, 2)["messageId"], second["messageId"]);
+}
+
 #[derive(Default)]
 struct BackgroundChannel {
     events: Mutex<Vec<(String, Value)>>,
@@ -183,4 +225,34 @@ async fn mock_repeated_compact_commands_do_not_reuse_receipt_identity() {
     assert_success(&first);
     assert_success(&second);
     assert_ne!(stream_id(&first, "message", "completed"), stream_id(&second, "message", "completed"));
+}
+
+#[tokio::test]
+async fn mock_distinct_thoughts_have_separate_delta_replay_and_empty_completions() {
+    let plugin = PiPlugin::new();
+    let events = collect(&plugin, "segments-run", request("segments"), false).await;
+    plugin.dispose().await;
+    assert_success(&events);
+
+    let mut chunks: HashMap<&str, String> = HashMap::new();
+    let mut completed = std::collections::HashSet::new();
+    for event in events.iter().filter(|event| event["kind"] == "thinking") {
+        let id = event["messageId"].as_str().unwrap();
+        let text = event["text"].as_str().unwrap();
+        if event["phase"] == "delta" {
+            assert!(!completed.contains(id), "delta after completion: {event:?}");
+            chunks.entry(id).or_default().push_str(text);
+        } else {
+            assert_eq!(event["phase"], "completed");
+            assert!(text.is_empty(), "nonempty summaries lose delta identity on old host replay");
+            assert!(chunks.contains_key(id));
+            assert!(completed.insert(id), "same block completed twice");
+        }
+    }
+    assert_eq!(completed.len(), 3);
+    let mut texts: Vec<_> = chunks.into_values().collect();
+    texts.sort();
+    assert_eq!(texts, ["first block", "second block", "snapshot only"]);
+    assert_eq!(stream_id(&events, "message", "delta"), stream_id(&events, "message", "completed"));
+    assert!(events.iter().any(|event| event["kind"] == "message" && event["text"].as_str().is_some_and(|text| text.ends_with(":1:segments"))));
 }
