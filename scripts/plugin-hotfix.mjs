@@ -159,7 +159,12 @@ async function main() {
   const { positionals, values } = parseArgs({ allowPositionals: true, options: Object.fromEntries(['version', 'min-app-version', 'release-repository', 'release-tag', 'platform', 'binary-directory', 'output', 'input', 'registry', 'source-commit'].map(name => [name, { type: 'string' }])) });
   const [command] = positionals;
   assert(positionals.length === 1 && ['build', 'package', 'assemble'].includes(command), 'Usage: node scripts/plugin-hotfix.mjs build|package|assemble [--version 0.2.17 --min-app-version 0.2.16 ...]');
-  const options = hotfixOptions(values);
+  const options = hotfixOptions({
+    version: process.env.PLUGIN_VERSION,
+    'min-app-version': process.env.MIN_APP_VERSION,
+    'release-repository': process.env.RELEASE_REPOSITORY,
+    ...values,
+  });
   const sourceCommit = values['source-commit'] ?? run('git', ['rev-parse', 'HEAD'], { cwd: workspace });
   const output = resolve(workspace, values.output ?? `release/plugin-hotfix/${options.pluginVersion}`);
   if (command === 'assemble') {

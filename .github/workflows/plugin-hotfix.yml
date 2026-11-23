@@ -83,13 +83,9 @@ jobs:
           key: plugin-hotfix-${{ matrix.platform }}
           cache-on-failure: true
       - name: Test Pi and Trae, build only their release binaries, and package
-        shell: bash
-        run: >-
-          node scripts/plugin-hotfix.mjs build
-          --version "$PLUGIN_VERSION" --min-app-version "$MIN_APP_VERSION"
-          --release-repository "$RELEASE_REPOSITORY"
-          --platform '${{ matrix.platform }}'
-          --output build/plugin-hotfix-packages
+        # On Windows the default PowerShell PATH uses the same native tar as
+        # the desktop release. Git Bash's tar mistakes D:\ for a remote host.
+        run: node scripts/plugin-hotfix.mjs build --platform '${{ matrix.platform }}' --output build/plugin-hotfix-packages
       # GitHub OIDC provenance signs the package digests. This is not OS
       # Authenticode/Developer ID signing and uses no long-lived signing key.
       - name: Attest plugin package provenance
