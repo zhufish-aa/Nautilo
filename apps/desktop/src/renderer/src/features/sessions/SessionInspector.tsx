@@ -1,5 +1,6 @@
-import { useMemo, type ReactNode } from "react";
-import { RefreshCw } from "lucide-react";
+import { useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+import { RefreshCw, X } from "lucide-react";
 import type { RuntimeConnection } from "@agenthub/domain";
 import { accountQuotaSource, type AccountQuota, type IpcRequestMap } from "@agenthub/schemas";
 import { useAccountQuota } from "../../lib/account-quota";
@@ -13,26 +14,36 @@ import { useTeamsStore } from "../../stores/teams";
 import { useUsageStore } from "../../stores/usage";
 import { AgentPanel } from "./AgentPanel";
 import { useContextUsage } from "./ContextUsageIndicator";
+import { InspectorDisclosure } from "./InspectorDisclosure";
+import { WorkspaceDrawer } from "./WorkspaceDrawer";
 import "./session-inspector.css";
 
 const tokenFormat = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 
-export function SessionInspector({ session, events, menu, onOpenSession, compactSlot }: {
+export function SessionInspector({ session, events, lineageOnly, onClose, onOpenSession, compactSlot }: {
   session: UiSession;
   events: TimelineEvent[];
-  menu: ReactNode;
+  lineageOnly: boolean;
+  onClose: () => void;
   onOpenSession: (id: string) => void;
   compactSlot: (element: HTMLSpanElement | null) => void;
 }): JSX.Element {
-  const zh = useI18n().locale === "zh-CN";
-  return <aside className="session-inspector" aria-label={zh ? "会话信息" : "Conversation details"}>
-    <header className="session-inspector-heading"><h2>{zh ? "会话关系" : "Lineage"}</h2>{menu}</header>
+  const { t, locale } = useI18n();
+  const zh = locale === "zh-CN";
+  const title = lineageOnly ? t("sessions.workspace.agents") : zh ? "会话检查器" : "Conversation inspector";
+  const closeLabel = zh ? "收起面板" : "Close panel";
+  return <WorkspaceDrawer open onClose={onClose} title={title} resizable defaultWidth={322} minWidth={260} adjacentMinWidth={360}
+    storageKey="nautilo.session.inspector.width" hideHeader animateReview="slide"
+    className={lineageOnly ? "session-inspector" : "session-inspector session-inspector-overlay"}>
+    <header className="session-inspector-heading"><h2>{title}</h2><button type="button" className="workspace-panel-icon" onClick={onClose} title={closeLabel} aria-label={closeLabel}><X size={15} aria-hidden /></button></header>
     <div className="session-inspector-body">
-      <AgentPanel session={session} onOpenSession={onOpenSession} />
-      <ContextSection sessionId={session.id} events={events} compactSlot={compactSlot} />
-      <AccountsSection session={session} />
+      {!lineageOnly && <>
+        <ContextSection sessionId={session.id} events={events} compactSlot={compactSlot} />
+        <AccountsSection session={session} />
+      </>}
+      <AgentPanel session={session} onOpenSession={onOpenSession} showEmpty={lineageOnly} />
     </div>
-  </aside>;
+  </WorkspaceDrawer>;
 }
 
 function ContextSection({ sessionId, events, compactSlot }: {
@@ -42,8 +53,9 @@ function ContextSection({ sessionId, events, compactSlot }: {
 }): JSX.Element {
   const zh = useI18n().locale === "zh-CN";
   const { used, limit, percentage, cached } = useContextUsage(sessionId);
-  const uncached = used !== undefined && cached !== undefined ? used - cached : undefined;
-  const cachedPercent = limit && cached !== undefined ? Math.min(percentage ?? 0, 100 * cached / limit) : undefined;
+  const cachedTokens = used !== undefined && cached !== undefined ? Math.min(used, cached) : undefined;
+  const uncached = used !== undefined && cachedTokens !== undefined ? used - cachedTokens : undefined;
+  const cachedPercent = limit && cachedTokens !== undefined ? Math.min(percentage ?? 0, 100 * cachedTokens / limit) : undefined;
   const summary = useUsageStore(state => state.summaries[sessionId]);
   const instances = useAgentsStore(state => state.instances);
   const cache = useMemo(() => promptCacheRates(summary?.snapshots ?? [],
@@ -54,24 +66,24 @@ function ContextSection({ sessionId, events, compactSlot }: {
     for (const { data } of events) {
       if (data.kind === "message" && data.sender === "user") turns++;
       if (data.kind === "tool_activity" || data.kind === "command") tools++;
-      if (data.kind === "tool_group") tools += data.callCount;
     }
     return { turns, tools };
   }, [events]);
 
-  return <section className="session-inspector-section">
-    <header className="session-inspector-section-heading"><h3>{zh ? "上下文" : "Context"}</h3></header>
-    <div className="session-inspector-meter-heading">
-      <strong>{percentage === undefined ? (zh ? "占用比例未知" : "Usage percentage unavailable") : `${Math.round(percentage)}%${zh ? " 已用" : " used"}`}</strong>
-      <span>{used === undefined ? "—" : tokenFormat.format(used)} / {limit ? tokenFormat.format(limit) : "—"}</span>
-    </div>
+  const cacheLabel = cache && (zh ? `提示词缓存 ${cache.hit}% · 均值 ${cache.average}%` : `Prompt cache ${cache.hit}% · avg ${cache.average}%`);
+  const usageSummary = <span className="session-inspector-section-meta">
+    {percentage !== undefined && <strong>{Math.round(percentage)}%</strong>}
+    <span>{used === undefined ? "—" : tokenFormat.format(used)} / {limit ? tokenFormat.format(limit) : "—"}</span>
+  </span>;
+  return <InspectorDisclosure label={zh ? "上下文" : "Context"} summary={usageSummary}>
     {percentage !== undefined && <div className="session-inspector-meter" role="progressbar" aria-label={zh ? "上下文占用" : "Context used"} aria-valuenow={Math.round(percentage)}>
-      <span style={{ width: `${percentage}%` }}>{cachedPercent !== undefined && percentage > 0 && <i style={{ width: `${100 * cachedPercent / percentage}%` }} />}</span>
+      <span data-tone={cachedPercent === undefined ? "cached" : "uncached"} style={{ transform: `scaleX(${percentage / 100})` }} />
+      {cachedPercent !== undefined && <span data-tone="cached" style={{ transform: `scaleX(${cachedPercent / 100})` }} />}
     </div>}
     <dl className="session-inspector-stats">
-      {cached !== undefined && uncached !== undefined && <>
+      {cachedTokens !== undefined && uncached !== undefined && <>
         <div className="session-inspector-breakdown">
-          <dt><i data-tone="cached" />{zh ? "已缓存上下文" : "Cached context"}</dt><dd>{tokenFormat.format(cached)}</dd><dd>{limit ? `${formatPercent(cached / limit)}%` : "—"}</dd>
+          <dt><i data-tone="cached" />{zh ? "已缓存上下文" : "Cached context"}</dt><dd>{tokenFormat.format(cachedTokens)}</dd><dd>{limit ? `${formatPercent(cachedTokens / limit)}%` : "—"}</dd>
         </div>
         <div className="session-inspector-breakdown">
           <dt><i data-tone="uncached" />{zh ? "未缓存上下文" : "Uncached context"}</dt><dd>{tokenFormat.format(uncached)}</dd><dd>{limit ? `${formatPercent(uncached / limit)}%` : "—"}</dd>
@@ -82,15 +94,15 @@ function ContextSection({ sessionId, events, compactSlot }: {
         <dd>{limit !== undefined && used !== undefined ? tokenFormat.format(Math.max(0, limit - used)) : "—"}</dd>
         <dd>{percentage === undefined ? "—" : `${100 - Math.round(percentage)}%`}</dd>
       </div>
-      {cache && <div className="session-inspector-cache">
-        <dt>{zh ? "提示词缓存" : "Prompt cache"}</dt><dd>{cache.hit}% <small>· {zh ? "均值" : "avg"} {cache.average}%</small></dd>
-      </div>}
     </dl>
     <footer className="session-inspector-context-footer">
       <span>{zh ? `${turns} 轮 · ${tools} 次工具调用` : `${turns} turns · ${tools} tool calls`}</span>
+      {cache && <span className="session-inspector-cache" data-high={cache.hit >= 80} title={cacheLabel}>
+        {cache.hit >= 80 ? (zh ? "高命中" : "High hit rate") : (zh ? `缓存 ${cache.hit}%` : `Cache ${cache.hit}%`)}
+      </span>}
       <span ref={compactSlot} />
     </footer>
-  </section>;
+  </InspectorDisclosure>;
 }
 
 const formatPercent = (fraction: number): string => new Intl.NumberFormat("en", {
@@ -99,6 +111,7 @@ const formatPercent = (fraction: number): string => new Intl.NumberFormat("en", 
 
 function AccountsSection({ session }: { session: UiSession }): JSX.Element {
   const zh = useI18n().locale === "zh-CN";
+  const [dotTarget, setDotTarget] = useState<HTMLSpanElement | null>(null);
   const connections = useConnectionsStore(state => state.connections);
   const current = connections.find(account => account.id === session.connectionId);
   const target = session.target;
@@ -113,31 +126,35 @@ function AccountsSection({ session }: { session: UiSession }): JSX.Element {
   const other = connections.filter(account => account.enabled
     && account.id !== current?.id && accountQuotaSource(account));
   const revision = session.connectionRevision ?? current?.revision;
-  const nativeKimi = !session.connectionId && native?.providerId === "kimi-code";
   const activeNative = !session.connectionId && native && hasNativeQuota(native) ? native : undefined;
+  const nativeKimi = !session.connectionId && !activeNative && native?.providerId === "kimi-code";
   const otherNative = agents.filter(agent => agent.configurationKind === "harness" && agent.id !== activeNative?.id && hasNativeQuota(agent));
-  return <section className="session-inspector-section session-inspector-accounts">
-    <h3 className="sr-only">{zh ? "账号额度" : "Account limits"}</h3>
-    {current?.enabled && revision !== undefined && accountQuotaSource(current) &&
+  const otherCount = other.length + otherNative.length;
+  const currentAvailable = current?.enabled && revision !== undefined && accountQuotaSource(current);
+  if (!currentAvailable && !activeNative && !nativeKimi && !otherCount) return <></>;
+  return <InspectorDisclosure className="session-inspector-accounts" label={zh ? "账号额度" : "Account limits"}>
+    {currentAvailable && current && revision !== undefined &&
       <AccountLimits key={`${current.id}:${revision}`} account={current} lookup={{ connectionId: current.id, revision }} auto />}
     {nativeKimi && <AccountLimits key={session.id} account={{ name: native.displayName, harness: "kimi-code" }} lookup={{ sessionId: session.id }} auto />}
     {activeNative && <AccountLimits key={`${session.id}:${activeNative.updatedAt}`} account={{ name: activeNative.displayName, harness: activeNative.providerId }}
       lookup={{ sessionId: session.id }} auto unpinned />}
-    {(other.length > 0 || otherNative.length > 0) && <>
-      <h4 className="session-inspector-subheading">{zh ? "其他登录账号" : "Other signed-in accounts"}</h4>
-      {other.map(account => <AccountLimits key={`${account.id}:${account.revision}`} account={account} lookup={{ connectionId: account.id, revision: account.revision }} />)}
+    {otherCount > 0 && <InspectorDisclosure className="session-inspector-other-accounts" defaultOpen={false}
+      label={zh ? `其他 ${otherCount} 个可用账号` : `${otherCount} other accounts`}
+      summary={<span className="session-inspector-account-dots" ref={setDotTarget} />}>
+      {other.map(account => <AccountLimits key={`${account.id}:${account.revision}`} account={account} lookup={{ connectionId: account.id, revision: account.revision }} dotTarget={dotTarget} />)}
       {otherNative.map(agent => <AccountLimits key={`${agent.id}:${agent.updatedAt}`} account={{ name: agent.displayName, harness: agent.providerId }}
-        lookup={{ agentInstanceId: agent.id }} unpinned />)}
-    </>}
-  </section>;
+        lookup={{ agentInstanceId: agent.id }} unpinned dotTarget={dotTarget} />)}
+    </InspectorDisclosure>}
+  </InspectorDisclosure>;
 }
 
 
-function AccountLimits({ account, lookup, auto = false, unpinned = false }: {
+function AccountLimits({ account, lookup, auto = false, unpinned = false, dotTarget }: {
   account: Pick<RuntimeConnection, "name" | "harness">;
   lookup: IpcRequestMap["connection.quota"]["input"];
   auto?: boolean;
   unpinned?: boolean;
+  dotTarget?: HTMLSpanElement | null;
 }): JSX.Element | null {
   const { locale } = useI18n();
   const zh = locale === "zh-CN";
@@ -163,12 +180,17 @@ function AccountLimits({ account, lookup, auto = false, unpinned = false }: {
     return { reset, leftMs, marker };
   };
   if (!auto) {
-    if (windows.length === 0) return null;
-    return <>{windows.map(window => {
+    const minimum = windows.length ? Math.max(0, 100 - Math.max(...windows.map(window => window.usedPercent))) : undefined;
+    const tone = minimum === undefined ? undefined : minimum <= 15 ? "danger" : minimum <= 40 ? "warn" : "ok";
+    const dotLabel = `${account.name} · ${minimum === undefined ? (zh ? "额度未知" : "Limits unavailable") : `${Math.floor(minimum)}%`}`;
+    return <>
+    {dotTarget && createPortal(<span className="session-inspector-dot" data-status={tone} title={dotLabel}><span className="sr-only">{dotLabel}</span></span>, dotTarget)}
+    {!windows.length && <div className="session-inspector-pool"><span>{account.name}</span><small>{loading ? "…" : "—"}</small></div>}
+    {windows.map(window => {
       const title = `${account.name} · ${windowTitle(window)}`;
       const period = windowPeriod(window);
       const name = account.harness === "antigravity" && window.label ? window.label : [account.name, window.label].filter(Boolean).join(" · ");
-      const remaining = 100 - window.usedPercent;
+      const remaining = Math.max(0, 100 - window.usedPercent);
       const { reset, marker } = resets(window);
       return <div className="session-inspector-pool" key={window.id}
         title={[title, remainingQuota(window), reset && `${zh ? "重置" : "Resets"} ${reset.toLocaleString(locale)}`].filter(Boolean).join(" · ")}>
@@ -185,7 +207,7 @@ function AccountLimits({ account, lookup, auto = false, unpinned = false }: {
   return <div className="session-inspector-account">
     <div className="session-inspector-account-heading">
       <span className="session-inspector-primary-account" title={account.name}>{account.name}</span>
-      <button type="button" className="session-inspector-toggle" aria-label={refreshLabel} title={refreshLabel} disabled={loading}
+      <button type="button" className="workspace-panel-icon session-inspector-refresh" data-loading={loading} aria-label={refreshLabel} title={refreshLabel} disabled={loading}
         onClick={refresh}><RefreshCw size={13} aria-hidden /></button>
     </div>
     <div className="session-inspector-quota">
@@ -208,7 +230,6 @@ function AccountLimits({ account, lookup, auto = false, unpinned = false }: {
         const title = windowTitle(window);
         return <div key={window.id} className="session-inspector-quota-window">
           <div className="session-inspector-meter-heading">
-            <i className="session-inspector-quota-ring" aria-hidden style={{ background: `conic-gradient(var(--session-inspector-amber) ${remaining}%, var(--line-strong) 0)` }} />
             <strong title={title}>{title}</strong><span>{percent}%</span>
           </div>
           <div role="progressbar" aria-label={zh ? `${title}剩余` : `${title} remaining`} aria-valuenow={percent} className="session-inspector-quota-steps">

@@ -4,61 +4,6 @@ import { createHarness } from "./helpers/orchestration-runtime-harness.mjs";
 
 const users = (h) => h.state.events.s.filter((event) => event.data.kind === "message" && event.data.sender === "user");
 
-test("sending displays immediately, survives old history and keeps its identity after saving", async () => {
-  const h = createHarness();
-  let release;
-  h.runtime.sessionConfigWrites.set("s", new Promise((resolve) => { release = resolve; }));
-  const sending = h.runtime.sendWorkbenchMessage("s", "Hello");
-  const bubble = users(h)[0];
-  assert.equal(bubble.data.text, "Hello");
-  assert.equal(h.calls.length, 0, "message is visible before any IPC or pending config save");
-  h.runtime.replaceSessionTimeline("s", []);
-  assert.equal(users(h)[0].id, bubble.id, "old empty history cannot erase the bubble");
-  release();
-  await h.advance(500);
-  await sending;
-  assert.equal(users(h).length, 1);
-  const { messageId } = h.calls.find((call) => call.method === "session.send").params;
-  assert.equal(messageId, bubble.data.messageId);
-  h.replies["session.get"] = { session: h.session, messages: [{ id: messageId, sessionId: "s", sender: "user", kind: "chat", text: "Hello", createdAt: h.session.createdAt }] };
-  const refresh = h.runtime.refreshStandaloneSessionState(h.session);
-  await h.advance(100);
-  await refresh;
-  assert.equal(users(h).length, 1);
-  assert.equal(users(h)[0].id, bubble.id, "persistence must not remount the message");
-  assert.equal(h.runtime.pendingMessages.has("s"), false);
-});
-
-test("identical queued messages have independent identities and remain visible before acknowledgement", async () => {
-  const h = createHarness();
-  h.replies["session.followUp"] = { accepted: true, mode: "queue" };
-  const first = h.runtime.sendWorkbenchFollowUp("s", "again", "queue");
-  const second = h.runtime.sendWorkbenchFollowUp("s", "again", "queue");
-  const bubbles = users(h);
-  assert.equal(bubbles.length, 2);
-  assert.notEqual(bubbles[0].id, bubbles[1].id);
-  h.runtime.replaceSessionTimeline("s", [bubbles[0]]);
-  assert.deepEqual(Array.from(users(h), (row) => row.id), Array.from(bubbles, (row) => row.id));
-  await h.advance(100);
-  await Promise.all([first, second]);
-});
-
-test("a pending steer splits a tool group before the durable user message arrives", () => {
-  const h = createHarness();
-  const time = second => `2026-11-03T00:00:0${second}.000Z`;
-  const command = second => ({ id: `command-${second}`, sessionId: "s", runId: "r", sequence: second, timestamp: time(second), data: { kind: "command", status: "done" } });
-  const before = command(1);
-  const after = command(3);
-  const pending = { id: "message-steer", sessionId: "s", sequence: 1, timestamp: time(4), data: { kind: "message", sender: "user", messageId: "steer" } };
-  const group = { ...before, data: { kind: "tool_group", items: [before, after] } };
-  h.runtime.pendingMessages.set("s", new Map([["steer", pending]]));
-  const receipt = { type: "session.follow_up_steered", sequence: 2, timestamp: time(2), payload: { messageId: "steer" } };
-  h.runtime.replaceSessionTimeline("s", [group], [receipt]);
-  assert.deepEqual(Array.from(h.state.events.s, row => row.id), ["command-1", "message-steer", "command-3"]);
-  assert.equal(h.runtime.pendingMessages.get("s").get("steer"), pending);
-  assert.equal(h.runtime.needsStandalonePersistenceSync([receipt]), true);
-});
-
 test("a late standalone history read cannot reset a conversation that just became a team run", async () => {
   const h = createHarness();
   const oldRead = h.runtime.hydrateStandaloneSession(h.session);
@@ -86,45 +31,13 @@ test("first team message materializes on the already-mounted workbench without r
   };
   const unregister = h.runtime.registerStandaloneSessionView("s");
   const sending = h.runtime.sendWorkbenchMessage("s", "Use my team");
-  const firstId = users(h)[0].id;
   await h.advance(650);
   await sending;
   assert.equal(h.state.sessions.find((session) => session.id === "s").projectRunId, "pr");
   assert.equal(h.runtime.projectSessionBuilt.has("s"), true);
   assert.equal(users(h).length, 1);
-  assert.equal(users(h)[0].id, firstId);
-  assert.equal(h.runtime.pendingMessages.has("s"), false, "the displayed bubble is now the durable message");
+  assert.equal(users(h)[0].data.text, "Use my team");
   unregister();
-});
-
-test("streamed assistant reply keeps its row key after being saved", () => {
-  const h = createHarness();
-  const stream = { schemaVersion: 1, eventId: "delta", sessionId: "s", projectId: "p", runId: "r", sequence: 1, timestamp: "2026-11-03T00:00:01Z", type: "agent.message_delta", payload: { messageId: "provider-item", text: "Hello" } };
-  const before = h.runtime.buildStandaloneTimeline([], [stream], []);
-  const after = h.runtime.buildStandaloneTimeline([{ id: "saved-message", sessionId: "s", runId: "r", sender: "agent", kind: "chat", text: "Hello", createdAt: stream.timestamp }], [stream], []);
-  assert.equal(before[0].id, after[0].id);
-  assert.equal(after.length, 1);
-  assert.notEqual(after[0].data.streaming, true);
-});
-
-test("interleaved OMP replies stay in place when the second reply is saved first", () => {
-  const { runtime } = createHarness();
-  const a = "omp-message-11111111-1111-4111-8111-111111111111";
-  const b = "omp-message-22222222-2222-4222-8222-222222222222";
-  const event = (sequence, type, payload) => ({ schemaVersion: 1, eventId: `e${sequence}`, sessionId: "s", projectId: "p", runId: "r", sequence, timestamp: `2026-11-03T00:00:0${sequence}Z`, type, payload });
-  const streams = [event(1, "agent.message_delta", { messageId: a, text: "A…" }), event(2, "agent.message_delta", { messageId: b, text: "B…" })];
-  const save = (sequence, providerMessageId, messageId, text) => [
-    event(sequence, "agent.message", { providerMessageId, messageId, text }),
-    { id: messageId, sessionId: "s", runId: "r", sender: "agent", kind: "chat", text, createdAt: `2026-11-03T00:00:0${sequence}Z` }
-  ];
-  const [doneB, persistedB] = save(3, b, "saved-b", "B complete");
-  const [doneA, persistedA] = save(4, a, "saved-a", "A complete");
-  const before = runtime.buildStandaloneTimeline([], streams, []);
-  const during = runtime.buildStandaloneTimeline([persistedB], [...streams, doneB], []);
-  const after = runtime.buildStandaloneTimeline([persistedB, persistedA], [...streams, doneB, doneA], []);
-  const view = (rows) => Array.from(rows, ({ id, data }) => [id, data.text, Boolean(data.streaming)]);
-  assert.deepEqual(view(during), [[before[0].id, "A…", true], [before[1].id, "B complete", false]]);
-  assert.deepEqual(view(after), [[before[0].id, "A complete", false], [before[1].id, "B complete", false]]);
 });
 
 for (const outcome of ['steer', 'queue', 'error']) {

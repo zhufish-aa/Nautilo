@@ -29,6 +29,7 @@ pub mod process;
 pub mod event_stream;
 pub mod extension_ui;
 pub mod session_pool;
+pub mod runtime_tools;
 pub mod history;
 pub mod history_files;
 pub mod capabilities;

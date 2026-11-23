@@ -1,0 +1,64 @@
+:root {
+  --br-bg-canvas: #F3F5F8;
+  --br-bg-chrome: #ECEFF4;
+  --br-bg-toolbar: #FFFFFF;
+  --br-bg-recessed: #F4F6FA;
+  --br-bg-hover: rgba(15, 23, 42, 0.05);
+  --br-bg-active: rgba(15, 23, 42, 0.09);
+  --br-bg-selected: rgba(15, 23, 42, 0.025);
+  --br-border-subtle: rgba(15, 23, 42, 0.06);
+  --br-border-default: rgba(15, 23, 42, 0.10);
+  --br-border-strong: rgba(15, 23, 42, 0.18);
+  --br-highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  --br-text-primary: #0F172A;
+  --br-text-secondary: #475569;
+  --br-text-muted: #94A3B8;
+  --br-accent: #2563EB;
+  --br-accent-soft: rgba(37, 99, 235, 0.09);
+  --br-accent-border: rgba(37, 99, 235, 0.32);
+  --br-action: #2563EB;
+  --br-action-text: #FFFFFF;
+  --br-emerald: #047857;
+  --br-emerald-soft: rgba(16, 185, 129, 0.12);
+  --br-amber: #92400E;
+  --br-amber-soft: rgba(245, 158, 11, 0.13);
+  --br-amber-border: rgba(245, 158, 11, 0.36);
+  --br-danger: #B91C1C;
+  --br-danger-soft: rgba(248, 113, 113, 0.13);
+  --br-danger-border: rgba(248, 113, 113, 0.36);
+  --br-overlay: rgba(255, 255, 255, 0.91);
+  --br-shadow: rgba(15, 23, 42, 0.12);
+  --br-shadow-device: rgba(15, 23, 42, 0.19);
+  --br-dot-grid: rgba(15, 23, 42, 0.09);
+  --br-spot: rgba(37, 99, 235, 0.10);
+  --br-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --br-spring: cubic-bezier(0.34, 1.35, 0.64, 1);
+}
+
+:root[data-theme="dark"], .dark {
+  --br-bg-canvas: #090B0E;
+  --br-bg-chrome: #0A0C10;
+  --br-bg-toolbar: #0D0F14;
+  --br-bg-recessed: #080A0E;
+  --br-bg-hover: rgba(255, 255, 255, 0.05);
+  --br-bg-active: rgba(255, 255, 255, 0.08);
+  --br-bg-selected: rgba(255, 255, 255, 0.025);
+  --br-border-subtle: rgba(255, 255, 255, 0.06);
+  --br-border-default: rgba(255, 255, 255, 0.09);
+  --br-border-strong: rgba(255, 255, 255, 0.16);
+  --br-highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --br-text-primary: #F1F5F9;
+  --br-text-secondary: #94A3B8;
+  --br-text-muted: #525B6B;
+  --br-accent: #3B82F6;
+  --br-accent-soft: rgba(59, 130, 246, 0.12);
+  --br-accent-border: rgba(59, 130, 246, 0.36);
+  --br-emerald: #10B981;
+  --br-amber: #F59E0B;
+  --br-danger: #F87171;
+  --br-overlay: rgba(10, 12, 16, 0.88);
+  --br-shadow: rgba(0, 0, 0, 0.32);
+  --br-shadow-device: rgba(0, 0, 0, 0.55);
+  --br-dot-grid: rgba(255, 255, 255, 0.07);
+  --br-spot: rgba(59, 130, 246, 0.10);
+}

@@ -69,7 +69,7 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
             override fun configureTheme(builder: MarkwonTheme.Builder) {
                 builder.linkColor(colors.ink.toArgb()).isLinkUnderlined(true)
                     .codeBackgroundColor(colors.inset.toArgb()).codeTextColor(colors.ink.toArgb())
-                    .codeTypeface(resources.getFont(app.nautilo.mobile.R.font.nautilo_code))
+                    .codeTypeface(readingTypeface(context))
                     .codeTextSize((15 * resources.displayMetrics.scaledDensity).toInt())
                     .headingTypeface(readingTypeface(context, 600))
                     .headingTextSizeMultipliers(floatArrayOf(1.45f, 1.28f, 1.14f, 1.06f, 1f, 1f))
@@ -179,7 +179,6 @@ private class MarkdownCodeBlock(context: Context, private val colors: MobileColo
         addView(header, LayoutParams(LayoutParams.MATCH_PARENT, dp(42)))
         val scroll = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER }
         codeView.readingStyle(14f, 22f)
-        codeView.typeface = resources.getFont(app.nautilo.mobile.R.font.nautilo_code)
         codeView.setTextColor(colors.ink.toArgb()); codeView.setTextIsSelectable(true)
         codeView.setPadding(dp(16), 0, dp(16), dp(16))
         scroll.addView(codeView, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))

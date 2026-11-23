@@ -47,7 +47,7 @@
 .policy-rule-labels { padding: 7px 0 13px; font-size: 12px; color: var(--ink-2); }
 .policy-rule { min-height: 55px; }
 .policy-rule-number { color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; }
-.policy-rule > input { height: 34px; padding: 0 8px; background: transparent; border-color: transparent; font-family: "JetBrains Mono Variable", "Noto Sans SC Variable", monospace; font-size: 13px; }
+.policy-rule > input { height: 34px; padding: 0 8px; background: transparent; border-color: transparent; font-family: var(--app-font-sans); font-size: 13px; }
 .policy-rule > input:hover { border-color: var(--line); }
 .settings-content .policy-rule > .ui-field { border-color: transparent; background: transparent; box-shadow: none; border-radius: 5px; font-size: 14px; font-weight: 500; color: var(--ink); }
 .settings-content .policy-rule > .ui-field:focus { border-color: var(--line-strong); background: var(--card-hover); box-shadow: 0 0 0 2px var(--accent-soft); }

@@ -13,7 +13,6 @@ import "./session-error.css";
 function lastAction(events: TimelineEvent[] | undefined): TimelineEvent | undefined {
   for (let at = (events?.length ?? 0) - 1; at >= 0; at -= 1) {
     const event = events![at]!;
-    if (event.data.kind === "tool_group") { const found = lastAction(event.data.items); if (found) return found; }
     if (event.data.kind === "error" || (event.data.kind === "message" && event.data.sender !== "system")) return event;
   }
   return undefined;

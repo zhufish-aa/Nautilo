@@ -65,12 +65,6 @@ export function latestTodoGoal(events: TimelineEvent[]): TodoGoalItem[] | undefi
     const data = events[index].data;
     const direct = fromActivity(data);
     if (direct) return direct;
-    if (data.kind === "tool_group") {
-      for (let item = data.items.length - 1; item >= 0; item -= 1) {
-        const grouped = fromActivity(data.items[item].data);
-        if (grouped) return grouped;
-      }
-    }
   }
   return undefined;
 }

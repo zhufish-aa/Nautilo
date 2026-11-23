@@ -117,7 +117,7 @@
   padding-inline: 3px;
   border: 1px solid var(--model-divider);
   border-radius: 4px;
-  font: 400 10px/1 ui-monospace, monospace;
+  font: 400 10px/1 var(--app-font-sans);
   text-transform: uppercase;
 }
 .model-search-clear {

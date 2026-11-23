@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use agenthub_plugin_sdk::process::{self, ProcessEvent, ProcessRequest};
 use base64::Engine;
-use agenthub_plugin_sdk::{DaemonChannel, ProviderPlugin};
+use agenthub_plugin_sdk::{DaemonChannel, ProviderPlugin, runtime_tools::{RuntimeTools, ToolRoute}};
 
 /// The Pi extension loaded by every run (MCP bridge + PowerShell tool +
 /// provider config). Written to a temp file; loaded via --extension.
@@ -207,183 +207,11 @@ fn agenthub_pi_extension_path() -> String {
     path.to_string_lossy().into_owned()
 }
 
-// ---------------------------------------------------------------- runtime tool bridge
-
-/// Serves run-scoped daemon tools to the Pi extension over loopback HTTP.
-/// One long-lived server per plugin process; each run registers under a
-/// random URL token that acts as the capability.
-struct PiRuntimeToolServer {
-    port: Mutex<Option<u16>>,
-    registrations: Arc<Mutex<HashMap<String, (Vec<Value>, Arc<dyn DaemonChannel>, String)>>>,
-    shutdown: Mutex<Option<std::sync::mpsc::Sender<()>>>,
-}
-
-impl PiRuntimeToolServer {
-    fn new() -> Self {
-        Self { port: Mutex::new(None), registrations: Arc::new(Mutex::new(HashMap::new())), shutdown: Mutex::new(None) }
-    }
-
-    fn ensure_started(&self) -> std::io::Result<u16> {
-        if let Some(port) = *self.port.lock().unwrap() {
-            return Ok(port);
-        }
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let port = listener.local_addr()?.port();
-        let (shutdown_sender, shutdown) = std::sync::mpsc::channel::<()>();
-        let registrations = self.registrations.clone();
-        std::thread::spawn(move || loop {
-            if shutdown.try_recv().is_ok() {
-                return;
-            }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let registrations = registrations.clone();
-                    std::thread::spawn(move || {
-                        let _ = handle_bridge_connection(stream, &registrations);
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(_) => return,
-            }
-        });
-        *self.port.lock().unwrap() = Some(port);
-        *self.shutdown.lock().unwrap() = Some(shutdown_sender);
-        Ok(port)
-    }
-
-    fn register(&self, tools: Vec<Value>, channel: Arc<dyn DaemonChannel>, run_id: &str) -> Option<String> {
-        let port = self.ensure_started().ok()?;
-        let token = Uuid::new_v4().to_string().replace('-', "");
-        self.registrations.lock().unwrap().insert(token.clone(), (tools, channel, run_id.to_string()));
-        Some(format!("http://127.0.0.1:{port}/mcp/{token}"))
-    }
-
-    fn unregister(&self, url: Option<&str>) {
-        let Some(url) = url else { return };
-        let token = url.rsplit('/').next().unwrap_or("");
-        self.registrations.lock().unwrap().remove(token);
-    }
-
-    fn close(&self) {
-        self.registrations.lock().unwrap().clear();
-        if let Some(sender) = self.shutdown.lock().unwrap().take() {
-            let _ = sender.send(());
-        }
-        *self.port.lock().unwrap() = None;
-    }
-}
-
 fn public_tool_name(name: &str) -> &str {
     name.strip_prefix("agenthub.").or_else(|| name.strip_prefix("agenthub_")).unwrap_or(name)
 }
 
-fn handle_bridge_connection(
-    mut stream: std::net::TcpStream,
-    registrations: &Arc<Mutex<HashMap<String, (Vec<Value>, Arc<dyn DaemonChannel>, String)>>>,
-) -> std::io::Result<()> {
-    use std::io::{BufRead, BufReader, Read, Write};
-    stream.set_nonblocking(false)?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(());
-    }
-    let method = request_line.split_whitespace().next().unwrap_or("").to_string();
-    let target = request_line.split_whitespace().nth(1).unwrap_or("/").to_string();
-    let pathname = target.split('?').next().unwrap_or("/");
-    let mut content_length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = trimmed.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-    let mut body = vec![0u8; content_length.min(20 * 1024 * 1024)];
-    reader.read_exact(&mut body)?;
 
-    let local = stream.peer_addr().map(|address| address.ip().is_loopback()).unwrap_or(false);
-    let token = pathname.strip_prefix("/mcp/").unwrap_or("");
-    let registration = registrations.lock().unwrap().get(token).cloned();
-    if !local || registration.is_none() {
-        stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")?;
-        return Ok(());
-    }
-    let (tools, channel, run_id) = registration.unwrap();
-    if method == "DELETE" {
-        stream.write_all(b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")?;
-        return Ok(());
-    }
-    if method != "POST" {
-        stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")?;
-        return Ok(());
-    }
-    let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let id = message.get("id").cloned();
-    if id.is_none() || id == Some(Value::Null) {
-        stream.write_all(b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")?;
-        return Ok(());
-    }
-    let id = id.unwrap();
-    let rpc_method = message.get("method").and_then(Value::as_str).unwrap_or("");
-    let reply = |result: Value| json!({ "jsonrpc": "2.0", "id": id, "result": result });
-    let fail = |code: i64, text: &str| json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": text } });
-    let response = match rpc_method {
-        "initialize" => reply(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "agenthub-runtime", "version": "0.1.0" }
-        })),
-        "tools/list" => reply(json!({
-            "tools": tools.iter().map(|tool| json!({
-                "name": public_tool_name(tool.get("name").and_then(Value::as_str).unwrap_or("")),
-                "description": tool.get("description").cloned().unwrap_or(Value::Null),
-                "inputSchema": tool.get("inputSchema").cloned().unwrap_or_else(|| json!({ "type": "object" }))
-            })).collect::<Vec<_>>()
-        })),
-        "tools/call" => {
-            let params = message.get("params").cloned().unwrap_or(Value::Null);
-            let requested = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let tool = tools.iter().find(|entry| public_tool_name(entry.get("name").and_then(Value::as_str).unwrap_or("")) == requested);
-            match tool {
-                Some(tool) => {
-                    let name = tool.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                    let channel = channel.clone();
-                    let run_id = run_id.clone();
-                    let result = std::thread::scope(|_| {
-                        tokio::runtime::Handle::current().block_on(channel.call_tool(&run_id, &name, arguments))
-                    });
-                    let success = result.get("success").and_then(Value::as_bool).unwrap_or(false);
-                    let content = result.get("content").and_then(Value::as_str).unwrap_or("").to_string();
-                    reply(json!({ "isError": !success, "content": [{ "type": "text", "text": content }] }))
-                }
-                None => reply(json!({
-                    "isError": true,
-                    "content": [{ "type": "text", "text": format!("Unknown Nautilo tool: {requested}") }]
-                })),
-            }
-        }
-        other => fail(-32601, &format!("Method not found: {other}")),
-    };
-    let body = serde_json::to_vec(&response).unwrap_or_default();
-    stream.write_all(
-        format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).as_bytes(),
-    )?;
-    stream.write_all(&body)?;
-    stream.flush()
-}
 
 // ---------------------------------------------------------------- RPC event parsing
 
@@ -691,7 +519,7 @@ struct PiPlugin {
     pool: agenthub_plugin_sdk::session_pool::SessionPool<PiResident>,
     channel: Mutex<Option<Arc<dyn DaemonChannel>>>,
     runs: Arc<Mutex<HashMap<String, agenthub_plugin_sdk::process::ProcessHandle>>>,
-    terminal_resources:Mutex<HashMap<String,(PiSkills,PiRuntimeToolServer)>>,
+    terminal_resources:Mutex<HashMap<String,PiSkills>>,
 }
 #[cfg(test)] #[path="../../../../tests/fixtures/native_session_checks.rs"] mod native_session_checks;
 #[cfg(test)] #[tokio::test] async fn native_resident_conformance(){native_session_checks::exercise(&PiPlugin::new(),"pi").await;}
@@ -713,12 +541,12 @@ impl ProviderPlugin for PiPlugin {
     fn native_terminal_supported(&self)->bool {true}
     async fn release_session(&self,request:&Value)->anyhow::Result<()> {if let Some(native)=self.pool.retire(request["localSessionId"].as_str().unwrap_or("")){native.close().await;}Ok(())}
     async fn terminal_plan(&self,request:&Value,resume:Option<String>)->anyhow::Result<Value> {
-        let(mut plan,skills,tools)=prepare_pi(request,&resume,&None,"terminal")?;
+        let(mut plan,skills)=prepare_pi(request,&resume,None)?;
         if let Some(index)=plan.args.windows(2).position(|args|args==["--mode","rpc"]){plan.args.drain(index..index+2);}
-        let token=Uuid::new_v4().to_string();self.terminal_resources.lock().unwrap().insert(token.clone(),(skills,tools));
+        let token=Uuid::new_v4().to_string();self.terminal_resources.lock().unwrap().insert(token.clone(),skills);
         Ok(json!({"command":plan.command,"args":plan.args,"env":plan.env,"token":token}))
     }
-    async fn close_terminal(&self,token:&str){if let Some((skills,tools))=self.terminal_resources.lock().unwrap().remove(token){tools.close();skills.cleanup();}}
+    async fn close_terminal(&self,token:&str){if let Some(skills)=self.terminal_resources.lock().unwrap().remove(token){skills.cleanup();}}
     fn descriptor(&self) -> Value {
         descriptor()
     }
@@ -830,7 +658,7 @@ impl ProviderPlugin for PiPlugin {
 
     async fn dispose(&self) {
         for native in self.pool.drain() { native.close().await; }
-        for (_,(skills,tools)) in self.terminal_resources.lock().unwrap().drain(){tools.close();skills.cleanup();}
+        for (_,skills) in self.terminal_resources.lock().unwrap().drain(){skills.cleanup();}
     }
 
     async fn cancel(&self, run_id: &str) {
@@ -1059,7 +887,7 @@ struct PiResident {
     session_id:Option<String>,
     process: Option<process::StartedProcess>,
     skills: Option<PiSkills>,
-    tools: Option<PiRuntimeToolServer>,
+    tools: Option<RuntimeTools>,
     parse_state: Arc<Mutex<PiParseState>>,
 }
 impl PiResident {
@@ -1077,7 +905,7 @@ impl Drop for PiResident {
         }
     }
 }
-fn prepare_pi(request: &Value, resume: &Option<String>, channel: &Option<Arc<dyn DaemonChannel>>, run_id: &str) -> anyhow::Result<(ProcessRequest,PiSkills,PiRuntimeToolServer)> {
+fn prepare_pi(request: &Value, resume: &Option<String>, tools: Option<&RuntimeTools>) -> anyhow::Result<(ProcessRequest,PiSkills)> {
     let instance = request.get("instance").cloned().unwrap_or(Value::Null);
     let mut env = env_of(&request);
     if instance.pointer("/providerOptions/runtimeConnectionId").is_none() {
@@ -1085,31 +913,8 @@ fn prepare_pi(request: &Value, resume: &Option<String>, channel: &Option<Arc<dyn
     }
     configure_pi_provider_environment(&instance, &mut env);
 
-    let runtime_tools = request.get("runtimeTools").and_then(Value::as_array).cloned().unwrap_or_default();
-    let tool_server = PiRuntimeToolServer::new();
-    let tool_url = if !runtime_tools.is_empty() && channel.is_some() {
-        // A dedicated server per plugin process; the channel is required.
-        let channel = channel.clone().unwrap();
-        let server = &tool_server;
-        // The plugin process owns one shared server; register per run.
-        let url = {
-            let port = server.ensure_started().ok();
-            port.map(|port| {
-                let token = Uuid::new_v4().to_string().replace('-', "");
-                server.registrations.lock().unwrap().insert(token.clone(), (runtime_tools.clone(), channel, run_id.to_string()));
-                format!("http://127.0.0.1:{port}/mcp/{token}")
-            })
-        };
-        url
-    } else {
-        None
-    };
-    anyhow::ensure!(runtime_tools.is_empty() || tool_url.is_some(), "Pi runtime tool bridge failed to start");
-    let extra_servers: Vec<Value> = tool_url
-        .as_ref()
-        .map(|url| vec![json!({ "transport": "http", "name": "agenthub", "url": url })])
-        .unwrap_or_default();
-    configure_pi_mcp_environment(&request, &mut env, extra_servers);
+    configure_pi_mcp_environment(request,&mut env,tools.map(RuntimeTools::server).into_iter().collect());
+    agenthub_plugin_sdk::runtime_tools::bypass_loopback_proxy(&mut env);
     let permission_mode = request.get("permissionMode").and_then(Value::as_str).unwrap_or("standard");
     if cfg!(windows) && permission_mode != "read-only" {
         env.insert("AGENTHUB_PI_ENABLE_POWERSHELL".to_string(), "1".to_string());
@@ -1161,11 +966,12 @@ fn prepare_pi(request: &Value, resume: &Option<String>, channel: &Option<Arc<dyn
         max_output_bytes: None,
         ..Default::default()
     };
-    Ok((plan,skills,tool_server))
+    Ok((plan,skills))
 }
 async fn open_pi(request:&Value,resume:&Option<String>,channel:&Option<Arc<dyn DaemonChannel>>,run_id:&str)->anyhow::Result<PiResident>{
-    let(plan,skills,tools)=prepare_pi(request,resume,channel,run_id)?;
-    match process::start(&plan) {Ok(started)=>Ok(PiResident{session_id:None,process:Some(started),skills:Some(skills),tools:Some(tools),parse_state:Arc::new(Mutex::new(PiParseState::default()))}),Err(error)=>{tools.close();skills.cleanup();Err(error.into())}}
+    let tools=RuntimeTools::start(request,channel.clone(),ToolRoute::Run(run_id.to_owned()),"agenthub",public_tool_name).await?;
+    let(plan,skills)=prepare_pi(request,resume,tools.as_ref())?;
+    match process::start(&plan) {Ok(started)=>Ok(PiResident{session_id:None,process:Some(started),skills:Some(skills),tools,parse_state:Arc::new(Mutex::new(PiParseState::default()))}),Err(error)=>{skills.cleanup();Err(error.into())}}
 }
 
 async fn run_pi(
@@ -1196,9 +1002,7 @@ async fn run_pi(
         if resume.is_some() && cached.session_id==resume && previous == identity && cached.process.as_ref().is_some_and(|process|process.handle.is_alive()) { reused=true;cached }
         else { cached.close().await; open_pi(&request,&resume,&channel,run_id).await? }
     } else { open_pi(&request,&resume,&channel,run_id).await? };
-    if let (Some(tools),Some(channel)) = (&native.tools,&channel) {
-        for registration in tools.registrations.lock().unwrap().values_mut() { registration.1=channel.clone(); registration.2=run_id.to_string(); }
-    }
+    if let Some(tools) = &native.tools { tools.bind(ToolRoute::Run(run_id.to_owned())); }
     let selected_model = effective_pi_model(&request["instance"], request["model"].as_str());
     let started = native.process.as_mut().unwrap();
     started.events.pause().await;
@@ -1372,9 +1176,7 @@ async fn run_pi(
     if result.is_ok() && !failed && handle.is_alive() && !sender.is_closed() {
         if let (Some(host),Some(binding))=(&channel,request["sessionBindingId"].as_str()) {
             let idle_channel=agenthub_plugin_sdk::session_channel(&channel,&request);
-            if let (Some(tools),Some(channel))=(&native.tools,&idle_channel) {
-                for registration in tools.registrations.lock().unwrap().values_mut(){registration.1=channel.clone();}
-            }
+            if let Some(tools)=&native.tools {tools.bind(ToolRoute::Session(binding.to_owned()));}
             let sink=agenthub_plugin_sdk::session_sink(host.clone(),binding.into()).await;
             let idle_handle=handle.clone();let idle_run=run_id.to_string();
             native.process.as_ref().unwrap().events.observe_idle_with_pending(Arc::new(move |event| {
@@ -1664,6 +1466,60 @@ mod stream_identity_tests;
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pi_extension_calls_builtin_tools_with_a_proxy_configured() {
+        struct Daemon;
+        impl DaemonChannel for Daemon {
+            fn ask(&self, _: &str, _: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
+                panic!("unexpected interaction")
+            }
+            fn call_tool(&self, run_id: &str, name: &str, args: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
+                let receipt = format!("{run_id}:{name}:{}", args["task"].as_str().unwrap());
+                Box::pin(async move { json!({"success":true,"content":receipt}) })
+            }
+        }
+
+        let request = json!({
+            "runtimeTools":[
+                {"name":"agenthub_delegate","inputSchema":{"type":"object"}},
+                {"name":"agenthub_workflow_submit","inputSchema":{"type":"object"}},
+            ],
+            "env":{
+                "HTTP_PROXY":"http://127.0.0.1:1",
+                "http_proxy":"http://127.0.0.1:1",
+                "NODE_USE_ENV_PROXY":"1",
+                "NO_PROXY":"fixture.example",
+                "no_proxy":"fixture.example"
+            }
+        });
+        let bridge = RuntimeTools::start(
+            &request, Some(Arc::new(Daemon)), ToolRoute::Run("turn".into()), "agenthub", public_tool_name,
+        ).await.unwrap().unwrap();
+        let (plan, _) = prepare_pi(&request, &None, Some(&bridge)).unwrap();
+        let env = plan.env.unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), tokio::process::Command::new("node")
+            .envs(["AGENTHUB_PI_MCP_SERVERS", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY"]
+                .map(|key| (key, &env[key])))
+            .args(["--input-type=module", "--eval", r#"
+                import assert from "node:assert/strict";
+                import { pathToFileURL } from "node:url";
+                const { default: install } = await import(pathToFileURL(process.argv[1]));
+                const tools = new Map(), hooks = new Map();
+                await install({ registerTool: tool => tools.set(tool.name, tool), on: (name, hook) => hooks.set(name, hook) });
+                for (const name of ["delegate", "workflow_submit"]) {
+                    const tool = tools.get("mcp_agenthub_" + name);
+                    assert.ok(tool, "Missing tool " + name);
+                    const receipt = await tool.execute("call", {task: "inspect"});
+                    assert.equal(receipt.content[0].text, "turn:agenthub_" + name + ":inspect");
+                }
+                await hooks.get("session_shutdown")();
+            "#, &agenthub_pi_extension_path()])
+            .kill_on_drop(true).output()).await.unwrap().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(env["NO_PROXY"].split(',').any(|host| host == "fixture.example"));
+    }
+
     #[test]
     fn tool_progress_reuses_the_call_and_does_not_finish_it() {
         let mut state = PiParseState::default();

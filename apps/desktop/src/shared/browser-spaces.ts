@@ -6,6 +6,10 @@ export interface BrowserSpace {
   selectedTabId?: string;
   title: string;
   url: string;
+  favicon?: string;
+  loaded: boolean;
+  errors: number;
+  hasSession: boolean;
   open: boolean;
   active: boolean;
   status: "running" | "agent" | "user" | "stopped" | "ready";

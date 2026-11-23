@@ -1,4 +1,4 @@
-import {useCallback,useEffect,useId,useMemo,useRef,useState,type KeyboardEvent} from "react";
+import {useCallback,useEffect,useId,useRef,useState,type KeyboardEvent} from "react";
 import {ArrowDown,ArrowUp,Check,ChevronDown,ChevronUp,ExternalLink,FolderTree,GitBranch,GitCommitHorizontal,GitPullRequest,History,List,Loader2,MoreHorizontal,RefreshCw,RotateCcw,Search,SquarePen} from "lucide-react";
 import type {SourceControlDiff,SourceControlMutation,SourceControlRepository,SourceControlScope,SourceControlStatus} from "@agenthub/schemas";
 import {requestCore} from "../../lib/bridge";
@@ -15,10 +15,11 @@ import {SourceControlHistory} from "./SourceControlHistory";
 import {SourceControlEditor} from "./SourceControlEditor";
 import {flushSourceDrafts,sourceDrafts} from "./source-control-editor-drafts";
 import {sourceControlClient} from "./source-control-client";
-import {FileCheckbox,SourceControlChangeList,staged,unstaged} from "./SourceControlChangeList";
+import {canSelectChange,FileCheckbox,SourceControlChangeList,staged,unstaged,type ChangeSection} from "./SourceControlChangeList";
 import "./source-control.css";
 
 type Selection={path:string;source:"worktree"|"index"};
+type ChangeFilter="all"|ChangeSection|"checked";
 type TransferView = {
   tab?:"changes"|"history"; query?:string; selection?:Selection; editingTarget?:{rootPath:string;path:string};
   history?:{hash?:string;path?:string;search?:string};
@@ -39,7 +40,8 @@ function SourceControlWorkspace({scope,onClose}:{scope:SourceControlScope;onClos
   const [selection,setSelection]=useState<Selection|undefined>(initial.selection),[loadedDiff,setDiff]=useState<SourceControlDiff>(),[diffError,setDiffError]=useState(""),[diffLoading,setDiffLoading]=useState(false);
   const [checkedPaths,setCheckedPaths]=useState<Set<string>>(()=>new Set());
   const [tree,setTree]=useState(()=>{try{return localStorage.getItem("nautilo.scm.files.view")==="tree";}catch{return false;}});
-  const [checkedOnly,setCheckedOnly]=useState(false);
+  const [filter,setFilter]=useState<ChangeFilter>("all");
+  const [expandedSections,setExpandedSections]=useState<Partial<Record<ChangeSection,boolean>>>({});
   const [dockExpanded,setDockExpanded]=useState(false);
   const [message,setMessage]=useState(""),[draftRoot,setDraftRoot]=useState<string>(),[tab,setTab]=useState<"changes"|"history">(initial.tab??"changes"),[query,setQuery]=useState(initial.query??"");
   const messageRef=useRef(message);messageRef.current=message;
@@ -50,7 +52,10 @@ function SourceControlWorkspace({scope,onClose}:{scope:SourceControlScope;onClos
   const locked=!!busy||editorSaving;
   const menu=useRef<HTMLDetailsElement>(null),openPreview=useFilePreviewStore(state=>state.open);
   const repository=status?.available?status:undefined,current=useRef(repository);current.current=repository;
-  useEffect(()=>{setCheckedPaths(previous=>previous.size?new Set():previous);},[repository?.rootPath,repository?.branch]);
+  useEffect(()=>{
+    setCheckedPaths(previous=>previous.size?new Set():previous);
+    setExpandedSections({});
+  },[repository?.rootPath,repository?.branch]);
   const refresh=useCallback(async(force=false,visible=false):Promise<void>=>{
     if(inFlight.current&&!force||disposed.current)return;const expected=epoch.current;inFlight.current=true;
     if(visible)setRefreshing(true);
@@ -76,7 +81,7 @@ function SourceControlWorkspace({scope,onClose}:{scope:SourceControlScope;onClos
     if(remoteScope.current!==scopeKey){remoteScope.current=scopeKey;setRemote(preferred);setPushRemote(preferredPush);}else{setRemote(previous=>choices.includes(previous)?previous:preferred);setPushRemote(previous=>choices.includes(previous)?previous:preferredPush);}
     setSelection(previous=>{
       if(editingTarget?.rootPath===repository.rootPath)return previous?.path===editingTarget.path?previous:{path:editingTarget.path,source:"worktree"};
-      const file=repository.changes.find(file=>file.path===previous?.path)??repository.changes.find(file=>file.conflict)??repository.changes[0];if(!file)return undefined;
+      const file=repository.changes.find(file=>file.path===previous?.path)??repository.changes.find(file=>file.conflict)??repository.changes.find(file=>!file.untracked)??repository.changes[0];if(!file)return undefined;
       const source=previous?.path===file.path&&previous.source==="index"&&staged(file)?"index":unstaged(file)||file.conflict?"worktree":"index";
       return previous?.path===file.path&&previous.source===source?previous:{path:file.path,source};
     });
@@ -111,17 +116,22 @@ function SourceControlWorkspace({scope,onClose}:{scope:SourceControlScope;onClos
     setTree(enabled);
     try{localStorage.setItem("nautilo.scm.files.view",enabled?"tree":"list");}catch{/* The current view still works. */}
   };
+  const chooseFilter=(next:ChangeFilter):void=>{
+    setFilter(next);
+    if(next==="tracked"||next==="untracked")setExpandedSections(previous=>({...previous,[next]:true}));
+  };
   const selectedFile=repository?.changes.find(file=>file.path===selection?.path);
   const diff=loadedDiff&&(!loadedDiff.rootPath||loadedDiff.rootPath===repository?.rootPath)
     &&!(loadedDiff.path===selection?.path&&loadedDiff.source!==selection.source)?loadedDiff:undefined;
   const previewReady=!!selection&&diff?.path===selection.path&&diff.source===selection.source;
   const stagedFiles=repository?.changes.filter(staged)??[],conflicts=repository?.changes.filter(file=>file.conflict)??[];
-  const selectable=repository?.changes.filter(file=>!file.conflict&&!file.directory)??[];
-  const filesToCommit=selectable.filter(file=>checkedPaths.has(file.path)).map(file=>file.path);
-  const filteringChecked=checkedOnly&&filesToCommit.length>0;
-  useEffect(()=>{if(!filesToCommit.length)setCheckedOnly(false);},[filesToCommit.length]);
+  const changes=repository?.changes??[];
+  const checkedFiles=changes.filter(file=>canSelectChange(file)&&checkedPaths.has(file.path));
+  const filesToCommit=checkedFiles.map(file=>file.path);
+  const activeFilter=filter==="checked"&&filesToCommit.length===0?"all":filter;
+  const filteringChecked=activeFilter==="checked";
+  useEffect(()=>{if(!filesToCommit.length)setFilter(previous=>previous==="checked"?"all":previous);},[filesToCommit.length]);
   useEffect(()=>{if(message.includes("\n"))setDockExpanded(true);},[message]);
-  const allChecked=selectable.length>0&&filesToCommit.length===selectable.length;
   const merging=repository?.operation==="merge",directCommit=features.sourceControl===2;
   const readyToCommit=conflicts.length===0&&(!repository?.operation||merging)&&!!message.trim();
   const canCommit=readyToCommit&&(merging||directCommit&&filesToCommit.length>0);
@@ -129,18 +139,25 @@ function SourceControlWorkspace({scope,onClose}:{scope:SourceControlScope;onClos
   const operationName=repository?.operation?({merge:zh?"合并":"Merge",rebase:zh?"变基":"Rebase","cherry-pick":zh?"拣选提交":"Cherry-pick",revert:zh?"还原提交":"Revert"})[repository.operation]:"";
   const operationHint=repository?.operation==="merge"&&conflicts.length===0?(zh?"合并已就绪，提交以完成合并。":"Merge ready. Commit to finish the merge."):conflicts.length>0?(zh?`${operationName}进行中，请处理 ${conflicts.length} 个冲突文件。`:`${operationName} in progress. Resolve ${conflicts.length} conflicted files.`):(zh?`${operationName}进行中，请在终端继续或完成当前步骤。`:`${operationName} in progress. Continue the operation in the terminal.`);
   const remoteChoices=repository&&(repository.upstreamRemote==="."||repository.pushRemote===".")?[".",...repository.remotes]:repository?.remotes??[];
-  const baseGroups=useMemo(()=>{
-    const normalizedQuery=query.toLocaleLowerCase();
-    const filtered=repository?.changes.filter(file=>file.path.toLocaleLowerCase().includes(normalizedQuery))??[];
-    return [
-      {id:"conflicts",label:zh?"冲突":"Conflicts",source:"worktree" as const,files:filtered.filter(file=>file.conflict)},
-      {id:"worktree",label:zh?"工作区":"Working tree",source:"worktree" as const,files:filtered.filter(file=>!file.conflict&&!file.untracked&&unstaged(file))},
-      {id:"untracked",label:zh?"未跟踪":"Untracked",source:"worktree" as const,files:filtered.filter(file=>file.untracked)},
-      {id:"index",label:zh?"仅暂存区有更改":"Index changes only",source:"index" as const,files:filtered.filter(file=>staged(file)&&!unstaged(file))}
-    ];
-  },[repository?.changes,query,zh]);
-  const groups=filteringChecked?baseGroups.map(group=>({...group,files:group.files.filter(file=>checkedPaths.has(file.path))})):baseGroups;
-  const retainedDrafts=repository?sourceDrafts(repository.rootPath).filter(draft=>!repository.changes.some(file=>file.path===draft.path)&&draft.path.toLocaleLowerCase().includes(query.toLocaleLowerCase())):[];
+  const normalizedQuery=query.trim().toLocaleLowerCase();
+  const matchesQuery=(path:string):boolean=>path.toLocaleLowerCase().includes(normalizedQuery);
+  const untrackedCount=changes.filter(file=>file.untracked).length;
+  const trackedCount=changes.length-untrackedCount;
+  const checkedUntracked=checkedFiles.filter(file=>file.untracked).length;
+  const visibleChanges=(filteringChecked?checkedFiles:changes).filter(file=>matchesQuery(file.path));
+  const groups=([
+    {id:"tracked",files:visibleChanges.filter(file=>!file.untracked),open:expandedSections.tracked??true},
+    {id:"untracked",files:visibleChanges.filter(file=>file.untracked),open:expandedSections.untracked??(trackedCount===0)}
+  ] as const).filter(group=>activeFilter==="all"||activeFilter==="checked"||group.id===activeFilter);
+  const filters=[
+    {id:"all", label:zh?"全部":"All", count:changes.length},
+    {id:"tracked", label:zh?"已变更":"Tracked", count:trackedCount},
+    {id:"untracked", label:zh?"未追踪":"Untracked", count:untrackedCount},
+    {id:"checked", label:zh?"已选":"Selected", count:filesToCommit.length}
+  ] as const;
+  const selectionSummary=zh?`已选 ${filesToCommit.length} / ${changes.length}`:`${filesToCommit.length} / ${changes.length} selected`;
+  const selectionDetails=zh?`含 ${filesToCommit.length-checkedUntracked} 变更 · ${checkedUntracked} 未追踪`:`${filesToCommit.length-checkedUntracked} tracked · ${checkedUntracked} untracked`;
+  const retainedDrafts=repository&&activeFilter==="all"?sourceDrafts(repository.rootPath).filter(draft=>!changes.some(file=>file.path===draft.path)&&matchesQuery(draft.path)):[];
   const submit=():void=>{if(canCommit&&!locked)void commitSelection();};
   const commitAndPush=async():Promise<void>=>{if(!canCommit||locked||!pushRemote)return;const committed=await commitSelection();if(committed)await mutate("push",{remote:pushRemote});};
   const prepareMove=()=>{
@@ -155,7 +172,7 @@ function SourceControlWorkspace({scope,onClose}:{scope:SourceControlScope;onClos
     if(!message.includes("\n")&&!event.currentTarget.contains(event.relatedTarget))setDockExpanded(false);
   }}>
     <button type="button" className="scm-selection-chip" aria-pressed={filteringChecked} disabled={!filesToCommit.length}
-      title={zh?"只显示已选文件":"Show selected files"} onClick={()=>setCheckedOnly(value=>!value)}>
+      title={zh?"只显示已选文件":"Show selected files"} onClick={()=>chooseFilter(filteringChecked?"all":"checked")}>
       {filesToCommit.length?(zh?`已选 ${filesToCommit.length} 项`:`${filesToCommit.length} selected`):(zh?"未选文件":"No files selected")}
     </button>
     <textarea ref={commitInput} aria-label={zh?"提交说明":"Commit message"} placeholder={zh?"填写提交说明…":"Commit message…"}
@@ -216,19 +233,22 @@ function SourceControlWorkspace({scope,onClose}:{scope:SourceControlScope;onClos
               <button type="button" aria-label={zh?"文件夹树":"Folder tree"} title={zh?"文件夹树":"Folder tree"} aria-pressed={tree} onClick={()=>chooseTree(true)}><FolderTree size={15} aria-hidden/></button>
             </div>
           </div>
-          <div className="scm-list-heading"><label><FileCheckbox label={zh?"选择全部文件":"Select all files"} checked={allChecked} mixed={!allChecked&&filesToCommit.length>0} disabled={locked||!!repository.operation||selectable.length===0} onChange={checked=>setCheckedPaths(new Set(checked?selectable.map(file=>file.path):[]))}/><span>{zh?"文件":"Files"}</span></label><span>{zh?`已选 ${filesToCommit.length} / ${selectable.length}`:`${filesToCommit.length} / ${selectable.length} selected`}</span></div>
-          <div className="scm-file-list" aria-label={zh?"更改文件":"Changed files"}>
-            <SourceControlChangeList groups={groups} tree={tree} selection={selection} disabled={locked||!!repository.operation} checkedPaths={checkedPaths} editing={editorSaving} zh={zh} onSelect={value=>{setEditingTarget(undefined);setSelection(value);}} onCheck={checkFiles} onStage={(paths,stage)=>{void mutate(stage?"stage":"unstage",{paths});}}/>
-            {!filteringChecked&&retainedDrafts.length>0&&<section className="scm-retained-drafts"><h3>{zh?"未保存草稿":"Unsaved drafts"}</h3>{retainedDrafts.map(draft=><button type="button" className="scm-history-file" key={draft.path} disabled={editorSaving||features.sourceControlEditing!==1} aria-label={`${zh?"恢复文件草稿":"Restore file draft"} ${draft.path}`} onClick={()=>{setSelection({path:draft.path,source:"worktree"});setEditingTarget({rootPath:repository.rootPath,path:draft.path});}}><SourceControlFileIcon path={draft.path}/><SourceControlFileName path={draft.path}/><span className="scm-file-status">{zh?"草稿":"Draft"}</span></button>)}</section>}
-            {repository.changes.length===0&&retainedDrafts.length===0?<div className="scm-empty scm-clean"><Check size={22}/>{zh?"工作目录干净":"Working tree clean"}</div>:!groups.some(group=>group.files.length)&&(filteringChecked||retainedDrafts.length===0)?<div className="scm-empty">{zh?"没有匹配的文件":"No matching files"}</div>:null}
+          <div className="scm-change-filters" role="group" aria-label={zh?"按文件状态筛选":"Filter by file status"}>
+            {filters.map(({id,label,count})=><button key={id} type="button" aria-pressed={activeFilter===id} disabled={id==="checked"&&count===0} data-has-selection={id==="checked"&&count>0||undefined} onClick={()=>chooseFilter(id)}>{label} <span>{count}</span></button>)}
           </div>
+          <SourceControlChangeList groups={groups} tree={tree} revealMatches={!!normalizedQuery||filteringChecked} selection={selection} disabled={locked||!!repository.operation} checkedPaths={checkedPaths} editing={editorSaving} zh={zh}
+            summary={selectionSummary} summaryDetails={selectionDetails} onToggle={(id,open)=>setExpandedSections(previous=>({...previous,[id]:open}))}
+            onSelect={value=>{setEditingTarget(undefined);setSelection(value);}} onCheck={checkFiles} onStage={(paths,stage)=>{void mutate(stage?"stage":"unstage",{paths});}}>
+            {retainedDrafts.length>0&&<section className="scm-retained-drafts"><h3>{zh?"未保存草稿":"Unsaved drafts"}</h3>{retainedDrafts.map(draft=><button type="button" className="scm-history-file" key={draft.path} disabled={editorSaving||features.sourceControlEditing!==1} aria-label={`${zh?"恢复文件草稿":"Restore file draft"} ${draft.path}`} onClick={()=>{setSelection({path:draft.path,source:"worktree"});setEditingTarget({rootPath:repository.rootPath,path:draft.path});}}><SourceControlFileIcon path={draft.path}/><SourceControlFileName path={draft.path}/><span className="scm-file-status">{zh?"草稿":"Draft"}</span></button>)}</section>}
+            {changes.length===0&&retainedDrafts.length===0?<div className="scm-empty scm-clean"><Check size={22}/>{zh?"工作目录干净":"Working tree clean"}</div>:!groups.some(group=>group.files.length)&&retainedDrafts.length===0?<div className="scm-empty">{zh?"没有匹配的文件":"No matching files"}</div>:null}
+          </SourceControlChangeList>
         </>}>
           {editingTarget?.rootPath===repository.rootPath&&features.sourceControlEditing===1?<SourceControlEditor key={`${repository.rootPath}:${editingTarget.path}`} scope={scope} rootPath={repository.rootPath} path={editingTarget.path} zh={zh} onClose={()=>setEditingTarget(undefined)} onBusy={value=>{editorBusy.current=value;setEditorSaving(value);}} onSaved={(status,resolved)=>{epoch.current++;if(status){sourceControlClient.rememberStatus(scope,status);setStatus(status);}else void refresh(true);if(resolved)setEditingTarget(undefined);window.dispatchEvent(new Event("nautilo:source-control-changed"));}}/>:<SourceControlPreview path={diff?.path ?? selection?.path} pendingPath={!previewReady ? selection?.path : undefined} headerActions={selection&&previewReady&&<div className="scm-file-actions">
             {features.sourceControlEditing===1&&selectedFile&&!selectedFile.submodule&&(selectedFile.conflict||(typeof diff?.after==="string"||diff?.previewReason==="large")&&!diff.binary)&&<button type="button" className={selectedFile.conflict?"scm-text-action scm-resolve-action":"workspace-panel-icon"} disabled={locked||diffLoading} aria-label={selectedFile.conflict?(zh?"解决所选文件冲突":"Resolve selected file conflict"):(zh?"编辑所选文件":"Edit selected file")} title={selectedFile.conflict?(zh?"解决冲突":"Resolve conflict"):(zh?"编辑文件":"Edit file")} onClick={()=>setEditingTarget({rootPath:repository.rootPath,path:selection.path})}>{selectedFile.conflict?(zh?"解决冲突":"Resolve conflict"):<SquarePen size={14}/>}</button>}
             {selectedFile&&staged(selectedFile)&&unstaged(selectedFile)&&<div className="scm-segment"><button type="button" aria-label={zh?"查看工作区更改":"View working tree changes"} aria-pressed={selection.source==="worktree"} onClick={()=>setSelection({...selection,source:"worktree"})}>{zh?"工作区":"Working tree"}</button><button type="button" aria-label={zh?"查看暂存区更改":"View staged changes"} aria-pressed={selection.source==="index"} onClick={()=>setSelection({...selection,source:"index"})}>{zh?"暂存区":"Index"}</button></div>}
             <button type="button" className="workspace-panel-icon" aria-label={zh?"打开所选文件":"Open selected file"} title={zh?"打开文件":"Open file"} onClick={()=>openPreview({path:`${repository.rootPath.replace(/[\\/]+$/u,"")}/${selection.path}`})}><ExternalLink size={14}/></button>
             {selection.source==="worktree"&&selectedFile&&!selectedFile.untracked&&!selectedFile.conflict&&!selectedFile.submodule&&diff?.fileToken&&<button type="button" className="workspace-panel-icon" disabled={locked||diffLoading} aria-label={zh?"放弃所选文件的未暂存更改":"Discard unstaged changes"} title={zh?"放弃未选更改":"Discard unselected changes"} onClick={()=>setDiscard({path:selection.path,fileToken:diff.fileToken!,token:repository.token})}><RotateCcw size={14}/></button>}
-          </div>} fileToggle={previewReady&&selectedFile&&<FileCheckbox label={zh?"勾选当前文件":"Include current file"} checked={checkedPaths.has(selectedFile.path)} disabled={locked||!!repository.operation||selectedFile.conflict||selectedFile.directory} onChange={checked=>checkFiles([selectedFile.path],checked)}/>}
+          </div>} fileToggle={previewReady&&selectedFile&&<FileCheckbox label={zh?"勾选当前文件":"Include current file"} checked={checkedPaths.has(selectedFile.path)} disabled={locked||!!repository.operation||!canSelectChange(selectedFile)} onChange={checked=>checkFiles([selectedFile.path],checked)}/>}
             diff={diff} loading={diffLoading} error={diffError} disabled={locked||!previewReady} zh={zh} locale={locale} onApply={choice=>{if(selection&&diff&&previewReady)void mutate(selection.source==="index"?"unstage-hunks":"stage-hunks",{paths:[selection.path],patchToken:diff.patchToken,...choice});}}/>}
         </SourceControlSplit>}</div>
       </>}

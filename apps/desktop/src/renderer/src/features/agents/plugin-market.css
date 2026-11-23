@@ -81,20 +81,6 @@
 .plugin-view-tabs > button:hover,
 .plugin-view-tabs > button[aria-pressed="true"] { color: var(--ink); }
 .plugin-view-tabs > button > span { color: var(--plugin-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.plugin-tab-indicator {
-  position: absolute;
-  inset-block-end: -1px;
-  left: 0;
-  width: 100px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--plugin-blue);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--plugin-blue) 50%, transparent);
-  opacity: 0;
-  transform-origin: left;
-  transition: transform 260ms var(--plugin-ease);
-  pointer-events: none;
-}
 .plugin-toolbar-actions { gap: 6px; padding-block-end: 5px; }
 .plugin-search {
   position: relative;
@@ -465,7 +451,7 @@
   .plugin-search:focus-within :is(.plugin-search-content) { transform: none; }
   .plugin-search:focus-within::before, .plugin-search:focus-within::after { transform: none; }
 }
-.plugin-center[data-reduced-motion="true"] :is(.plugin-tab-indicator, .plugin-search-content, .ui-switch-thumb),
+.plugin-center[data-reduced-motion="true"] :is(.plugin-search-content, .ui-switch-thumb),
 .plugin-center[data-reduced-motion="true"] .plugin-search::before,
 .plugin-center[data-reduced-motion="true"] .plugin-search::after { transition: none; }
 .plugin-center[data-reduced-motion="true"] .ui-switch:active .ui-switch-thumb { --plugin-thumb-scale: 1; }
@@ -473,7 +459,7 @@
 .plugin-center[data-reduced-motion="true"] :is(.plugin-card-status > i, .plugin-update)::after,
 :root[data-reduce-motion] .plugin-install-dialog [aria-busy="true"] > svg { animation: none; }
 @media (prefers-reduced-motion: reduce) {
-  .plugin-center :is(.plugin-card-slot, button > svg, .plugin-tab-indicator, .plugin-search-content, .ui-switch-thumb),
+  .plugin-center :is(.plugin-card-slot, button > svg, .plugin-search-content, .ui-switch-thumb),
   .plugin-center .plugin-search::before,
   .plugin-center .plugin-search::after,
   .plugin-center :is(.plugin-card-status > i, .plugin-update, .plugin-install)::after,

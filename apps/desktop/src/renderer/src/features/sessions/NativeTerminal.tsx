@@ -55,10 +55,14 @@ export function NativeTerminal({ sessionId, kind = "shell", toolbarTarget, tabId
     setState("starting"); setError(""); setHistorySync(undefined);
     stopped.current = false; acceptInput.current = true;
     void (async () => {
-      const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]);
+      const fontFamily = '"Noto Sans SC Variable"';
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import("@xterm/xterm"), import("@xterm/addon-fit"),
+        document.fonts.load(`14px ${fontFamily}`, "W中").catch(() => []),
+      ]);
       if (disposed || !container.current) return;
       const terminal = new Terminal({ cursorBlink: true, cursorStyle: "bar", scrollback: 5000, fontSize: 14, lineHeight: 1.22,
-        fontFamily: '"Cascadia Code", "Cascadia Mono", Consolas, "Noto Sans SC Variable", monospace', theme: terminalTheme(appearanceRef.current) });
+        fontFamily, theme: terminalTheme(appearanceRef.current) });
       terminalRef.current = terminal;
       const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(container.current); if (latest.current.active) fit.fit();
       // Escape belongs to native TUI programs, not to the containing drawer.

@@ -93,6 +93,7 @@ impl<'a> NativeHistoryRepository<'a> {
                     "timestamp":entry.get("timestamp").filter(|time|time.is_string()).cloned().unwrap_or_else(||json!(now_iso())),
                     "payload":payload});
                 repos.events().append(&event)?;
+                super::timeline::record_event(self.db, &event)?;
                 self.bind(sid,native,"fileChanges",entry["nativeId"].as_str().unwrap_or(call),Some(&run),"")?;
                 events.push(event);
             }
@@ -159,6 +160,9 @@ impl<'a> NativeHistoryRepository<'a> {
             }
             for message in &batch.messages {
                 repos.sessions().save_message(message)?;
+                if message["nativeIdentity"]["source"] != "native-stream" {
+                    super::timeline::record_imported_message(self.db, session_id, message)?;
+                }
             }
             repos.sessions().save(session)?;
             for binding in &batch.bindings {
@@ -188,6 +192,7 @@ impl<'a> NativeHistoryRepository<'a> {
                 event["sequence"] = json!(sequence);
                 sequence += 1;
                 repos.events().append(event)?;
+                super::timeline::record_event(self.db, event)?;
             }
             self.save(next)?;
             Ok(batch.activities)

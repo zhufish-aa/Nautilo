@@ -9,13 +9,12 @@ import org.junit.Test
 import java.io.IOException
 
 class EventPollerTest {
-    @Test fun fastStreamingStaysWithinTheRequestBudgetWithoutDroppingTextOrCursor() = runBlocking {
+    @Test fun fastStreamingStaysWithinTheRequestBudgetWithoutDroppingTheCursor() = runBlocking {
         var time = 0L
         val starts = mutableListOf<Long>()
         val poller = EventPoller(nowMs = { time }, pause = { time += it })
         val projection = SessionProjection()
         val received = mutableListOf<Long>()
-        val expected = "流".repeat(500)
         while (projection.sequence < 500) {
             poller.next {
                 starts += time
@@ -24,12 +23,12 @@ class EventPollerTest {
                     received += sequence
                     projection.apply(json("eventId" to "event-$sequence", "sequence" to sequence,
                         "type" to "agent.message_delta", "runId" to "run", "timestamp" to "2026-11-16T07:00:00Z",
-                        "payload" to json("messageId" to "reply", "text" to expected.take(sequence.toInt()))))
+                        "payload" to json("text" to "流")))
                 }
             }
         }
         assertEquals((1L..500L).toList(), received)
-        assertEquals(expected, projection.messageList().single().text)
+        assertEquals(500L, projection.sequence)
         assertTrue(starts.zipWithNext().all { (previous, next) -> next - previous >= 250 })
         assertTrue("500 updates should be batched, not become 500 RPCs", starts.size <= 22)
     }

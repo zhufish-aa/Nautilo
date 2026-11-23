@@ -1,5 +1,3 @@
-@import "@fontsource-variable/jetbrains-mono";
-
 .change-review-drawer {
   position: absolute !important;
   inset: 0 !important;
@@ -118,7 +116,7 @@
 .review-file .review-file-name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .review-file-type { flex-shrink: 0; display: inline-flex; position: relative; }
 .review-rust-icon { align-items: center; justify-content: center; }
-.review-rust-icon b { position: absolute; font-family: Arial, sans-serif; font-size: 8px; color: #756454; }
+.review-rust-icon b { position: absolute; font-family: var(--app-font-sans); font-size: 8px; color: #756454; }
 .review-file-delta { display: flex; gap: 6px; margin-left: auto; font-size: 12px; font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .review-file-check { margin-left: auto; flex-shrink: 0; opacity: .7; }
 .review-file.is-current { background: var(--review-ink); color: var(--review-inverse); font-weight: 500; box-shadow: 0 3px 6px #0000000c; }
@@ -177,7 +175,7 @@
 .review-hunk-heading { margin: 3px 22px 13px; color: var(--review-editor-muted); font-size: 11px; }
 .review-hunk-heading:not(:first-child) { margin-top: 23px; }
 .review-recorded-pair { display: grid; grid-template-columns: minmax(0, 1fr) 30px minmax(0, 1fr); }
-.review-recorded-line { display: grid; grid-template-columns: 40px 16px minmax(0, 1fr); min-height: 29px; font: 500 14px/29px "JetBrains Mono Variable", "Noto Sans SC Variable", Consolas, monospace; font-variant-ligatures: none; }
+.review-recorded-line { display: grid; grid-template-columns: 40px 16px minmax(0, 1fr); min-height: 29px; font: 500 14px/29px var(--app-font-sans); font-variant-ligatures: none; }
 .review-recorded-line code { white-space: pre; overflow: hidden; padding: 0 17px 0 5px; font: inherit; background: transparent; }
 .review-recorded-line .recorded-line-number { font-size: 10px; color: var(--review-editor-muted); text-align: right; padding-right: 9px; user-select: none; }
 .review-recorded-line .recorded-line-indicator { font-size: 11px; text-align: center; opacity: .75; user-select: none; }
@@ -188,7 +186,7 @@
 .review-load-records { color: var(--review-editor-muted); width: 100%; font-size: 11px; padding: 12px; }
 .review-recorded-notice { font-size: 11px; color: var(--review-editor-muted); padding: 4px 22px 10px; }
 .review-recorded .hljs { background: transparent; color: var(--review-editor-text); }
-.review-recorded pre, .review-recorded .font-mono { font-family: "JetBrains Mono Variable", "Noto Sans SC Variable", "Cascadia Code", Consolas, monospace; font-size: 13px; line-height: 29px; }
+.review-recorded pre, .review-recorded .font-mono { font-family: var(--app-font-sans); font-size: 13px; line-height: 29px; }
 .review-recorded [class*="bg-ok"] { background: var(--review-editor-added-bg); }
 .review-recorded [class*="bg-danger"] { background: var(--review-editor-removed-bg); }
 .review-recorded [class*="text-ok"] { color: var(--review-editor-add); }
@@ -207,7 +205,7 @@
 .review-source-records .hljs { color: var(--review-editor-text); background: transparent; }
 .review-artifact-records section + section { margin-top: 24px; }
 .review-artifact-records h4 { font-size: 13px; font-weight: 500; margin-bottom: 16px; }
-.review-artifact-records pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.9 "JetBrains Mono Variable", monospace; color: var(--review-editor-muted); }
+.review-artifact-records pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.9 var(--app-font-sans); color: var(--review-editor-muted); }
 @media (max-width: 1050px) {
   .change-review { grid-template-columns: 224px minmax(0, 1fr); padding: 20px; gap: 20px; }
   .review-toolbar { gap: 7px; }

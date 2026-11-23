@@ -360,7 +360,7 @@ async fn runtime_tools_are_isolated_between_local_sessions() {
     let b = f.start("team-b-turn", "team-b", None).await;
     let server_b = f.plugin.pool.lock().unwrap().servers.values().find(|server| server.events.has_local("team-b")).unwrap().clone();
     assert!(!Arc::ptr_eq(&server_a, &server_b));
-    assert_ne!(server_a.runtime_tools.as_ref().unwrap().url, server_b.runtime_tools.as_ref().unwrap().url);
+    assert_ne!(server_a.runtime_tools.as_ref().unwrap().url(), server_b.runtime_tools.as_ref().unwrap().url());
     for server in [&server_a, &server_b] {
         let result = api_json(&server.base_url, &server.cwd, "/fixture/runtime-tool", "POST", Some(json!({"name":"agenthub_delegate","arguments":{"task":"inspect"}}))).await.unwrap();
         assert_eq!(result["result"]["isError"], false);

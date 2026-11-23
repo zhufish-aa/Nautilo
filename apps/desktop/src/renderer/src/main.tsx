@@ -23,7 +23,7 @@ function showFatalOverlay(text: string): void {
   overlay.style.cssText =
     "position:fixed;inset:16px;z-index:99999;overflow:auto;padding:16px;" +
     "background:#fff2f0;color:#a8071a;border:2px solid #ffa39e;border-radius:8px;" +
-    "font:12px/1.5 monospace;white-space:pre-wrap;";
+    "font:12px/1.5 var(--app-font-sans);white-space:pre-wrap;";
   overlay.textContent = `界面渲染出错，请把这段发给开发者:\n\n${text}`;
   const reload = document.createElement("button");
   reload.type = "button";

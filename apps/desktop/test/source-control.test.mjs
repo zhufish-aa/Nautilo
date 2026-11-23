@@ -38,7 +38,7 @@ async function fixture({initial=repository(),request}={}){
   w.eval((await bundlePromise).outputFiles[0].text);w.qa.render();
   return{w,base,setState(value){state=value},button(label){return w.document.querySelector(`button[aria-label="${label}"]`)},byText(text){return [...w.document.querySelectorAll('button')].find(button=>button.textContent.trim()===text)},calls(method){return w.qa.calls.filter(call=>call.method===method)},close(){w.qa.close();w.close()}};
 }
-function inputText(w,node,value){Object.getOwnPropertyDescriptor(w.HTMLTextAreaElement.prototype,'value').set.call(node,value);node.dispatchEvent(new w.Event('input',{bubbles:true}));}
+function inputText(w,node,value){Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node),'value').set.call(node,value);node.dispatchEvent(new w.Event('input',{bubbles:true}));}
 
 test('advanced index commit keeps working changes and clears its draft',{skip:!JSDOM},async()=>{
   const f=await fixture();const{w}=f;
@@ -136,6 +136,73 @@ test('checking files issues no Git request and commit receives only the checked 
     assert.equal(f.calls('scm.mutate')[0].input.action,'commit');
     assert.deepEqual(Array.from(f.calls('scm.mutate')[0].input.paths),['new.txt']);
     assert.equal(w.document.querySelectorAll('.scm-file-row').length,2,'one row per file, including partial changes');assert.equal(f.button('暂存 new.txt'),null);
+  }finally{f.close();}
+});
+test('Git sections isolate bulk selection and preserve the exact paths sent to commit',{skip:!JSDOM},async()=>{
+  const initial={...repository(),changes:[file('src/new.txt','?','?'),file('src/changed.txt'),file('src/staged.txt','A','.')]};
+  const f=await fixture({initial});const{w}=f;
+  const checkbox=label=>w.document.querySelector(`input[aria-label="${label}"]`);
+  const heading=section=>w.document.querySelector(`.scm-change-section[data-group="${section}"] .scm-group-heading>button`);
+  try{
+    await until(()=>heading('untracked'));
+    assert.deepEqual([...w.document.querySelectorAll('.scm-change-section')].map(section=>section.dataset.group),['tracked','untracked']);
+    assert.equal(heading('tracked').getAttribute('aria-expanded'),'true');
+    assert.equal(heading('untracked').getAttribute('aria-expanded'),'false');
+    checkbox('选择提交文件 src/changed.txt').click();
+    assert.equal(checkbox('选择已跟踪变更').indeterminate,true);
+    checkbox('选择已跟踪变更').click();
+    assert.equal(checkbox('选择提交文件 src/staged.txt').checked,true);
+    assert.equal(checkbox('选择未追踪文件').checked,false);
+    f.byText('已选 2').click();
+    await until(()=>!heading('untracked'));
+    f.byText('全部 3').click();
+    await until(()=>heading('untracked'));
+    assert.equal(heading('untracked').getAttribute('aria-expanded'),'false');
+    f.byText('未追踪 1').click();
+    await until(()=>!heading('tracked'));
+    assert.equal(heading('untracked').getAttribute('aria-expanded'),'true');
+    checkbox('选择未追踪文件').click();
+    f.byText('已选 3').click();
+    await until(()=>heading('tracked')&&heading('untracked'));
+    checkbox('选择未追踪文件').click();
+    await until(()=>!heading('untracked'));
+    assert.equal(checkbox('选择已跟踪变更').checked,true);
+    f.button('查看文件差异 src/staged.txt').click();
+    await until(()=>f.calls('scm.diff').some(call=>call.input.path==='src/staged.txt'&&call.input.source==='index'));
+    inputText(w,w.document.querySelector('textarea'),'Commit tracked files');
+    await until(()=>f.button('提交所选 (2)')&&!f.button('提交所选 (2)').disabled);
+    f.button('提交所选 (2)').click();
+    await until(()=>f.calls('scm.mutate').length===1);
+    assert.deepEqual(Array.from(f.calls('scm.mutate')[0].input.paths),['src/changed.txt','src/staged.txt']);
+  }finally{f.close();}
+});
+test('search reveals collapsed groups and compact folders without overwriting open preferences',{skip:!JSDOM},async()=>{
+  const f=await fixture({initial:{...repository(),changes:[file('apps/desktop/src/shared.txt'),file('apps/desktop/src/shared-new.txt','?','?')]}});const{w}=f;
+  const section=id=>w.document.querySelector(`.scm-change-section[data-group="${id}"]`);
+  const body=id=>section(id)?.querySelector('.scm-change-section-body');
+  const folder=id=>section(id)?.querySelector('.scm-folder-toggle');
+  try{
+    await until(()=>body('untracked'));
+    f.button('文件夹树').click();
+    await until(()=>folder('tracked'));
+    assert.equal(folder('tracked').textContent,'apps/desktop/src');
+    f.button('折叠全部目录').click();
+    await until(()=>folder('tracked').getAttribute('aria-expanded')==='false');
+    assert.equal(body('untracked').getAttribute('aria-hidden'),'true');
+    const search=w.document.querySelector('input[type="search"]');
+    inputText(w,search,'shared');
+    await until(()=>body('untracked').getAttribute('aria-hidden')==='false');
+    assert.ok(f.button('查看文件差异 apps/desktop/src/shared.txt'));
+    assert.ok(f.button('查看文件差异 apps/desktop/src/shared-new.txt'));
+    inputText(w,search,'');
+    await until(()=>body('untracked').getAttribute('aria-hidden')==='true');
+    assert.equal(folder('tracked').getAttribute('aria-expanded'),'false');
+    f.button('展开全部目录').click();
+    await until(()=>folder('tracked').getAttribute('aria-expanded')==='true');
+    f.setState({...repository(),token:'state-2',changes:[file('apps/desktop/src/shared-new.txt','?','?')]});
+    f.button('刷新仓库状态').click();
+    await until(()=>!section('tracked'));
+    assert.equal(body('untracked').getAttribute('aria-hidden'),'false');
   }finally{f.close();}
 });
 test('unchanged status refreshes and revisiting a file do not reload its diff',{skip:!JSDOM},async()=>{

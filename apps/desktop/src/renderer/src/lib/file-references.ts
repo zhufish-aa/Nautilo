@@ -26,7 +26,7 @@ export const CODE_EXTENSIONS = [
   // Office deliverables (Work mode outputs): detected so message text turns
   // them into chips; routing (preview pane vs system app) is decided per
   // mode by resolveFileOpenTarget.
-  "pptx", "ppt", "docx", "doc", "xlsx", "xls", "csv", "pdf"
+  "pptx", "ppt", "docx", "doc", "xlsx", "xls", "csv", "tsv", "pdf"
 ];
 
 /** Extensions whose files open with the OS default app rather than the in-app preview. */
@@ -204,7 +204,7 @@ const ABSOLUTE_OR_UNC = /^(?:[A-Za-z]:[/\\]|\\\\|\/)/;
  * classify as "local" (safe-decoded); http(s)/mailto/data/blob and every
  * other scheme stay "external" so they keep the target=_blank behavior.
  */
-export function classifyLocalHref(href: string | undefined | null): LocalHrefClassification {
+export function classifyLocalHref(href: string | undefined | null, keepLine = false): LocalHrefClassification {
   if (!href) return { kind: "none" };
   let value = href.trim();
   if (!value) return { kind: "none" };
@@ -212,7 +212,7 @@ export function classifyLocalHref(href: string | undefined | null): LocalHrefCla
   if (value.startsWith(LOCAL_MARKDOWN_HREF)) {
     try {
       const path = decodeURIComponent(value.slice(LOCAL_MARKDOWN_HREF.length));
-      return path ? { kind: "local", path: normalizeLocalFilePath(path) } : { kind: "none" };
+      return path ? { kind: "local", path: keepLine ? path : normalizeLocalFilePath(path) } : { kind: "none" };
     } catch {
       return { kind: "none" };
     }
@@ -237,9 +237,9 @@ export function classifyLocalHref(href: string | undefined | null): LocalHrefCla
     /* keep the raw href — artifact.read will reject undecodable junk */
   }
 
-  value = normalizeLocalFilePath(value);
-  if (ABSOLUTE_OR_UNC.test(value) || value.includes("/") || value.includes("\\") || hasKnownExtension(value)) {
-    return { kind: "local", path: value };
+  const normalized = normalizeLocalFilePath(value);
+  if (ABSOLUTE_OR_UNC.test(normalized) || normalized.includes("/") || normalized.includes("\\") || hasKnownExtension(normalized)) {
+    return { kind: "local", path: keepLine ? value : normalized };
   }
   return { kind: "none" };
 }

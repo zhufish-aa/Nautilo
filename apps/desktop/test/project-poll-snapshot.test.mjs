@@ -9,9 +9,9 @@ test('21-session warm snapshot uses one IPC/40ms with no unchanged history rebui
  assert.deepEqual(h.calls.slice(before).map(c=>c.method),['projectRun.poll']);assert.equal(h.now()-time,40);assert.equal(h.renders.length,renders);
  assert.ok(h.calls.at(-1).params.sessions.every(s=>s.historyCursor&&s.eventCursor));
 });
-test('new child and same-timestamp edits are hydrated; cross-run first output remains immediate',async()=>{
+test('same-timestamp edits hydrate without moving raw text into the metadata cache',async()=>{
  const h=fixture(1);await h.hydrate();h.messages.get('s')[0].text='same timestamp edit';h.feeds.get('s').push(delta(1,'first new token',{runId:'next'}));
- await h.hydrate();assert.ok(h.state.events.s.some(e=>e.data.text==='same timestamp edit'));assert.ok(h.state.events.s.some(e=>e.data.text==='first new token'));
+ await h.hydrate();assert.ok(h.state.events.s.some(e=>e.data.text==='same timestamp edit'));assert.equal(h.state.events.s.some(e=>e.data.text==='first new token'),false);
 });
 test('earlier empty queue cannot overwrite a newer queued event and cursor advancement',async()=>{
  const h=fixture(1),poll=h.replies['projectRun.poll'];h.feeds.get('s').push(delta(1,'',{type:'session.follow_up_queued',payload:{messageId:'q',text:'queued'}}));
@@ -23,11 +23,11 @@ test('authoritative queue plus run transition does not shift the next queued ite
  h.replies['projectRun.poll']=(input)=>({...poll(input),followUps:[{sessionId:'s',afterSequence:0,items:[{messageId:'next-q',text:'next queued',queuedAt:h.session.createdAt}]}]});
  await h.hydrate();assert.equal(h.state.activeAgentRunIds.s,'next');assert.deepEqual(h.state.queuedFollowUps.s.map(q=>q.messageId),['next-q']);
 });
-test('event reset removes cached reasoning after deletion even with unchanged max sequence',async()=>{
- const h=fixture(1);h.feeds.get('s').push(delta(1,'old reasoning',{type:'agent.thinking_delta'}),delta(2,'',{type:'run.started',payload:{runId:'r'}}));await h.hydrate();
- assert.ok(h.state.events.s.some(e=>e.data.kind==='reasoning'));h.feeds.set('s',[h.feeds.get('s')[1]]);const poll=h.replies['projectRun.poll'];
+test('event reset removes cached file metadata even with unchanged max sequence',async()=>{
+ const h=fixture(1);h.feeds.get('s').push(delta(1,'',{type:'file.changed',payload:{path:'old.txt',changeType:'modified'}}),delta(2,'',{type:'run.started',payload:{runId:'r'}}));await h.hydrate();
+ assert.ok(h.state.events.s.some(e=>e.data.kind==='file_change'));h.feeds.set('s',[h.feeds.get('s')[1]]);const poll=h.replies['projectRun.poll'];
  h.replies['projectRun.poll']=(input)=>{const result=poll(input);result.feeds[0].reset=true;result.feeds[0].events=h.feeds.get('s');result.followUps=[{sessionId:'s',afterSequence:2,items:[]}];return result;};
- await h.hydrate();assert.equal(h.state.events.s.some(e=>e.data.kind==='reasoning'),false);assert.deepEqual(Array.from(h.runtime.projectSessionEventCache.get('s'),e=>e.eventId),['e2']);
+ await h.hydrate();assert.equal(h.state.events.s.some(e=>e.data.kind==='file_change'),false);assert.deepEqual(Array.from(h.runtime.projectSessionEventCache.get('s'),e=>e.eventId),['e2']);
 });
 test('late snapshot cannot resurrect a deleted/recreated session generation',async()=>{
  const h=fixture(1),poll=h.replies['projectRun.poll'];let release;h.replies['projectRun.poll']=(input)=>{const response=poll(input);return new Promise(resolve=>{release=()=>resolve(response);});};
@@ -59,11 +59,11 @@ test('epoch/reset rebuilds the real interaction store per session and invalidate
 });
 
 test('snapshot to legacy protocol transition resets old DB sequence and sees new sequence one immediately',async()=>{
- const h=fixture(1);h.feeds.get('s').push(delta(100,'old DB answer'));await h.hydrate();
- h.feeds.set('s',[delta(1,'new DB answer',{eventId:'new-e1'})]);h.replies['projectRun.poll']=()=>{throw new Error('unknown method projectRun.poll');};
+ const h=fixture(1);h.feeds.get('s').push(delta(100,'',{type:'agent.status',payload:{phase:'provider_queued'}}));await h.hydrate();
+ h.feeds.set('s',[delta(1,'',{eventId:'new-e1',type:'agent.status',payload:{phase:'turn_started'}})]);h.replies['projectRun.poll']=()=>{throw new Error('unknown method projectRun.poll');};
  const before=h.calls.length;await h.hydrate();
  assert.ok(h.calls.slice(before).some(c=>c.method==='event.replay'&&c.params.afterSequence===0));
- assert.ok(h.state.events.s.some(e=>e.data.text==='new DB answer'));assert.equal(h.state.events.s.some(e=>e.data.text==='old DB answer'),false);
+ assert.ok(h.state.events.s.some(e=>e.data.phase==='thinking'));assert.equal(h.state.events.s.some(e=>e.data.phase==='provider_queued'),false);
  assert.equal(h.runtime.projectSessionSequences.get('s'),1);assert.equal(h.runtime.projectEventCursors.has('s'),false);
 });
 

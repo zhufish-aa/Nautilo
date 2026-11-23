@@ -51,6 +51,7 @@ struct ActiveRun {
     cancel: Arc<tokio::sync::Mutex<Option<CancelTurn>>>,
     steer: Option<Arc<dyn Fn(String) -> crate::adapters::BoxFuture<CoreResult<()>> + Send + Sync>>,
     project_run_id: Option<String>,
+    ingress: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Shared context for one run launch — mirrors RunContext.
@@ -355,20 +356,19 @@ impl RunService {
     }
 
     /// Sends new user guidance into an in-flight provider turn.
-    pub async fn steer_session(&self, session_id: &str, input: &str) -> CoreResult<()> {
-        let steer = {
+    pub async fn steer_session(&self, session_id: &str, input: &str, record: impl FnOnce(&str) -> CoreResult<()> + Send) -> CoreResult<()> {
+        let (run_id, steer, ingress) = {
             let active = self.active.lock().unwrap();
-            active
-                .values()
-                .find(|run| run.session_id == session_id)
-                .ok_or_else(|| invalid_field("sessionId", "There is no active run to guide."))?
-                .steer
-                .clone()
+            let (id, run) = active.iter().find(|(_, run)| run.session_id == session_id)
+                .ok_or_else(|| invalid_field("sessionId", "There is no active run to guide."))?;
+            (id.clone(), run.steer.clone(), run.ingress.clone())
         };
         let Some(steer) = steer else {
             return Err(invalid_field("sessionId", "The active provider does not support immediate guidance. Use Queue instead."));
         };
-        steer(input.to_string()).await
+        let _ingress = ingress.lock().await;
+        steer(input.to_string()).await?;
+        record(&run_id)
     }
 
     /// Awaits the terminal snapshot of a run launched via start().
@@ -438,8 +438,8 @@ impl RunService {
         if cancelled{self.request_logs.cancel_queued(session_id,key);}cancelled
     }
 
-    pub async fn steer_queued(&self, session_id: &str, key: &str, text: &str) -> CoreResult<bool> {
-        self.session_queue.promote_pending(session_id, key, || self.steer_session(session_id, text)).await
+    pub async fn steer_queued(&self, session_id: &str, key: &str, text: &str, record: impl FnOnce(&str) -> CoreResult<()> + Send) -> CoreResult<bool> {
+        self.session_queue.promote_pending(session_id, key, || self.steer_session(session_id, text, record)).await
     }
 
     async fn launch_now(
@@ -695,7 +695,7 @@ impl RunService {
             if let Some(message_id) = context.user_message_id.as_deref().or(context.queue_key.as_deref()) {
                 started["userMessageId"] = json!(message_id);
             }
-            let _ = self.events.append(&run, session, "run.started", started);
+            self.events.append(&run, session, "run.started", started)?;
         }
 
         let provider_command = context.presentation.as_deref() == Some("provider_command");
@@ -875,6 +875,7 @@ impl RunService {
         let consume_context = context.clone();
         let consume_run_id = run_id.clone();
         let consume_request_id = context.request_id.clone();
+        let ingress = Arc::new(tokio::sync::Mutex::new(()));
         self.active.lock().unwrap().insert(
             run_id.clone(),
             ActiveRun {
@@ -882,11 +883,12 @@ impl RunService {
                 cancel: cancel.clone(),
                 steer,
                 project_run_id: context.project_run_id.clone(),
+                ingress: ingress.clone(),
             },
         );
         tokio::spawn(async move {
             let completion = consume_service
-                .consume(&consume_run, &consume_session, events, consume_context, background_handoff, cancel)
+                .consume(&consume_run, &consume_session, events, consume_context, background_handoff, cancel, ingress)
                 .await;
             if let Some(id)=&consume_request_id {
                 consume_service.request_logs.finish(id,completion.run["status"].as_str().unwrap_or("failed"),completion.run["failureCode"].as_str(),completion.failure_detail.as_deref());
@@ -1010,6 +1012,7 @@ impl RunService {
         context: RunContext,
         background_handoff: session_events::ForegroundHandoff,
         turn: Arc<tokio::sync::Mutex<Option<CancelTurn>>>,
+        ingress: Arc<tokio::sync::Mutex<()>>,
     ) -> RunCompletionSnapshot {
         let mut messages: Vec<Value> = vec![];
         let mut provider_error: Option<String> = None;
@@ -1018,6 +1021,7 @@ impl RunService {
         let consume_run_id = run.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         run_log::run_event(&consume_run_id, "consume_enter", json!({}));
         while let Some(event) = adapter_events.recv().await {
+            let _ingress = ingress.lock().await;
             if let AdapterEvent::Error { message } = &event {
                 provider_error = Some(self.redaction.text(message));
             }
@@ -1029,6 +1033,7 @@ impl RunService {
                 messages.push(message);
             }
         }
+        let _ingress = ingress.lock().await;
         // A taken cancel handle marks an intentional stop. The lock also
         // waits for native and account transports before the session is reused.
         let interrupted = turn.lock().await.is_none();
@@ -1247,6 +1252,7 @@ impl RunService {
                         let _ = self.events.append(run, session, "agent.message_delta", json!({
                             "messageId": buffer_key,
                             "text": self.redaction.text(text),
+                            "kind": context.message_kind.as_deref(),
                             "subagentDispatchId": subagent_dispatch_id.clone().map(Value::String).unwrap_or(Value::Null)
                         }));
                     }
@@ -1258,6 +1264,9 @@ impl RunService {
                     .unwrap()
                     .get_mut(&buffer_run_id)
                     .and_then(|buffers| buffers.remove(&key));
+                let timeline_had_delta = phase.as_deref() == Some("buffered_complete") || buffered.as_ref().is_some_and(|buffered| {
+                    !buffered.text.is_empty() && (text.is_empty() || text.starts_with(&buffered.text) || buffered.text.ends_with(text))
+                });
                 let final_text = if !text.is_empty() { text.clone() } else { buffered.map(|message| message.text).unwrap_or_default() };
                 if final_text.is_empty() {
                     return None;
@@ -1306,6 +1315,8 @@ impl RunService {
                         "providerMessageId": buffer_key,
                         "messageId": if subagent_dispatch_id.is_some() { json!(buffer_key) } else { message.get("id").cloned().unwrap_or(Value::Null) },
                         "text": message.get("text").cloned().unwrap_or(Value::Null),
+                        "kind": context.message_kind.as_deref(),
+                        "timelineHadDelta": timeline_had_delta,
                         "subagentDispatchId": subagent_dispatch_id.clone().map(Value::String).unwrap_or(Value::Null)
                     }));
                 }

@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -52,15 +53,13 @@ import kotlinx.coroutines.launch
     var follow by rememberSaveable(state.host?.id, state.session?.id) { mutableStateOf(true) }
     var showModels by remember { mutableStateOf(false) }
     var showModes by remember { mutableStateOf(false) }
-    val entries = remember(state.messages, state.activities, state.runs, state.interactions) {
-        conversationTimeline(state.messages, state.activities, state.runs, state.interactions)
-    }
+    val entries = remember(state.timeline) { state.timeline?.let(::conversationTimeline).orEmpty() }
     val atBottom by remember { derivedStateOf { list.layoutInfo.visibleItemsInfo.lastOrNull()?.index.let { it == null || it >= list.layoutInfo.totalItemsCount - 2 } } }
     LaunchedEffect(dragged) {
         if (dragged) snapshotFlow { atBottom }.collect { follow = it }
         else if (atBottom) follow = true
     }
-    LaunchedEffect(entries.lastOrNull()?.key, state.messages.lastOrNull()?.text?.length, state.activities.lastOrNull()?.detail?.length, state.interactions.size, state.approvals.size, state.busy) {
+    LaunchedEffect(entries.lastOrNull()?.key, state.timeline?.revision, state.busy) {
         // One layout-frame pin, not a new smooth-scroll animation for every token.
         // Explicit "back to latest" below still animates; dragging always wins.
         withFrameNanos { }
@@ -69,26 +68,20 @@ import kotlinx.coroutines.launch
     Column(Modifier.fillMaxSize().imePadding()) {
         Box(Modifier.weight(1f)) {
             LazyColumn(state = list, modifier = Modifier.fillMaxSize().pointerInput(Unit) { awaitEachGesture { awaitFirstDown(requireUnconsumed = false); focus.clearFocus(); keyboard?.hide() } }, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (state.hasOlder) item("older") { Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { NTextButton(onClick = model::older) { Text("查看更早的消息", fontSize = 12.sp) } } }
                 items(entries, key = { it.key }) { entry ->
-                    Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = spring(stiffness = Spring.StiffnessMedium, dampingRatio = Spring.DampingRatioNoBouncy))) {
+                    Box(Modifier.testTag("timeline:" + entry.key).animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = spring(stiffness = Spring.StiffnessMedium, dampingRatio = Spring.DampingRatioNoBouncy))) {
                         when (entry) {
-                            is ConversationItem.Message -> MessageRow(entry.value, state.session?.id.orEmpty(), model::retryMessages)
-                            is ConversationItem.Turn -> AssistantTurn(entry) { request ->
-                                InteractionCard(request, state.readOnly || !state.connected, model)
-                            }
+                            is ConversationItem.Block -> TimelineBlockContent(entry.block, state, model)
+                            is ConversationItem.Turn -> AssistantTurn(entry) { block -> TimelineBlockContent(block, state, model) }
                         }
                     }
                 }
-                items(state.approvals.filter { it.text("status") == "pending" }, key = { "approval:${it.text("id")}" }) { approval ->
-                    ApprovalCard(approval, state.readOnly || !state.connected, model, scopeSelection = "approval.scopes" in state.capabilities)
-                }
                 item("progress") {
-                    if (state.busy) Row(Modifier.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (state.busy || state.timeline == null) Row(Modifier.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         NSpinner(Modifier.size(16.dp), strokeWidth = 1.7.dp)
                         Text("正在同步会话", fontSize = 13.sp, color = Secondary)
                     }
-                    else if (entries.isEmpty() && state.interactions.isEmpty() && state.approvals.isEmpty()) EmptyView(Icons.Outlined.ChatBubbleOutline, "继续电脑上的工作", "消息和任务会同步到这台手机。")
+                    else if (entries.isEmpty()) EmptyView(Icons.Outlined.ChatBubbleOutline, "继续电脑上的工作", "消息和任务会同步到这台手机。")
                 }
                 item("end") { Spacer(Modifier.height(2.dp)) }
             }
@@ -101,7 +94,7 @@ import kotlinx.coroutines.launch
     if (showModes) state.session?.let { session ->
         LaunchedEffect(session.agentId, session.projectId) { model.clearError(); model.loadModes(session.agentId, session.projectId) }
         ModeConfigurationSheet(state.modes, state.modesLoading, session.permissionMode, session.agentMode,
-            session.modeLocked || state.messages.any { it.sender == "user" }, state.changing, state.error,
+            session.modeLocked || state.timeline?.blocks.orEmpty().any { it.content.text("sender") == "user" }, state.changing, state.error,
             refresh = { model.loadModes(session.agentId, session.projectId, true) }, close = { showModes = false }) { permission, mode ->
             model.configureModes(permission, mode) { showModes = false }
         }

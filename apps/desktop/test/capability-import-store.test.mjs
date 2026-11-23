@@ -103,3 +103,17 @@ test("JSON parsing delegates original source to Core rather than renderer parsin
     { method: "capability.parseImport", payload: input },
   ]);
 });
+
+test("a multi-Harness change saves once and keeps the next change for the same skill", async () => {
+  store.setState({ tools: [{ id: "skill", kind: "skill", enabled: true, providerIds: ["codex"] }] });
+  const { toggleForHarness } = store.getState();
+  await Promise.all([
+    toggleForHarness("skill", ["opencode", "claude-code"], true),
+    toggleForHarness("skill", "codex", false),
+  ]);
+  assert.deepEqual(calls.map(call => [call.method, call.payload.providerIds]), [
+    ["capability.upsert", ["codex", "opencode", "claude-code"]],
+    ["capability.upsert", ["opencode", "claude-code"]],
+  ]);
+  assert.deepEqual(store.getState().tools[0].providerIds, ["opencode", "claude-code"]);
+});

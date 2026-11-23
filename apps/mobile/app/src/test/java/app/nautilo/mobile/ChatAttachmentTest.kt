@@ -10,18 +10,16 @@ import java.nio.file.Files
 import java.util.Base64
 
 class ChatAttachmentTest {
-    @Test fun sentHistoryReplacesOptimisticLocalReferenceWithPersistentImageMetadata() {
-        val projection = SessionProjection()
-        projection.optimistic(ChatMessage("message", "user", "图片", "", "sending", attachments = listOf(
-            ChatAttachment("upload", "照片.jpg", "image/jpeg", 8, "image", "upload", "/private/file"))))
-        projection.history(json("items" to JSONArray().put(json("value" to json("id" to "message", "sender" to "user", "text" to "图片",
-            "attachments" to JSONArray().put(json("id" to "artifact", "name" to "照片.jpg", "kind" to "image", "mimeType" to "image/jpeg", "sizeBytes" to 8, "uploadId" to "upload")))))))
-        val message = projection.messageList().single()
-        assertEquals("sent", message.delivery)
-        assertEquals("artifact", message.attachments.single().id)
-        assertEquals("upload", message.attachments.single().cacheId)
-        assertTrue(message.attachments.single().isImage)
-        assertEquals("", message.attachments.single().localPath)
+    @Test fun storedTimelineKeepsPersistentImageMetadata() {
+        val content = json("attachments" to JSONArray().put(json("id" to "artifact", "name" to "照片.jpg",
+            "kind" to "image", "mimeType" to "image/jpeg", "sizeBytes" to 8, "uploadId" to "upload")))
+        val snapshot = MobileTimeline.open(json("revision" to 1, "blocks" to JSONArray().put(
+            json("seq" to 1, "blockId" to "message", "kind" to "user_prompt", "content" to content))))
+        val image = ChatAttachment.decode(snapshot.blocks.single().content.objects("attachments").single())
+        assertEquals("artifact", image.id)
+        assertEquals("upload", image.cacheId)
+        assertTrue(image.isImage)
+        assertEquals("", image.localPath)
     }
     @Test fun phoneImageRemainsAvailableAfterPendingUploadIsDeletedAndAfterReopening() = runBlocking {
         val root = Files.createTempDirectory("nautilo-images-").toFile()

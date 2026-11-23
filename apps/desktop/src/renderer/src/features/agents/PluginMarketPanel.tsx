@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
 import {
   ArrowUp,
   Check,
@@ -17,6 +17,7 @@ import { getBridge } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
+import { SlidingTabs } from "../../components/ui/SlidingTabs";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { Switch } from "../../components/ui/Switch";
@@ -47,8 +48,6 @@ export function PluginMarketPanel(): JSX.Element {
   const [busyPluginId, setBusyPluginId] = useState<string>();
   const zh = locale === "zh-CN";
   const reducedMotion = useUiReducedMotion();
-  const tabList = useRef<HTMLElement>(null);
-  const indicator = useRef<HTMLSpanElement>(null);
 
   const [loadFailed, setLoadFailed] = useState(false);
   const [loadingInstalled, setLoadingInstalled] = useState(false);
@@ -68,23 +67,6 @@ export function PluginMarketPanel(): JSX.Element {
     void loadInstalled();
     void usePluginsStore.getState().fetchRegistry();
   }, [loadInstalled]);
-
-  useLayoutEffect(() => {
-    const list = tabList.current;
-    const line = indicator.current;
-    if (!list || !line) return;
-    const sync = () => {
-      const active = list.querySelector<HTMLButtonElement>('button[aria-pressed="true"]');
-      if (!active) return;
-      // Scale a fixed 100px line to the measured width without animating layout.
-      line.style.transform = `translateX(${active.offsetLeft}px) scaleX(${active.offsetWidth / 100})`;
-      line.style.opacity = "1";
-    };
-    sync();
-    const observer = new ResizeObserver(sync);
-    list.querySelectorAll("button").forEach((button) => observer.observe(button));
-    return () => observer.disconnect();
-  }, [view]);
 
   const installLocal = async (): Promise<void> => {
     try {
@@ -189,11 +171,11 @@ export function PluginMarketPanel(): JSX.Element {
         </Button>
       </header>
       <div className="plugin-toolbar">
-        <nav className="plugin-view-tabs" ref={tabList} aria-label={zh ? "插件视图" : "Plugin views"}>
-          <button type="button" aria-pressed={view === "installed"} onClick={() => setView("installed")}>{zh ? "已安装" : "Installed"}<span>{installed.length}</span></button>
-          <button type="button" aria-pressed={view === "discover"} onClick={() => setView("discover")}>{zh ? "发现插件" : "Discover"}<span>{registry.length}</span></button>
-          <span className="plugin-tab-indicator" ref={indicator} aria-hidden />
-        </nav>
+        <SlidingTabs value={view} onChange={setView} className="plugin-view-tabs" label={zh ? "插件视图" : "Plugin views"}
+          items={[
+            { id: "installed", label: zh ? "已安装" : "Installed", count: installed.length },
+            { id: "discover", label: zh ? "发现插件" : "Discover", count: registry.length },
+          ]} />
         <div className="plugin-toolbar-actions">
           <label className="plugin-search">
             <span className="plugin-search-content">

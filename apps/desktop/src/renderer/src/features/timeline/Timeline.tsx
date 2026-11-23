@@ -834,7 +834,7 @@ function FileChangeCard({ event, locale, t, onOpenLocalFile }: {
   event: TimelineEvent & { data: { kind: "file_change" } };
   locale: "zh-CN" | "en-US";
   t: (key: MessageKey, values?: Record<string, string | number>) => string;
-  onOpenLocalFile?: (path: string) => void;
+  onOpenLocalFile?: (path: string, diff?: string) => void;
 }): JSX.Element {
   const [openPath, setOpenPath] = useState<string>();
   const zh = locale === "zh-CN";
@@ -852,9 +852,12 @@ function FileChangeCard({ event, locale, t, onOpenLocalFile }: {
         {file.diff && !file.comparisonUnavailable
           ? <SourceControlDiffView patch={file.diff} scope={`${event.id}:${file.path}`} locale={locale} />
           : <p>{zh ? "这条记录没有可显示的差异。" : "No diff is available for this record."}</p>}
-        {file.changeType !== "deleted" && <button type="button" className="mt-2 text-xs text-ink-3 hover:text-ink"
-          onClick={() => openTimelineFile(file.path, t, onOpenLocalFile, "drawer")}>
-          {zh ? "预览文件" : "Preview file"}
+        {(file.changeType !== "deleted" || (!!file.diff && !!onOpenLocalFile)) && <button type="button" className="mt-2 text-xs text-ink-3 hover:text-ink"
+          onClick={() => {
+            if (onOpenLocalFile && file.diff && !file.comparisonUnavailable) onOpenLocalFile(file.path, file.diff);
+            else openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
+          }}>
+          {file.diff && !file.comparisonUnavailable && onOpenLocalFile ? zh ? "在预览中查看改动" : "View changes in preview" : zh ? "预览文件" : "Preview file"}
         </button>}
       </div>
     </ProcessDisclosure>;
@@ -1025,8 +1028,6 @@ function TimelineEventViewImpl({
       if (data.toolName === "run_code" || data.codeExecution) return <CodeExecutionCard data={data} locale={locale} sessionId={event.sessionId} runId={event.runId} />;
       return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
     }
-    case "tool_group":
-        return <div className="space-y-1">{data.items.map((item) => <TimelineEventView key={item.id} event={item} onOpenSession={onOpenSession} onOpenSubagent={onOpenSubagent} onOpenWorkflow={onOpenWorkflow} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />)}</div>;
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
     case "artifact":

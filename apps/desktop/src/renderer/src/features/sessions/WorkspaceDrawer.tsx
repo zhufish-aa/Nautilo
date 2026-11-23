@@ -25,7 +25,7 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
   windowChrome?: boolean;
   /** A custom workbench can own its toolbar and close action. */
   hideHeader?: boolean;
-  animateReview?: boolean;
+  animateReview?: boolean | "slide";
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const panel = useRef<HTMLElement>(null);
@@ -82,12 +82,17 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
   useEffect(() => {
     if (!interactive) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    panel.current?.focus({ preventScroll: true });
+    const element = panel.current;
+    if (animateReview !== "slide" || !previous?.closest("input, textarea, [contenteditable]")) element?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === "Escape" && panel.current?.contains(document.activeElement)) { event.stopPropagation(); close.current(); }
     };
     document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("keydown", onKey); finishDrag(); if (previous?.isConnected) previous.focus({ preventScroll: true }); };
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      finishDrag();
+      if (previous?.isConnected && (element?.contains(document.activeElement) || document.activeElement === document.body)) previous.focus({ preventScroll: true });
+    };
   }, [interactive]);
   useLayoutEffect(() => {
     if (animateReview && panel.current) panel.current.inert = !interactive;
@@ -110,10 +115,12 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
   },[open,resizable,placement]);
   if (!open && !keepMounted) return null;
   const Panel = animateReview ? motion.aside : "aside";
+  const offset = animateReview === "slide" ? "translateX(18px)" : "translateY(6px)";
+  const centered = animateReview === "slide" ? "translateX(0px)" : "translateY(0px)";
   const reviewMotion = animateReview ? {
-    initial: reducedMotion ? false as const : { opacity: 0, transform: "translateY(6px)" },
-    animate: { opacity: 1, transform: "translateY(0px)" },
-    exit: { opacity: 0, transform: reducedMotion ? "translateY(0px)" : "translateY(6px)" },
+    initial: reducedMotion ? false as const : { opacity: 0, transform: offset },
+    animate: { opacity: 1, transform: centered },
+    exit: { opacity: 0, transform: reducedMotion ? centered : offset },
     transition: { duration: reducedMotion ? 0 : .22, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] },
   } : undefined;
   return <Panel ref={panel} tabIndex={-1} role="region" aria-label={title} {...reviewMotion}

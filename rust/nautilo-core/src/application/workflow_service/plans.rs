@@ -267,10 +267,10 @@ impl WorkflowService {
             if latest["status"] != "pending" { return Ok(visible_plan(&latest)); }
             plan["status"] = json!("rejected");
             workflow_plans::decide(&tx, &plan)?;
-            let event = Self::record_plan_event(&tx, &event_builder, &parent, &plan)?;
+            Self::update_plan_card(&tx, &event_builder, session_id, &plan)?;
             tx.commit().map_err(crate::database::connection::db_fail)?;
             drop(db);
-            self.events.publish_committed(&[event]);
+            self.events.wake_timeline(session_id);
             return Ok(visible_plan(&plan));
         }
 
@@ -329,7 +329,13 @@ impl WorkflowService {
         Ok(visible_plan(&saved))
     }
 
-    pub(super) fn record_plan_event(
+    pub(super) fn update_plan_card(
+        db: &Connection, event_builder: &SessionEventBuilder, session_id: &str, plan: &Value,
+    ) -> CoreResult<()> {
+        crate::database::timeline::update_workflow_plan(db, session_id, &event_builder.redact(&visible_plan(plan)))
+    }
+
+    fn record_plan_event(
         db: &Connection, event_builder: &SessionEventBuilder, session: &Value, plan: &Value,
     ) -> CoreResult<Value> {
         let mut event = event_builder.prepare_for_session(

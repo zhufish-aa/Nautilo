@@ -5,7 +5,7 @@ import ts from "typescript";
 const lib = new URL("../../src/renderer/src/lib/", import.meta.url);
 const compile = (source) => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 export const helperModules = {};
-for (const name of ["context-usage", "session-lifecycle", "deepseek-legacy-history", "process-display", "orchestration-timeline-policy", "tool-timeline-groups", "subagent-activities", "provider-diff", "tool-display", "changed-files"]) {
+for (const name of ["context-usage", "session-lifecycle", "process-display", "orchestration-timeline-policy", "provider-diff", "tool-display", "changed-files"]) {
   const exports = {};
   vm.runInNewContext(compile(readFileSync(new URL(`${name}.ts`, lib), "utf8")), {
     exports, TextEncoder, TextDecoder, require: (name) => helperModules[name]
@@ -112,12 +112,12 @@ export function createHarness({ source = runtimeSource, ipcDelay = 40, agentCoun
   const exports = {};
   const optionalExports = (source.includes("function isAwaitingFirstOutput(") ? ", isAwaitingFirstOutput, projectRunAwaitingOutput" : "")
     + (source.includes("function needsStandalonePersistenceSync(") ? ", needsStandalonePersistenceSync" : "");
-  const extraExports = `\nexport { pendingMessages, replaceSessionTimeline, sessionConfigWrites, toUiArtifact, sameArtifacts, syncProjectAndAgents, mergeStandaloneEvents, standaloneHydrated, standaloneMessageCache, standaloneEventCache, standaloneLastRebuildAt, scheduleStandaloneRender, clearSessionRuntime, schedulePoll, buildStandaloneTimeline, hydrateProjectRun, projectSessionBuilt, mergeEventCache, readSessionHistory, readArtifactHistory, persistedHistory, resetHistoryCapabilities, hydrateStandaloneSession, refreshStandaloneSessionState, readSessionHistoryBatch, standaloneSequences, projectSessionSequences, projectSessionEventCache, projectSessionDetails, consumeProjectPollFeed, projectEventCursors${optionalExports} };\nexport function setTestProjectHydrator(fn) { hydrateProjectRun = fn; }`;
+  const extraExports = `\nexport { sessionConfigWrites, toUiArtifact, sameArtifacts, syncProjectAndAgents, mergeStandaloneEvents, standaloneHydrated, standaloneMessageCache, standaloneEventCache, standaloneLastRebuildAt, scheduleStandaloneRender, clearSessionRuntime, schedulePoll, hydrateProjectRun, projectSessionBuilt, mergeEventCache, readSessionHistory, readArtifactHistory, persistedHistory, resetHistoryCapabilities, hydrateStandaloneSession, refreshStandaloneSessionState, readSessionHistoryBatch, standaloneSequences, projectSessionSequences, projectSessionEventCache, projectSessionDetails, consumeProjectPollFeed, projectEventCursors${optionalExports} };\nexport function metadataEvents(messages, events, artifacts) { return sessionMetadataEvents(messages, mergeEventCache([], events), undefined, [], artifacts, []); }\nexport function setTestProjectHydrator(fn) { hydrateProjectRun = fn; }`;
   class FakeDate extends Date { static now() { return now; } }
   vm.runInNewContext(compile(source + extraExports), { exports, require: (name) => {
     if (!(name in modules)) throw new Error(`Unexpected import: ${name}`);
     return modules[name];
-  }, Date: FakeDate, setTimeout, clearTimeout, window: { setTimeout }, console });
+  }, Date: FakeDate, setTimeout, clearTimeout, window: { setTimeout }, document: { hidden: false }, console });
   const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
   const advance = async (ms) => {
     const end = now + ms;

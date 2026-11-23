@@ -14,6 +14,10 @@ import { initializeCoreState } from "./lib/core-bootstrap";
 import { buildThemeCss, getTheme, SYSTEM_THEME_ID } from "./lib/themes";
 
 import { getBridge } from "./lib/bridge";
+import { useSessionsStore } from "./stores/sessions";
+import { useComposerDraftsStore } from "./stores/composer-drafts";
+import { startComposerPersistence } from "./lib/composer-persistence";
+import { toast } from "./stores/toast";
 const AssistantPage = lazy(() => import("./features/assistant/AssistantPage"));
 const DetachedPanel = lazy(() => import("./features/sessions/DetachedPanel"));
 const HarnessPage = lazy(() => import("./features/agents/HarnessPanel").then((module) => ({ default: module.HarnessPage })));
@@ -84,6 +88,34 @@ export default function App(): JSX.Element {
       navigate(route+"panel="+panel.kind, {replace:false});
     });
   },[panels,target,navigate]);
+  useEffect(() => {
+    if (target?.kind !== "browser" && target?.kind !== "browser-spaces") return;
+    const refreshSettings = (event:StorageEvent) => {
+      if (event.key === "agenthub.settings") void useSettingsStore.persist.rehydrate();
+    };
+    window.addEventListener("storage",refreshSettings);
+    return () => window.removeEventListener("storage",refreshSettings);
+  },[target?.kind]);
+  useEffect(() => {
+    if (target) return;
+    return getBridge()?.browser?.onDraft(draft => {
+      if (!draft.text && !draft.attachment) {
+        navigate("/sessions?session="+encodeURIComponent(draft.sessionId!));
+        return;
+      }
+      const id = draft.sessionId ?? useSessionsStore.getState().activeSessionId ?? "new";
+      const store = useComposerDraftsStore.getState();
+      if (draft.text) {
+        const text = store.drafts[id]?.text;
+        store.setText(id,text ? text + "\n\n" + draft.text : draft.text);
+      }
+      if (draft.attachment) {
+        const attachment = draft.attachment;
+        store.setAttachments(id,previous => [...previous,attachment]);
+      }
+      void startComposerPersistence().catch(error => toast.error(String(error)));
+    });
+  },[target,navigate]);
   const reduceMotion = useSettingsStore((state) => state.reduceMotion);
   const locale = useSettingsStore((state) => state.locale);
 

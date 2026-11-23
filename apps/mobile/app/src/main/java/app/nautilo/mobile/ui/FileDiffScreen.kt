@@ -17,8 +17,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.nautilo.mobile.MobileState
@@ -94,7 +95,16 @@ internal fun coloredLines(lines: List<DiffLine>, path: String, dark: Boolean = f
         else if (lines.isEmpty()) Box(Modifier.weight(1f)) { EmptyView(Icons.Outlined.Difference, if (change.verifiedDiff) "没有内容差异" else "原生 Harness 未提供差异内容") }
         else NPanel(color = palette.card, shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp), modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
             BoxWithConstraints {
-                val codeWidth = if (wrap) maxWidth else maxOf(maxWidth, ((lines.maxOfOrNull { it.text.length } ?: 0) * 8 + 110).coerceAtMost(12000).dp)
+                val context = LocalContext.current
+                val density = LocalDensity.current
+                val codeWidth = if (wrap) maxWidth else {
+                    val textSize = with(density) { 12.sp.toPx() }
+                    val widestLine = remember(lines, context, textSize) {
+                        val paint = android.text.TextPaint().apply { typeface = readingTypeface(context); this.textSize = textSize }
+                        lines.maxOfOrNull { paint.measureText(it.text) } ?: 0f
+                    }
+                    (with(density) { widestLine.toDp() } + 110.dp).coerceIn(maxWidth, maxOf(maxWidth, 12000.dp))
+                }
                 Box(if (wrap) Modifier else Modifier.horizontalScroll(rememberScrollState())) {
                     SelectionContainer {
                         LazyColumn(state = list, modifier = Modifier.width(codeWidth).fillMaxHeight(), contentPadding = PaddingValues(vertical = 12.dp)) {
@@ -127,13 +137,13 @@ internal fun coloredLines(lines: List<DiffLine>, path: String, dark: Boolean = f
         else -> palette.card
     }
     Row(Modifier.fillMaxWidth().background(background).padding(vertical = if (line.kind == DiffKind.Hunk) 9.dp else 3.dp), verticalAlignment = Alignment.Top) {
-        if (line.kind == DiffKind.Hunk) Text(line.text, Modifier.padding(horizontal = 14.dp), fontFamily = CodeFont, fontSize = 11.sp, lineHeight = 18.sp, color = Secondary)
+        if (line.kind == DiffKind.Hunk) Text(line.text, Modifier.padding(horizontal = 14.dp), fontFamily = UiFont, fontSize = 11.sp, lineHeight = 18.sp, color = Secondary)
         else {
-            val numberStyle = androidx.compose.ui.text.TextStyle(fontFamily = CodeFont, fontSize = 10.sp, lineHeight = 21.sp, color = Secondary)
+            val numberStyle = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 10.sp, lineHeight = 21.sp, color = Secondary)
             Text(line.oldNumber?.toString().orEmpty(), Modifier.width(35.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End, style = numberStyle)
             Text(line.newNumber?.toString().orEmpty(), Modifier.width(35.dp).padding(end = 5.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End, style = numberStyle)
             Text(when (line.kind) { DiffKind.Added -> "+"; DiffKind.Removed -> "−"; else -> " " }, Modifier.width(16.dp), fontSize = 11.sp, lineHeight = 21.sp, color = if (line.kind == DiffKind.Removed) Danger else Green)
-            Text(row.text, Modifier.weight(1f).padding(end = 15.dp), fontFamily = CodeFont, fontSize = 12.sp, lineHeight = 21.sp, color = Ink, softWrap = wrap,
+            Text(row.text, Modifier.weight(1f).padding(end = 15.dp), fontFamily = UiFont, fontSize = 12.sp, lineHeight = 21.sp, color = Ink, softWrap = wrap,
                 style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "\"liga\" 0, \"calt\" 0"))
         }
     }

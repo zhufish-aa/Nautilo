@@ -23,6 +23,7 @@ import app.nautilo.mobile.data.Host
 @Composable fun ComputersScreen(state: MobileState, model: MobileViewModel, pair: () -> Unit) {
     var remove by remember { mutableStateOf<Host?>(null) }
     val palette = MobilePalette
+    val hostBorder = if (palette.dark) BorderStroke(1.dp, palette.mirror) else BorderStroke(1.dp, palette.edge)
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         if (state.pairing) item {
             NPanel(shape = RoundedCornerShape(20.dp), color = MobilePalette.card) {
@@ -41,7 +42,7 @@ import app.nautilo.mobile.data.Host
         }
         items(state.hosts, key = { it.id }) { host ->
             val current = host.id == state.host?.id
-            NPanel(shape = RoundedCornerShape(18.dp), color = palette.card, border = BorderStroke(1.dp, palette.mirror)) {
+            NPanel(shape = RoundedCornerShape(18.dp), color = palette.card, border = hostBorder) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(40.dp).background(Selection, RoundedCornerShape(11.dp)), contentAlignment = Alignment.Center) {
@@ -74,7 +75,8 @@ import app.nautilo.mobile.data.Host
             }
         }
         item {
-            NPanel(onClick = pair, shape = RoundedCornerShape(18.dp), color = MobilePalette.card, border = BorderStroke(1.dp, Line)) {
+            NPanel(onClick = pair, shape = RoundedCornerShape(18.dp), color = palette.card,
+                border = BorderStroke(1.dp, if (palette.dark) Line else palette.edge)) {
                 Row(Modifier.fillMaxWidth().padding(19.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Add, null, Modifier.size(23.dp))
                     Text(if (state.hosts.isEmpty()) "连接我的电脑" else "连接另一台电脑", Modifier.weight(1f).padding(start = 16.dp), fontSize = 15.sp)

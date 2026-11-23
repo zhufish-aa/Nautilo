@@ -1,6 +1,8 @@
 /* Settings and assignment panels. Data and actions stay visible; help is contextual. */
-.settings-layout:is([data-section="accounts"], [data-section="usage"]) .settings-content-inner { width: 100%; max-width: 1380px; margin-inline: auto; }
-.settings-layout:is([data-section="agents"], [data-section="usage"], [data-section="teams"], [data-section="skills"], [data-section="mcp"], [data-section="plugins"]) .settings-content-inner { max-width: 1160px; }
+.settings-layout[data-section="accounts"] .settings-content-inner { width: 100%; max-width: 1380px; margin-inline: auto; }
+.settings-layout:is([data-section="agents"], [data-section="teams"], [data-section="skills"], [data-section="mcp"], [data-section="plugins"]) .settings-content-inner { max-width: 1160px; }
+.settings-layout[data-section="usage"] .settings-content { scrollbar-gutter: stable; }
+.settings-layout[data-section="usage"] .settings-content-inner { max-width: 1280px; }
 .settings-layout:is([data-section="agents"], [data-section="accounts"], [data-section="usage"]) .settings-content-inner > h1 { margin: 2px 0 24px; color: var(--ink); font-size: 22px; font-weight: 600; line-height: 1.4; }
 .settings-layout:is([data-section="agents"], [data-section="accounts"], [data-section="usage"]) .settings-panel-card { padding: 0; background: transparent; box-shadow: none; }
 

@@ -116,10 +116,7 @@ function isProgressEvent(event: TimelineEvent): boolean {
 function latestProgressEvent(events: TimelineEvent[], startedAt?: string): TimelineEvent | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
-    if (event.data.kind === "tool_group") {
-      const nested = latestProgressEvent(event.data.items, startedAt);
-      if (nested) return nested;
-    } else if (isProgressEvent(event) && (!startedAt || event.timestamp >= startedAt)) return event;
+    if (isProgressEvent(event) && (!startedAt || event.timestamp >= startedAt)) return event;
   }
   return undefined;
 }

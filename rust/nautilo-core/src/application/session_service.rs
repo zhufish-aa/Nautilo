@@ -472,19 +472,10 @@ impl SessionService {
         // Only providers with an in-flight steer channel can inject mid-turn;
         // every other CLI takes the queue path.
         if mode == "steer" && runs.can_steer(session_id) {
-            runs.steer_session(session_id, &text).await?;
             let mut message = follow_up_message(&session, &text);
             if let Some(id) = input.get("messageId").and_then(Value::as_str).filter(|id| !id.is_empty()) { message["id"] = json!(id); }
-            {
-                let db = self.db.lock().unwrap();
-                Repositories::new(&db.raw).sessions().save_message(&message)?;
-            }
-            if let Some(events) = self.events.read().unwrap().clone() {
-                let _ = events.append_for_session(&session, &json!({
-                    "projectRunId": session.get("projectRunId").cloned().unwrap_or(Value::Null),
-                    "taskId": session.get("taskId").cloned().unwrap_or(Value::Null)
-                }), "session.follow_up_steered", json!({ "messageId": message["id"] }));
-            }
+            let id = message["id"].as_str().unwrap().to_owned();
+            runs.steer_session(session_id, &text, |run_id| self.record_guidance(&session, run_id, &id, Some(&message))).await?;
             return Ok(json!({ "accepted": true, "mode": "steer" }));
         }
 
@@ -728,18 +719,31 @@ impl SessionService {
             .ok_or_else(|| invalid("messageId", "Follow-up is no longer queued."))?;
         let runs = self.runs()?;
         if !runs.can_steer(session_id) { return Ok(json!({ "accepted": true, "mode": "queue" })); }
-        if !runs.steer_queued(session_id, message_id, entry["text"].as_str().unwrap_or("")).await? {
+        if !runs.steer_queued(session_id, message_id, entry["text"].as_str().unwrap_or(""),
+            |run_id| self.record_guidance(&session, run_id, message_id, None)).await? {
             return Err(invalid("messageId", "Follow-up is already being sent."));
         }
         self.untrack_pending_follow_up(session_id, message_id);
-        if let Some(events) = self.events.read().unwrap().clone() {
-            let _ = events.append_for_session(&session, &json!({
-                "projectRunId": session.get("projectRunId").cloned().unwrap_or(Value::Null),
-                "taskId": session.get("taskId").cloned().unwrap_or(Value::Null)
-            }), "session.follow_up_steered", json!({ "messageId": message_id }));
-        }
         Ok(json!({ "accepted": true, "mode": "steer" }))
     }
+
+    fn record_guidance(&self, session: &Value, run_id: &str, message_id: &str, message: Option<&Value>) -> CoreResult<()> {
+        let events = self.events.read().unwrap().clone().ok_or_else(|| invalid("sessionId", "The session event writer is unavailable"))?;
+        let mut event = events.session_event_builder().prepare_for_session(session, &json!({
+            "runId":run_id, "projectRunId":session["projectRunId"], "taskId":session["taskId"]
+        }), "session.follow_up_steered", json!({"messageId":message_id}));
+        {
+            let mut db = self.db.lock().unwrap();
+            let tx = db.raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(crate::database::connection::db_fail)?;
+            let repos = Repositories::new(&tx);
+            if let Some(message) = message { repos.sessions().save_message(message)?; }
+            repos.events().append_in_transaction(&mut event)?;
+            tx.commit().map_err(crate::database::connection::db_fail)?;
+        }
+        events.publish_committed(&[event]);
+        Ok(())
+    }
+
 }
 
 fn merge_artifacts(session_artifacts: Vec<Value>, project_run_artifacts: Vec<Value>) -> Vec<Value> {

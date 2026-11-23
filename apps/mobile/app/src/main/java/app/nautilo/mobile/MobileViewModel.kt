@@ -35,18 +35,17 @@ data class MobileState(
     val error: String = "", val connectionIssue: String = "", val syncIssue: String = "",
     val pairingCode: String = "", val pairing: Boolean = false,
     val projects: List<Project> = emptyList(), val sessions: List<Conversation> = emptyList(),
-    val session: Conversation? = null, val messages: List<ChatMessage> = emptyList(),
-    val activities: List<ActivityItem> = emptyList(), val busy: Boolean = false,
+    val session: Conversation? = null, val timeline: MobileTimeline? = null, val busy: Boolean = false,
     val runId: String = "", val runStatus: String = "", val elapsed: Long = 0,
     val contextUsage: ContextUsage = ContextUsage(), val compactCommand: String = "", val canCompact: Boolean = false,
     val compacting: Boolean = false, val compactError: String = "",
     val runs: List<RunInfo> = emptyList(),
-    val draft: String = "", val newDraft: String = "", val readOnly: Boolean = false, val hasOlder: Boolean = false,
+    val draft: String = "", val newDraft: String = "", val readOnly: Boolean = false,
     val draftAttachments: List<DraftAttachment> = emptyList(), val newAttachments: List<DraftAttachment> = emptyList(), val attachmentLoading: Boolean = false,
     val models: List<JSONObject> = emptyList(), val defaultModel: String = "", val modelsLoading: Boolean = false,
     val workspace: List<JSONObject> = emptyList(), val workspaceLoading: Boolean = false,
     val diffPath: String = "",
-    val members: List<JSONObject> = emptyList(), val interactions: List<JSONObject> = emptyList(),
+    val members: List<JSONObject> = emptyList(),
     val teamTasks: TeamTaskSnapshot = TeamTaskSnapshot(), val teamTasksLoading: Boolean = false,
     val teamTasksCancelling: Boolean = false, val teamTasksError: String = "",
     val approvals: List<JSONObject> = emptyList(), val changing: Boolean = false,
@@ -452,9 +451,9 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         sessionGeneration++; sessionSync.cancel()
         projection = SessionProjection()
         val host = state.value.host ?: return
-        mutable.update { it.copy(session = session, screen = Screen.Chat, messages = emptyList(), activities = emptyList(), busy = true,
+        mutable.update { it.copy(session = session, screen = Screen.Chat, timeline = null, busy = true,
             contextUsage = ContextUsage(), compactCommand = "", canCompact = false, compacting = false, compactError = "",
-            models = emptyList(), defaultModel = "", workspace = emptyList(), interactions = emptyList(), approvals = emptyList(), runs = emptyList(), runId = "", runStatus = "", error = "", syncIssue = "",
+            models = emptyList(), defaultModel = "", workspace = emptyList(), approvals = emptyList(), runs = emptyList(), runId = "", runStatus = "", error = "", syncIssue = "",
             draft = store.draft("${host.id}:${session.id}"), draftAttachments = store.attachments("${host.id}:${session.id}")) }
         watchSession(session)
     }
@@ -473,15 +472,25 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             val recovery = ReadRecovery(report = { error ->
                 reportRead("events", error)
             }, checkConnection = peer::requestHealthCheck)
+            launch {
+                val timelineReads = ReadRecovery(report = { reportRead("timeline", it) }, checkConnection = peer::requestHealthCheck)
+                var current: MobileTimeline? = null
+                while (isActive && foreground && ticket.isCurrent() && generation == sessionGeneration) {
+                    val visible = current
+                    val page = timelineReads.read {
+                        if (visible == null) peer.call(host, "session.timeline.open", json("sessionId" to session.id))
+                        else peer.call(host, "session.timeline.wait", json("sessionId" to session.id, "revision" to visible.revision))
+                    }
+                    if (!ticket.isCurrent() || generation != sessionGeneration) break
+                    current = if (visible == null) MobileTimeline.open(page)
+                        else if (page.optBoolean("reset")) null
+                        else visible.apply(page)
+                    current?.let { next -> mutable.update { it.copy(timeline = next) } }
+                }
+            }
             val poller = EventPoller()
             try {
-                for (command in store.commands().filter { it.hostId == host.id && it.sessionId == session.id }) {
-                    val id = PendingCommand.stableMessageId(peer.identity(), command.id)
-                    currentProjection.optimistic(ChatMessage(id, "user", command.params.text("text").ifBlank { "请查看附件。" }, command.createdAt, "waiting", attachmentNames = command.params.objects("_attachments").map { it.text("name") }, attachments = command.params.objects("_attachments").map { ChatAttachment.draft(DraftAttachment.decode(it)) }))
-                }
-                // Show cached/journal content before waiting for ancillary configuration.
                 if (!ticket.isCurrent() || generation != sessionGeneration) return@launch
-                publish()
                 if (currentProjection.epoch.isEmpty()) {
                     val page = recovery.read { peer.call(host, "session.history", json("sessionId" to session.id)) }
                     if (!ticket.isCurrent() || generation != sessionGeneration) return@launch
@@ -566,15 +575,13 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             // Older desktops remain compatible; independent reads share one network wait.
             val detail = async { peer.call(host, "session.details", params) }
             val runs = async { peer.call(host, "run.list", params).objects("items") }
-            val interactions = async { peer.call(host, "interaction.list", params).objects("items") }
             val approvals = async { peer.call(host, "approval.list", params).objects("items") }
-            json("details" to detail.await(), "runs" to JSONArray(runs.await()), "interactions" to JSONArray(interactions.await()), "approvals" to JSONArray(approvals.await()))
+            json("details" to detail.await(), "runs" to JSONArray(runs.await()), "approvals" to JSONArray(approvals.await()))
         }
         val detail = snapshot.getJSONObject("details")
         val config = detail.getJSONObject("session")
         val runs = snapshot.objects("runs")
         val latest = runs.maxByOrNull { it.text("startedAt", it.text("createdAt")) }
-        val questions = snapshot.objects("interactions")
         val approvals = snapshot.objects("approvals")
         if (!valid() || connection != connectionGeneration || generation != sessionGeneration || state.value.session?.id != id || state.value.host?.id != host.id) return
         // A snapshot dispatched before a newer event cannot roll back its run state.
@@ -587,7 +594,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             permissionMode = config.text("permissionMode"), agentMode = config.text("agentMode"), modeLocked = config.optBoolean("modeLocked"),
             teamId = config.text("teamId"), teamName = detail.optJSONObject("team")?.text("name").orEmpty(), parentSessionId = config.text("parentSessionId")),
             compactCommand = snapshot.optJSONObject("compactCommand")?.text("id").orEmpty(), canCompact = config.optBoolean("hasNativeSession"),
-            members = detail.objects("members"), interactions = mergeInteractions(it.interactions, projection.interactionList(), questions), approvals = approvals, runs = runs.map(RunInfo::decode), busy = false) }
+            members = detail.objects("members"), approvals = approvals, runs = runs.map(RunInfo::decode), busy = false) }
     }
     private fun publish() {
         val seconds = runCatching {
@@ -595,21 +602,9 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             java.time.Duration.between(Instant.parse(projection.startedAt), end).seconds.coerceAtLeast(0)
         }.getOrDefault(0)
         val currentRun = RunInfo(projection.runId, projection.runStatus, projection.startedAt, projection.endedAt)
-        mutable.update { it.copy(messages = projection.messageList(), activities = projection.activityList(), hasOlder = projection.before != null,
-            contextUsage = projection.contextUsage(),
-            interactions = mergeInteractions(it.interactions, projection.interactionList()),
+        mutable.update { it.copy(contextUsage = projection.contextUsage(),
             runId = projection.runId, runStatus = projection.runStatus, elapsed = seconds,
             runs = if (currentRun.id.isBlank()) it.runs else it.runs.filterNot { run -> run.id == currentRun.id } + currentRun, busy = false) }
-    }
-    fun older() = action { host, session ->
-        val target = projection
-        val generation = sessionGeneration
-        val connection = connectionGeneration
-        val before = target.before ?: return@action
-        val page = peer.call(host, "session.history", json("sessionId" to session.id, "before" to before))
-        if (projection !== target || generation != sessionGeneration || connection != connectionGeneration || state.value.session?.id != session.id || state.value.host?.id != host.id) return@action
-        target.history(page, older = true)
-        publish()
     }
     fun send(mode: String? = null, sourceDraftKey: String? = null): Boolean {
         val s = state.value
@@ -629,8 +624,6 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         draftJob?.cancel()
         mutable.update { it.copy(draft = "", draftAttachments = emptyList()) }
         viewModelScope.launch {
-            projection.optimistic(ChatMessage(PendingCommand.stableMessageId(peer.identity(), command.id), "user", command.params.text("text").ifBlank { "请查看附件。" }, command.createdAt, "sending", attachmentNames = s.draftAttachments.map { it.name }, attachments = s.draftAttachments.map(ChatAttachment::draft)))
-            publish()
             try { flushOutbox(host) } catch (error: Exception) { mutable.update { it.copy(error = readableError(error)) } }
         }
         return true
@@ -669,19 +662,16 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
                     peer.call(host, command.method, input, command.id)
                     store.finishCommand(command.id)
                     files.forEach(attachmentFiles::remove)
-                    if (state.value.session?.id == command.sessionId) { projection.delivery(messageId, "sent"); publish() }
                 } catch (error: RemoteFailure) {
                     val uploadRetry = files.isNotEmpty() && error.code in listOf("ATTACHMENT_INCOMPLETE", "ATTACHMENT_NOT_AVAILABLE", "ATTACHMENT_STORAGE_FULL", "METHOD_NOT_ALLOWED")
                     val transportRetry = error.isTransportFailure()
                     val uncertain = transportRetry || uploadRetry || error.code in listOf("COMMAND_OUTCOME_PENDING", "DEVICE_NOT_AUTHORIZED", "REMOTE_DISABLED")
                     if (!uncertain) store.finishCommand(command.id)
-                    if (state.value.session?.id == command.sessionId) { projection.delivery(messageId, if (transportRetry || uploadRetry) "waiting" else if (uncertain) "review" else "failed"); publish() }
                     mutable.update { it.copy(error = readableError(error)) }
                     // Preserve the original ID. The user can retry this exact command after reviewing.
                     if (uncertain) break
                 } catch (error: Exception) {
                     if (error is CancellationException) throw error
-                    if (state.value.session?.id == command.sessionId) { projection.delivery(messageId, "waiting"); publish() }
                     throw error
                 }
             }

@@ -94,6 +94,9 @@ export function Composer({
   const permissionMode = starterControls?.configuration.permissionMode ?? session?.permissionMode ?? instance?.permissionMode ?? defaultPermissionMode;
   const planSelected = supportsPlan && (agentMode === "plan" || permissionMode === "plan");
   const value = goalSelected ? draft.text.slice(6) : draft.text;
+  const quoteTail = value.match(/(?:\n\x60[^\x60\n]+\.\w+:\d+(?:-\d+)?\x60)+$/)?.[0] ?? "";
+  const quotedFiles = quoteTail ? quoteTail.slice(1).split("\n").map(quote => quote.slice(1, -1)) : [];
+  const editableText = quoteTail ? value.slice(0, -quoteTail.length) : value;
   const attachments = draft.attachments;
   const updateText = useComposerDraftsStore((state) => state.setText);
   const updateAttachments = useComposerDraftsStore((state) => state.setAttachments);
@@ -491,11 +494,20 @@ export function Composer({
             <button type="button" onClick={() => updateWorkflow(draftKey)} aria-label={locale === "zh-CN" ? "移除工作流引用" : "Remove workflow reference"}><X size={13}/></button>
           </span>
         </div>}
+        {quotedFiles.length > 0 && <div className="workflow-composer-reference">
+          {quotedFiles.map((file, index) => <span className="workflow-reference-chip" key={file + index}>
+            <FileText size={14} aria-hidden /><span title={file}>{file.split(/[\\/]/).at(-1)}</span>
+            <button type="button" aria-label={zh ? "移除文件引用" : "Remove file reference"} onClick={() => {
+              const remaining = quotedFiles.filter((_, item) => item !== index);
+              setValue(editableText + remaining.map(quote => "\n\x60" + quote + "\x60").join(""));
+            }}><X size={13} aria-hidden /></button>
+          </span>)}
+        </div>}
         <textarea
           ref={textareaRef}
-          value={value}
+          value={editableText}
           onChange={event => {
-            setValue(event.target.value);
+            setValue(event.target.value + quoteTail);
             if (canReference) setMention(workflowQueryAt(event.target.value, event.target.selectionStart));
           }}
           onClick={event => { if (canReference) setMention(workflowQueryAt(event.currentTarget.value, event.currentTarget.selectionStart)); }}

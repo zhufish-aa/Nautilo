@@ -57,19 +57,12 @@ test("returns undefined for truncated or unrecognized input", async () => {
   assert.equal(extractTodoItems('{"todos": []}'), undefined);
 });
 
-test("latestTodoGoal picks the most recent call, including inside tool groups", async () => {
+test("latestTodoGoal picks the most recent matching call", async () => {
   const { latestTodoGoal } = await loadTodoGoal();
   const older = toolEvent("e1", "TodoList", JSON.stringify({ todos: [{ title: "old", status: "pending" }] }));
   const unrelated = toolEvent("e2", "Read", JSON.stringify({ path: "a.ts" }));
   const newer = toolEvent("e3", "TodoList", JSON.stringify({ todos: [{ title: "new", status: "done" }] }));
-  const group = {
-    id: "g1",
-    sessionId: "s1",
-    timestamp: "g1",
-    data: { kind: "tool_group", items: [unrelated, newer], stepCount: 2, callCount: 2, running: false }
-  };
-
-  assert.deepEqual(latestTodoGoal([older, group]), [{ title: "new", status: "done" }]);
+  assert.deepEqual(latestTodoGoal([older, unrelated, newer]), [{ title: "new", status: "done" }]);
   assert.deepEqual(latestTodoGoal([older, unrelated]), [{ title: "old", status: "pending" }]);
   assert.equal(latestTodoGoal([unrelated]), undefined);
   assert.equal(latestTodoGoal([]), undefined);

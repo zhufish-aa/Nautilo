@@ -2,7 +2,7 @@
   "id": "deepseek",
   "apiVersion": 1,
   "main": "agenthub-plugin-deepseek",
-  "version": "0.2.16",
+  "version": "0.2.19",
   "descriptor": {
     "providerId": "deepseek",
     "name": "DeepSeek Harness",

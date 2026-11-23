@@ -318,6 +318,20 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             input.get("sessionId").and_then(Value::as_str).unwrap_or(""), input.get("cursor"),
         )
     });
+    reg_str(router, daemon, "session.timeline.open", "sessionId", |d, id| d.events.timeline_open(id));
+    {
+        let daemon = daemon.clone();
+        router.register("session.timeline.wait", move |input| {
+            let daemon = daemon.clone();
+            async move {
+                daemon.events.timeline_wait(
+                    input["sessionId"].as_str().unwrap_or(""),
+                    input["revision"].as_i64().unwrap_or(-1),
+                    input["timeoutMs"].as_u64().unwrap_or(20_000),
+                ).await.map_err(anyhow::Error::new)
+            }
+        });
+    }
     reg_str(router, daemon, "session.get", "sessionId", |d, id| d.sessions.get(id));
     {
         let daemon = daemon.clone();

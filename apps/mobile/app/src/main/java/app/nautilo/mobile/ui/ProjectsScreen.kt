@@ -95,7 +95,7 @@ import app.nautilo.mobile.data.Conversation
                         if (state.connected) state.latency?.let { latency ->
                             ConnectionMeter(latency)
                             Text("${latency}ms", Modifier.background(palette.inset, CircleShape).padding(horizontal = 6.dp, vertical = 3.dp),
-                                fontFamily = CodeFont, fontSize = 11.sp, color = Ink, maxLines = 1)
+                                fontFamily = UiFont, fontSize = 11.sp, color = Ink, maxLines = 1)
                         }
                         Icon(Icons.Outlined.ChevronRight, null, Modifier.size(15.dp), tint = Secondary)
                     }
@@ -111,7 +111,7 @@ import app.nautilo.mobile.data.Conversation
             Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("我的项目", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                 Text("${state.projects.size}", Modifier.background(palette.inset, CircleShape).padding(horizontal = 7.dp, vertical = 2.dp),
-                    color = Secondary, fontFamily = CodeFont, fontSize = 11.sp)
+                    color = Secondary, fontFamily = UiFont, fontSize = 11.sp)
                 Spacer(Modifier.weight(1f))
                 if (state.host != null) NPanel({ newProject = true }, Modifier.height(28.dp).testTag("projects-create-project"), shape = CircleShape, color = Selection) {
                     Row(Modifier.padding(horizontal = 9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -138,7 +138,7 @@ import app.nautilo.mobile.data.Conversation
                                     Icon(Icons.Outlined.FolderOpen, null, Modifier.size(19.dp), tint = Accent)
                                     Text(project.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f, false),
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text("${all.size}", fontFamily = CodeFont, fontSize = 11.sp, color = Secondary)
+                                    Text("${all.size}", fontFamily = UiFont, fontSize = 11.sp, color = Secondary)
                                     Icon(Icons.Outlined.ExpandMore, if (expanded) "收起会话" else "展开会话", Modifier.size(16.dp).graphicsLayer { rotationZ = caret.value }, tint = Secondary)
                                 }
                             }
@@ -212,7 +212,7 @@ import app.nautilo.mobile.data.Conversation
             Text(session.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                 fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ink)
             if (session.status in listOf("running", "waiting", "starting")) Dot(true)
-            Text(shortTime(session.updatedAt), fontFamily = CodeFont, fontSize = 12.sp, color = Secondary)
+            Text(shortTime(session.updatedAt), fontFamily = UiFont, fontSize = 12.sp, color = Secondary)
             Icon(Icons.Outlined.ChevronRight, null, Modifier.size(14.dp), tint = Secondary)
         }
     }

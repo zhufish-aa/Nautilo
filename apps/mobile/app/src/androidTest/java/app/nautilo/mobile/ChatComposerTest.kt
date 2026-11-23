@@ -110,7 +110,12 @@ class ChatComposerTest {
         val model = MobileViewModel(ApplicationProvider.getApplicationContext())
         val state = MobileState(screen = Screen.Chat, connected = true,
             session = Conversation("session", "project", "项目讨论", "idle", "", "gpt-6.1-sol", "max"),
-            messages = listOf(ChatMessage("user", "user", "帮我梳理一下项目。", ""), ChatMessage("reply", "agent", "当然。我们可以先从项目结构开始，再看你想改进的部分。", "")))
+            timeline = MobileTimeline(1, listOf(
+                MobileTimelineBlock(json("blockId" to "user", "seq" to 1, "kind" to "user_prompt",
+                    "content" to json("sender" to "user", "text" to "帮我梳理一下项目。"))),
+                MobileTimelineBlock(json("blockId" to "reply", "seq" to 2, "kind" to "assistant_text",
+                    "content" to json("text" to "当然。我们可以先从项目结构开始，再看你想改进的部分。")))
+            ), emptyMap()))
         compose.setContent { NautiloTheme { Box(Modifier.fillMaxSize().background(ChatBackground).statusBarsPadding().navigationBarsPadding()) { ChatScreen(state, model) } } }
         compose.onNodeWithTag("composer-configuration").assertDoesNotExist()
         compose.onNodeWithText("gpt-6.1-sol", substring = true).assertDoesNotExist()

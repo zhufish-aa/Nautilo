@@ -28,8 +28,7 @@
   --color-info: var(--info);
 
   --font-sans: var(--app-font-sans);
-  --font-mono: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas,
-    "Courier New", monospace;
+  --font-mono: var(--app-font-sans);
 
   --shadow-card: var(--shadow-card-value);
   --shadow-pop: var(--shadow-pop-value);
@@ -510,10 +509,6 @@
   *, *::before, *::after { scroll-behavior: auto !important; }
 }
 
-/* Context panels overlay rather than squeeze the conversation at narrow widths. */
-@media (max-width: 1100px) {
-  .workspace-preview { position: absolute; inset: 0 0 0 auto; z-index: 35; width: min(520px, 100%) !important; box-shadow: -8px 0 24px rgb(0 0 0 / .06); }
-}
 
 /* Small, consistent movements help surfaces feel connected without animating
    individual rows or the conversation timeline. */
@@ -585,7 +580,8 @@ html[data-reduce-motion] *::after {
 
 /* Compact desktop workspace, with a fixed composer and one level of menus. */
 html, body { font-family: var(--app-font-sans); font-size: 14px; font-weight: var(--app-font-weight); line-height: 1.6; letter-spacing: normal; }
-button, input, select, textarea { font-family: inherit; }
+:where(code, kbd, pre, samp), button, input, select, textarea { font-family: inherit; }
+.monaco-editor, .monaco-component { --monaco-monospace-font: var(--app-font-sans); }
 /* Portalled menus share the same typography as the controls in the app. */
 .ui-select-content, .permission-menu { font-family: var(--app-font-sans); font-weight: var(--app-font-weight); color: var(--ink); }
 .app-shell {
@@ -647,7 +643,8 @@ button, input, select, textarea { font-family: inherit; }
 .sidebar-navigation::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
 .sidebar-navigation:hover::-webkit-scrollbar-thumb { background: var(--line-strong); }
 
-.workspace-conversation-header { display: flex; align-items: center; gap: 16px; min-height: 64px; padding: 16px 26px; flex-shrink: 0; }
+.workspace-conversation-header { display: flex; align-items: center; gap: 16px; min-height: var(--workspace-header-height); padding: 16px 26px; flex-shrink: 0; }
+.session-with-preview .workspace-conversation-header { height: var(--workspace-header-height); padding-block: 0; border-bottom: 1px solid var(--session-inspector-divider); }
 .dark .workspace-conversation-header { background: color-mix(in srgb, var(--panel) 55%, transparent); }
 .workspace-project-name { display: flex; align-items: center; gap: 7px; color: var(--ink-3); font-size: 12px; max-width: 200px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .assistant-identity { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; font-size: 14px; }

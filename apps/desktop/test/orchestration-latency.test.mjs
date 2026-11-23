@@ -4,6 +4,32 @@ import { createHarness, delta } from "./helpers/orchestration-runtime-harness.mj
 
 const texts = (h) => Array.from(h.state.events.s).filter((row) => row.data.kind === "message").map((row) => row.data.text);
 
+test("the workbench picks up newly persisted workflow children and refreshes just their metadata", async () => {
+  const h = createHarness();
+  const child = { ...h.session, id: "child", parentSessionId: "s", title: "代码探索", status: "running" };
+  h.replies["session.list"] = [];
+  const close = h.runtime.watchChildSessions("p", "s");
+  await h.advance(40);
+  assert.equal(h.state.sessions.length, 1);
+
+  h.replies["session.list"] = [child, { ...child, id: "unrelated", parentSessionId: "other" }];
+  await h.advance(2040);
+  assert.deepEqual(h.state.sessions.map(session => session.id), ["s", "child"]);
+  assert.equal(h.state.sessions[1].status, "running");
+
+  h.replies["session.list"] = [{ ...child, status: "completed", updatedAt: "2026-11-03T00:00:01Z" }];
+  await h.advance(2040);
+  assert.equal(h.state.sessions[1].status, "completed");
+
+  h.replies["session.list"] = [{ ...child, id: "after-close" }];
+  await h.advance(2000);
+  close();
+  await h.advance(5000);
+  assert.deepEqual(h.state.sessions.map(session => session.id), ["s", "child"]);
+  assert.equal(h.calls.length, 4);
+  assert.ok(h.calls.every(call => call.method === "session.list" && call.params.projectId === "p"));
+});
+
 test("independent project/agent writes overlap but session/send await every prerequisite", async () => {
   const h = createHarness();
   const start = h.now();
@@ -39,67 +65,6 @@ test("failed prerequisite never starts a model turn", async () => {
   await h.advance(400); await sent;
   assert.ok(!h.calls.some((call) => call.method === "session.send"));
   assert.ok(h.state.events.s.some((row) => row.data.kind === "error"));
-});
-
-test("first token bypasses pending structural timer without losing history or duplicating cumulative deltas", async () => {
-  const h = createHarness();
-  h.runtime.standaloneHydrated.add("s");
-  h.runtime.standaloneMessageCache.set("s", [{ id: "old", sessionId: "s", sender: "user", text: "Earlier", createdAt: "2026-11-03T00:00:00Z" }]);
-  h.runtime.standaloneLastRebuildAt.set("s", h.now());
-  h.runtime.scheduleStandaloneRender("s");
-  await h.advance(1);
-  const start = h.now();
-  h.runtime.mergeStandaloneEvents("s", [delta(1)]);
-  assert.equal(h.renders[0].at - start, 0);
-  assert.deepEqual(texts(h), ["Earlier", "Hello"]);
-  const id = h.state.events.s[1].id;
-  h.runtime.mergeStandaloneEvents("s", [delta(2, "Hello there")]);
-  assert.deepEqual(texts(h), ["Earlier", "Hello there"]);
-  assert.equal(h.state.events.s[1].id, id);
-  h.runtime.mergeStandaloneEvents("s", [delta(2, "Hello there")]);
-  await h.advance(199);
-  assert.equal(h.renders.length, 3); // first build + patches, no stale structural timer
-  assert.equal(h.runtime.standaloneEventCache.get("s").length, 1);
-});
-
-test("later new segments remain coalesced, terminal event finalizes the stream", async () => {
-  const h = createHarness();
-  h.runtime.standaloneHydrated.add("s");
-  h.runtime.mergeStandaloneEvents("s", [delta(1)]);
-  for (let i = 2; i < 20; i++) h.runtime.mergeStandaloneEvents("s", [delta(i, "segment", { payload: { messageId: `m${i}`, text: "segment" } })]);
-  assert.equal(h.renders.length, 1);
-  await h.advance(200);
-  assert.equal(h.renders.length, 2);
-  assert.equal(texts(h).length, 19);
-  h.runtime.mergeStandaloneEvents("s", [delta(20, "", { type: "run.completed", payload: {} })]);
-  await h.advance(200);
-  assert.ok(h.state.events.s.filter((row) => row.data.kind === "message").every((row) => row.data.streaming === false));
-});
-
-test("interleaved reasoning channels stream independently and each final snapshot replaces its own prefix", async () => {
-  const h = createHarness();
-  h.runtime.standaloneHydrated.add("s");
-  const thought = (sequence, messageId, text, type = "agent.thinking_delta") => delta(sequence, text, { type, payload: { messageId, text } });
-  h.runtime.mergeStandaloneEvents("s", [thought(1, "reason", "Summary prefix")]);
-  h.runtime.mergeStandaloneEvents("s", [thought(2, "reason:content", "Raw prefix")]);
-  await h.advance(200);
-  const rows = () => Array.from(h.state.events.s)
-    .flatMap(row => row.data.kind === "tool_group" ? Array.from(row.data.items) : [row])
-    .filter(row => row.data.kind === "reasoning");
-  assert.equal(rows().length, 2);
-  h.runtime.mergeStandaloneEvents("s", [thought(3, "reason", "Summary prefix continued")]);
-  h.runtime.mergeStandaloneEvents("s", [thought(4, "reason:content", "Raw prefix continued")]);
-  await h.advance(200);
-  assert.deepEqual(rows().map(row => row.data.text), ["Summary prefix continued", "Raw prefix continued"]);
-  h.runtime.mergeStandaloneEvents("s", [thought(5, "reason", "Complete summary", "agent.thinking_summary")]);
-  await h.advance(200);
-  assert.equal(rows()[0].data.text, "Complete summary");
-  assert.equal(rows()[0].data.streaming, false);
-  assert.equal(rows()[1].data.streaming, true);
-  h.runtime.mergeStandaloneEvents("s", [thought(6, "reason:content", "Complete raw content", "agent.thinking_summary")]);
-  await h.advance(200);
-  assert.deepEqual(rows().map(row => row.data.text), ["Complete summary", "Complete raw content"]);
-  assert.ok(rows().every(row => row.data.streaming === false));
 });
 
 test("first-token priority retains queue events and cancellation clears pending renders", async () => {
@@ -192,7 +157,7 @@ test("missing session/bridge reject; accepted turn survives hydrate failure with
   await h.advance(1000);
   assert.equal(h.calls.filter((call) => call.method === "session.send").length, 1);
   assert.ok(h.calls.some((call) => call.method === "event.wait"));
-  assert.ok(texts(h).includes("Already streamed"));
+  assert.equal(h.runtime.standaloneSequences.get("s"), 1);
 });
 
 test("configuration reset sends null, commits only on success, and queues subsequent edits", async () => {

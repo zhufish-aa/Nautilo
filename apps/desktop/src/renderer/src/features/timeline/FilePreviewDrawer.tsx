@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileCode2, FileWarning, FolderOpen, Loader2 } from "lucide-react";
 import { Drawer } from "../../components/ui/Drawer";
 import { useI18n } from "../../lib/i18n";
@@ -32,14 +32,15 @@ const OVERSCAN = 20;
  * and each row is highlighted on demand (whole-file highlight.js on hundreds
  * of thousands of lines would block the renderer for seconds).
  */
-export function VirtualizedCode({ lines, language, targetLine }: {
+export function VirtualizedCode({ lines, language, targetLine, highlightedLines }: {
   lines: string[];
   language?: string;
   targetLine?: number;
+  highlightedLines?: string[];
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef(0);
-  const highlightCacheRef = useRef(new Map<number, string>());
+  const highlightCache = useMemo(() => new Map<number, string>(), [lines, language]);
   const [range, setRange] = useState({ start: 0, end: 80 });
 
   const updateRange = useCallback((): void => {
@@ -54,7 +55,6 @@ export function VirtualizedCode({ lines, language, targetLine }: {
   }, [lines.length]);
 
   useEffect(() => {
-    highlightCacheRef.current.clear();
     updateRange();
     const element = scrollRef.current;
     if (!element) return undefined;
@@ -79,50 +79,35 @@ export function VirtualizedCode({ lines, language, targetLine }: {
   }, [targetLine, lines.length, updateRange]);
 
   const htmlFor = (index: number): string => {
-    const cache = highlightCacheRef.current;
-    const cached = cache.get(index);
+    if (highlightedLines) return highlightedLines[index] ?? "";
+    const cached = highlightCache.get(index);
     if (cached !== undefined) return cached;
     const html = highlightLine(lines[index] ?? "", language);
-    if (cache.size > 5000) cache.clear();
-    cache.set(index, html);
+    if (highlightCache.size > 5000) highlightCache.clear();
+    highlightCache.set(index, html);
     return html;
   };
 
-  const gutterRows: JSX.Element[] = [];
-  const codeRows: JSX.Element[] = [];
-  for (let index = range.start; index < range.end; index += 1) {
+  const rows: JSX.Element[] = [];
+  for (let index = range.start; index < Math.min(range.end, lines.length); index += 1) {
     const lineNumber = index + 1;
     const highlighted = targetLine === lineNumber;
-    gutterRows.push(
-      <div key={lineNumber} className={highlighted ? "font-semibold text-accent" : undefined}>
-        {lineNumber}
+    rows.push(
+      <div key={lineNumber} className={`preview-code-row flex ${highlighted ? "bg-accent-soft" : ""}`} style={{ height: LINE_HEIGHT }}>
+        <span aria-hidden className={`preview-code-number sticky left-0 z-10 w-[46px] shrink-0 select-none border-r border-line bg-card px-2 text-right ${highlighted ? "font-semibold text-accent" : "text-ink-3"}`}>
+          {lineNumber}
+        </span>
+        {/* Highlighting escapes the file text before adding token spans. */}
+        <code className="whitespace-pre px-4" dangerouslySetInnerHTML={{ __html: htmlFor(index) }} />
       </div>
-    );
-    codeRows.push(
-      // eslint-disable-next-line react/no-danger -- html is escaped/built by highlight.js
-      <div key={lineNumber} className="whitespace-pre" dangerouslySetInnerHTML={{ __html: htmlFor(index) }} />
     );
   }
 
   return (
-    <div ref={scrollRef} onScroll={updateRange} className="min-h-0 flex-1 overflow-auto">
-      <div className="relative flex min-w-fit" style={{ height: lines.length * LINE_HEIGHT + BLOCK_PADDING * 2 }}>
-        {targetLine !== undefined && targetLine >= 1 && targetLine <= lines.length && (
-          <div
-            aria-hidden
-            className="absolute inset-x-0 bg-accent-soft"
-            style={{ top: BLOCK_PADDING + (targetLine - 1) * LINE_HEIGHT, height: LINE_HEIGHT }}
-          />
-        )}
-        <div className="sticky left-0 z-10 shrink-0 select-none overflow-hidden border-r border-line bg-card pl-4 pr-3 text-right font-mono text-[12px] leading-[20px] text-ink-3/70">
-          <div style={{ transform: `translateY(${BLOCK_PADDING + range.start * LINE_HEIGHT}px)` }}>
-            {gutterRows}
-          </div>
-        </div>
-        <pre className="min-w-0 flex-1 pl-4 pr-4 font-mono text-[12px] leading-[20px] text-ink-2">
-          <div aria-hidden style={{ height: BLOCK_PADDING + range.start * LINE_HEIGHT }} />
-          {codeRows}
-        </pre>
+    <div ref={scrollRef} onScroll={updateRange} className="preview-code-scroll min-h-0 flex-1 overflow-auto">
+      <div className="w-max min-w-full font-mono text-[12px] font-normal leading-[20px] text-ink-2"
+        style={{ paddingTop: BLOCK_PADDING + range.start * LINE_HEIGHT, paddingBottom: BLOCK_PADDING + Math.max(0, lines.length - range.end) * LINE_HEIGHT }}>
+        {rows}
       </div>
     </div>
   );

@@ -138,6 +138,17 @@ const bridge = {
     }
   },
   browser: {
+    shell: ((command,input) => ipcRenderer.invoke("browser:shell",command,input)) as import("../shared/browser-shell").BrowserShellBridge,
+    onShellChange: (cb:(change:import("../shared/browser-shell").BrowserShellChange)=>void) => {
+      const listener = (_event:Electron.IpcRendererEvent,change:import("../shared/browser-shell").BrowserShellChange) => cb(change);
+      ipcRenderer.on("browser:shell-changed",listener);
+      return () => { ipcRenderer.removeListener("browser:shell-changed",listener); };
+    },
+    onDraft: (cb:(draft:import("../shared/browser-shell").BrowserDraft)=>void) => {
+      const listener = (_event:Electron.IpcRendererEvent,draft:import("../shared/browser-shell").BrowserDraft) => cb(draft);
+      ipcRenderer.on("browser:draft",listener);
+      return () => { ipcRenderer.removeListener("browser:draft",listener); };
+    },
     profile: (command:"inspect"|"import"|"login",input:import("../shared/browser-profile").BrowserProfileInput) => ipcRenderer.invoke("browser:profile",command,input),
     spaces: (command: "list" | "create" | "rename", input?: import("../shared/browser-spaces").BrowserSpacesInput) => ipcRenderer.invoke("browser:spaces", command, input),
     panel: (sessionId: string, command: string, value?: unknown) => ipcRenderer.invoke("browser:panel",sessionId,command,value)

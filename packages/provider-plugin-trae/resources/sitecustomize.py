@@ -17,6 +17,58 @@ def install():
     from trae_agent.utils.llm_clients.llm_client import LLMClient
     from trae_agent.tools.base import ToolExecutor
 
+    managed_servers = json.loads(os.environ.pop("NAUTILO_TRAE_MCP_SERVERS", "[]")) or []
+    if managed_servers:
+        from trae_agent.utils.config import Config, MCPServerConfig
+
+        native_config = Config.create
+
+        def create_config(**options):
+            config = native_config(**options)
+            agent = config.trae_agent
+            for server in managed_servers:
+                name = server["name"]
+                if server["transport"] == "http":
+                    value = {"http_url": server["url"], "headers": server.get("headers")}
+                else:
+                    value = {key: server[key] for key in ("command", "args", "env", "cwd") if key in server}
+                agent.mcp_servers_config[name] = MCPServerConfig(**value)
+                if name not in agent.allow_mcp_servers:
+                    agent.allow_mcp_servers.append(name)
+            return config
+
+        Config.create = staticmethod(create_config)
+
+        from trae_agent.utils.mcp_client import MCPClient
+        from trae_agent.utils.llm_clients.openai_client import OpenAIClient
+
+        builtin_servers = {server["name"] for server in managed_servers
+                           if "NAUTILO_LOCAL_MCP_SPEC" in server.get("env", {})}
+        builtin_tools = set()
+        native_discover = MCPClient.connect_and_discover
+
+        async def discover(client, mcp_server_name, mcp_server_config, mcp_tools_container, model_provider):
+            start = len(mcp_tools_container)
+            await native_discover(client, mcp_server_name, mcp_server_config, mcp_tools_container, model_provider)
+            if mcp_server_name in builtin_servers:
+                for tool in mcp_tools_container[start:]:
+                    # Trae 0.1.0 rebuilds MCP schemas and drops nested properties.
+                    tool.get_input_schema = lambda tool=tool: tool.tool.inputSchema
+                    builtin_tools.add(tool.name)
+
+        MCPClient.connect_and_discover = discover
+
+        native_response = OpenAIClient._create_openai_response
+
+        def openai_response(client, api_call_input, model_config, tool_schemas):
+            if tool_schemas:
+                # Responses strict schemas cannot express arbitrary workflow result keys.
+                tool_schemas = [dict(tool, strict=False) if tool.get("name") in builtin_tools else tool
+                                for tool in tool_schemas]
+            return native_response(client, api_call_input, model_config, tool_schemas)
+
+        OpenAIClient._create_openai_response = openai_response
+
     state_path = Path(os.environ["NAUTILO_TRAE_STATE"])
     session_id = os.environ["NAUTILO_TRAE_SESSION_ID"]
     resume = os.environ.get("NAUTILO_TRAE_RESUME") == "1"

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import "@fontsource-variable/jetbrains-mono";
 import "../../lib/monaco-workers";
 import * as monaco from "monaco-editor";
 import { bindDiffRecovery } from "../../lib/monaco-diff-provider";
@@ -217,7 +216,7 @@ function styleSourceControlFolds(container: HTMLElement): () => void {
 }
 
 export interface DiffReviewPosition { index: number; count: number }
-export interface DiffReviewNavigation { move: (direction: -1 | 1) => void }
+export interface DiffReviewNavigation { move: (direction: -1 | 1) => void; find?: () => void }
 
 /** Monaco language id for a file path, via the registered languages' extensions. */
 function languageForFile(filePath: string): string {
@@ -231,6 +230,7 @@ function languageForFile(filePath: string): string {
 
 const EDITOR_OPTIONS: monaco.editor.IStandaloneEditorConstructionOptions = {
   automaticLayout: true,
+  fontFamily: '"Noto Sans SC Variable"',
   minimap: { enabled: false },
   fontSize: 12,
   lineHeight: 20,
@@ -293,7 +293,6 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
       : currentTheme(review);
     const options: monaco.editor.IStandaloneEditorConstructionOptions = review ? {
       ...EDITOR_OPTIONS,
-      fontFamily: '"JetBrains Mono Variable", "Noto Sans SC Variable", "Cascadia Code", Consolas, monospace',
       fontSize: 15,
       lineHeight: 29,
       fontWeight: "500",
@@ -312,7 +311,6 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
       unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false, nonBasicASCII: false }
     } : sourceControl ? {
       ...EDITOR_OPTIONS,
-      fontFamily: '"JetBrains Mono Variable", "Noto Sans SC Variable", Consolas, monospace',
       fontSize: 12,
       lineHeight: 1.6,
       fontWeight: "500",
@@ -432,7 +430,11 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
       for (const code of [diffEditor.getOriginalEditor(), diffEditor.getModifiedEditor()]) {
         subscriptions.push(code.onDidScrollChange(scheduleConnectors), code.onDidLayoutChange(scheduleConnectors));
       }
-      if (navigationRef) navigationRef.current = { move(direction) {
+      if (navigationRef) navigationRef.current = { find() {
+        const editor = diffEditor.getModifiedEditor();
+        editor.focus();
+        editor.trigger("preview", "actions.find", undefined);
+      }, move(direction) {
         const changes = diffEditor.getLineChanges() ?? [];
         if (!changes.length) return;
         changeIndex = (changeIndex + direction + changes.length) % changes.length;
@@ -450,9 +452,9 @@ export default function DiffCodeEditor({ before, value, onChange, filePath, mode
     activeModelKey.current = identity;
     modelCache.current.set(identity, { modified: modifiedModel, original: originalModelRef.current ?? undefined });
 
-    if (review || sourceControl) void document.fonts.load(`500 ${review ? 15 : 12}px "JetBrains Mono Variable"`, sourceControl ? "n→" : undefined).then(() => {
+    void document.fonts.load(`${options.fontWeight ?? "normal"} ${options.fontSize}px ${options.fontFamily}`, "n中→").then(() => {
       if (!disposed) { monaco.editor.remeasureFonts(); editor.layout(); }
-    }).catch(() => { /* The configured local monospace fallback remains available. */ });
+    }).catch(() => { /* The system font remains available if loading fails. */ });
     const themeObserver = new MutationObserver(() => monaco.editor.setTheme(theme()));
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
     const removeFoldStyling = sourceControl ? styleSourceControlFolds(container) : undefined;

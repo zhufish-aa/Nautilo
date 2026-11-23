@@ -2,7 +2,7 @@
   "id": "trae",
   "apiVersion": 1,
   "main": "agenthub-plugin-trae",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "descriptor": {
     "providerId": "trae",
     "name": "Trae",

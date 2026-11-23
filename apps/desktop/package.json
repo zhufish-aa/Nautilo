@@ -1,6 +1,6 @@
 {
   "name": "@agenthub/desktop",
-  "version": "0.2.16",
+  "version": "0.2.19",
   "private": true,
   "description": "A local, user-configurable multi-agent coding workspace.",
   "author": "Nautilo",
@@ -16,7 +16,6 @@
   "dependencies": {
     "@agenthub/schemas": "workspace:*",
     "@aiden0z/pptx-renderer": "1.2.4",
-    "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@fontsource-variable/noto-sans-sc": "^5.3.1",
     "@radix-ui/react-dialog": "^1.1.4",
     "@radix-ui/react-dropdown-menu": "^2.1.21",

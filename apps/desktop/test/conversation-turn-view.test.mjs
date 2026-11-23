@@ -7,77 +7,45 @@ import ts from 'typescript';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-test('process stays expanded while generating, collapses after the result, and can reopen', () => {
+test('turn summary displays generation, completion, elapsed time, and its expansion control', () => {
   const require = createRequire(import.meta.url);
-  let expansion;
   const modules = {
-    react: { useId: () => 'process', useState: initial => { expansion ??= initial; return [expansion, value => { expansion = value; }]; } },
     'react/jsx-runtime': require('react/jsx-runtime'),
     'lucide-react': { Check: () => null, ChevronRight: () => null, CircleAlert: () => null, Square: () => null },
-    '../../lib/i18n': { useI18n: () => ({ locale: 'zh-CN' }) },
-    './WorkflowToolActivity': { workflowTool: name => name === 'agenthub_workflow_status' ? 'status' : undefined },
-    './Timeline': { TimelineEventView: ({ event, showAuthor }) => React.createElement('div', null, showAuthor && 'Nautilo', event.data.text ?? event.data.toolName) }
+    '../../lib/i18n': { useI18n: () => ({ locale: 'zh-CN' }) }
   };
   const source = readFileSync(new URL('../src/renderer/src/features/timeline/ConversationTurnView.tsx', import.meta.url), 'utf8');
   const exports = {};
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, { exports, require: name => modules[name] });
-  const before = { id: 'step', data: { kind: 'message', sender: 'agent', text: 'Reading the file' } };
-  const result = { id: 'result', data: { kind: 'message', sender: 'agent', text: 'Final answer' } };
-  const render = turn => exports.ConversationTurnView({ turn });
-  const dispatch = { id: 'native', data: { kind: 'tool_activity', toolName: 'Native child dispatch', subagent: { task: 'Read directory' }, status: 'done' } };
-  const after = { id: 'after', data: { kind: 'message', sender: 'agent', text: 'Checking the delegated result' } };
-  const task = { id: 'task', data: { kind: 'task_update', text: 'Team task card', status: 'running' } };
-  const command = { id: 'command', data: { kind: 'tool_activity', toolName: 'Verify directory' } };
-  assert.equal(exports.isTurnTraceStep({ data: { kind: 'tool_activity', toolName: 'agenthub_workflow_status' } }), true);
-  const notice = { id: 'notice', data: { kind: 'approval', text: 'Approval needed' } };
-  const turn = { id: 'turn', events: [before, dispatch, after, task, command, notice, result], completed: false };
-  const assertOrder = (markup, labels) => {
-    let previous = -1;
-    for (const label of labels) {
-      const position = markup.indexOf(label);
-      assert.ok(position > previous, `${label} retains its chronological position`);
-      previous = position;
-    }
-  };
-  const live = renderToStaticMarkup(render(turn));
-  assert.match(live, /Reading the file/);
-  assert.match(live, /Final answer/);
+  let expanded = true;
+  const toggle = () => { expanded = !expanded; };
+  const view = (status, durationMs) => exports.ConversationTurnView({ turn: { status, durationMs }, expanded, onToggle: toggle });
+  const live = renderToStaticMarkup(view('running', null));
+  assert.match(live, /执行中/);
   assert.match(live, /aria-expanded="true"/);
   assert.match(live, /conversation-wait-orbit/);
-  assert.doesNotMatch(live, /data-activity-(mark|sweep)/);
-  assert.doesNotMatch(live, /assistant-identity|assistant-mark/);
-  assertOrder(live, ['Reading the file', 'Native child dispatch', 'Checking the delegated result', 'Team task card', 'Verify directory', 'Approval needed', 'Final answer']);
-  const done = { ...turn, completed: true, result, durationMs: 72_000 };
-  const collapsed = renderToStaticMarkup(render(done));
-  assert.doesNotMatch(collapsed, /Reading the file/);
-  assert.match(collapsed, /Final answer/);
-  assert.match(collapsed, /已完成，用时 1分12秒/);
-  assert.doesNotMatch(collapsed, /conversation-wait-orbit/);
-  assert.doesNotMatch(collapsed, /项过程|assistant-identity/);
-  assert.ok(collapsed.indexOf('conversation-turn-summary') < collapsed.indexOf('Final answer'));
-  assert.equal((collapsed.match(/Native child dispatch/g) ?? []).length, 1, 'native delegation remains visible outside the collapsed process');
-  assert.match(collapsed, /aria-expanded="false"/);
-  assertOrder(collapsed, ['Native child dispatch', 'Team task card', 'Approval needed', 'Final answer']);
-  const buttons = [];
-  const visit = node => {
-    if (!node || typeof node !== 'object') return;
-    if (node.type === 'button') buttons.push(node);
-    React.Children.forEach(node.props?.children, visit);
-  };
-  visit(render(done));
-  buttons[0].props.onClick();
-  const reopened = renderToStaticMarkup(render(done));
-  assert.match(reopened, /Reading the file/);
-  assert.match(reopened, /Final answer/);
-  assert.match(reopened, /aria-expanded="true"/);
-  assertOrder(reopened, ['Reading the file', 'Native child dispatch', 'Checking the delegated result', 'Team task card', 'Verify directory', 'Approval needed', 'Final answer']);
-  const updated = { ...done, events: done.events.map(event => event === task ? { ...task, data: { ...task.data, status: 'completed' } } : event) };
-  assertOrder(renderToStaticMarkup(render(updated)), ['Native child dispatch', 'Team task card', 'Verify directory', 'Final answer']);
-  const plain = renderToStaticMarkup(render({ id: 'plain', events: [result], result, completed: true, durationMs: 3_000 }));
-  assert.match(plain, /已完成，用时 3秒/);
-  assert.match(plain, /Final answer/);
-  assert.doesNotMatch(plain, /<button|aria-expanded|assistant-identity/);
-  assert.match(renderToStaticMarkup(render({ ...done, durationMs: 500 })), /用时 不到1秒/);
-  assert.doesNotMatch(renderToStaticMarkup(render({ ...done, durationMs: undefined })), /用时/);
-  assert.match(renderToStaticMarkup(render({ ...done, events: [...done.events, { id: 'stopped', data: { kind: 'activity', phase: 'stopped' } }] })), /已停止，用时 1分12秒/);
+
+  expanded = false;
+  const collapsed = view('completed', 72_000);
+  const markup = renderToStaticMarkup(collapsed);
+  assert.match(markup, /已完成，用时 1分12秒/);
+  assert.match(markup, /aria-expanded="false"/);
+  assert.doesNotMatch(markup, /conversation-wait-orbit/);
+  const button = React.Children.only(React.Children.only(collapsed.props.children).props.children);
+  button.props.onClick();
+  assert.match(renderToStaticMarkup(view('completed', 72_000)), /aria-expanded="true"/);
+  assert.match(renderToStaticMarkup(view('cancelled', 500)), /已停止，用时 不到1秒/);
+  assert.doesNotMatch(renderToStaticMarkup(view('completed', null)), /用时/);
+  const statusOnly = renderToStaticMarkup(exports.ConversationTurnView({
+    turn: { status: 'completed', durationMs: 5900 }, expanded: false,
+  }));
+  assert.match(statusOnly, /class="conversation-process-label"/);
+  assert.match(statusOnly, /已完成，用时 5秒/);
+  assert.doesNotMatch(statusOnly, /<button|aria-expanded|conversation-turn-chevron/);
+
+  for (const toolName of ['web_search', 'browser_run', 'read_file', 'write_file', 'run_code', 'agenthub_workflow_status']) {
+    assert.equal(exports.isTurnTraceStep({ data: { kind: 'tool_activity', toolName } }), true, toolName);
+  }
+  assert.equal(exports.isTurnTraceStep({ data: { kind: 'tool_activity', subagent: {} } }), false);
+  assert.equal(exports.isTurnTraceStep({ data: { kind: 'message' } }), false);
 });

@@ -189,28 +189,6 @@ export function normalizePathKey(path: string): string {
   return path.replace(/\\/g, "/").toLowerCase();
 }
 
-/**
- * Deliverable tab list with a chat-requested file merged in: the requested
- * path becomes the first tab when it is not already among the deliverables
- * (compared case- and separator-insensitively); existing order is preserved.
- */
-export function mergeDeliverableTabs(deliverables: string[], requestedPath?: string): string[] {
-  if (!requestedPath) return deliverables;
-  const key = normalizePathKey(requestedPath);
-  if (deliverables.some((path) => normalizePathKey(path) === key)) return deliverables;
-  return [requestedPath, ...deliverables];
-}
-
-/**
- * The tab path a chat-requested preview should select: prefers the existing
- * deliverable's exact form (so artifact.read keeps a known-good path) and
- * falls back to the requested path itself.
- */
-export function resolveRequestedTab(deliverables: string[], requestedPath: string): string {
-  const key = normalizePathKey(requestedPath);
-  return deliverables.find((path) => normalizePathKey(path) === key) ?? requestedPath;
-}
-
 export interface VisibleRange {
   start: number;
   end: number;
@@ -244,10 +222,4 @@ export async function docxToHtml(bytes: Uint8Array): Promise<string> {
   const mammoth = await import("mammoth");
   const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer as ArrayBuffer });
   return result.value;
-}
-
-export function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

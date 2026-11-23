@@ -25,7 +25,6 @@ function lastSnippet(events: TimelineEvent[] | undefined): string {
     const data = events![index]!.data;
     if (data.kind === "message" && data.text.trim()) return data.text.replace(/\s+/g, " ").trim();
     if (data.kind === "tool_activity") return data.toolName;
-    if (data.kind === "tool_group") { const snippet = lastSnippet(data.items); if (snippet) return snippet; }
   }
   return "";
 }

@@ -17,14 +17,12 @@ test('native dialogs round-trip selection, empty input, editor whitespace and ca
     import {useInteractionsStore as ui} from './src/renderer/src/stores/interactions';
     import {providerUiState,applyLiveProviderUi} from './src/renderer/src/lib/provider-ui';
     import {useComposerDraftsStore as drafts} from './src/renderer/src/stores/composer-drafts';
-    import {conversationRows} from './src/renderer/src/lib/conversation-timeline';
-    import {ConversationTurnView} from './src/renderer/src/features/timeline/ConversationTurnView';
     const root=createRoot(document.getElementById('root'));let record;let serial=0;
     window.qa={responses:[],render(question,providerId='pi'){record={id:'i'+(++serial),sessionId:'s',providerId,status:'pending',kind:'question',title:'Native',createdAt:new Date().toISOString(),questions:[{id:'q',question:'Question',...question}]};
       flushSync(()=>{ui.setState({bySession:{s:[record]}});root.render(<I18nProvider><InteractionCards sessionId='s'/></I18nProvider>);});},
       resolve(input){this.responses.push(input);return {...record,status:input.outcome==='cancelled'?'cancelled':'resolved',response:input};},
-      renderTurn:turn=>flushSync(()=>root.render(<I18nProvider><ConversationTurnView turn={turn}/></I18nProvider>)),
-      close:()=>flushSync(()=>root.unmount()),providerUiState,applyLiveProviderUi,drafts,conversationRows};
+      renderStored:request=>flushSync(()=>root.render(<I18nProvider><InteractionCards sessionId='s' request={request}/></I18nProvider>)),
+      close:()=>flushSync(()=>root.unmount()),providerUiState,applyLiveProviderUi,drafts};
   `},bundle:true,platform:'browser',conditions:['worker'],format:'iife',jsx:'automatic',write:false,
   nodePaths:[join(desktop,'node_modules')],define:{'process.env.NODE_ENV':'"test"'},loader:{'.css':'empty','.svg':'dataurl','.png':'dataurl'},
   plugins:[{name:'workers',setup(build){build.onResolve({filter:/\?worker/},()=>({path:'worker',namespace:'fixture'}));build.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export default class {postMessage(){} terminate(){}}'}));}}]});
@@ -60,8 +58,9 @@ test('native dialogs round-trip selection, empty input, editor whitespace and ca
     const native={eventId:'edit-live',type:'provider.extension_ui',payload:{method:'set_editor_text',text:'from extension'}};
     w.qa.applyLiveProviderUi('s',native);assert.equal(w.qa.drafts.getState().drafts.s.text,'from extension');
     w.qa.drafts.getState().setText('s','user typing');w.qa.applyLiveProviderUi('s',native);assert.equal(w.qa.drafts.getState().drafts.s.text,'user typing');
-    const rows=w.qa.conversationRows([{id:'u',sessionId:'s',data:{kind:'message',sender:'user',text:'hi'}},{id:'a',sessionId:'s',runId:'r',data:{kind:'message',sender:'agent',text:'Partial'}},{id:'end',sessionId:'s',runId:'r',data:{kind:'activity',phase:'stopped'}}],false);
-    assert.equal(rows[1].turn.completed,true);assert.equal(rows[1].turn.result.data.text,'Partial');assert.equal(rows[1].turn.events.at(-1).data.phase,'stopped');
-    w.qa.renderTurn(rows[1].turn);assert.ok(w.document.body.textContent.includes('已停止'));assert.ok(w.document.body.textContent.includes('Partial'));
+    w.qa.renderStored({id:'saved',sessionId:'s',providerId:'pi',status:'resolved',kind:'question',title:'Saved question',
+      createdAt:new Date().toISOString(),questions:[{id:'q',question:'Saved question'}],response:{answers:{q:['Saved answer']}}});
+    assert.ok(w.document.body.textContent.includes('Saved question'));
+    assert.ok(w.document.body.textContent.includes('Saved answer'));
   } finally {w.qa?.close();w.close();}
 });

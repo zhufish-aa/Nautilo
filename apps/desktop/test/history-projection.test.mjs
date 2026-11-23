@@ -38,30 +38,10 @@ test('native history sync refreshes persisted rows even without a foreground run
 test('native edits retain the local row and missing native attachments remain visible',()=>{
   const h=createHarness();
   const messages=[{...row('local','native edit'),sender:'agent',runId:'r',nativeIdentity:{providerSessionId:'native',id:'native-part',source:'native-terminal',completed:true},nativeFiles:[{id:'missing',name:'missing.txt',unavailable:true}]}];
-  const events=[{schemaVersion:1,eventId:'old-completion',sequence:1,sessionId:'s',projectId:'p',runId:'r',timestamp:'2026-11-03T00:00:00Z',type:'agent.message',payload:{messageId:'local',providerMessageId:'native-part',text:'before native edit'}}];
-  const rows=h.runtime.buildStandaloneTimeline(messages,events,[]).filter(row=>row.data.kind==='message');
-  assert.equal(rows.length,1);assert.equal(rows[0].data.text,'native edit');
+  const event=h.runtime.timelineBlockEvent('s',{seq:1,blockId:'local',kind:'legacy',content:messages[0],sealed:true});
+  const rows=[event];
+  assert.equal(event.id,'local');assert.equal(event.data.text,'native edit');
   assert.equal(rows[0].data.attachments[0].name,'missing.txt');assert.equal(rows[0].data.attachments[0].unavailable,true);
-});
-
-test('native partial replies stream while running and stop after cancellation',()=>{
-  const h=createHarness();
-  const message={...row('native-partial','retained prefix'),sender:'agent',runId:'native-run',nativeIdentity:{providerSessionId:'native',id:'part',source:'native-terminal',completed:false,turnStatus:'running'}};
-  assert.equal(h.runtime.buildStandaloneTimeline([message],[],[]).find(row=>row.data.kind==='message').data.streaming,true);
-  message.nativeIdentity.turnStatus='cancelled';
-  const cancelled=h.runtime.buildStandaloneTimeline([message],[],[]).find(row=>row.data.kind==='message');
-  assert.equal(cancelled.data.streaming,false);assert.equal(cancelled.data.text,'retained prefix');
-});
-
-test('a native completion supersedes an earlier reconstructed cancellation',()=>{
-  const h=createHarness();const message={...row('native-final','native reply'),sender:'agent',runId:'r',nativeIdentity:{providerSessionId:'native',id:'part',source:'native-terminal',completed:true,turnStatus:'completed'}};
-  const base={schemaVersion:1,sessionId:'s',projectId:'p',runId:'r',timestamp:'2026-11-07T03:13:20Z'};
-  const cancelled={...base,eventId:'interim-cancelled',sequence:1,type:'run.cancelled',payload:{reason:'native-terminal'}};
-  const completed={...base,eventId:'actual-completion',sequence:2,type:'run.completed',payload:{summary:''}};
-  const corrected=h.runtime.buildStandaloneTimeline([message],[cancelled,completed],[]);
-  assert.equal(corrected.some(row=>row.data.kind==='activity'&&row.data.phase==='stopped'),false);
-  const stopped=h.runtime.buildStandaloneTimeline([message],[cancelled],[]);
-  assert.equal(stopped.some(row=>row.data.kind==='activity'&&row.data.phase==='stopped'),true);
 });
 
 test('standalone warm sync retains array identity, appends a row, and never uses full legacy reads', async () => {
@@ -179,16 +159,16 @@ test('deleting a project session during a batch never resurrects its metadata, v
 
 test('successful artifact/event cursors remain redrawable after a sibling metadata failure', async () => {
   const h = projectFixture(1); h.runtime.registerProjectSessionView('s', 'pr'); await h.hydrate();
-  h.feeds.get('s').push(delta(1, 'new output'));
+  h.feeds.get('s').push(delta(1, '', { type: 'file.changed', payload: { path: 'new.txt', changeType: 'added' } }));
   h.setFailure('session.historyBatch'); await assert.rejects(h.hydrate(), /simulated/);
   h.setFailure(undefined); await h.hydrate();
-  assert.ok(h.state.events.s.some((e) => e.data.text === 'new output'));
+  assert.ok(h.state.events.s.some(row => row.data.kind === 'file_change' && row.data.files[0].path === 'new.txt'));
 });
 
 test('provider queue maps to queue activity, startup to starting, and only turn_started to thinking', () => {
   const h = createHarness();
   const events = ['provider_queued', 'provider_starting', 'turn_started'].map((phase, i) => delta(i + 1, '', { type: 'agent.status', payload: { phase } }));
-  const timeline = h.runtime.buildStandaloneTimeline([], events, []);
+  const timeline = h.runtime.metadataEvents([], events, []);
   assert.deepEqual(Array.from(timeline, (e) => e.data.phase), ['provider_queued', 'starting', 'thinking']);
 });
 

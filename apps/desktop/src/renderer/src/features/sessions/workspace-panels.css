@@ -102,5 +102,6 @@
 @container conversation (min-width: 850px) {
   .workspace-panel-right { position: relative; inset: auto; max-width: 48%; box-shadow: none; }
   .workspace-panel-right.is-resizable { max-width: 100%; }
+  .workspace-panel-right[data-review-closing] { position: absolute; inset: 0 0 0 auto; }
   .workspace-panel-right.is-maximized { position: absolute; inset: 0; }
 }

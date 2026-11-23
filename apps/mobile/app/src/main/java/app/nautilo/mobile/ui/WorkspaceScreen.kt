@@ -100,7 +100,7 @@ import kotlinx.coroutines.withContext
                             }
                         }
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                            Text(files.size.toString(), color = Ink, fontSize = 30.sp, fontFamily = CodeFont, maxLines = 1)
+                            Text(files.size.toString(), color = Ink, fontSize = 30.sp, fontFamily = UiFont, maxLines = 1)
                             if (files.isEmpty() && state.connected && !state.workspaceLoading) {
                                 Dot(true)
                                 Text("干净", color = Green, fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1)
@@ -126,8 +126,8 @@ import kotlinx.coroutines.withContext
                             Text("变更清单", Modifier.weight(1f), color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                             if ((state.connected && !state.workspaceLoading && files.isEmpty()) || files.any { it.first.verifiedDiff }) {
                                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("+${files.sumOf { it.first.added }}", color = Green, fontFamily = CodeFont, fontSize = 11.sp)
-                                    Text("−${files.sumOf { it.first.removed }}", color = Danger, fontFamily = CodeFont, fontSize = 11.sp)
+                                    Text("+${files.sumOf { it.first.added }}", color = Green, fontFamily = UiFont, fontSize = 11.sp)
+                                    Text("−${files.sumOf { it.first.removed }}", color = Danger, fontFamily = UiFont, fontSize = 11.sp)
                                 }
                             }
                         }
@@ -225,5 +225,5 @@ import kotlinx.coroutines.withContext
 
 @Composable private fun FileStatus(label: String, tone: Color) {
     Text(label, Modifier.background(tone.copy(alpha = .10f), RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 2.dp),
-        color = tone, fontFamily = CodeFont, fontSize = 11.sp)
+        color = tone, fontFamily = UiFont, fontSize = 11.sp)
 }

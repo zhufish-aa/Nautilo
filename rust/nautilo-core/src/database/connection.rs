@@ -24,17 +24,6 @@ impl Database {
         raw.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
             .map_err(db_fail)?;
         crate::database::migrations::migrate(&raw)?;
-        // One-time compaction: drop verbatim message deltas journaled by older
-        // builds (writes are coalesced now, and message text also lives in the
-        // final agent.message event). Thinking deltas are NOT purged here —
-        // they are the only record of past reasoning. Best-effort: VACUUM
-        // just fails while another daemon holds the database open.
-        let purged = raw
-            .execute("DELETE FROM runtime_events AS delta WHERE json_extract(delta.data, '$.type') = 'agent.message_delta' AND EXISTS (SELECT 1 FROM runtime_events AS saved WHERE saved.session_id = delta.session_id AND COALESCE(saved.run_id, '') = COALESCE(delta.run_id, '') AND json_extract(saved.data, '$.type') = 'agent.message' AND json_extract(saved.data, '$.payload.providerMessageId') = json_extract(delta.data, '$.payload.messageId'))", [])
-            .unwrap_or(0);
-        if purged > 50_000 {
-            let _ = raw.execute_batch("VACUUM");
-        }
         Ok(Self { raw, path: file_path.to_path_buf() })
     }
 

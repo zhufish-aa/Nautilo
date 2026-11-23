@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { AnimatePresence } from "framer-motion";
 import { useI18n } from "../../lib/i18n";
 import { useConversationSelection } from "../../lib/use-conversation-selection";
 import { useUiReducedMotion } from "../../lib/ui-motion";
 import { requestedWorkspaceFile } from "../../lib/workspace-state";
-import { WorkspacePreview } from "./WorkspacePreview";
+import { WorkspacePreview, type PreviewFileRequest } from "./WorkspacePreview";
+import { useComposerDraftsStore } from "../../stores/composer-drafts";
 import { NewConversation } from "./NewConversation";
 import { SessionWorkbench, type DrawerKind } from "./SessionWorkbench";
 import { composerEase, flashComposer } from "./composer-motion";
@@ -74,23 +76,14 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
       origin.exit.forEach(element => element.remove());
     };
   }, [session?.id, active, reducedMotion]);
-  const [drawer, setDrawer] = useState<DrawerKind>(null);
-  const [preview, setPreview] = useState<{ sessionId: string; path: string }>();
-  const openPreview = useCallback((path: string): void => {
+  const [drawer, setDrawer] = useState<DrawerKind>(() => window.innerWidth >= 1500 ? "inspector" : null);
+  const [preview, setPreview] = useState<PreviewFileRequest & { sessionId: string }>();
+  const openPreview = useCallback((path: string, diff?: string): void => {
     if (!session) return;
-    setDrawer(null);
-    setPreview({ sessionId: session.id, path });
+    setDrawer(current => current === "inspector" ? current : null);
+    setPreview({ sessionId: session.id, path, diff });
   }, [session?.id]);
-  const [showInspector, setShowInspector] = useState<boolean>();
   const previewPath = requestedWorkspaceFile(preview, session?.id);
-  const inspectorOpen = !previewPath && (!drawer || drawer === "terminal" || drawer === "tools") && (showInspector ?? window.innerWidth >= 1500);
-  const toggleInspector = useCallback((): void => {
-    if (!inspectorOpen) {
-      setPreview(undefined);
-      setDrawer(current => current === "terminal" ? current : null);
-    }
-    setShowInspector(!inspectorOpen);
-  }, [inspectorOpen]);
   const openDrawer = useCallback((next: DrawerKind): void => {
     setPreview(undefined);
     setDrawer(next);
@@ -104,6 +97,20 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
   },[active,session?.id,params,openDrawer,setParams]);
   const closeDrawer = useCallback((): void => setDrawer(null), []);
   const closePreview = useCallback((): void => setPreview(undefined), []);
+  function quoteFile(reference: string): void {
+    if (!session) return;
+    const drafts = useComposerDraftsStore.getState();
+    const text = drafts.drafts[session.id]?.text ?? "";
+    const quote = "\x60" + reference + "\x60";
+    if (!text.split("\n").includes(quote)) drafts.setText(session.id, text + "\n" + quote);
+    if (window.innerWidth <= 1100) closePreview();
+    requestAnimationFrame(() => {
+      const field = workspace.current?.querySelector<HTMLTextAreaElement>(".composer textarea");
+      if (!field) return;
+      field.focus({ preventScroll: true });
+      field.setSelectionRange(field.value.length, field.value.length);
+    });
+  }
   if (loadingSession || sessionLoadError) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-ink-2">
     <p role={sessionLoadError ? "alert" : "status"}>{sessionLoadError
       ? (locale === "zh-CN" ? "暂时打不开这个会话" : "Could not open this conversation")
@@ -112,13 +119,12 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
   </div>;
   if (missingSession) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-ink-2"><p>{locale === "zh-CN" ? "此会话不存在或已移除" : "This conversation is unavailable"}</p><a href="#/sessions?new=1" className="rounded-lg border border-line px-4 py-2 text-ink hover:bg-panel">{locale === "zh-CN" ? "新会话" : "New conversation"}</a></div>;
   return (
-    <div ref={workspace} className="relative isolate flex h-full min-h-0">
+    <div ref={workspace} className={`relative isolate flex h-full min-h-0 ${previewPath ? "session-with-preview" : ""}`}>
       {!session ? <NewConversation mode="code" onCreated={openCreatedSession} active={active} /> :
       <section className="relative z-[1] flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden" aria-label={locale === "zh-CN" ? "对话" : "Conversation"}>
-        <SessionWorkbench sessionId={session.id} focusKey={params.get("focus") ?? undefined} active={active} drawer={drawer} onOpenDrawer={openDrawer} onCloseDrawer={closeDrawer} onOpenSession={openSession} onToggleInspector={toggleInspector} inspectorOpen={inspectorOpen} onOpenLocalFile={openPreview} />
+        <SessionWorkbench sessionId={session.id} focusKey={params.get("focus") ?? undefined} active={active} drawer={previewPath ? null : drawer} onOpenDrawer={openDrawer} onCloseDrawer={closeDrawer} onOpenSession={openSession} onOpenLocalFile={openPreview}
+          filePane={<AnimatePresence>{preview && previewPath && <WorkspacePreview key={session.id} sessionId={session.id} request={preview} onClose={closePreview} onQuote={quoteFile} />}</AnimatePresence>} />
       </section>}
-
-      {session && previewPath && <WorkspacePreview key={session.id} sessionId={session.id} path={previewPath} onClose={closePreview} />}
       <div ref={exitLayer} className="new-conversation-exit" aria-hidden="true" />
     </div>
   );

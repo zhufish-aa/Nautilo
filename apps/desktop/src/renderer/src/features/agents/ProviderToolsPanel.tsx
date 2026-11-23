@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import {
-  Blocks,
   Import,
   Plus,
   Search,
@@ -13,6 +13,7 @@ import { toDaemonProviderId } from "../../lib/core-mappers";
 import { capabilityEnabledFor } from "../../lib/capability-enablement";
 import { capabilityOrigin, capabilityDescription, type CapabilityOriginKind } from "../../lib/capability-origin";
 import { providerMeta, useProviderMetas } from "../../lib/provider-catalog";
+import { useUiReducedMotion } from "../../lib/ui-motion";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { Dialog } from "../../components/ui/Dialog";
@@ -20,11 +21,14 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { Input } from "../../components/ui/Input";
 import { SelectField } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
+import { SlidingTabs } from "../../components/ui/SlidingTabs";
 import { toast } from "../../stores/toast";
 import { useProviderToolsStore } from "../../stores/provider-tools";
+import { useAgentsStore } from "../../stores/agents";
 import { CapabilityEditorDialog, type CapabilityDialogState } from "./CapabilityEditorDialog";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { McpWorkbench } from "./McpWorkbench";
+import { SkillWorkbench } from "./SkillWorkbench";
 import { ResourceSyncDialog } from "./ResourceSyncDialog";
 import {
   CapabilityImportDialog,
@@ -57,6 +61,16 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   const harnessName = providerMeta(providerId).name;
   const [toggling, setToggling] = useState<string[]>([]);
   const zh = locale === "zh-CN";
+  const reduced = useUiReducedMotion();
+  const skills = kind === "skill";
+  const [matrix, setMatrix] = useState(false);
+  const installations = useAgentsStore(state => state.installations);
+  const instances = useAgentsStore(state => state.instances);
+  const ready = providers.filter(provider => installations.some(item => item.providerId === provider.id && item.status === "ready")
+    && instances.find(item => item.configurationKind === "harness" && item.providerId === provider.id)?.enabled !== false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const writing = useRef(false);
+  const [copyFrom, setCopyFrom] = useState("");
   const [query, setQuery] = useState("");
   const [view, setView] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -75,8 +89,33 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     if (isElectron && !loaded) void load();
   }, [load, loaded]);
 
+  useEffect(() => {
+    if (!skills) return;
+    function focusSearch(event: KeyboardEvent): void {
+      if (event.key !== "/" || event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey
+        || event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable]")
+        || document.querySelector('[role="dialog"][data-state="open"]') || !searchRef.current?.getClientRects().length) return;
+      event.preventDefault();
+      searchRef.current.focus();
+    }
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, [skills]);
+
   const inventory = useMemo(() => tools.filter(tool => tool.kind === kind), [tools, kind]);
   const enabledCount = inventory.filter(tool => capabilityEnabledFor(tool, daemonProviderId)).length;
+  const missingCount = skills ? inventory.filter(tool => !capabilityDescription(tool)).length : 0;
+  const filterView = view === "missing" && !missingCount ? "all" : view;
+  const isEnabled = (tool: ProviderCapability): boolean => matrix
+    ? ready.some(provider => capabilityEnabledFor(tool, toDaemonProviderId(provider.id)))
+    : capabilityEnabledFor(tool, daemonProviderId);
+  const filterCount = matrix ? inventory.filter(isEnabled).length : enabledCount;
+  const indexTokens = skills ? inventory.reduce((sum, tool) => {
+    if (!capabilityEnabledFor(tool, daemonProviderId)) return sum;
+    const text = [tool.name, capabilityDescription(tool)].join(" ");
+    const cjk = text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu)?.length ?? 0;
+    return sum + cjk + Math.ceil((Array.from(text).length - cjk) / 4);
+  }, 0) : 0;
   const originNames: Record<CapabilityOriginKind, string> = {
     builtin: zh ? "Nautilo 内置" : "Built into Nautilo",
     plugin: zh ? "来自插件" : "From plugins",
@@ -84,19 +123,17 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     custom: zh ? "手动创建" : "Created manually",
     unknown: zh ? "来源未记录" : "Source not recorded"
   };
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    return inventory.filter((tool) => {
-      const enabled = capabilityEnabledFor(tool, daemonProviderId);
-      if (view === "enabled" && !enabled || view === "disabled" && enabled) return false;
-      const origin = capabilityOrigin(tool);
-      if (sourceFilter !== "all" && origin.kind !== sourceFilter) return false;
-      if (!normalized) return true;
-      return `${tool.name} ${tool.description} ${origin.label} ${origin.path ?? ""} ${tool.tags.join(" ")}`
-        .toLowerCase()
-        .includes(normalized);
-    }).sort((a, b) => a.name.localeCompare(b.name, locale));
-  }, [inventory, query, view, sourceFilter, daemonProviderId, locale]);
+  const normalized = query.trim().toLocaleLowerCase();
+  const terms = skills ? normalized.split(/\s+/) : [normalized];
+  const filtered = inventory.filter(tool => {
+    const enabled = isEnabled(tool);
+    if (filterView === "enabled" && !enabled || filterView === "disabled" && enabled
+      || filterView === "missing" && capabilityDescription(tool)) return false;
+    const origin = capabilityOrigin(tool);
+    if (sourceFilter !== "all" && origin.kind !== sourceFilter) return false;
+    const searchable = [tool.name, tool.description, originNames[origin.kind], origin.label, origin.path, ...tool.tags].join(" ").toLocaleLowerCase();
+    return terms.every(term => searchable.includes(term));
+  }).sort((a, b) => a.name.localeCompare(b.name, locale));
   const groups = (["builtin", "local", "plugin", "custom", "unknown"] as const)
     .map(origin => ({ origin, items: filtered.filter(tool => capabilityOrigin(tool).kind === origin) }))
     .filter(group => group.items.length);
@@ -152,8 +189,8 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     setDropActive(false);
   };
 
-  const openEdit = (tool: ProviderCapability): void => {
-    setEditor({ mode: "edit", capability: tool });
+  const openEdit = (tool: ProviderCapability, focusDescription = false): void => {
+    setEditor({ mode: "edit", capability: tool, focusDescription });
   };
 
   const handleToggle = (tool: ProviderCapability, enabled: boolean): void => {
@@ -161,6 +198,40 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     void toggle(tool.id, daemonProviderId, enabled)
       .catch((error: unknown) => toast.error(messageOf(error)))
       .finally(() => setToggling((ids) => ids.filter((id) => id !== tool.id)));
+  };
+
+  const applyBindings = async (updates: Array<{ id: string; targets: string[]; enabled: boolean }>): Promise<void> => {
+    if (writing.current || !updates.length) return;
+    writing.current = true;
+    setToggling(updates.map(update => update.id));
+    const errors: string[] = [];
+    try {
+      for (const { id, targets, enabled } of updates) {
+        try { await toggle(id, targets, enabled); }
+        catch (error) { errors.push(messageOf(error)); }
+      }
+      if (errors.length) toast.error(zh ? `${errors.length} 项启用设置保存失败 · ${errors[0]}` : `${errors.length} changes failed · ${errors[0]}`);
+    } finally {
+      writing.current = false;
+      setToggling([]);
+    }
+  };
+
+  const setBindings = (items: ProviderCapability[], targets: string[], enabled: boolean): void => {
+    void applyBindings(items.map(tool => ({ id: tool.id, enabled,
+      targets: targets.filter(provider => capabilityEnabledFor(tool, provider) !== enabled),
+    })).filter(update => update.targets.length));
+  };
+
+  const copyPlan = (overwrite: boolean): void => {
+    const source = toDaemonProviderId(copyFrom);
+    if (!source || !daemonProviderId || source === daemonProviderId) return;
+    void applyBindings(inventory.flatMap(tool => {
+      const enabled = capabilityEnabledFor(tool, source);
+      return (overwrite || enabled) && capabilityEnabledFor(tool, daemonProviderId) !== enabled
+        ? [{ id: tool.id, targets: [daemonProviderId], enabled }] : [];
+    }));
+    setCopyFrom("");
   };
 
   const confirmDelete = async (): Promise<void> => {
@@ -178,29 +249,31 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   };
 
   const actions = <div className="capability-heading-actions">
-    <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)}>{zh ? "原生同步" : "Native sync"}</Button>
-    <Button variant="outline" size="sm" onClick={() => openImport()}>
+    <Button variant="outline" size="sm" disabled={skills && !!toggling.length} onClick={() => setSyncOpen(true)}>{zh ? "原生同步" : "Native sync"}</Button>
+    <Button variant="outline" size="sm" disabled={skills && !!toggling.length} onClick={() => openImport()}>
       <Import size={14} aria-hidden />{t("agents.tools.import.button")}
     </Button>
-    <Button variant="primary" size="sm" onClick={openCreate}>
+    <Button variant="primary" size="sm" disabled={skills && !!toggling.length} onClick={openCreate}>
       <Plus size={15} aria-hidden />{kind === "mcp" ? (zh ? "添加 MCP" : "Add MCP") : (zh ? "添加 Skill" : "Add Skill")}
     </Button>
   </div>;
   const harness = <div className="capability-harness-select">
     <ProviderAvatar providerId={providerId} size="sm" />
-    <SelectField value={providerId} onValueChange={setProviderId} aria-label="Harness"
+    <SelectField value={providerId} onValueChange={id => { setProviderId(id); setCopyFrom(""); }} aria-label="Harness"
       options={providers.map(provider => ({ value: provider.id, label: provider.name }))} />
   </div>;
   const search = <div className="capability-search relative">
     <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-ink-3" aria-hidden />
-    <Input value={query} onChange={event => setQuery(event.target.value)} placeholder={t("agents.tools.searchPlaceholder")}
-      className="pl-9" aria-label={t("agents.tools.searchPlaceholder")} />
+    <Input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)}
+      placeholder={skills ? (zh ? "搜索名称、描述、标签与来源" : "Search names, descriptions, tags or sources") : t("agents.tools.searchPlaceholder")}
+      className="pl-9" aria-label={t("agents.tools.searchPlaceholder")} aria-keyshortcuts={skills ? "/" : undefined} />
   </div>;
-  const filters = [
+  const filters: Array<{ id: string; label: string; count: number; warning?: boolean }> = [
     { id: "all", label: zh ? "全部" : "All", count: inventory.length },
-    { id: "enabled", label: zh ? "已启用" : "Enabled", count: enabledCount },
-    { id: "disabled", label: zh ? "未启用" : "Disabled", count: inventory.length - enabledCount },
+    { id: "enabled", label: zh ? "已启用" : "Enabled", count: filterCount },
+    { id: "disabled", label: zh ? "未启用" : "Disabled", count: inventory.length - filterCount },
   ];
+  if (missingCount) filters.push({ id: "missing", label: zh ? "缺触发说明" : "Missing description", count: missingCount, warning: true });
   const sourceSelect = <SelectField value={sourceFilter} onValueChange={setSourceFilter}
     aria-label={zh ? "筛选来源" : "Filter by source"} className="capability-source-filter"
     options={[{ value: "all", label: zh ? "所有来源" : "All sources" }, ...Object.entries(originNames).map(([value, label]) => ({ value, label }))]} />;
@@ -215,17 +288,46 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
         <div className="skill-library-heading">
           <div className="skill-library-context">
             <h1>{kind === "mcp" ? (zh ? "MCP 服务" : "MCP servers") : (zh ? "Skills 技能" : "Skills")}</h1>
-            {harness}
-            <span className="skill-library-count">{zh ? `${enabledCount} / ${inventory.length} 已启用` : `${enabledCount} / ${inventory.length} enabled`}</span>
+            {skills && <div className="skill-mode" data-matrix={matrix} role="group" aria-label={zh ? "技能视图" : "Skills view"}>
+              <span aria-hidden />
+              <button type="button" aria-pressed={!matrix} onClick={() => setMatrix(false)}>{zh ? "工作台" : "Workbench"}</button>
+              <button type="button" aria-pressed={matrix} onClick={() => { setCopyFrom(""); setMatrix(true); }}>{zh ? "多 Harness 矩阵" : "Harness matrix"}</button>
+            </div>}
+            <AnimatePresence initial={false}>
+            {!matrix && <motion.div className="skill-target-context" key="harness-context"
+              initial={reduced ? false : { opacity: 0, y: -3 }} animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -3 }} transition={{ duration: reduced ? 0 : 0.14 }}>
+              {harness}
+              {skills && <details className="skill-copy-plan" onToggle={event => { if (!event.currentTarget.open) setCopyFrom(""); }}>
+                <summary>{zh ? "复制方案" : "Copy plan"}</summary>
+                <div className="skill-copy-popover" onKeyDown={event => {
+                  if (event.key === "Escape") {
+                    const details = event.currentTarget.closest("details");
+                    details?.querySelector("summary")?.focus();
+                    details?.removeAttribute("open");
+                  }
+                }}>
+                  <SelectField aria-label={zh ? "从 Harness 复制" : "Copy from Harness"} value={copyFrom} onValueChange={setCopyFrom}
+                    placeholder={zh ? "选择来源 Harness" : "Choose source Harness"}
+                    options={providers.filter(provider => provider.id !== providerId).map(provider => ({ value: provider.id, label: provider.name }))} />
+                  <div>
+                    <Button variant="outline" size="sm" disabled={!copyFrom || !providerId || !!toggling.length} onClick={event => { copyPlan(false); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{zh ? "合并启用项" : "Merge enabled"}</Button>
+                    <Button variant="outline" size="sm" disabled={!copyFrom || !providerId || !!toggling.length} onClick={event => { copyPlan(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{zh ? "覆盖方案" : "Replace plan"}</Button>
+                  </div>
+                </div>
+              </details>}
+              <span className="skill-library-count">{zh ? `${enabledCount} / ${inventory.length} 已启用` : `${enabledCount} / ${inventory.length} enabled`}
+                {skills && <small data-warn={indexTokens >= 1000} title={zh ? "按已启用技能的名称和描述估算。中日韩字符约 1 Token，其他字符约 4 个计 1 Token。实际用量取决于模型。" : "Estimated from enabled names and descriptions. About one token per CJK character or four other characters. Actual counts depend on the model."}>
+                  {zh ? ` · 索引 ~${indexTokens} tok` : ` · Index ~${indexTokens} tok`}
+                </small>}
+              </span>
+            </motion.div>}
+            </AnimatePresence>
           </div>
           {actions}
         </div>
         <div className="skill-library-toolbar">
-          <div className="capability-underline-tabs" role="group" aria-label={zh ? "启用状态" : "Enabled status"}>
-            {filters.map(({ id, label, count }) => <button key={id} type="button" aria-pressed={view === id} onClick={() => setView(id)}>
-              {label}<span>{count}</span>
-            </button>)}
-          </div>
+          <SlidingTabs value={filterView} onChange={setView} items={filters} className="capability-underline-tabs" label={zh ? "启用状态" : "Enabled status"} />
           <div className="skill-library-filters">{search}{sourceSelect}</div>
         </div>
       <ResourceSyncDialog kind={kind} open={syncOpen} onOpenChange={setSyncOpen}/>
@@ -258,60 +360,13 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
             aria-label={`${harnessName} · ${tool.name}`}
           />}
         />
-      ) : inventory.length === 0 ? (
-        <EmptyState
-          icon={Blocks}
-          title={t("agents.tools.emptyTitle")}
-          description={t("agents.tools.emptyDesc")}
-          action={
-            <Button variant="primary" size="sm" onClick={openCreate}>
-              <Plus className="h-3.5 w-3.5" aria-hidden />{" "}
-              {zh ? "添加 Skill" : "Add Skill"}
-            </Button>
-          }
-        />
-      ) : (
-        <>
-          <div className="capability-library-groups">
-            {groups.map(group => <section key={group.origin} aria-label={originNames[group.origin]}>
-              <div className="capability-group-heading"><h3>{originNames[group.origin]}</h3><span>{group.items.length}</span></div>
-              <div className="capability-group-list">
-                {group.items.map(tool => {
-                  const origin = capabilityOrigin(tool);
-                  const description = capabilityDescription(tool);
-                  const enabled = capabilityEnabledFor(tool, daemonProviderId);
-                  return <article key={tool.id} className="skill-library-card" data-enabled={enabled}>
-                    <button type="button" className="skill-card-open" onClick={() => setEditor({ mode: "view", capability: tool })} aria-label={`${zh ? "查看详情" : "View details"} · ${tool.name}`}>
-                      <span className="skill-card-heading">
-                        <strong title={tool.name}>{tool.name}</strong>
-                        {origin.kind !== "builtin" && origin.label && <span className="skill-card-origin" title={origin.label}>{origin.label}</span>}
-                      </span>
-                      <span className="skill-card-description" data-empty={!description} title={description || undefined}>
-                        {description || (zh ? "暂无说明" : "No description")}
-                      </span>
-                    </button>
-                    <Switch checked={enabled} disabled={!providerId || toggling.includes(tool.id)} onCheckedChange={checked => handleToggle(tool, checked)} aria-label={`${harnessName} · ${tool.name}`} />
-                  </article>;
-                })}
-              </div>
-            </section>)}
-          </div>
-          {filtered.length === 0 && (
-            <Card className="px-5 py-10 text-center text-sm text-ink-3">
-              {view === "enabled" && !query && sourceFilter === "all" ? <><p>{zh ? `${harnessName} 还没有启用技能。` : `Nothing is enabled for ${harnessName} yet.`}</p><button className="mt-3 text-ink underline underline-offset-4" onClick={() => setView("all")}>{zh ? "浏览全部" : "Browse all"}</button></> : t("agents.tools.emptyFiltered")}
-            </Card>
-          )}
-        </>
-      )}
+      ) : <SkillWorkbench matrix={matrix} showWorkbench={() => setMatrix(false)} groups={groups} inventory={inventory}
+        originNames={originNames} ready={ready} providers={providers} providerId={daemonProviderId} harnessName={harnessName}
+        busy={!!toggling.length} setBindings={setBindings} onEdit={openEdit} onDelete={setDeleting} onCreate={openCreate} />}
 
       <CapabilityEditorDialog
         state={editor}
         onChange={setEditor}
-        onRemove={(tool) => {
-          setDeleting(tool);
-          setEditor(undefined);
-        }}
-        originNames={originNames}
         defaultKind={kind}
         defaultProviderId={providerId}
       />

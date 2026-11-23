@@ -150,7 +150,7 @@ impl RemoteService {
                 json!({"protocol":1,"epoch":self.repo.epoch()?,"device":device,"name":self.settings()?.device_name,
                 "system":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION"),
                 "endpoint":self.state.lock().unwrap().endpoint.as_ref().map(Endpoint::addr),
-                "capabilities":["projects.list","project.browse","project.create","project.files","file.preview","session.options","session.catalog","session.modes","sessions.list","session.history","session.create","session.details","session.snapshot","session.models","session.configure","session.workspace","session.compact","session.team","session.team.cancel","session.team.retry","session.workflows","events.wait","session.send","session.followUp","attachment.upload","attachment.read","run.list","run.cancel","interaction.list","interaction.respond","approval.list","approval.resolve","approval.scopes"]}),
+                "capabilities":["projects.list","project.browse","project.create","project.files","file.preview","session.options","session.catalog","session.modes","sessions.list","session.history","session.timeline.open","session.timeline.wait","session.create","session.details","session.snapshot","session.models","session.configure","session.workspace","session.compact","session.team","session.team.cancel","session.team.retry","session.workflows","events.wait","session.send","session.followUp","attachment.upload","attachment.read","run.list","run.cancel","interaction.list","interaction.respond","approval.list","approval.resolve","approval.scopes"]}),
             ));
         }
         if method == "projects.list" {
@@ -291,6 +291,18 @@ impl RemoteService {
                 template
             }
             "run.list" => json!({"sessionId":session}),
+            "session.timeline.open" | "session.timeline.wait" => {
+                let mut page = if method == "session.timeline.open" {
+                    self.events.timeline_open(&session)?
+                } else {
+                    let revision = params["revision"].as_i64().filter(|value| *value >= 0)
+                        .ok_or_else(|| anyhow::anyhow!("INVALID_CURSOR"))?;
+                    self.events.timeline_wait(&session, revision, 20_000).await?
+                };
+                self.authorize(peer, generation)?;
+                crate::database::timeline::for_remote(&mut page);
+                return Ok(success(&request.id, page))
+            }
             "session.history" => {
                 return Ok(success(
                     &request.id,

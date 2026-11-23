@@ -7,26 +7,10 @@ import { join } from "node:path";
 
 const request = (id, sequence, extra = {}) => ({schemaVersion: 1, eventId: `e-${sequence}`, sessionId: "s", projectId: "p", sequence, timestamp: `2026-11-06T00:00:${String(sequence).padStart(2, "0")}Z`, type: "approval.requested", payload: {approvalId: id, category: "command", summary: "Launch Pi", operation: "agent.launch:pi"}, ...extra});
 const decision = (id, sequence, value = "approved") => ({...request(id, sequence), type: "approval.resolved", payload: {approvalId: id, decision: value, scope: "once"}});
-const cards = (events) => createHarness().runtime.buildStandaloneTimeline([], events, []).filter((event) => event.data.kind === "approval");
-
-test("repeated pending launch approvals share one stable row, including legacy records", () => {
-  for (const legacy of [false, true]) {
-    const events = [request("a", 1), request("b", 2), request("c", 3)];
-    if (legacy) for (const event of events) delete event.payload.operation;
-    const rows = cards(events);
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].id, "e-1");
-    assert.equal(rows[0].data.approval.id, "a");
-    const resolved = cards([...events, decision("b", 4)]);
-    assert.equal(resolved.length, 1);
-    assert.equal(resolved[0].id, rows[0].id);
-    assert.equal(resolved[0].data.approval.status, "approved");
-    assert.equal(resolved[0].data.approval.decisionScope, "once");
-  }
-});
+const cards = (events) => createHarness().runtime.metadataEvents([], events, []).filter((event) => event.data.kind === "approval");
 
 test("new approval after a decision and a different operation remain separate", () => {
-  const rows = cards([request("a", 1), request("a", 2), decision("a", 3, "rejected"), request("b", 4), request("c", 5, {payload: {approvalId: "c", category: "command", summary: "Launch Pi", operation: "agent.launch:other"}})]);
+  const rows = cards([request("a", 1), decision("a", 3, "rejected"), request("b", 4), request("c", 5, {payload: {approvalId: "c", category: "command", summary: "Launch Pi", operation: "agent.launch:other"}})]);
   assert.equal(rows.length, 3);
   assert.deepEqual(Array.from(rows, (row) => row.data.approval.status), ["rejected", "pending", "pending"]);
 });

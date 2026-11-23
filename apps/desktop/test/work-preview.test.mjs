@@ -156,24 +156,6 @@ test("planVisibleRange chunks large sheets and reports truncation", async () => 
   assert.deepEqual(planVisibleRange(300, 400, 200), { start: 0, end: 300, truncated: false });
 });
 
-test("mergeDeliverableTabs prepends a chat-requested file exactly once", async () => {
-  const { mergeDeliverableTabs } = await loadPreview();
-  const deliverables = ["outputs/a.py", "outputs/b.md"];
-  // Not among deliverables → becomes the first tab, order preserved.
-  assert.deepEqual(mergeDeliverableTabs(deliverables, "C:\\work\\deck.pptx"), ["C:\\work\\deck.pptx", "outputs/a.py", "outputs/b.md"]);
-  // Already present (case/separator-insensitive) → no duplicate tab.
-  assert.deepEqual(mergeDeliverableTabs(deliverables, "outputs\\A.PY"), deliverables);
-  assert.deepEqual(mergeDeliverableTabs(deliverables, "outputs/a.py"), deliverables);
-  assert.deepEqual(mergeDeliverableTabs(deliverables, undefined), deliverables);
-});
-
-test("resolveRequestedTab prefers the existing deliverable's exact path form", async () => {
-  const { resolveRequestedTab } = await loadPreview();
-  const deliverables = ["outputs/Deck.pptx", "outputs/a.py"];
-  assert.equal(resolveRequestedTab(deliverables, "outputs\\deck.pptx"), "outputs/Deck.pptx");
-  assert.equal(resolveRequestedTab(deliverables, "C:\\work\\new.pdf"), "C:\\work\\new.pdf");
-});
-
 test("classifyLocalHref routes local paths to the preview and keeps externals", async () => {
   const { classifyLocalHref } = await loadFileReferences();
   // Absolute Windows paths, UNC, file:// URLs and relative project paths.
@@ -257,13 +239,13 @@ test("unified workspace click wiring reaches the preview pane and office rendere
     readRendererSource("features/work/preview/DocumentPreview.tsx")
   ]);
 
-  assert.match(workPage, /setPreview\(\{ sessionId: session.id, path \}\)/);
+  assert.match(workPage, /setPreview\(\{ sessionId: session.id, path, diff \}\)/);
   assert.match(workPage, /onOpenLocalFile=\{openPreview\}/);
   assert.match(workPage, /requestedWorkspaceFile\(preview, session\?\.id\)/);
-  assert.match(workspacePreview, /requestedPath=\{path\}/);
+  assert.match(workspacePreview, /request=\{request\}/);
 
   assert.match(sessionWorkbench, /timelineActions = \{[^}]*onOpenLocalFile \}/);
-  assert.match(sessionWorkbench, /ConversationTurnView[^>]*\{\.\.\.timelineActions\}/);
+  assert.match(sessionWorkbench, /TimelineEventView[^>]*\{\.\.\.timelineActions\}/);
   assert.match(timeline, /<MarkdownContent[\s\S]*onOpenLocalFile=\{onOpenLocalFile\}/);
   assert.match(timeline, /openTimelineFile\(attachment\.path, t, onOpenLocalFile/);
   assert.match(timeline, /openTimelineFile\(path, t, onOpenLocalFile/);
@@ -276,11 +258,9 @@ test("unified workspace click wiring reaches the preview pane and office rendere
   assert.match(markdown, /popupImageMenu\(/);
   assert.match(markdown, /target: "_blank"/);
 
-  assert.match(previewPane, /mergeDeliverableTabs\(deliverables, requestedPath\)/);
-  assert.match(previewPane, /selected \? resolveRequestedTab\(deliverables, selected\)/);
-  assert.match(previewPane, /requestedWorkspaceFile\(selection, sessionId\)/);
-  assert.match(previewPane, /setSelection\(\{ sessionId, path: requestedPath \}\);[\s\S]*\}, \[requestedPath, sessionId\]\)/);
-  assert.doesNotMatch(previewPane, /\[requestedPath, deliverables\]/);
+  assert.match(timeline, /onOpenLocalFile\(file\.path, file\.diff\)/);
+  assert.match(previewPane, /noteArrival\(request\.path\); setView\(request\.diff \? "diff" : "preview"\)/);
+  assert.match(previewPane, /onCloseTabs=\{closeTabs\}/);
   assert.match(previewPane, /"artifact\.read"/);
   assert.match(previewPane, /<DocumentPreview/);
   assert.match(documentPreview, /case "pptx":\s*return <PptxPreview/);
@@ -321,30 +301,17 @@ test("Office/PDF timeline clicks are resolver-routed; external fallback stays lo
   assert.match(helper, /onOpenLocalFile\(path\)/);
   assert.equal((timeline.slice(0, helperStart) + timeline.slice(helperEnd)).match(/openFileWithToast\(/g)?.length ?? 0, 0);
   assert.match(fileRefChip, /resolveFileOpenTarget\(reference\.path, onOpenLocalFile !== undefined\)/);
-  assert.match(previewPane, /status === "error"/);
-  assert.match(previewPane, /status === "unsupported"/);
-  assert.match(previewPane, /openFileWithToast\(activePath, t\)/);
+  assert.match(previewPane, /failure \|\| unavailable/);
+  assert.match(previewPane, /openFileWithToast\(fullPath, t\)/);
 });
 
-test("nested tool-group file_change rows retain the Work local-file callback", async () => {
+test("file change blocks retain the Work local-file callback", async () => {
   const timeline = await readRendererSource("features/timeline/Timeline.tsx");
   const eventViewStart = timeline.indexOf("function TimelineEventViewImpl");
   assert.ok(eventViewStart >= 0, "TimelineEventViewImpl should exist");
   const eventView = timeline.slice(eventViewStart);
-  const groupStart = eventView.indexOf('case "tool_group":');
-  const groupEnd = eventView.indexOf('case "usage":', groupStart);
-  const group = eventView.slice(groupStart, groupEnd);
-  assert.match(group, /data\.items\.map/);
-  assert.match(group, /<TimelineEventView[^>]*onOpenLocalFile=\{onOpenLocalFile\}/);
   assert.match(eventView, /<FileChangeCard[^>]*onOpenLocalFile=\{onOpenLocalFile\}/);
 
-});
-
-test("formatFileSize picks sensible units", async () => {
-  const { formatFileSize } = await loadPreview();
-  assert.equal(formatFileSize(512), "512 B");
-  assert.equal(formatFileSize(2048), "2.0 KB");
-  assert.equal(formatFileSize(3 * 1024 * 1024), "3.0 MB");
 });
 
 test("base64 helpers round-trip utf-8 text", async () => {

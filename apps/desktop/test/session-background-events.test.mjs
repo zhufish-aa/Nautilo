@@ -3,17 +3,6 @@ import assert from 'node:assert/strict';
 import {createHarness} from './helpers/orchestration-runtime-harness.mjs';
 const event=(sequence,type,payload,background=false)=>({schemaVersion:1,eventId:`e${sequence}`,sequence,sessionId:'s',projectId:'p',runId:'r',timestamp:`2026-11-06T00:00:0${sequence}Z`,type,payload,background});
 const flatten=(events)=>events.flatMap(row=>row.data.kind==='tool_group'?flatten(row.data.items):[row]);
-test('foreground completion cannot finalize background tool and reasoning streams',()=>{
-  const h=createHarness();
-  const events=[event(1,'run.completed',{summary:'done'}),event(2,'tool.started',{callId:'bg',toolName:'Read'},true),event(3,'agent.thinking_delta',{messageId:'bg-think',text:'still running'},true)];
-  let rows=flatten(h.runtime.buildStandaloneTimeline([],events,[]));
-  assert.equal(rows.find(row=>row.data.kind==='tool_activity').data.status,'running');
-  assert.equal(rows.find(row=>row.data.kind==='reasoning').data.streaming,true);
-  rows=flatten(h.runtime.buildStandaloneTimeline([],[...events,event(4,'tool.finished',{callId:'bg',toolName:'Read',success:true},true),event(5,'agent.thinking_summary',{messageId:'bg-think',text:'finished'},true)],[]));
-  assert.equal(rows.find(row=>row.data.kind==='tool_activity').data.status,'done');
-  assert.equal(rows.find(row=>row.data.kind==='reasoning').data.streaming,false);
-});
-
 test('an open completed conversation keeps its event subscription for background updates',async()=>{
   const h=createHarness();
   h.replies['run.list']=[{id:'r',sessionId:'s',status:'completed'}];

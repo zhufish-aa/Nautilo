@@ -59,8 +59,6 @@ export interface ThemeDefinition {
   tokens: Record<string, string>;
   /** Radius overrides (Tailwind --radius-* vars). */
   radii?: Record<string, string>;
-  /** Optional body font stack. */
-  bodyFont?: string;
   /** Optional canvas (body) background layers. */
   canvasBackground?: {
     images: string[];
@@ -188,8 +186,6 @@ const ukiyoe: ThemeDefinition = {
     "--radius-xl": "6px",
     "--radius-2xl": "8px"
   },
-  bodyFont:
-    'Georgia, "Times New Roman", "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif',
   canvasBackground: {
     images: [
       // Vermillion sun (日の出): a crisp disc, not a wash.
@@ -589,8 +585,6 @@ const macos: ThemeDefinition = {
     "--radius-xl": "8px",
     "--radius-2xl": "10px"
   },
-  bodyFont:
-    '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro SC", "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
   // Structural chrome: traffic lights (close/min/zoom order, glyphs on group
   // hover), full-height Finder sidebar (titlebar split-tinted at the sidebar
   // seam), centered window title, gray sidebar selection, flat canvas.
@@ -1136,9 +1130,6 @@ const terminal: ThemeDefinition = {
     "--radius-xl": "2px",
     "--radius-2xl": "4px"
   },
-  // Monospaced latin, proper CJK fallback — a terminal, but readable Chinese.
-  bodyFont:
-    '"JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "PingFang SC", "Microsoft YaHei", monospace',
   canvasBackground: {
     images: [
       // Phosphor glow pooling at the top.
@@ -1592,9 +1583,6 @@ const deco: ThemeDefinition = {
     "--radius-xl": "6px",
     "--radius-2xl": "8px"
   },
-  // Engraved serif latin, Song-style CJK fallback.
-  bodyFont:
-    '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif',
   canvasBackground: {
     images: [
       // Sunburst rays pouring down from above the titlebar.
@@ -2165,9 +2153,6 @@ const pop: ThemeDefinition = {
     "--radius-xl": "14px",
     "--radius-2xl": "18px"
   },
-  // Rounded sans latin, rounded-gothic CJK fallback.
-  bodyFont:
-    'ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", "Nunito", "Hiragino Maru Gothic ProN", "Yuanti SC", "YouYuan", "Microsoft YaHei", sans-serif',
   canvasBackground: {
     images: [
       // Bubblegum glow warming the top edge.
@@ -2780,8 +2765,6 @@ const sakura: ThemeDefinition = {
     "--radius-xl": "18px",
     "--radius-2xl": "22px"
   },
-  bodyFont:
-    'ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", "Nunito", "Hiragino Maru Gothic ProN", "Yuanti SC", "YouYuan", "Microsoft YaHei", sans-serif',
   canvasBackground: {
     images: [
       // Moon glow high on the right.
@@ -3860,7 +3843,6 @@ export function buildThemeCss(theme: ThemeDefinition): string {
   parts.push(`${scope} {\n  color-scheme: ${theme.base};\n${vars}\n}`);
 
   const bodyRules: string[] = [];
-  if (theme.bodyFont) bodyRules.push(`font-family: ${theme.bodyFont}`);
   if (theme.canvasBackground) {
     bodyRules.push(`background-image: ${theme.canvasBackground.images.join(",\n    ")}`);
     if (theme.canvasBackground.sizes) {

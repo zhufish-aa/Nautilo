@@ -1,7 +1,6 @@
 import { useUsageStore } from "../stores/usage";
 import { latestContextUsage } from "./context-usage";
 import { hasRunningDelegatedTask, lifecycleWithDelegates } from "./session-lifecycle";
-import { recoverLegacyDeepSeekReplies } from "./deepseek-legacy-history";
 import { applyLiveProviderUi } from "./provider-ui";
 import type {
   AgentInstance,
@@ -18,18 +17,15 @@ import type {
   WorkflowMention
 } from "@agenthub/domain";
 import type { RuntimeEvent } from "@agenthub/event-protocol";
-import type { HistoryCursor, HistoryItem, HistoryProjection, SessionHistory, ProjectEventCursor, ProjectPollInput, ProjectPollSnapshot, ProjectPollResult, SessionUpsertInput } from "@agenthub/schemas";
+import type { HistoryCursor, HistoryItem, HistoryProjection, SessionHistory, ProjectEventCursor, ProjectPollInput, ProjectPollSnapshot, ProjectPollResult, SessionUpsertInput, TimelineBlock } from "@agenthub/schemas";
 import { getBridge, requestCore } from "./bridge";
 import { newId } from "./utils";
 import { parseProviderDiff } from "./provider-diff";
 import { toDomainAgent, toDomainProject, toDomainTeam, toStandaloneUiSession } from "./core-mappers";
 import type { DesktopAttachment } from "../types/bridge";
-import type { ApprovalScope, QueuedFollowUp, RunLifecycle, SessionArtifact, SessionTask, SessionTarget, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
+import type { ApprovalScope, MessageAttachmentView, QueuedFollowUp, RunLifecycle, SessionArtifact, SessionTask, SessionTarget, TimelineEvent, TimelinePayload, UiSession, UiTeam } from "./types";
 import type { ActiveRunSummary } from "./types";
-import { compactOrchestrationTimeline, hiddenCompletionRunIds, hiddenInternalRunIds, isVisibleTimelineMessage } from "./orchestration-timeline-policy";
-import { groupToolTimeline } from "./tool-timeline-groups";
-import { collectSubagentActivities, subagentDispatchIdOf } from "./subagent-activities";
-import { mergeCodeExecution } from "./process-display";
+import { isVisibleTimelineMessage } from "./orchestration-timeline-policy";
 import { markOutgoingMessage } from "./ui-motion";
 import { useAgentsStore } from "../stores/agents";
 import { useConnectionsStore } from "../stores/connections";
@@ -102,39 +98,6 @@ function followUpDelivered(sessionId: string, messageId: string): void {
   if (store.queuedFollowUps[sessionId]?.some(item => item.messageId === messageId)) markOutgoingMessage(sessionId, messageId);
   store._removeQueuedFollowUp(sessionId, messageId);
 }
-// Keep outgoing bubbles until their exact durable IDs appear in history.
-// An older/in-flight history snapshot must never remove a just-sent message.
-const pendingMessages = new Map<string, Map<string, TimelineEvent>>();
-
-function appendPendingMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], messageId = newId("msg"), workflowRef?: WorkflowMention): string {
-  const existing = useSessionsStore.getState().events[sessionId]?.find(event => event.data.kind === "message" && event.data.messageId === messageId);
-  if (existing) return messageId;
-  markOutgoingMessage(sessionId, messageId);
-  const event = useSessionsStore.getState()._append(sessionId, { kind: "message", sender: "user", text, messageId, workflowRef, attachments: attachments.map((item) => ({ ...item })) });
-  const pending = pendingMessages.get(sessionId) ?? new Map<string, TimelineEvent>();
-  pending.set(messageId, event);
-  pendingMessages.set(sessionId, pending);
-  return messageId;
-}
-
-function replaceSessionTimeline(sessionId: string, timeline: TimelineEvent[], runtimeEvents: RuntimeEvent[] = []): void {
-  const pending = pendingMessages.get(sessionId);
-  if (pending) {
-    for (const event of timeline) {
-      if (event.data.kind === "message" && event.data.messageId) pending.delete(event.data.messageId);
-    }
-    if (!pending.size) pendingMessages.delete(sessionId);
-    else {
-      // A tool burst can span an input that has not appeared in the history
-      // snapshot yet. Insert the bubble between its steps before regrouping.
-      const outgoing = [...pending.values()];
-      positionDeliveredInputs(outgoing, runtimeEvents);
-      const rows = timeline.flatMap(event => event.data.kind === "tool_group" ? event.data.items : [event]);
-      timeline = groupToolTimeline([...rows, ...outgoing].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sequence - b.sequence));
-    }
-  }
-  useSessionsStore.getState()._replaceEvents(sessionId, timeline);
-}
 // Poll-activity bookkeeping: a monotonically increasing counter per run that
 // hydrateProjectRun bumps whenever a poll tick actually changed something, so
 // the scheduler can back off while a run is idle.
@@ -148,55 +111,24 @@ const projectRunActiveRuns = new Map<string, number>();
 const projectRunAwaitingOutput = new Map<string, boolean>();
 
 const STREAMING_DELTA_TYPES = new Set(["agent.message_delta", "agent.thinking_delta"]);
-const SNAPSHOT_EVENT_TYPES = new Set([...STREAMING_DELTA_TYPES, "run.diff_updated"]);
-
-/** Stream identity for delta upserts: run + kind + message segment. */
-function streamKeyOf(event: RuntimeEvent): string {
-  const messageId = (event.payload as { messageId?: string } | undefined)?.messageId ?? "";
-  return JSON.stringify([event.sessionId, event.runId ?? "", event.type, messageId]);
-}
-
-/**
- * Appends fresh events to a session cache. Streaming deltas are cumulative
- * snapshots: the daemon coalesces them into one journal row and re-issues
- * each merge with a NEW eventId and sequence, so appending them would store
- * every intermediate streaming state and grow the cache quadratically
- * mid-turn. The cached row for the same stream is replaced instead — keeping
- * the FIRST eventId/timestamp, because timeline rows are keyed by eventId and
- * a changing key remounts the card on every rebuild (visible as flicker).
- * Provider diffs also replace by run, but retain the latest timestamp so
- * cross-run file aggregation respects the snapshot update order.
- */
 function mergeEventCache(current: RuntimeEvent[], fresh: RuntimeEvent[]): RuntimeEvent[] {
-  if (!fresh.some((event) => SNAPSHOT_EVENT_TYPES.has(event.type))) return [...current, ...fresh];
-  const next = [...current];
-  const streamIndex = new Map<string, number>();
-  for (let index = 0; index < current.length; index += 1) {
-    const event = current[index]!;
-    if (SNAPSHOT_EVENT_TYPES.has(event.type)) streamIndex.set(streamKeyOf(event), index);
-  }
-  for (const event of fresh) {
-    if (SNAPSHOT_EVENT_TYPES.has(event.type)) {
-      const existing = streamIndex.get(streamKeyOf(event));
-      if (existing !== undefined) {
-        const previous = next[existing]!;
-        if (event.type === "run.diff_updated" && previous.sequence > event.sequence) continue;
-        next[existing] = { ...event, eventId: previous.eventId, timestamp: event.type === "run.diff_updated" ? event.timestamp : previous.timestamp };
+  const events: RuntimeEvent[] = [];
+  const diffPositions = new Map<string, number>();
+  for (const event of [...current, ...fresh]) {
+    if (STREAMING_DELTA_TYPES.has(event.type)) continue;
+    // The Diff pane needs the provider's latest full snapshot, not its history.
+    if (event.type === "run.diff_updated") {
+      const key = JSON.stringify([event.sessionId, event.runId]);
+      const position = diffPositions.get(key);
+      if (position !== undefined) {
+        if (events[position]!.sequence < event.sequence) events[position] = event;
         continue;
       }
-      streamIndex.set(streamKeyOf(event), next.length);
+      diffPositions.set(key, events.length);
     }
-    next.push(event);
+    events.push(event);
   }
-  return next;
-}
-
-/** Reasoning streams are display-only and can run to hundreds of KB. The
- * collapsed preview reads the latest line, so oversized text is capped at the
- * TAIL (newest content) rather than the head. The daemon caps too; this is a
- * defensive bound for older daemons / replayed journals. */
-function capReasoningText(text: string, limit = 20_000): string {
-  return text.length > limit ? text.slice(-limit) : text;
+  return events;
 }
 
 export async function resumeWorkbenchRuns(): Promise<void> {
@@ -346,9 +278,7 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
   } else if (configurationWrite) {
     session = await configurationWrite;
   }
-  const attachmentViews = attachments.map((attachment) => ({ ...attachment }));
-  if (editMessageId) state._patchEvent(sessionId, `message-${editMessageId}`, { text, workflowRef, attachments: attachmentViews, editedAt: new Date().toISOString() });
-  const messageId = editMessageId ?? appendPendingMessage(sessionId, text, attachments, submissionMessageId, workflowRef);
+  const messageId = editMessageId ?? submissionMessageId ?? newId("msg");
   state._append(sessionId, { kind: "activity", phase: "queued" });
   state._setForeground(sessionId, { status: "running", startedAt: new Date().toISOString() });
 
@@ -436,12 +366,10 @@ export async function sendWorkbenchFollowUp(sessionId: string, text: string, mod
 
   // The daemon may downgrade "steer" to "queue" when the provider lacks a
   // mid-turn injection channel; honor the mode it actually applied.
-  const messageId = appendPendingMessage(sessionId, text, [], submissionMessageId);
+  const messageId = submissionMessageId ?? newId("msg");
   if (mode === "queue") store._addQueuedFollowUp(sessionId, { messageId, text, queuedAt: new Date().toISOString() });
   const { mode: appliedMode } = await requestCore<{ accepted: true; mode: "steer" | "queue" }>("session.followUp", { sessionId, text, messageId, mode }).catch((error) => {
     store._removeQueuedFollowUp(sessionId, messageId);
-    pendingMessages.get(sessionId)?.delete(messageId);
-    storeRemoveMessage(sessionId, messageId);
     store._append(sessionId, { kind: "error", code: "IPC_INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error), retryable: true });
     throw error;
   });
@@ -458,8 +386,6 @@ export async function cancelWorkbenchFollowUp(sessionId: string, messageId: stri
   if (!getBridge()) throw new Error("Core Daemon is only available in the desktop shell");
   try {
     await requestCore<{ cancelled: true }>("session.followUp.cancel", { sessionId, messageId });
-    pendingMessages.get(sessionId)?.delete(messageId);
-    storeRemoveMessage(sessionId, messageId);
     useSessionsStore.getState()._removeQueuedFollowUp(sessionId, messageId);
   } catch (error) {
     // Resync from the daemon so a failed withdraw restores the entry.
@@ -477,12 +403,6 @@ export async function steerWorkbenchQueuedFollowUp(sessionId: string, messageId:
   return mode;
 }
 
-function storeRemoveMessage(sessionId: string, messageId: string): void {
-  const store = useSessionsStore.getState();
-  store._replaceEvents(sessionId, (store.events[sessionId] ?? []).filter((event) => event.data.kind !== "message" || event.data.messageId !== messageId));
-}
-
-/** Mirrors daemon queue events into the store-backed queued-follow-up list. */
 function ingestFollowUpEvents(sessionId: string, events: RuntimeEvent[]): void {
   const store = useSessionsStore.getState();
   for (const event of events) {
@@ -665,7 +585,6 @@ export async function switchWorkbenchSessionInstance(sessionId: string, instance
 
 function clearSessionRuntime(sessionId: string): void {
   const idle=projectIdleStreams.get(sessionId);if(idle)idle.cancelled=true;projectIdleStreams.delete(sessionId);
-  pendingMessages.delete(sessionId);
   deliveredFollowUps.delete(sessionId);
   forgetSessionHistory(sessionId);
   const stream = standaloneStreams.get(sessionId);
@@ -971,9 +890,8 @@ async function readPersistedHistory<T extends PersistedValue, R>(
         const rows = response.reset ? new Map<string, HistoryItem<PersistedValue>>()
           : response.items.length ? new Map(previous!.rows) : previous!.rows;
         for (const item of response.items) rows.set(item.value.id, item);
-        const values = changed ? [...rows.values()].sort((a, b) =>
-          (a.order.createdAt < b.order.createdAt ? -1 : a.order.createdAt > b.order.createdAt ? 1 : 0) || a.order.ordinal - b.order.ordinal
-        ).map((item) => item.value) : previous!.values;
+        const values = changed ? [...rows.values()].sort((a, b) => a.order.ordinal - b.order.ordinal)
+          .map((item) => item.value) : previous!.values;
         if (persistedReads.get(scope) === pending) persistedHistory.set(scope, { cursor: response.cursor, rows, values });
         return { values: values as T[], extra: extra(response), changed };
       } catch (error) {
@@ -1022,6 +940,37 @@ export async function loadLinkedSession(sessionId: string): Promise<DomainSessio
     store._upsertExternalSession(toStandaloneUiSession(detail.session));
   }
   return detail.session;
+}
+
+/** Refresh the session index for child workflows that run outside the parent's event feed. */
+export function watchChildSessions(projectId: string, parentSessionId: string): () => void {
+  let disposed = false;
+  let timer: ReturnType<typeof setTimeout>;
+  const refresh = async (): Promise<void> => {
+    try {
+      if (document.hidden) return;
+      const generations = new Map(sessionRuntimeGenerations);
+      const sessions = await requestCore<DomainSession[]>("session.list", { projectId });
+      if (disposed || !currentSessionGeneration(parentSessionId, generations.get(parentSessionId) ?? 0)) return;
+      const store = useSessionsStore.getState();
+      const indexed = new Map(store.sessions.map(session => [session.id, session]));
+      for (const session of sessions) {
+        if (session.parentSessionId !== parentSessionId || !currentSessionGeneration(session.id, generations.get(session.id) ?? 0)) continue;
+        const current = indexed.get(session.id);
+        if (current && current.updatedAt > session.updatedAt) continue;
+        const next = toStandaloneUiSession(session);
+        // Project-run polling owns the team target for sessions it has indexed.
+        if (session.projectRunId && current?.projectRunId === session.projectRunId) next.target = current.target;
+        if (!current || !sameUiSession(current, next)) store._upsertExternalSession(next);
+      }
+    } catch {
+      // Retry on the next tick without disturbing the conversation feed.
+    } finally {
+      if (!disposed) timer = setTimeout(() => void refresh(), 2000);
+    }
+  };
+  void refresh();
+  return () => { disposed = true; clearTimeout(timer); };
 }
 
 /** Coalesce a project's visible histories into bounded IPC reads. Per-session
@@ -1188,88 +1137,21 @@ function mergeStandaloneEvents(sessionId: string, events: RuntimeEvent[]): void 
   fresh.forEach((event) => applyLiveProviderUi(sessionId, event));
   ingestFollowUpEvents(sessionId, fresh);
   ingestProviderCommandEvents(sessionId, fresh);
-  // Keep the event -> render edge synchronous for streaming text. The
-  // workbench follows the rendered timeline height; queueing deltas here can
-  // leave the UI with a stale event array for a frame and, more importantly,
-  // makes nested reasoning updates invisible to a last-row scroll trigger.
-  // Structural bursts still use the coalesced full rebuild below.
-  if (fresh.every((event) => STREAMING_DELTA_TYPES.has(event.type)) && applyStandaloneDeltas(sessionId, fresh)) return;
-  // The first text/reasoning row cannot use the patch path. Do not leave
-  // that first visible output behind an already queued structural rebuild.
-  // Limit this exception to the first stream of each kind per run, not every
-  // segment/tool transition; sustained structural traffic remains throttled.
-  const firstOutput = fresh.some((event) => STREAMING_DELTA_TYPES.has(event.type)
-    && !current.some((previous) => previous.runId === event.runId && previous.type === event.type));
-  if (firstOutput && standaloneHydrated.has(sessionId)) {
-    const frame = standaloneRenderFrames.get(sessionId);
-    if (frame !== undefined) clearTimeout(frame);
-    standaloneRenderFrames.delete(sessionId);
-    standaloneLastRebuildAt.set(sessionId, Date.now());
-    renderStandaloneCache(sessionId);
-    return;
-  }
   scheduleStandaloneRender(sessionId);
 }
 
-/**
- * Coalesces structural timeline rebuilds. Streaming deltas take the direct
- * patch path below, so full rebuilds only carry structural changes (tool
- * cards, statuses) — those are capped at ~5/s: during a heavy turn the rAF
- * cadence rebuilt the entire timeline of a multi-thousand-event session up to
- * 60 times per second, which dominated the renderer's transient memory churn.
- */
-const STANDALONE_REBUILD_MIN_INTERVAL_MS = 200;
 const standaloneLastRebuildAt = new Map<string, number>();
 
 function scheduleStandaloneRender(sessionId: string): void {
-  const generation = sessionGeneration(sessionId);
   if (standaloneRenderFrames.has(sessionId)) return;
+  const generation = sessionGeneration(sessionId);
   const elapsed = Date.now() - (standaloneLastRebuildAt.get(sessionId) ?? 0);
-  const delay = Math.max(0, STANDALONE_REBUILD_MIN_INTERVAL_MS - elapsed);
-  const frame = window.setTimeout(() => {
-    if (!currentSessionGeneration(sessionId, generation)) return;
+  standaloneRenderFrames.set(sessionId, window.setTimeout(() => {
     standaloneRenderFrames.delete(sessionId);
+    if (!currentSessionGeneration(sessionId, generation)) return;
     standaloneLastRebuildAt.set(sessionId, Date.now());
-    // The session may have been evicted while the frame was pending; rendering
-    // it now would re-create store entries nobody will clean up.
     if (standaloneHydrated.has(sessionId)) renderStandaloneCache(sessionId);
-  }, delay);
-  standaloneRenderFrames.set(sessionId, frame);
-}
-
-/**
- * Applies a delta-only batch to the newest streaming timeline row. Returns
- * false when no matching streaming row exists (a full rebuild must create it),
- * so callers can fall back to renderStandaloneCache.
- */
-function applyStandaloneDeltas(sessionId: string, events: RuntimeEvent[]): boolean {
-  const store = useSessionsStore.getState();
-  const timeline = store.events[sessionId];
-  if (!timeline?.length) return false;
-  let next: TimelineEvent[] | undefined;
-  for (const event of events) {
-    if (event.type !== "agent.message_delta" && event.type !== "agent.thinking_delta") return false;
-    const wantMessage = event.type === "agent.message_delta";
-    const rows = next ?? timeline;
-    let index = -1;
-    for (let i = rows.length - 1; i >= 0; i -= 1) {
-      const data = rows[i].data;
-      if (data.kind !== (wantMessage ? "message" : "reasoning")) continue;
-      // Only the newest row of this kind is eligible; a finalized row means
-      // the delta starts a new stream and needs the full builder.
-      if ((data.kind === "message" || data.kind === "reasoning") && data.streaming && data.messageId === event.payload.messageId) index = i;
-      break;
-    }
-    if (index === -1) return false;
-    const row = rows[index].data;
-    if (row.kind !== "message" && row.kind !== "reasoning") return false;
-    if (!next) next = [...timeline];
-    // The daemon coalesces delta rows by ACCUMULATING chunk text, so every
-    // delta payload carries the full text so far — replace, don't append.
-    next[index] = { ...next[index], data: { ...row, text: event.payload.text } };
-  }
-  if (next) store._replaceEvents(sessionId, next);
-  return true;
+  }, Math.max(0, 200 - elapsed)));
 }
 
 function renderStandaloneCache(sessionId: string): void {
@@ -1277,7 +1159,7 @@ function renderStandaloneCache(sessionId: string): void {
   const messages = standaloneMessageCache.get(sessionId) ?? [];
   const artifacts = standaloneArtifactCache.get(sessionId) ?? [];
   const store = useSessionsStore.getState();
-  replaceSessionTimeline(sessionId, buildStandaloneTimeline(messages, events, artifacts), events);
+  store._replaceEvents(sessionId, sessionMetadataEvents(messages, events, undefined, [], artifacts, []));
   store._replaceContextUsage(sessionId, latestContextUsage(events));
   useUsageStore.getState().ingest(sessionId, events);
   store._replaceArtifacts(sessionId, artifacts.flatMap(toUiArtifact));
@@ -1578,7 +1460,7 @@ async function hydrateProjectRun(projectRunId: string): Promise<ProjectRun> {
     const messageRevisionChanged = refreshed && (!cached || refreshed.messages !== cached.messages);
     const timelineDirty = needed && (feed.hasNew || projectSessionRenderedEvents.get(session.id) !== feed.events || messageRevisionChanged || artifactsChanged || !projectSessionBuilt.has(session.id));
     if (timelineDirty) {
-      replaceSessionTimeline(session.id, buildTimeline(detail.messages, feed.events, projectRun, team, tasks, sessionArtifacts, verifications, session.id === projectRun.mainSessionId), feed.events);
+      store._replaceEvents(session.id, sessionMetadataEvents(detail.messages, feed.events, team, tasks, sessionArtifacts, verifications));
       store._replaceContextUsage(session.id, latestContextUsage(feed.events));
       useUsageStore.getState().ingest(session.id, feed.events);
       store._replaceRawLog(session.id, buildRawLog(feed.events, sessionArtifacts));
@@ -1894,432 +1776,26 @@ function hasQueuedFollowUpForProject(projectRunId: string): boolean {
   );
 }
 
-function buildStandaloneTimeline(messages: Message[], events: RuntimeEvent[], artifacts: Artifact[]): TimelineEvent[] {
-  ({ messages, events } = recoverLegacyDeepSeekReplies(messages, events));
-  const timeline = messageTimeline(messages, undefined, artifacts);
-  const changedFiles = diffArtifactsByScope(artifacts);
-  appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, undefined, [], new Map(), new Map(artifacts.map((artifact) => [artifact.id, artifact])), new Map(), changedFiles));
-  positionDeliveredInputs(timeline, events);
-  return groupToolTimeline(timeline
-    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence))
-    .map((event, index) => ({ ...event, sequence: index + 1 }));
-}
-
-function buildTimeline(
-  messages: Message[],
-  events: RuntimeEvent[],
-  projectRun: ProjectRun,
-  team: UiTeam | undefined,
-  tasks: Task[],
-  artifacts: Artifact[],
-  verifications: VerificationResult[],
-  isMain: boolean
-): TimelineEvent[] {
-  ({ messages, events } = recoverLegacyDeepSeekReplies(messages, events));
-  const resolvedApprovals = new Map(events.filter((event) => event.type === "approval.resolved").map((event) => [event.payload.approvalId, event.payload.decision]));
-  const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
-  const verificationsById = new Map(verifications.map((verification) => [verification.id, verification]));
-  const changedFiles = diffArtifactsByScope(artifacts);
-  const timeline = messageTimeline(messages, team, artifacts);
-  appendRuntimeEvents(timeline, messages, events, (event) => runtimePayload(event, team, tasks, resolvedApprovals, artifactsById, verificationsById, changedFiles));
-  positionDeliveredInputs(timeline, events);
-  if (isMain) {
-    timeline.push({
-      id: `project-run-${projectRun.id}-${projectRun.status}`,
-      sessionId: String(projectRun.mainSessionId),
-      sequence: Number.MAX_SAFE_INTEGER,
-      timestamp: projectRun.updatedAt,
-      data: { kind: "run_status", run: projectLifecycle(projectRun) ?? { status: "running" } }
-    });
-  }
-  return groupToolTimeline(compactOrchestrationTimeline(timeline, projectRun.mainSessionId)
-    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence))
-    .map((event, index) => ({ ...event, sequence: index + 1 }));
-}
-
-/** A queued input belongs immediately before the turn that actually consumes it. */
-function positionDeliveredInputs(timeline: TimelineEvent[], events: RuntimeEvent[]): void {
-  const positions = new Map<string, RuntimeEvent>();
+/** Business observers read task, artifact and usage metadata; chat rows come only from the block feed. */
+function sessionMetadataEvents(messages: Message[], events: RuntimeEvent[], team: UiTeam | undefined, tasks: Task[], artifacts: Artifact[], verifications: VerificationResult[]): TimelineEvent[] {
+  const approvals = new Map(events.filter(event => event.type === "approval.resolved").map(event => [event.payload.approvalId, event.payload.decision]));
+  const files = diffArtifactsByScope(artifacts);
+  const artifactIds = new Map(artifacts.map(artifact => [artifact.id, artifact]));
+  const verificationIds = new Map(verifications.map(verification => [verification.id, verification]));
+  const result = messageTimeline(messages, team, artifacts);
   for (const event of events) {
-    const id = event.type === "run.started" ? event.payload.userMessageId
-      : event.type === "session.follow_up_steered" ? event.payload.messageId : undefined;
-    if (id) positions.set(id, event);
+    const data = runtimePayload(event, team, tasks, approvals, artifactIds, verificationIds, files);
+    if (data) result.push({ id: event.eventId, sessionId: String(event.sessionId), runId: event.runId,
+      sequence: event.sequence, timestamp: event.timestamp, background: event.background, data });
   }
-  for (let index = 0; index < timeline.length; index++) {
-    const row = timeline[index]!;
-    if (row.data.kind !== "message" || row.data.sender !== "user" || !row.data.messageId) continue;
-    const position = positions.get(row.data.messageId);
-    if (position) timeline[index] = { ...row, timestamp: position.timestamp, sequence: position.sequence - 0.5 };
-  }
-}
-
-function appendRuntimeEvents(
-  timeline: TimelineEvent[],
-  messages: Message[],
-  events: RuntimeEvent[],
-  mapPayload: (event: RuntimeEvent) => TimelinePayload | undefined
-): void {
-  // Older streams use their order within the run to match saved segments.
-  const persistedSegmentsByRun = new Map<string, number>();
-  for (const message of messages) {
-    if (message.sender !== "agent" || !message.runId) continue;
-    persistedSegmentsByRun.set(message.runId, (persistedSegmentsByRun.get(message.runId) ?? 0) + 1);
-  }
-  // OMP replies can complete out of order. Match each stream to its own receipt.
-  const ompMessageId = /^omp-message-[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/;
-  const savedRows = new Map<string, number>();
-  for (const [index, row] of timeline.entries()) {
-    if (row.data.kind === "message" && row.data.sender === "agent" && row.data.messageId) {
-      savedRows.set(row.data.messageId, index);
-    }
-  }
-  const savedOmpStreams = new Map<string, number>();
-  for (const event of events) {
-    if (event.type !== "agent.message" || event.payload.subagentDispatchId) continue;
-    const { providerMessageId, messageId } = event.payload;
-    if (!providerMessageId || !ompMessageId.test(providerMessageId)) continue;
-    const index = savedRows.get(messageId);
-    if (index === undefined || timeline[index].runId !== event.runId) continue;
-    const key = `${event.runId ?? "session"}:${providerMessageId}`;
-    savedOmpStreams.set(key, index);
-    timeline[index] = { ...timeline[index], id: `agent-message-${key}` };
-  }
-  const hiddenCompletions = hiddenCompletionRunIds(messages);
-  const hiddenInternalRuns = hiddenInternalRunIds(messages);
-  const terminalRuns = new Map(events
-    .filter((event) => event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled")
-    .map((event) => [String(event.runId ?? ""), event.type === "run.failed" ? "failed" as const : "done" as const]));
-  const latestTerminalEvents = new Map(events
-    .filter((event) => event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled")
-    .map((event) => [String(event.runId ?? ""), event.eventId]));
-  const streaming = new Map<string, number>();
-  const positionedOmpStreams = new Set<string>();
-  const deltaSegments = new Map<string, string[]>();
-  const reasoning = new Map<string, number>();
-  const latestReasoning = new Map<string, string>();
-  const reasoningGeneration = new Map<string, number>();
-  const runningReasoningRows = new Map<number, string>();
-  const tools = new Map<string, number>();
-  const commands = new Map<string, number>();
-  const approvalRows = new Map<string, number>();
-  const workflowPlanRows = new Map<string, number>();
-  const workflowPlanRuns = new Map<string, number>();
-  const pendingCommandApprovals = new Map<string, number>();
-  const retryableCommands = new Map<string, number>();
-  const latestTool = new Map<string, string>();
-  const latestCommand = new Map<string, string>();
-  const runningRows = new Map<number, string>();
-  const backgroundRows = new Set<number>();
-  // Streaming message rows per run; closed below once the run reaches a
-  // terminal event so a killed run cannot leave a row blinking forever.
-  const streamingMessageRows = new Map<number, string>();
-
-  const push = (event: RuntimeEvent, data: TimelinePayload): number => {
-    timeline.push({ id: event.eventId, sessionId: String(event.sessionId), runId: event.runId, background: event.background, sequence: event.sequence, timestamp: event.timestamp, data });
-    if (event.background) backgroundRows.add(timeline.length-1);
-    return timeline.length - 1;
-  };
-
-  // Provider-native sub-agent activity is attached to its dispatch card
-  // instead of appearing as top-level rows.
-  const nativeDiffs = new Map<string, RuntimeEvent>();
-  for (const event of events) {
-    if (event.type === "run.diff_updated") nativeDiffs.set(JSON.stringify([event.sessionId, event.runId]), event);
-  }
-  const subagentActivities = collectSubagentActivities(events);
-  const withActivities = (subagent: Extract<TimelinePayload, { kind: "tool_activity" }>["subagent"], callId?: string): typeof subagent => {
-    if (!subagent) return subagent;
-    const activities = callId ? subagentActivities.get(callId) : undefined;
-    return activities?.length ? { ...subagent, activities } : subagent;
-  };
-
-  const finishLatestReasoning = (runId: string): void => {
-    const key = latestReasoning.get(runId);
-    const index = key ? reasoning.get(key) : undefined;
-    if (index === undefined) return;
-    const current = timeline[index].data;
-    if (current.kind === "reasoning" && current.streaming) {
-      timeline[index] = { ...timeline[index], data: { ...current, streaming: false } };
-    }
-    runningReasoningRows.delete(index);
-  };
-
-  for (const event of events) {
-    const runId = String(event.runId ?? "session");
-    if (event.type === "workflow.plan") {
-      const { plan } = event.payload;
-      const data: TimelinePayload = { kind: "workflow_plan", plan };
-      const index = workflowPlanRows.get(plan.id);
-      if (index === undefined) {
-        const inserted = push(event, data);
-        workflowPlanRows.set(plan.id, inserted);
-        if (plan.runId) workflowPlanRuns.set(plan.runId, inserted);
-      } else {
-        timeline[index] = { ...timeline[index], data };
-        if (plan.runId) workflowPlanRuns.set(plan.runId, index);
-      }
-      continue;
-    }
-    if (event.type === "workflow.updated") {
-      const index = workflowPlanRuns.get(event.payload.workflowRunId);
-      if (index !== undefined) {
-        const row = timeline[index];
-        if (row.data.kind === "workflow_plan") {
-          timeline[index] = { ...row, data: { ...row.data, runStatus: event.payload.status } };
-        }
-      }
-      continue;
-    }
-    if (event.type === "approval.requested") {
-      if (approvalRows.has(event.payload.approvalId)) continue;
-      const key = JSON.stringify([event.sessionId, event.projectRunId, event.taskId, event.payload.operation ?? event.payload.summary]);
-      const existing = event.payload.category === "command" ? pendingCommandApprovals.get(key) : undefined;
-      if (existing !== undefined) {
-        approvalRows.set(event.payload.approvalId, existing);
-        continue;
-      }
-      const data = mapPayload(event);
-      if (data) {
-        const index = push(event, data);
-        approvalRows.set(event.payload.approvalId, index);
-        if (event.payload.category === "command") pendingCommandApprovals.set(key, index);
-      }
-      continue;
-    }
-    if (event.type === "approval.resolved") {
-      const index = approvalRows.get(event.payload.approvalId);
-      const current = index === undefined ? undefined : timeline[index];
-      if (current?.data.kind === "approval") {
-        timeline[index!] = { ...current, data: { ...current.data, approval: { ...current.data.approval, status: event.payload.decision, decisionScope: event.payload.scope } } };
-        for (const [key, value] of pendingCommandApprovals) if (value === index) pendingCommandApprovals.delete(key);
-      }
-      continue;
-    }
-    const nativeDiff = nativeDiffs.get(JSON.stringify([event.sessionId, event.runId]));
-    if (event.type === "run.diff_updated" && nativeDiff !== event) continue;
-    if (subagentDispatchIdOf(event)) continue;
-    if (hiddenInternalRuns.has(runId)) continue;
-    if ((event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled")
-      && latestTerminalEvents.get(runId) !== event.eventId) continue;
-    if (event.type === "run.completed" && hiddenCompletions.has(runId)) continue;
-    if (event.type === "agent.message_delta") {
-      // The model has moved on to final text output: whatever reasoning
-      // row is still streaming for this run is done now (pi/omp emit no
-      // thinking_summary in this path, so without this the row would stay
-      // "thinking…" forever).
-      finishLatestReasoning(runId);
-      const key = `${runId}:${event.payload.messageId}`;
-      const saved = savedOmpStreams.get(key);
-      if (saved !== undefined) {
-        if (!positionedOmpStreams.has(key)) {
-          timeline[saved] = { ...timeline[saved], timestamp: event.timestamp, sequence: event.sequence };
-          positionedOmpStreams.add(key);
-        }
-        continue;
-      }
-      let rowId = `agent-message-${key}`;
-      if (!ompMessageId.test(event.payload.messageId)) {
-        let order = deltaSegments.get(runId);
-        if (!order) {
-          order = [];
-          deltaSegments.set(runId, order);
-        }
-        let segmentIndex = order.indexOf(event.payload.messageId);
-        if (segmentIndex === -1) {
-          order.push(event.payload.messageId);
-          segmentIndex = order.length - 1;
-        }
-        if (segmentIndex < (persistedSegmentsByRun.get(runId) ?? 0)) continue;
-        rowId = `agent-message-${runId}-${segmentIndex}`;
-      }
-      const index = streaming.get(key);
-      // Delta payloads are cumulative (the daemon accumulates chunk text when
-      // coalescing), so each event REPLACES the row text — appending would
-      // duplicate everything.
-      if (index === undefined) {
-        const row = push(event, { kind: "message", sender: "agent", text: event.payload.text, streaming: true, messageId: event.payload.messageId });
-        timeline[row] = { ...timeline[row], id: rowId };
-        streaming.set(key, row);
-        streamingMessageRows.set(row, runId);
-      } else {
-        const current = timeline[index].data;
-        if (event.background) backgroundRows.add(index);
-        if (current.kind === "message") timeline[index] = { ...timeline[index], data: { ...current, text: event.payload.text } };
-      }
-      continue;
-    }
-    if (event.type === "agent.thinking_delta") {
-      const generation = reasoningGeneration.get(runId) ?? 0;
-      const key = `${runId}:${event.payload.messageId}:${generation}`;
-      const index = reasoning.get(key);
-      if (index === undefined) {
-        const text = capReasoningText(event.payload.text);
-        if (!text.trim()) continue;
-        const row = push(event, { kind: "reasoning", text, streaming: true, messageId: event.payload.messageId });
-        reasoning.set(key, row);
-        latestReasoning.set(runId, key);
-        runningReasoningRows.set(row, runId);
-      } else {
-        const current = timeline[index].data;
-        if (event.background) backgroundRows.add(index);
-        // Cumulative payload — replace (see agent.message_delta above).
-        if (current.kind === "reasoning") timeline[index] = { ...timeline[index], data: { ...current, text: capReasoningText(event.payload.text) } };
-      }
-      continue;
-    }
-    if (event.type === "agent.thinking_summary") {
-      const explicitKey = event.payload.messageId
-        ? `${runId}:${event.payload.messageId}:${reasoningGeneration.get(runId) ?? 0}`
-        : undefined;
-      const key = explicitKey && reasoning.has(explicitKey) ? explicitKey : latestReasoning.get(runId) ?? explicitKey;
-      const index = key ? reasoning.get(key) : undefined;
-      if (index === undefined) {
-        const text = capReasoningText(event.payload.text);
-        if (!text.trim()) continue;
-        const row = push(event, { kind: "reasoning", text, streaming: false, messageId: event.payload.messageId });
-        if (key) reasoning.set(key, row);
-      } else {
-        const current = timeline[index].data;
-        if (current.kind === "reasoning") timeline[index] = {
-          ...timeline[index],
-          data: { ...current, text: capReasoningText(event.payload.text || current.text), streaming: false }
-        };
-        runningReasoningRows.delete(index);
-      }
-      continue;
-    }
-    if (event.type === "tool.started" || event.type === "tool.updated" || event.type === "tool.finished") {
-      if (event.type === "tool.started") finishLatestReasoning(runId);
-      const fallback = `${runId}:${event.payload.toolName}`;
-      const suppliedCallId = event.payload.callId;
-      const key = suppliedCallId ? `${runId}:${suppliedCallId}` : event.type === "tool.finished" ? latestTool.get(fallback) ?? `${fallback}:${event.sequence}` : `${fallback}:${event.sequence}`;
-      if (event.type === "tool.started") latestTool.set(fallback, key);
-      const index = tools.get(key);
-      if (index === undefined) {
-        const row = push(event, {
-          kind: "tool_activity",
-          toolName: event.payload.toolName,
-          status: event.type === "tool.finished" ? (event.payload.success ? "done" : "failed") : "running",
-          input: event.payload.inputSummary,
-          output: event.type !== "tool.started" ? event.payload.outputSummary : undefined,
-          codeExecution: mergeCodeExecution(undefined, event.payload.codeExecution),
-          fileDiff: event.payload.fileDiff,
-          subagent: withActivities(event.payload.subagent, suppliedCallId)
-        });
-        tools.set(key, row);
-        if (event.type === "tool.started") runningRows.set(row, runId);
-      } else {
-        const current = timeline[index].data;
-        if (event.background) backgroundRows.add(index);
-        if (current.kind === "tool_activity") timeline[index] = {
-          ...timeline[index],
-          data: {
-            ...current,
-            toolName: current.toolName === "tool" ? event.payload.toolName : current.toolName,
-            status: event.type === "tool.finished" ? (event.payload.success ? "done" : "failed") : current.status,
-            input: event.payload.inputSummary ?? current.input,
-            output: event.type === "tool.finished" || (event.type === "tool.updated" && current.status === "running") ? event.payload.outputSummary ?? current.output : current.output,
-            fileDiff: event.payload.fileDiff ?? current.fileDiff,
-            codeExecution: mergeCodeExecution(current.codeExecution, event.payload.codeExecution),
-            subagent: withActivities(event.payload.subagent ?? current.subagent, suppliedCallId)
-          }
-        };
-        if (event.type === "tool.finished") runningRows.delete(index);
-      }
-      if (event.type === "tool.started") reasoningGeneration.set(runId, (reasoningGeneration.get(runId) ?? 0) + 1);
-      continue;
-    }
-    if (event.type === "command.started" || event.type === "command.updated" || event.type === "command.finished") {
-      if (event.type === "command.started") finishLatestReasoning(runId);
-      const fallback = `${runId}:${event.payload.command ?? "command"}`;
-      const suppliedCallId = event.payload.callId;
-      const key = suppliedCallId ? `${runId}:${suppliedCallId}` : event.type === "command.finished" ? latestCommand.get(fallback) ?? `${fallback}:${event.sequence}` : `${fallback}:${event.sequence}`;
-      if (event.type === "command.started") latestCommand.set(fallback, key);
-      let index = commands.get(key);
-      const retryKey = event.payload.command ? `${runId}:${normalizeCommandForRetry(event.payload.command)}` : undefined;
-      if (index === undefined && event.type === "command.started" && retryKey) {
-        const retryIndex = retryableCommands.get(retryKey);
-        const previous = retryIndex === undefined ? undefined : timeline[retryIndex]?.data;
-        if (retryIndex !== undefined && previous?.kind === "command" && previous.status !== "done") {
-          index = retryIndex;
-          commands.set(key, retryIndex);
-          timeline[retryIndex] = {
-            ...timeline[retryIndex],
-            data: {
-              ...previous,
-              command: event.payload.command,
-              status: "running",
-              exitCode: undefined,
-              attempts: (previous.attempts ?? 1) + 1
-            }
-          };
-          runningRows.set(retryIndex, runId);
-        }
-      }
-      if (index === undefined) {
-        const data = mapPayload(event);
-        if (data) {
-          if (data.kind === "command" && event.type === "command.started") data.attempts = 1;
-          const row = push(event, data);
-          commands.set(key, row);
-          if (retryKey && event.type === "command.started") retryableCommands.set(retryKey, row);
-          if (event.type === "command.started") runningRows.set(row, runId);
-        }
-      } else {
-        const current = timeline[index].data;
-        if (event.background) backgroundRows.add(index);
-        if (current.kind === "command" && current.status === "running" && event.type === "command.updated") timeline[index] = { ...timeline[index], data: { ...current, output: event.payload.outputSummary ?? current.output } };
-        if (current.kind === "command" && event.type === "command.finished") timeline[index] = {
-          ...timeline[index],
-          data: { ...current, status: event.payload.exitCode === 0 ? "done" : "failed", exitCode: event.payload.exitCode, output: event.payload.outputSummary ?? current.output }
-        };
-        if (event.type === "command.finished") runningRows.delete(index);
-      }
-      if (event.type === "command.started") reasoningGeneration.set(runId, (reasoningGeneration.get(runId) ?? 0) + 1);
-      continue;
-    }
-    const data = mapPayload(event);
-    if (data) push(event, data);
-  }
-
-  for (const [index, runId] of runningRows) {
-    if (backgroundRows.has(index)) continue;
-    const terminalStatus = terminalRuns.get(runId);
-    if (!terminalStatus) continue;
-    const current = timeline[index].data;
-    if (current.kind === "tool_activity") timeline[index] = { ...timeline[index], data: { ...current, status: terminalStatus } };
-    if (current.kind === "command") timeline[index] = { ...timeline[index], data: { ...current, status: terminalStatus } };
-  }
-  for (const [index, runId] of runningReasoningRows) {
-    if (backgroundRows.has(index)) continue;
-    if (!terminalRuns.has(runId)) continue;
-    const current = timeline[index].data;
-    if (current.kind === "reasoning") timeline[index] = { ...timeline[index], data: { ...current, streaming: false } };
-  }
-  for (const [index, runId] of streamingMessageRows) {
-    if (backgroundRows.has(index)) continue;
-    if (!terminalRuns.has(runId)) continue;
-    const current = timeline[index].data;
-    if (current.kind === "message" && current.streaming) timeline[index] = { ...timeline[index], data: { ...current, streaming: false } };
-  }
-}
-
-function normalizeCommandForRetry(command: string): string {
-  return command.replaceAll("\\\\", "\\").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+  return result;
 }
 
 function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact[] = []): TimelineEvent[] {
   const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
-  const segments = new Map<string, number>();
   return messages.filter(isVisibleTimelineMessage).map((message, index) => {
-    let id = `message-${message.id}`;
-    if (message.sender === "agent" && message.runId) {
-      const segment = segments.get(message.runId) ?? 0;
-      segments.set(message.runId, segment + 1);
-      id = `agent-message-${message.runId}-${segment}`;
-    }
     return {
-      id,
+      id: `message-${message.id}`,
       sessionId: message.sessionId,
       runId: message.runId,
       background: message.background,
@@ -2348,6 +1824,50 @@ function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact
       }
     };
   });
+}
+
+/** Render a single stored block. Its identity and position belong to SQLite. */
+export function timelineBlockEvent(sessionId: string, block: TimelineBlock): TimelineEvent | undefined {
+  const { content, result } = block;
+  const metadata = {
+    id: block.blockId, sessionId, runId: block.runId ?? undefined, sequence: block.seq,
+    timestamp: String(content.createdAt ?? content.timestamp ?? ""), background: block.kind === "late_result"
+  };
+  let data: TimelinePayload | undefined;
+  if (block.kind === "user_prompt" || block.kind === "user_append" || block.kind === "legacy") {
+    const message = content as unknown as Message;
+    const mapped = messageTimeline([message])[0]?.data;
+    if (mapped?.kind === "message") {
+      const attachments = (content.attachments as MessageAttachmentView[] | undefined)?.map(attachment => ({
+        ...attachment, kind: attachment.kind === "image" ? "image" as const : "file" as const
+      }));
+      data = { ...mapped, streaming: !block.sealed, attachments: [...(attachments ?? []), ...(mapped.attachments ?? [])] };
+    }
+  } else if (typeof content.text === "string" && !content.type) {
+    data = block.kind === "thinking" || content.sourceKind === "thinking"
+      ? { kind: "reasoning", text: content.text, streaming: !block.sealed }
+      : { kind: "message", sender: "agent", text: content.text, streaming: !block.sealed };
+  } else if (typeof content.type === "string") {
+    const original = (content.payload ?? {}) as Record<string, unknown>;
+    const next = (result?.payload ?? {}) as Record<string, unknown>;
+    const event = { ...content, ...metadata, schemaVersion: 1, eventId: block.blockId,
+      type: block.kind === "tool_call" ? result?.type ?? content.type : content.type,
+      payload: { ...original, ...next }
+    } as unknown as RuntimeEvent;
+    if (event.type === "workflow.plan") data = { kind: "workflow_plan", plan: event.payload.plan };
+    else {
+      const approvals = new Map<string, "approved" | "rejected">();
+      if (event.type === "approval.requested" && (block.status === "approved" || block.status === "rejected")) {
+        approvals.set(event.payload.approvalId, block.status);
+      }
+      data = runtimePayload(event, undefined, [], approvals, new Map(), new Map(), new Map());
+      if ((data?.kind === "tool_activity" || data?.kind === "command") &&
+          (block.status === "running" || block.status === "done" || block.status === "failed")) {
+        data = { ...data, status: block.status };
+      }
+    }
+  }
+  return data && { ...metadata, data };
 }
 
 function runtimePayload(

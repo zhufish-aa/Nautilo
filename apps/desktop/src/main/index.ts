@@ -187,6 +187,7 @@ function registerIpcHandlers(): void {
   cycleBrowserWindows = panelWindows.cycle;
   taskBrowser.setWindowCycle(panelWindows.cycle);
   taskBrowser.setWindowOpener(id => panelWindows.open({kind:"browser",sessionId:id}));
+  taskBrowser.setWindowSpaceCloser(panelWindows.closeBrowserSpace);
   registerInteractionHandlers();
   registerProviderUpdateHandlers();
   registerAccountLoginHandlers();
@@ -211,7 +212,7 @@ function createPanelWindow(target:PanelTarget) {
   const browser = target.kind === "browser" || target.kind === "browser-spaces";
   const win = new BrowserWindow({
     width: target.kind === "browser-spaces" ? 1480 : 1220, height:target.kind === "browser-spaces" ? 920 : 820, minWidth:500, minHeight:360,
-    frame: !browser, backgroundColor: browser ? "#eef3f8" : undefined,
+    frame: !browser, backgroundColor: browser ? "#090B0E" : undefined,
     show:false, autoHideMenuBar:true, icon:appIcon, title:browser ? "Nautilo · 浏览器" : "Nautilo · Git",
     webPreferences:{preload:join(__dirname,"../preload/index.js"),sandbox:true,contextIsolation:true,
       nodeIntegration:false,webSecurity:true,spellcheck:false,

@@ -175,9 +175,9 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
                     val line = colored.line
                     val background = when (line.kind) { DiffKind.Added -> Color(0xFFEDF6EF); DiffKind.Removed -> Color(0xFFFCEFF0); else -> Color.Transparent }
                     Row(Modifier.fillMaxWidth().background(background).padding(horizontal = 8.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text((line.newNumber ?: line.oldNumber)?.toString().orEmpty(), Modifier.width(30.dp), fontSize = 11.sp, fontFamily = CodeFont, color = Secondary)
-                        Text(when (line.kind) { DiffKind.Added -> "+"; DiffKind.Removed -> "−"; else -> " " }, fontSize = 12.sp, fontFamily = CodeFont, color = if (line.kind == DiffKind.Removed) Danger else Secondary)
-                        Text(colored.text, fontSize = 12.sp, lineHeight = 19.sp, fontFamily = CodeFont, color = Ink)
+                        Text((line.newNumber ?: line.oldNumber)?.toString().orEmpty(), Modifier.width(30.dp), fontSize = 11.sp, fontFamily = UiFont, color = Secondary)
+                        Text(when (line.kind) { DiffKind.Added -> "+"; DiffKind.Removed -> "−"; else -> " " }, fontSize = 12.sp, fontFamily = UiFont, color = if (line.kind == DiffKind.Removed) Danger else Secondary)
+                        Text(colored.text, fontSize = 12.sp, lineHeight = 19.sp, fontFamily = UiFont, color = Ink)
                     }
                 }
             }

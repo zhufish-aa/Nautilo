@@ -16,7 +16,7 @@ const recordRejection = error => errors.push(`Unhandled rejection: ${error?.mess
 process.on("unhandledRejection", recordRejection);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 (async () => {
-  const bundle = await esbuild.build({ entryPoints: [path.join(__dirname, 'navigation-entry.tsx')], write: false, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.png': 'dataurl', '.svg': 'dataurl', '.css': 'empty', '.ttf': 'dataurl' }, nodePaths: [path.join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': '"test"' }, plugins: [{ name: 'test-worker-stub', setup(build) { build.onResolve({ filter: /\?worker/ }, args => ({ path: args.path, namespace: 'test-worker' })); build.onLoad({ filter: /.*/, namespace: 'test-worker' }, () => ({ contents: 'export default class Worker { postMessage() {} terminate() {} }' })); } }] });
+  const bundle = await esbuild.build({ entryPoints: [path.join(__dirname, 'navigation-entry.tsx')], write: false, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.png': 'dataurl', '.svg': 'dataurl', '.css': 'empty', '.ttf': 'dataurl' }, nodePaths: [path.join(desktop, 'node_modules')], alias: { '@': path.join(desktop, 'src/renderer/src') }, define: { 'process.env.NODE_ENV': '"test"' }, plugins: [{ name: 'test-worker-stub', setup(build) { build.onResolve({ filter: /\?worker/ }, args => ({ path: args.path, namespace: 'test-worker' })); build.onLoad({ filter: /.*/, namespace: 'test-worker' }, () => ({ contents: 'export default class Worker { postMessage() {} terminate() {} }' })); } }] });
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', error => errors.push(error.message));
   virtualConsole.on('error', (...args) => errors.push(args.join(' ')));
@@ -266,6 +266,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         assert(d.querySelector('section[aria-label="对话"] .composer'));
         const selector = await waitFor(() => d.querySelector('.workflow-execution-drawer select[aria-label="选择节点执行实例"]'), 'execution attempts');
         selector.value = `analysis-${iteration}`; selector.dispatchEvent(new w.Event('change', { bubbles: true }));
+        const incoming = await waitFor(() => {
+          const item = d.querySelector('.workflow-execution-drawer .workflow-dispatch-incoming');
+          return item?.textContent.includes(`上游记录 ${iteration}`) && item;
+        }, 'incoming data in workflow execution');
+        assert.equal(incoming.querySelector('.workflow-dispatch-json pre').textContent, '{status: "ready"}');
         const id = instanceRows[iteration - 1].sessionId;
         assert(!qa.sessions.getState().sessions.some(item => item.id === id));
         find('打开子会话 ↗').click();
@@ -274,21 +279,23 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         assert(requested.includes(id));
       };
       await inspect(2);
-      const dispatch = await waitFor(() => d.querySelector('.workflow-dispatch-card'), 'child dispatch information');
-      assert.match(dispatch.textContent, /检查第 2 组证据/);
-      assert.match(dispatch.querySelector('.workflow-dispatch-preview').textContent, /代码证据：JSON/);
-      const toggleDetails = dispatch.querySelector('.workflow-dispatch-toggle');
-      dispatch.querySelector('.workflow-dispatch-preview').click();
-      await waitFor(() => toggleDetails.getAttribute('aria-expanded') === 'true', 'dispatch details open');
-      assert.equal(dispatch.querySelector('.workflow-dispatch-preview-clip').getAttribute('aria-hidden'), 'true');
-      assert.match(dispatch.querySelector('.workflow-dispatch-incoming').textContent, /上游记录 2.*原始样本/);
-      assert.equal(dispatch.querySelector('.workflow-dispatch-json pre').textContent, JSON.stringify(JSON.parse(evidenceJson), null, 2));
-      assert.equal(dispatch.querySelector('.workflow-dispatch-incoming .workflow-dispatch-json pre').textContent, '{status: "ready"}');
-      toggleDetails.click();
-      await waitFor(() => toggleDetails.getAttribute('aria-expanded') === 'false', 'dispatch details closed');
+      const instruction = () => [...d.querySelectorAll('.conversation-message-row article')]
+        .find(card => card.querySelector('h2')?.textContent === '任务说明');
+      const fallback = await waitFor(instruction, 'task instructions from workflow history');
+      assert.equal(fallback.querySelector('p').textContent, instanceRows[1].prompt);
+      assert.equal(d.querySelector('.workflow-dispatch-card'), null);
+      const taskTitle = '检查第 2 组证据';
+      const objective = taskTitle + '，用实际文件验证。\n汇报结果。';
+      qa.sessions.setState(state => ({
+        sessions: state.sessions.map(item => item.id === selected ? { ...item, title: taskTitle } : item),
+        tasks: { ...state.tasks, [selected]: [{ id: 'fixture-task', title: taskTitle, objective, status: 'completed', dependencies: [] }] }
+      }));
+      await waitFor(() => instruction()?.querySelector('p')?.textContent === objective, 'saved task instructions');
+      assert.equal(d.querySelector('.workspace-conversation-header h1').textContent, 'Codex');
+      assert.equal(d.querySelector('.session-chat-column').textContent.split(taskTitle).length - 1, 1);
       await route('/sessions?session=s1');
       await inspect(1);
-      await waitFor(() => d.querySelector('.workflow-dispatch-card')?.textContent.includes('上游记录 1'), 'first dispatch after navigation');
+      await waitFor(() => instruction()?.querySelector('p')?.textContent === instanceRows[0].prompt, 'first task after navigation');
       qa.sessions.getState()._replaceEvents(first.id, [{ id: 'mcp-receipt', sessionId: first.id, runId: 'agent-run-1', sequence: 1, timestamp: now,
         data: { kind: 'tool_activity', status: 'done', toolName: 'nautilo_runtime_agenthub_workflow_submit',
           input: JSON.stringify({ instanceId: 'analysis-1', attempt: 1, branch: '证据冲突', result: { summary: '检查通过' } }), output: JSON.stringify({ accepted: true }) } }]);

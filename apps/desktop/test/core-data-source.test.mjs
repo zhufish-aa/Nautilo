@@ -88,9 +88,6 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
   for (const eventType of [
     "agent.status",
-    "agent.message_delta",
-    "agent.thinking_delta",
-    "agent.thinking_summary",
     "tool.started",
     "tool.finished",
     "usage.updated",
@@ -110,20 +107,10 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   const mediaActions = readFileSync(join(renderer, "features/timeline/media-actions.ts"), "utf8");
   assert.match(mediaActions, /agenthub-artifact:\/\/local\//);
   assert.match(mediaActions, /encodeURIComponent\(path\)/);
-  assert.match(timeline, /推理中/);
-  assert.match(timeline, /推理完成/);
-  assert.doesNotMatch(runtime, /event\.type === ["']run\.started["']\) return \{ kind: ["']activity["']/);
+  assert.match(timeline, /思考/);
   assert.match(runtime, /mergeStandaloneEvents\(sessionId, update\.events\)/);
-  assert.match(runtime, /latestReasoning\.set\(runId, key\)/);
-  assert.match(runtime, /reasoningGeneration\.get\(runId\)/);
-  assert.match(runtime, /event\.type === "tool\.started"\) reasoningGeneration\.set/);
-  assert.match(runtime, /runningReasoningRows/);
-  assert.match(runtime, /finishLatestReasoning\(runId\)/);
-  assert.match(runtime, /const text = capReasoningText\(event\.payload\.text\);\s*if \(!text\.trim\(\)\) continue/);
-  assert.match(runtime, /retryableCommands/);
-  assert.match(runtime, /normalizeCommandForRetry/);
-  assert.match(runtime, /event\.type === "run\.failed" \? "failed"/);
-  assert.match(runtime, /status: terminalStatus/);
+  assert.doesNotMatch(runtime, /latestReasoning|reasoningGeneration|finishLatestReasoning|applyStandaloneDeltas/);
+  assert.doesNotMatch(runtime, /retryableCommands|normalizeCommandForRetry/);
   assert.match(runtime, /_replaceContextUsage\(sessionId, latestContextUsage\(events\)\)/);
 
   const contextUsage = readFileSync(join(renderer, "features/sessions/ContextUsageIndicator.tsx"), "utf8");
@@ -147,26 +134,24 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
   assert.match(activityIndicator, /latest && latest\.data\.kind !== "activity"/);
 });
 
-test("chat timeline groups each turn while retaining all tools and controls", () => {
-  const grouping = readFileSync(join(renderer, "lib/tool-timeline-groups.ts"), "utf8");
-  const runtime = readFileSync(join(renderer, "lib/orchestration-runtime.ts"), "utf8");
+test("chat timeline renders adjacent stored blocks while retaining tools and controls", () => {
   const timeline = readFileSync(join(renderer, "features/timeline/Timeline.tsx"), "utf8");
-  const conversation = readFileSync(join(renderer, "lib/conversation-timeline.ts"), "utf8");
+  const conversation = readFileSync(join(renderer, "lib/session-timeline.ts"), "utf8");
+  const feed = readFileSync(join(renderer, "lib/use-session-timeline.ts"), "utf8");
   const workbench = readFileSync(join(renderer, "features/sessions/SessionWorkbench.tsx"), "utf8");
-  assert.match(grouping, /GROUPABLE_KINDS.*reasoning.*tool_activity.*command.*file_change.*verification/s);
-  assert.match(grouping, /items: pending/);
-  assert.match(runtime, /groupToolTimeline/);
-  assert.match(conversation, /data\.kind === "tool_group"\) visit\(data\.items\)/);
-  assert.match(workbench, /conversationRows\(events, workbenchRunning\)/);
-  assert.match(workbench, /ConversationTurnView turn=\{row.turn\}/);
-  assert.match(workbench, /shell\(row.event.id/);
-  assert.doesNotMatch(workbench, /ProcessFold/);
+  assert.match(feed, /session\.timeline\.open/);
+  assert.match(feed, /session\.timeline\.wait/);
+  assert.match(conversation, /blocks\.push\(block\)/);
+  assert.doesNotMatch(conversation, /\.sort\(|\.splice\(|\.unshift\(/);
+  assert.match(workbench, /timelineEntries\(timeline\)/);
+  assert.match(workbench, /ConversationTurnView turn=\{entry.turn\}/);
+  assert.match(workbench, /shell\(block.blockId/);
   assert.match(timeline, /function ToolActivityCard[\s\S]*const \[open, setOpen\] = useState\(false\)/);
   assert.match(timeline, /function CommandCard[\s\S]*const \[open, setOpen\] = useState\(false\)/);
-  assert.match(timeline, /case "tool_group":[\s\S]*data\.items\.map/);
+  assert.doesNotMatch(timeline, /case "tool_group"/);
   assert.match(timeline, /case "file_change":[\s\S]*<FileChangeCard/);
   assert.match(timeline, /case "verification":[\s\S]*<VerificationCard/);
-  assert.match(timeline, /status === "running" && <Loader2/);
+  assert.match(timeline, /<Loader2[^>]*sessions.cards.running/);
   assert.match(timeline, /useStreamingText/);
   assert.match(timeline, /prev\.event === next\.event/);
 });

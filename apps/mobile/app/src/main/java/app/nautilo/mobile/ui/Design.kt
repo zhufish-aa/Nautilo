@@ -70,12 +70,16 @@ val Green: Color @Composable get() = MobilePalette.mark
 val Danger: Color @Composable get() = MobilePalette.danger
 @OptIn(ExperimentalTextApi::class)
 val UiFont = FontFamily(*listOf(400, 500, 600, 700).map { weight ->
-    Font(app.nautilo.mobile.R.font.nautilo_text, weight = FontWeight(weight), variationSettings = FontVariation.Settings(FontVariation.weight(weight)))
+    Font(app.nautilo.mobile.R.font.noto_sans_sc, weight = FontWeight(weight), variationSettings = FontVariation.Settings(FontVariation.weight(weight)))
 }.toTypedArray())
-@OptIn(ExperimentalTextApi::class)
-val CodeFont = FontFamily(Font(app.nautilo.mobile.R.font.jetbrains_mono, variationSettings = FontVariation.Settings(FontVariation.weight(400))))
 val Backdrop: SolidColor @Composable get() = SolidColor(MobilePalette.canvas)
-val UiTypography = Typography(
+val UiTypography = Typography().let { defaults -> Typography(
+    displayLarge = defaults.displayLarge.copy(fontFamily = UiFont),
+    displayMedium = defaults.displayMedium.copy(fontFamily = UiFont),
+    displaySmall = defaults.displaySmall.copy(fontFamily = UiFont),
+    headlineLarge = defaults.headlineLarge.copy(fontFamily = UiFont),
+    headlineMedium = defaults.headlineMedium.copy(fontFamily = UiFont),
+    headlineSmall = defaults.headlineSmall.copy(fontFamily = UiFont),
     bodyLarge = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 17.sp, lineHeight = 28.sp),
     bodyMedium = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 16.sp, lineHeight = 26.sp),
     bodySmall = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 14.sp, lineHeight = 22.sp),
@@ -85,7 +89,7 @@ val UiTypography = Typography(
     labelLarge = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 15.sp, fontWeight = FontWeight.Medium),
     labelMedium = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 13.sp, fontWeight = FontWeight.Medium),
     labelSmall = androidx.compose.ui.text.TextStyle(fontFamily = UiFont, fontSize = 12.sp)
-)
+) }
 @Composable fun NautiloTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
     val colors = if (dark) DarkMobileColors else LightMobileColors
     val scheme = (if (colors.dark) darkColorScheme() else lightColorScheme()).copy(

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { createPortal } from "react-dom";
 import { ArrowDown, ArrowUp, ArrowUpRight, ChevronRight, Info, RefreshCw, Search, X } from "lucide-react";
 import type { UsageOverviewPayload, UsageOverviewQuery, UsageSessionRow, UsageSourceRow } from "@agenthub/schemas";
 import { Tooltip } from "../../components/ui/Tooltip";
+import { SlidingTabs } from "../../components/ui/SlidingTabs";
 import { requestCore, getBridge } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
 import { buildUsageOverview } from "../../../../shared/usage-overview";
@@ -18,21 +20,25 @@ type SortColumn = "totalTokens" | "costUsd" | "updatedAt";
 export function UsagePanel(): JSX.Element {
   const zh = useI18n().locale === "zh-CN";
   const [params, setParams] = useSearchParams();
+  const [actionsHost, setActionsHost] = useState<HTMLDivElement | null>(null);
   const logs = params.get("tab") === "requests";
   const sessionId = params.get("session") ?? undefined;
-  const tabs = <div className="usage-view-tabs" role="tablist" aria-label={zh ? "用量与费用" : "Usage and costs"}>
-    {[["usage", zh ? "会话汇总" : "Session usage"], ["requests", zh ? "请求日志" : "Request logs"]].map(([id, label]) =>
-      <button type="button" role="tab" aria-selected={logs === (id === "requests")} key={id}
-        onClick={() => setParams(previous => { const next = new URLSearchParams(previous); next.set("tab", id); return next; }, { replace: true })}>{label}</button>)}
+  return <div className="usage-overview">
+    <div className="usage-toolbar" data-requests={logs}>
+      <SlidingTabs tablist className="usage-view-tabs" label={zh ? "用量与费用" : "Usage and costs"}
+        value={logs ? "requests" : "usage"} items={[{ id: "usage", label: zh ? "会话汇总" : "Session usage" },
+          { id: "requests", label: zh ? "请求日志" : "Request logs" }]}
+        onChange={id => setParams(previous => { const next = new URLSearchParams(previous); next.set("tab", id); return next; }, { replace: true })} />
+      <div ref={setActionsHost} className="usage-toolbar-slot" />
+    </div>
+    {logs ? <RequestLogsPanel sessionId={sessionId} actionsHost={actionsHost} />
+      : <UsageSummary actionsHost={actionsHost} sessionId={sessionId} clearSession={() => setParams(previous => {
+        const next = new URLSearchParams(previous); next.delete("session"); return next;
+      }, { replace: true })} zh={zh} />}
   </div>;
-  return <div className="usage-overview">{logs
-    ? <><div className="usage-toolbar">{tabs}</div><RequestLogsPanel sessionId={sessionId} /></>
-    : <UsageSummary tabs={tabs} sessionId={sessionId} clearSession={() => setParams(previous => {
-      const next = new URLSearchParams(previous); next.delete("session"); return next;
-    }, { replace: true })} zh={zh} />}</div>;
 }
 
-function UsageSummary({ tabs, sessionId, clearSession, zh }: { tabs: JSX.Element; sessionId?: string; clearSession: () => void; zh: boolean }): JSX.Element {
+function UsageSummary({ actionsHost, sessionId, clearSession, zh }: { actionsHost: HTMLElement | null; sessionId?: string; clearSession: () => void; zh: boolean }): JSX.Element {
   const [query, setQuery] = useState("");
   const [period, setPeriod] = useState<typeof periods[number]>("all");
   const [harness, setHarness] = useState("");
@@ -85,9 +91,7 @@ function UsageSummary({ tabs, sessionId, clearSession, zh }: { tabs: JSX.Element
     : "Usage is timed by real runs. Uncached input includes cache writes. Colors use complete splits; gray marks measured totals without a split. Undated cumulative baselines count only in all-time totals. Custom rates take priority. Estimates use standard text API rates and do not represent bills.";
 
   return <>
-    <div className="usage-toolbar">
-      {tabs}
-      <div className="usage-actions">
+    {actionsHost && createPortal(<div className="usage-actions">
         <div className="usage-segments" aria-label={zh ? "时间范围" : "Date range"}>
           {periods.map((key, i) => <button type="button" key={key} aria-pressed={period === key}
             onClick={() => { setPeriod(key); setLimit(50); }}>{["24h", zh ? "7天" : "7 days", zh ? "30天" : "30 days", zh ? "全部" : "All"][i]}</button>)}
@@ -97,8 +101,7 @@ function UsageSummary({ tabs, sessionId, clearSession, zh }: { tabs: JSX.Element
           <RefreshCw size={14} className={busy ? "motion-safe:animate-spin" : undefined} /><span>{zh ? "刷新" : "Refresh"}</span>
         </button>
         <Link to={priceSettings}>{zh ? "价格设置" : "Set prices"}<ArrowUpRight size={13} /></Link>
-      </div>
-    </div>
+    </div>, actionsHost)}
     {(sessionId || data.unpricedModels > 0 || error || !canRead) && <div className="usage-notes">
       {sessionId && <button type="button" onClick={clearSession}>{zh ? "← 查看全部会话" : "← View all sessions"}</button>}
       {data.unpricedModels > 0 && <Link to={priceSettings}>{zh ? `${data.unpricedModels} 个模型的用量未匹配单价` : `${data.unpricedModels} models have usage without matching prices`} <ArrowUpRight size={12} /></Link>}

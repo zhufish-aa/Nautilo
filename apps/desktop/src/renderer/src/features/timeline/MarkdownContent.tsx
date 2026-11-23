@@ -3,6 +3,7 @@ import { Check, Copy } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { classifyLocalHref, isImagePath, isExternalOpenPath, parseFileReference, splitTextByFileReferences } from "../../lib/file-references";
 import { useI18n, type MessageKey } from "../../lib/i18n";
+import { highlightCode } from "../../lib/highlight";
 import { cn } from "../../lib/utils";
 import { useMarkdownFragments } from "../../lib/use-markdown-fragments";
 import { useInitialMarkdownMount } from "../../lib/use-initial-markdown-mount";
@@ -12,6 +13,7 @@ import { openLightbox } from "../../stores/lightbox";
 import { FileRefChip } from "./FileRefChip";
 import { TimelineImage } from "./TimelineImage";
 import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupImageMenu } from "./media-actions";
+import { PreviewCopyButton } from "../work/preview/PreviewCopyButton";
 
 function textOf(node: ReactNode): string {
   if (typeof node === "string") return node;
@@ -59,6 +61,7 @@ export const MarkdownContent = memo(function MarkdownContent({
   inverted = false,
   onOpenLocalFile,
   streaming = false,
+  document = false,
   scrollableTableLabel,
   onContentLayout
 }: {
@@ -66,11 +69,12 @@ export const MarkdownContent = memo(function MarkdownContent({
   inverted?: boolean;
   onOpenLocalFile?: OpenLocalFile;
   streaming?: boolean;
+  document?: boolean;
   scrollableTableLabel?: string;
   onContentLayout?: () => void;
 }): JSX.Element {
   const { t, locale } = useI18n();
-  const components = useMemo(() => createMarkdownComponents(inverted, onOpenLocalFile, t, scrollableTableLabel), [inverted, onOpenLocalFile, t, scrollableTableLabel]);
+  const components = useMemo(() => createMarkdownComponents(inverted, onOpenLocalFile, t, scrollableTableLabel, document), [inverted, onOpenLocalFile, t, scrollableTableLabel, document]);
   const rawRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const streamed = useRef(streaming);
@@ -161,9 +165,24 @@ function CodeBlock({ children }: { children?: ReactNode }): JSX.Element {
   );
 }
 
-function createMarkdownComponents(inverted: boolean, onOpenLocalFile: OpenLocalFile | undefined, t: Translate, scrollableTableLabel?: string): Components {
+function DocumentCodeBlock({ children }: { children?: ReactNode }): JSX.Element {
+  const { locale } = useI18n();
+  const code = Children.toArray(children).find(isValidElement<{ className?: string }>);
+  const language = code?.props.className?.match(/(?:^|\s)language-([^\s]+)/)?.[1];
+  const text = textOf(children).replace(/\n$/, "");
+  const html = useMemo(() => highlightCode(text, "", language), [text, language]);
+  return <div className="preview-code-block">
+    <div className="preview-code-block-toolbar">
+      <span>{language ?? (locale === "zh-CN" ? "代码" : "Code")}</span>
+      <PreviewCopyButton value={text} label={locale === "zh-CN" ? "复制代码" : "Copy code"} />
+    </div>
+    <pre tabIndex={0}><code dangerouslySetInnerHTML={{ __html: html }} /></pre>
+  </div>;
+}
+
+function createMarkdownComponents(inverted: boolean, onOpenLocalFile: OpenLocalFile | undefined, t: Translate, scrollableTableLabel?: string, document = false): Components {
   const linkProps = (href: string | undefined): Record<string, unknown> => {
-    const classification = classifyLocalHref(href);
+    const classification = classifyLocalHref(href, !!onOpenLocalFile);
     if (classification.kind === "local") {
       const path = classification.path;
       const imagePath = isImagePath(path);
@@ -199,12 +218,13 @@ function createMarkdownComponents(inverted: boolean, onOpenLocalFile: OpenLocalF
         blockquote: ({ children }) => <blockquote className="my-2 border-l-2 border-accent/50 pl-3 text-ink-2">{children}</blockquote>,
         a: ({ children, href }) => <a className="text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent" {...linkProps(href)}>{children}</a>,
         code: ({ children, className }) => {
+          if (document) return <code className={className}>{children}</code>;
           if (className) return <code className={cn("font-mono text-[12px] font-normal", className)}>{children}</code>;
           const reference = parseFileReference(textOf(children));
           if (reference) return <FileRefChip reference={reference} label={textOf(children)} inverted={inverted} onOpenLocalFile={onOpenLocalFile} />;
           return <code className={cn("rounded px-1.5 py-0.5 font-mono text-[12px] font-normal", inverted ? "bg-white/15" : "bg-card-hover text-ink")}>{children}</code>;
         },
-        pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+        pre: ({ children }) => document ? <DocumentCodeBlock>{children}</DocumentCodeBlock> : <CodeBlock>{children}</CodeBlock>,
         // table-fixed keeps column widths driven by the container (never the
         // widest cell), so a long path/code cell wraps instead of blowing the
         // table past the message bubble / timeline width.

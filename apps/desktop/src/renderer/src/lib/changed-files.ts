@@ -80,14 +80,7 @@ function activityDiff(data: ToolActivity): ToolFileDiff | undefined {
 /** Text/reasoning updates cannot change a file projection. Discard them before
  * scope checks, and apply native replacement semantics equally to counts/diffs. */
 function relevantChanges(events: TimelineEvent[]): TimelineEvent[] {
-  const flattened: TimelineEvent[] = [];
-  const flatten = (items: TimelineEvent[]): void => {
-    for (const event of items) {
-      if (event.data.kind === "tool_group") flatten(event.data.items);
-      else if (event.data.kind === "file_change" || event.data.kind === "tool_activity") flattened.push(event);
-    }
-  };
-  flatten(events);
+  const flattened = events.filter(({ data }) => data.kind === "file_change" || data.kind === "tool_activity");
   const scope = (event: TimelineEvent): string => JSON.stringify([event.sessionId, event.runId ?? ""]);
   const nativeByRun = new Map<string, TimelineEvent>();
   for (const event of flattened) {

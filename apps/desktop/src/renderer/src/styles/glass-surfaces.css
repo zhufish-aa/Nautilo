@@ -23,7 +23,9 @@
   --glass-search-fill: light-dark(var(--card), #090b0e);
   --glass-editor-fill: light-dark(var(--card), #080a0e);
   --glass-inactive-thumb: light-dark(var(--glass-action-ink), #71717a);
-  --session-inspector-fill: color-mix(in srgb, var(--glass-frame) 71%, var(--surface-soft));
+  --session-inspector-fill: light-dark(var(--card), #0b0d12);
+  --session-inspector-card: color-mix(in srgb, var(--surface-soft) 72%, var(--session-inspector-fill));
+  --workspace-header-height: 64px;
   --session-inspector-divider: color-mix(in srgb, var(--ink) 7%, transparent);
   --session-inspector-blue: light-dark(var(--info), var(--color-blue-500, color-mix(in oklch, var(--info), var(--nacre-indigo))));
   --session-inspector-amber: light-dark(var(--warn), var(--color-amber-500, color-mix(in srgb, var(--warn) 68%, var(--danger))));
@@ -57,7 +59,7 @@
   }
 }
 
-.ui-dialog:not(.workspace-dialog), .ui-drawer[data-state], .ui-select-content[data-state], .session-workspace-menu[data-state] {
+.ui-dialog:not(.workspace-dialog), .ui-drawer[data-state], .ui-select-content[data-state] {
   border-color: var(--glass-ui-line);
   background: var(--glass-ui-fill);
   box-shadow: var(--glass-ui-shadow);

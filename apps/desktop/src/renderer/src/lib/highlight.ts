@@ -97,14 +97,26 @@ export function languageForPath(filePath?: string): string | undefined {
 }
 
 /** Highlights a whole file; falls back to escaped plain text. */
-export function highlightCode(code: string, filePath: string): string {
-  const language = languageForPath(filePath);
-  if (!language) return escapeHtml(code);
+export function highlightCode(code: string, filePath: string, language = languageForPath(filePath)): string {
+  if (!language || !hljs.getLanguage(language)) return escapeHtml(code);
   try {
     return hljs.highlight(code, { language, ignoreIllegals: true }).value;
   } catch {
     return escapeHtml(code);
   }
+}
+
+/** Preserve multiline tokens while producing independently renderable rows. */
+export function highlightCodeLines(code: string, filePath: string): string[] {
+  const open: string[] = [];
+  return highlightCode(code, filePath).split("\n").map((line) => {
+    const prefix = open.join("");
+    for (const [tag] of line.matchAll(/<span\b[^>]*>|<\/span>/g)) {
+      if (tag === "</span>") open.pop();
+      else open.push(tag);
+    }
+    return prefix + line + "</span>".repeat(open.length);
+  });
 }
 
 /**

@@ -125,7 +125,7 @@ impl RunService {
                     session,
                     &AdapterEvent::Message {
                         text: buffered.text,
-                        phase: Some("completed".into()),
+                        phase: Some("buffered_complete".into()),
                         message_id: buffered.message_id,
                         subagent_dispatch_id: None,
                         raw: None,
@@ -153,7 +153,7 @@ impl RunService {
                     session,
                     &AdapterEvent::Message {
                         text: buffered.text,
-                        phase: Some("completed".into()),
+                        phase: Some("buffered_complete".into()),
                         message_id: buffered.message_id,
                         subagent_dispatch_id: buffered.subagent_dispatch_id,
                         raw: None,
@@ -684,11 +684,11 @@ mod tests {
             .iter()
             .filter(|event| event["type"] == "agent.message_delta")
             .collect();
-        // The journal coalesces a stream into a cumulative delta row, while
-        // the live broadcasts preserve both sides of the handoff.
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0]["payload"]["text"], "before after");
-        assert_eq!(deltas[0]["background"], true);
+        // Both chunks retain their own arrival positions around the tool.
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0]["payload"]["text"], "before ");
+        assert_eq!(deltas[1]["payload"]["text"], "after");
+        assert_eq!(deltas[1]["background"], true);
         let mut live_deltas = Vec::new();
         while let Ok(event) = announced.try_recv() {
             if event["type"] == "agent.message_delta" {
@@ -697,7 +697,7 @@ mod tests {
         }
         assert_eq!(live_deltas.len(), 2);
         assert_eq!(live_deltas[0]["payload"]["text"], "before ");
-        assert_eq!(live_deltas[1]["payload"]["text"], "before after");
+        assert_eq!(live_deltas[1]["payload"]["text"], "after");
         assert_eq!(
             live_deltas[0]["payload"]["messageId"],
             live_deltas[1]["payload"]["messageId"]
@@ -708,6 +708,7 @@ mod tests {
             .collect();
         assert_eq!(final_messages.len(), 1);
         assert_eq!(final_messages[0]["payload"]["text"], "before after");
+        assert_eq!(final_messages[0]["payload"]["timelineHadDelta"], true);
         assert_eq!(
             final_messages[0]["payload"]["providerMessageId"],
             deltas[0]["payload"]["messageId"]

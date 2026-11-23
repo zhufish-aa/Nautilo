@@ -345,7 +345,6 @@ export type TimelinePayload =
   | { kind: "activity"; phase: "queued" | "provider_queued" | "starting" | "thinking" | "responding" | "completed" | "stopped"; detail?: string }
     | { kind: "reasoning"; text: string; streaming?: boolean; messageId?: string }
   | { kind: "tool_activity"; toolName: string; status: "running" | "done" | "failed"; input?: string; output?: string; codeExecution?: CodeExecution; fileDiff?: ToolFileDiff; subagent?: { agentType?: string; task?: string; background?: boolean; status?: "running" | "done" | "failed"; model?: string; nativeAgentIds?: string[]; activities?: TimelinePayload[] } }
-  | { kind: "tool_group"; items: TimelineEvent[]; stepCount: number; callCount: number; running: boolean }
   | { kind: "usage"; inputTokens?: number; outputTokens?: number; contextUsed?: number; contextWindow?: number }
   | { kind: "artifact"; artifactType: "image" | "file"; name: string; mimeType?: string; content?: string; path?: string }
   | { kind: "planner_decision"; mode: "direct" | "delegate" | "plan"; rationale: string }

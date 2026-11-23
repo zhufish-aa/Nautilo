@@ -222,6 +222,8 @@ impl Daemon {
             "recovery.list",
             "diagnostics.export",
             "event.subscribe",
+            "session.timeline.open",
+            "session.timeline.wait",
             "event.replay",
             "event.wait",
         ];

@@ -32,21 +32,20 @@ test("latest native snapshot replaces its run including empty, suppresses late i
   assert.deepEqual(paths([...events, native("6", "r", [])]), []);
 });
 
-test("native withdrawal preserves other runs and sessions, including same-path fallback and nested groups", () => {
+test("native withdrawal preserves other runs and sessions, including same-path fallback", () => {
   const other = item("1", "other", "same");
   const foreign = item("2", "r", "foreign", "other-session");
-  const grouped = row("3", "r", { kind: "tool_group", items: [native("4", "r", ["same", "withdrawn"]), native("5", "r", [])] });
-  assert.deepEqual(paths([other, foreign, grouped]), ["same", "foreign"]);
+  assert.deepEqual(paths([other, foreign, native("4", "r", ["same", "withdrawn"]), native("5", "r", [])]), ["same", "foreign"]);
 });
 
 test("runtime keeps individual edits and one native snapshot for the workspace", () => {
   const h = createHarness();
   const events = [runtime(1, "file.changed", { path: "old", changeType: "modified", diff: patch("old") }), nativeEvent(2, patch("a") + patch("b")), nativeEvent(3, patch("a")), runtime(4, "file.changed", { path: "late", changeType: "modified", diff: patch("late") })];
-  const timeline = h.runtime.buildStandaloneTimeline([], events, []);
+  const timeline = h.runtime.metadataEvents([], events, []);
   assert.deepEqual(paths(timeline), ["a"]);
   const activities = Array.from(timeline, row => row.data.kind === "tool_group" ? Array.from(row.data.items) : [row]).flat();
   assert.deepEqual(activities.map(row => row.id), ["e1", "e3", "e4"]);
-  const empty = h.runtime.buildStandaloneTimeline([], [...events, nativeEvent(5, "")], []);
+  const empty = h.runtime.metadataEvents([], [...events, nativeEvent(5, "")], []);
   assert.deepEqual(paths(empty), []);
   const artifact = { id: "native-diff:r", kind: "diff", name: "r.native.diff.json", metadata: { source: "provider", runId: "r" }, content: JSON.stringify({ files: [], diff: patch("a"), source: "provider" }) };
   const ui = h.runtime.toUiArtifact(artifact)[0];
@@ -68,9 +67,9 @@ test("two edits to one file keep their original rows and patches after run compl
     .filter(row => row.data.kind === "file_change" && !row.data.replace)
     .map(row => [row.id, row.data.files[0].diff]);
   const expected = edits.map(event => [event.eventId, event.payload.diff]);
-  assert.deepEqual(editRows(h.runtime.buildStandaloneTimeline([], events, [])), expected);
+  assert.deepEqual(editRows(h.runtime.metadataEvents([], events, [])), expected);
   const finished = [...events, runtime(5, "run.completed", { summary: "done" })];
-  assert.deepEqual(editRows(h.runtime.buildStandaloneTimeline([], finished, [])), expected);
+  assert.deepEqual(editRows(h.runtime.metadataEvents([], finished, [])), expected);
 });
 
 test("native cache is bounded per run/session and latest snapshot replaces, never concatenates", () => {
@@ -79,18 +78,18 @@ test("native cache is bounded per run/session and latest snapshot replaces, neve
   for (let i = 1; i < 100; i++) events = h.runtime.mergeEventCache(events, [nativeEvent(i, patch("a", String(i)))]);
   assert.equal(events.length, 1);
   assert.equal(events[0].payload.diff, patch("a", "99"));
-  assert.equal(events[0].eventId, "e1");
+  assert.equal(events[0].eventId, "e99");
   events = h.runtime.mergeEventCache(events, [nativeEvent(100, ""), nativeEvent(101, patch("other"), "other")]);
   assert.equal(events.length, 2);
   assert.equal(events[0].payload.diff, "");
-  assert.deepEqual(paths(h.runtime.buildStandaloneTimeline([], events, [])), ["other"]);
+  assert.deepEqual(paths(h.runtime.metadataEvents([], events, [])), ["other"]);
 });
 
 test("filesystem artifact from another run cannot overwrite an item diff on the same path", () => {
   const h = createHarness();
   const artifact = { id: "fs", kind: "diff", sessionId: "s", metadata: { runId: "other", source: "filesystem" }, content: JSON.stringify({ files: [file("a", "wrong run")] }) };
   const events = [runtime(1, "file.changed", { path: "a", changeType: "modified", diff: "this run" })];
-  assert.equal(collectChangedFiles(h.runtime.buildStandaloneTimeline([], events, [artifact]))[0].diff, "this run");
+  assert.equal(collectChangedFiles(h.runtime.metadataEvents([], events, [artifact]))[0].diff, "this run");
 });
 
 test("incomplete per-file comparisons stay unknown despite tool fallback and promote artifact warning", () => {

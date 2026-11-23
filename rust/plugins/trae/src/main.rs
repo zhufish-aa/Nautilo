@@ -20,7 +20,10 @@ use tokio::sync::{mpsc, watch};
 use agenthub_plugin_sdk::jsonrpc::{JsonRpcClient, JsonRpcEvent};
 use agenthub_plugin_sdk::process::{self, ProcessEvent, ProcessHandle, ProcessRequest};
 use agenthub_plugin_sdk::session_pool::{self, SessionPool};
-use agenthub_plugin_sdk::ProviderPlugin;
+use agenthub_plugin_sdk::runtime_tools::{bypass_loopback_proxy, RuntimeTools, ToolRoute};
+use agenthub_plugin_sdk::{DaemonChannel, ProviderPlugin};
+
+mod local_mcp;
 
 fn descriptor() -> Value {
     let manifest: Value = serde_json::from_str(include_str!("../agenthub-plugin.json"))
@@ -106,6 +109,7 @@ async fn selected_trae_binary(instance: &Value) -> Option<TraeBinary> {
 
 struct TraePlugin {
     interactions: std::sync::Mutex<Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>>,
+    daemon: Mutex<Option<Arc<dyn DaemonChannel>>>,
     runs: Arc<ActiveRuns>,
     pool: SessionPool<AcpResident>,
 }
@@ -124,7 +128,7 @@ struct ActiveProcess {
 
 impl TraePlugin {
     fn new() -> Self {
-        Self { interactions: Mutex::new(None), runs: Arc::default(), pool: SessionPool::default() }
+        Self { interactions: Mutex::new(None), daemon:Mutex::new(None), runs: Arc::default(), pool: SessionPool::default() }
     }
 }
 
@@ -146,6 +150,10 @@ impl ProviderPlugin for TraePlugin {
 
     fn set_interaction_channel(&self, channel: Arc<dyn agenthub_plugin_sdk::InteractionChannel>) {
         *self.interactions.lock().unwrap() = Some(channel);
+    }
+
+    fn set_daemon_channel(&self, channel: Arc<dyn DaemonChannel>) {
+        *self.daemon.lock().unwrap() = Some(channel);
     }
 
     async fn detect(&self, instance: &Value) -> Value {
@@ -185,6 +193,7 @@ impl ProviderPlugin for TraePlugin {
     async fn start(&self, run_id: &str, request: Value, resume: Option<String>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let (sender, receiver) = mpsc::unbounded_channel::<Value>();
         let interactions = self.interactions.lock().unwrap().clone();
+        let daemon = self.daemon.lock().unwrap().clone();
         let runs = self.runs.clone();
         let run_id = run_id.to_string();
         let local_session = request["localSessionId"].as_str().filter(|id| !id.is_empty()).map(str::to_string);
@@ -197,7 +206,7 @@ impl ProviderPlugin for TraePlugin {
             active.insert(run_id.clone(), ActiveRun { local_session, process: None });
         }
         tokio::spawn(async move {
-            let result = run(request, resume, sender.clone(), interactions, &runs, &run_id, &pool).await;
+            let result = run(request, resume, sender.clone(), interactions, daemon, &runs, &run_id, &pool).await;
             let process = runs.lock().unwrap().remove(&run_id).and_then(|run| run.process);
             if let Some(process) = process { process.handle.cancel().await; }
             if let Err(error) = result {
@@ -267,6 +276,7 @@ async fn run(
     resume: Option<String>,
     sender: mpsc::UnboundedSender<Value>,
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
+    daemon: Option<Arc<dyn DaemonChannel>>,
     runs: &ActiveRuns,
     run_id: &str,
     pool: &SessionPool<AcpResident>,
@@ -281,8 +291,9 @@ async fn run(
             && worker.handle().is_some_and(ProcessHandle::is_alive) {
             worker.stop_idle_reader().await;
             if worker.handle().is_some_and(ProcessHandle::is_alive) {
+                if let Some(tools) = &worker.tools {tools.bind(ToolRoute::Run(run_id.to_owned()));}
                 return run_acp_turn(&request, resume, sender, interactions, runs, run_id, pool, key, identity,
-                    Some(worker), None).await;
+                    Some(worker), None, None).await;
             }
         }
         worker.close().await;
@@ -294,6 +305,17 @@ async fn run(
         anyhow::ensure!(id.starts_with("nautilo-trae:") == (binary.mode == "cli"), "Trae session belongs to a different execution mode");
     }
     request["instance"]["executable"] = json!(binary.executable);
+    let mut server_name = "nautilo_runtime".to_owned();
+    while request["mcpServers"].as_array().is_some_and(|servers|servers.iter().any(|server|server["name"]==server_name)) {
+        server_name.push('_');
+    }
+    let tools = RuntimeTools::start(
+        &request, daemon, ToolRoute::Run(run_id.to_owned()), &server_name, |name| name,
+    ).await?;
+    if let Some(tools) = &tools {
+        tools.append_to(&mut request);
+    }
+    local_mcp::relay_builtin_servers(&mut request, tools.as_ref().map(|_| server_name.as_str()))?;
     if binary.mode == "cli" { prepare_open_source_connection(&mut request)?; }
     else { prepare_connection(&mut request, modern_cli(&binary))?; }
     request["instance"]["baseArgs"] = json!(permission_args(
@@ -304,11 +326,13 @@ async fn run(
         prepare_open_source_runtime(&mut request, resume.as_deref())?;
         let instance = request["instance"].clone();
         let _ = sender.send(json!({ "kind": "status", "phase": "turn_started" }));
-        return plain_run(&instance, &request, sender, runs, run_id).await;
+        let result = plain_run(&instance, &request, sender, runs, run_id).await;
+        drop(tools);
+        return result;
     }
     let fallback = if modern_cli(&binary) { "--acp" } else { "acp" };
     run_acp_turn(&request, resume, sender, interactions, runs, run_id, pool, key, identity,
-        None, Some((&instance, fallback))).await
+        None, Some((&instance, fallback)),tools).await
 }
 
 fn modern_cli(binary: &TraeBinary) -> bool {
@@ -360,6 +384,7 @@ fn prepare_open_source_runtime(request: &mut Value, resume: Option<&str>) -> any
     request["env"]["NAUTILO_TRAE_SESSION_ID"] = json!(session);
     request["env"]["NAUTILO_TRAE_RESUME"] = json!(if resume.is_some() {"1"} else {"0"});
     request["env"]["NAUTILO_TRAE_IMAGES"] = json!(serde_json::to_string(&images)?);
+    request["env"]["NAUTILO_TRAE_MCP_SERVERS"] = json!(request["mcpServers"].to_string());
     request["env"]["NAUTILO_TRAE_TRAJECTORY"] = json!(directory.join("trajectory.json").to_string_lossy());
     if let Some(effort) = request["reasoningEffort"].as_str().map(str::to_string) { request["env"]["NAUTILO_TRAE_EFFORT"] = json!(effort); }
     Ok(())
@@ -380,7 +405,6 @@ fn prepare_open_source_connection(request: &mut Value) -> anyhow::Result<()> {
     let file = directory.join("trae_config.yaml");
     std::fs::write(&file,serde_json::to_string_pretty(&config)?)?;
     request["env"]["TRAE_CONFIG_FILE"] = json!(file.to_string_lossy());
-    request["env"]["NAUTILO_TRAE_MCP_COUNT"] = json!(config["mcp_servers"].as_object().map(|v|v.len()).unwrap_or(0).to_string());
     request["env"]["NAUTILO_TRAE_TRAJECTORY"] = json!(directory.join("trajectory.json").to_string_lossy());
     request["env"]["ANTHROPIC_BASE_URL"] = base;
     request["env"]["ANTHROPIC_API_KEY"] = request["env"]["NAUTILO_CONNECTION_API_KEY"].clone();
@@ -417,21 +441,6 @@ fn open_source_configuration(request: &Value, base: Value) -> anyhow::Result<Val
         if config.get("lakeview").is_none() { config["lakeview"] = json!({}); }
         anyhow::ensure!(config["lakeview"].is_object(), "Native Trae lakeview must be an object");
         config["lakeview"]["model"] = json!("selected");
-    }
-    for server in request["mcpServers"].as_array().into_iter().flatten() {
-        let Some(name) = server["name"].as_str() else {continue};
-        if config.get("mcp_servers").is_none() {config["mcp_servers"]=json!({});}
-        anyhow::ensure!(config["mcp_servers"].is_object(), "Native Trae mcp_servers must be an object");
-        let mut entry = config["mcp_servers"].get(name).cloned().unwrap_or_else(||json!({}));
-        let object = entry.as_object_mut().ok_or_else(||anyhow::anyhow!("Native Trae MCP entry must be an object"))?;
-        for key in ["command","args","env","cwd","url","http_url","headers"] {object.remove(key);}
-        if server["transport"] == "http" {object.insert("http_url".into(),server["url"].clone());}
-        else {for key in ["command","args","env","cwd"] {if let Some(value)=server.get(key) {object.insert(key.into(),value.clone());}}}
-        if let Some(headers)=server.get("headers") {object.insert("headers".into(),headers.clone());}
-        config["mcp_servers"][name]=entry;
-        if config.get("allow_mcp_servers").is_none() {config["allow_mcp_servers"]=json!([]);}
-        let allowed=config["allow_mcp_servers"].as_array_mut().ok_or_else(||anyhow::anyhow!("Native Trae allow_mcp_servers must be an array"))?;
-        if !allowed.contains(&json!(name)) {allowed.push(json!(name));}
     }
     Ok(config)
 }
@@ -536,6 +545,7 @@ async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSen
         .map(|env| env.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
         .unwrap_or_default();
     env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
+    bypass_loopback_proxy(&mut env);
     env.insert("PYTHONUTF8".to_string(), "1".to_string());
     env.insert("PYTHONIOENCODING".to_string(), "utf-8".to_string());
     let executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "trae-cli".to_string());
@@ -719,6 +729,7 @@ struct AcpResident {
     session_id: Option<String>,
     idle_reader: Option<tokio::task::JoinHandle<()>>,
     output: Arc<Mutex<AcpOutput>>,
+    tools: Option<RuntimeTools>,
 }
 
 struct AcpOutput { bytes: usize, max: usize }
@@ -759,7 +770,7 @@ impl AcpResident {
             }
         });
         let rpc = Arc::new(JsonRpcClient::new(process.clone(), rx));
-        Self { rpc, process: Some(process), session_id: None, idle_reader: None, output }
+        Self { rpc, process: Some(process), session_id: None, idle_reader: None, output, tools:None }
     }
 
     fn handle(&self) -> Option<&ProcessHandle> { self.process.as_ref() }
@@ -857,6 +868,7 @@ async fn run_acp_turn(
     identity: Value,
     mut worker: Option<AcpResident>,
     launch: Option<(&Value, &str)>,
+    tools: Option<RuntimeTools>,
 ) -> anyhow::Result<()> {
     let total = Duration::from_millis(request["timeoutMs"].as_u64().unwrap_or(30 * 60_000));
     let operation = execute_acp_turn(request, resume, &sender, interactions, runs, run_id, &mut worker, launch);
@@ -872,6 +884,8 @@ async fn run_acp_turn(
         }
     };
     if let Some(mut worker) = worker {
+        if tools.is_some() {worker.tools=tools;}
+        if let Some(tools) = &worker.tools {tools.suspend();}
         {
             let mut active = runs.lock().unwrap();
             if let Some(key) = key.filter(|_| exit_code == 0 && !sender.is_closed() && worker.handle().is_some_and(ProcessHandle::is_alive)) {
@@ -911,6 +925,7 @@ async fn execute_acp_turn(
             .map(|env| env.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
             .unwrap_or_default();
         env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
+        bypass_loopback_proxy(&mut env);
         let executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "traecli".to_string());
         let cwd = request.get("cwd").and_then(Value::as_str);
         let spawn = |entry: &[&str]| {
@@ -1562,6 +1577,13 @@ fn parse_tool_call(update: &Value, state: &mut TraeAcpParseState) -> Vec<Value> 
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref()==Some("--local-mcp-stdio") {
+        if let Err(error)=local_mcp::run_stdio().await {
+            eprintln!("Nautilo MCP relay: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     agenthub_plugin_sdk::serve(TraePlugin::new()).await;
 }
 #[cfg(test)]

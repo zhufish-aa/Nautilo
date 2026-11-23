@@ -1,5 +1,5 @@
 import {DefaultLinesDiffComputer} from "monaco-editor/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js";
-import {escapeHtml,highlightCode} from "../../lib/highlight";
+import {escapeHtml,highlightCodeLines} from "../../lib/highlight";
 
 type LineRange={startLineNumber:number;endLineNumberExclusive:number};
 type TextRange={startLineNumber:number;startColumn:number;endLineNumber:number;endColumn:number};
@@ -8,18 +8,6 @@ type Row={oldLine?:number;newLine?:number;kind?:"remove"|"add";oldHtml?:string;n
 type Chunk={length:number;html:string};
 export type PreviewBlock={kind:"context"|"fold"|"change";split:Chunk[];unified:Chunk[];length:number};
 export type NativeDiffData={blocks:PreviewBlock[];columns:number};
-
-// Highlight the whole file so comments and strings crossing lines keep their colours.
-function highlightedLines(text:string,path:string):string[]{
-  const open:string[]=[];
-  return highlightCode(text,path).split("\n").map(line=>{
-    const prefix=open.join("");
-    for(const tag of line.matchAll(/<span\b[^>]*>|<\/span>/g)){
-      if(tag[0]==="</span>")open.pop();else open.push(tag[0]);
-    }
-    return prefix+line+"</span>".repeat(open.length);
-  });
-}
 
 function markedLines(lines:string[],changes:Change[],side:"originalRange"|"modifiedRange",html:string[]):void{
   const marks=new Map<number,[number,number][]>();
@@ -81,7 +69,7 @@ export function prepareNativeDiff(before:string,after:string,path:string):Native
   const diff=new DefaultLinesDiffComputer().computeDiff(left,right,{ignoreTrimWhitespace:false,computeMoves:false,maxComputationTimeMs:1000});
   if(diff.hitTimeout)throw new Error("Code diff needs the virtualized editor");
   const changes=diff.changes as Change[];
-  const oldHtml=highlightedLines(left.join("\n"),path),newHtml=highlightedLines(right.join("\n"),path);
+  const oldHtml=highlightCodeLines(left.join("\n"),path),newHtml=highlightCodeLines(right.join("\n"),path);
   markedLines(left,changes,"originalRange",oldHtml);
   markedLines(right,changes,"modifiedRange",newHtml);
   const blocks:PreviewBlock[]=[];

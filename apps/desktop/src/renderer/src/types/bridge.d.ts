@@ -110,6 +110,9 @@ export interface AgentHubBridge {
     onDock(callback:(target:import("../../../shared/panel-window").PanelTarget)=>void):()=>void;
   };
   browser?: {
+    shell: import("../../../shared/browser-shell").BrowserShellBridge;
+    onShellChange(callback:(change:import("../../../shared/browser-shell").BrowserShellChange)=>void):()=>void;
+    onDraft(callback:(draft:import("../../../shared/browser-shell").BrowserDraft)=>void):()=>void;
     spaces(command:"list"|"create"|"rename", input?:import("../../../shared/browser-spaces").BrowserSpacesInput):Promise<import("../../../shared/browser-spaces").BrowserSpacesState>;
     profile(command:"inspect"|"import"|"login",input:import("../../../shared/browser-profile").BrowserProfileInput):Promise<import("../../../shared/browser-profile").BrowserProfileResult>;
     panel(id:string,command:"state"|"control"|"open"|"home"|"layout"|"hide"|"release"|"new"|"select"|"close"|"back"|"forward"|"reload"|"zoom"|"overview"|"preview",value?:unknown): Promise<BrowserPanelState|undefined>;

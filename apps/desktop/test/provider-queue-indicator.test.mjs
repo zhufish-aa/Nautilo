@@ -43,9 +43,9 @@ test('approval wait keeps its label visible without running effects',()=>{
  assert.match(html,/Waiting for your approval/);
  assert.doesNotMatch(html,/conversation-wait-orbit|conversation-wait-sheen/);
 });
-test('live rows including grouped tools do not duplicate the indicator, and replies keep it hidden',()=>{
+test('live tool rows and replies do not duplicate the indicator',()=>{
  for(const event of [progress('tool_activity',{status:'running'}),progress('reasoning',{streaming:true}),progress('message',{sender:'agent',streaming:true}),progress('message',{sender:'agent',streaming:false})])assert.match(renderEvents([event]),/hidden="" aria-hidden="true"/);
- const group=progress('tool_group',{items:[progress('command',{status:'running'})]});assert.match(renderEvents([group]),/hidden="" aria-hidden="true"/);
- assert(renderEvents([group],{status:'running',reason:'cancelling'}).includes('Stopping'));
+ assert.match(renderEvents([progress('command',{status:'running'})]),/hidden="" aria-hidden="true"/);
+ assert(renderEvents([progress('command',{status:'running'})],{status:'running',reason:'cancelling'}).includes('Stopping'));
  assert.equal(renderEvents([],{status:'completed'}),'');
 });

@@ -70,15 +70,21 @@ import com.journeyapps.barcodescanner.ScanOptions
     NautiloTheme(dark) {
         val motion = LocalNautiloMotion.current
         val palette = MobilePalette
+        val lightComputers = state.screen == Screen.Computers && !palette.dark
+        val pageCanvas = when {
+            state.screen == Screen.TeamTasks -> TeamCanvas
+            lightComputers -> palette.card
+            else -> palette.canvas
+        }
         val projectList = rememberLazyListState()
         val projectScrolled by remember { derivedStateOf { projectList.canScrollBackward } }
         val headerLine = animateFloatAsState(if (projectScrolled) 1f else 0f, tween(if (motion) 150 else 0), label = "projects-divider")
         val imageLoader: AttachmentImageLoader = remember(model, state.host?.id) { { attachment, session -> model.attachmentImage(attachment, session) } }
       CompositionLocalProvider(LocalFileOpener provides { reference -> model.previewFile(reference) }, LocalAttachmentImageLoader provides imageLoader) {
-        Column(Modifier.fillMaxSize().background(if (state.screen == Screen.TeamTasks) TeamCanvas else palette.canvas)
+        Column(Modifier.fillMaxSize().background(pageCanvas)
             .statusBarsPadding().navigationBarsPadding()) {
             if (state.screen != Screen.NewConversation) {
-            Row(Modifier.fillMaxWidth().height(56.dp).background(palette.chrome).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().height(56.dp).background(if (lightComputers) pageCanvas else palette.chrome).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (state.screen == Screen.Projects) Box {
                     ActionIcon(Icons.Outlined.Menu, "菜单") { homeMenu = true }
                     NMenu(expanded = homeMenu, onDismissRequest = { homeMenu = false }) {
@@ -142,6 +148,7 @@ import com.journeyapps.barcodescanner.ScanOptions
                 }
             }
             if (state.screen == Screen.Projects) NDivider(Modifier.graphicsLayer { alpha = headerLine.value })
+            if (lightComputers) NDivider()
             }
             val notice = state.error.ifBlank { state.syncIssue.ifBlank { state.connectionIssue } }
             AnimatedVisibility(notice.isNotEmpty(), enter = fadeIn(tween(if (motion) 150 else 0)), exit = fadeOut(tween(if (motion) 110 else 0))) {

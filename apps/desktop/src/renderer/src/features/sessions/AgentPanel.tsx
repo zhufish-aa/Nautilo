@@ -1,140 +1,103 @@
 import { useMemo } from "react";
-import { useI18n, type MessageKey } from "../../lib/i18n";
-import { providerMeta } from "../../lib/provider-catalog";
-import type { UiSession, UiTeam, UiTeamMember } from "../../lib/types";
+import { useShallow } from "zustand/react/shallow";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
+import { useI18n, type MessageKey } from "../../lib/i18n";
+import { useProviderMetas } from "../../lib/provider-catalog";
+import { isActiveLifecycle, visibleSessionStatus } from "../../lib/session-lifecycle";
+import { formatDurationMs } from "../../lib/subagent-result";
+import type { TimelineEvent, UiSession } from "../../lib/types";
 import { useSessionsStore } from "../../stores/sessions";
 import { useTeamsStore } from "../../stores/teams";
 import { useAgentsStore } from "../../stores/agents";
-import { visibleSessionStatus } from "../../lib/session-lifecycle";
+import { useConnectionsStore } from "../../stores/connections";
+import { InspectorDisclosure } from "./InspectorDisclosure";
 
-/**
- * Right rail (per the workbench contract): the current run's sessions —
- * the main session plus one sub-agent session per actual delegation.
- * Clicking an entry switches the central chat to that session (F-044);
- * no sub-session exists unless the main agent actually delegated (F-025/F-026).
- */
+type EntryStatus = UiSession["status"] | "cancelled";
 
-interface SessionEntryInfo {
+function completionTime(events?: TimelineEvent[]): string | undefined {
+  let end: TimelineEvent | undefined;
+  for (const event of events ?? []) {
+    if (event.runId && event.data.kind === "activity" && event.data.phase === "completed" && event.data.detail !== "turn_failed") end = event;
+  }
+  if (!end) return;
+  const { runId, sequence, timestamp } = end;
+  const start = events?.find(event => event.runId === runId && event.sequence < sequence
+    && event.data.kind === "activity" && event.data.phase === "starting");
+  if (!start) return;
+  const elapsed = Date.parse(timestamp) - Date.parse(start.timestamp);
+  if (Number.isFinite(elapsed) && elapsed >= 0) return formatDurationMs(elapsed).replace(/\.0s$/, "s");
+}
+
+export function AgentPanel({ session, onOpenSession, showEmpty }: {
   session: UiSession;
-  member?: UiTeamMember;
-  providerName?: string;
-  providerId?: string;
-  model?: string;
-}
-
-function useEntryInfo(entry: UiSession, team?: UiTeam): SessionEntryInfo {
-  const instances = useAgentsStore((state) => state.instances);
-  return useMemo(() => {
-    const target = entry.target;
-    let member: UiTeamMember | undefined;
-    if (team) {
-      if (target.type === "member") {
-        member = team.members.find((item) => item.id === target.memberId);
-      }
-    }
-    const instanceId = member?.agentInstanceId ?? (target.type === "agent" ? target.instanceId : undefined);
-    const instance = instances.find((item) => item.id === instanceId);
-    return {
-      session: entry,
-      member,
-      providerName: instance ? providerMeta(instance.providerId).name : undefined,
-      providerId: instance?.providerId,
-      model: entry.model ?? member?.model
-    };
-  }, [entry, team, instances]);
-}
-
-function SessionEntryRow({
-  info,
-  isMain,
-  active,
-  onOpen
-}: {
-  info: SessionEntryInfo;
-  isMain: boolean;
-  active: boolean;
-  onOpen: (id: string) => void;
-}): JSX.Element {
-  const { t } = useI18n();
-  const { session, member, providerName, model } = info;
-  const orchestrationLifecycle = useSessionsStore((state) => state.running[session.id]);
-  const status = visibleSessionStatus(session.status, orchestrationLifecycle);
-  const tone =
-    status === "running"
-      ? "accent"
-      : status === "waiting_approval"
-        ? "warn"
-        : status === "failed"
-          ? "danger"
-          : status === "completed"
-            ? "ok"
-            : "muted";
-
-  const title = session.title || member?.displayName || t("sessions.header.untitled");
-  return <li>
-    <button type="button" className="session-inspector-agent" aria-current={active ? "page" : undefined}
-      onClick={() => onOpen(session.id)} title={[title, member?.role.name, providerName, model].filter(Boolean).join(" · ")}>
-      <span className="session-inspector-harness" data-status={status}>
-        <ProviderAvatar providerId={info.providerId ?? "custom"} size="sm" />
-      </span>
-      <span className="session-inspector-agent-name">{title}</span>
-      {isMain && <span className="sr-only">{t("sessions.panel.mainSession")}</span>}
-      {session.unreadCount > 0 && <span className="session-inspector-unread">{session.unreadCount}</span>}
-      <span className="session-inspector-status" data-tone={tone}>{t(`sessions.status.${status}` as MessageKey)}</span>
-    </button>
-  </li>;
-}
-
-export function AgentPanel({
-  session,
-  onOpenSession
-}: {
-  session: UiSession;
-  onOpenSession: (sessionId: string) => void;
+  onOpenSession: (id: string) => void;
+  showEmpty?: boolean;
 }): JSX.Element | null {
-  const { t } = useI18n();
-  const teams = useTeamsStore((state) => state.teams);
-  const allSessions = useSessionsStore((state) => state.sessions);
+  const { t, locale } = useI18n();
+  const zh = locale === "zh-CN";
+  const teams = useTeamsStore(state => state.teams);
+  const instances = useAgentsStore(state => state.instances);
+  const connections = useConnectionsStore(state => state.connections);
+  const harnesses = useProviderMetas();
+  const sessions = useSessionsStore(state => state.sessions);
+  const running = useSessionsStore(state => state.running);
+  const foreground = useSessionsStore(state => state.foreground);
+  const rootId = session.parentSessionId ?? session.id;
+  const root = sessions.find(item => item.id === rootId) ?? session;
 
-  const target = session.target;
-  const team =
-    target.type === "team"
-      ? teams.find((item) => item.id === target.teamId)
-      : target.type === "member"
-        ? teams.find((item) => item.id === target.teamId)
-        : target.teamId
-          ? teams.find((item) => item.id === target.teamId)
-          : undefined;
-
-  // The run group: root (main) session + sub-agent sessions of the same run.
-  const { root, subs } = useMemo(() => {
-    const rootId = session.parentSessionId ?? session.id;
-    const rootSession = allSessions.find((item) => item.id === rootId) ?? session;
-    const children = allSessions
-      .filter((item) => item.parentSessionId === rootSession.id)
+  const children = useMemo(() => {
+    const lineage = sessions.filter(item => item.parentSessionId === rootId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    return { root: rootSession, subs: children };
-  }, [session, allSessions]);
+    return lineage.map(item => {
+      const target = item.target;
+      const member = target.type === "member" ? teams.find(team => team.id === target.teamId)?.members.find(candidate => candidate.id === target.memberId) : undefined;
+      const explicitTitle = item.title === "Agent" ? undefined : item.title;
+      const title = explicitTitle || member?.displayName || item.title || t("sessions.header.untitled");
+      const turn = foreground[item.id];
+      const run = isActiveLifecycle(turn) ? turn : running[item.id] ?? turn;
+      const status: EntryStatus = run?.status === "cancelled" ? "cancelled" : visibleSessionStatus(item.status, run);
+      return { item, title, status, instanceId: target.type === "agent" ? target.instanceId : member?.agentInstanceId,
+        model: item.model || member?.model };
+    }).sort((a, b) => Number(b.status === "running") - Number(a.status === "running")
+      || (b.item.lastMessageAt ?? b.item.updatedAt).localeCompare(a.item.lastMessageAt ?? a.item.updatedAt));
+  }, [sessions, rootId, teams, running, foreground, t]);
+  const history = useSessionsStore(useShallow(state => Object.fromEntries(children.filter(entry => entry.status === "completed")
+    .map(({ item }) => [item.id, state.events[item.id]]))));
 
-  const rootInfo = useEntryInfo(root, team);
-  if (subs.length === 0 && root.id === session.id) return null;
-
-  return <section className="session-inspector-section session-inspector-lineage">
-    <header className="session-inspector-section-heading"><h3>{t("sessions.panel.subSessions")}</h3></header>
+  if (!children.length && root.id === session.id && !showEmpty) return null;
+  const active = children.filter(entry => entry.status === "running").length;
+  function row({ item, title, status, instanceId, model }: typeof children[number]): JSX.Element {
+    const instance = instances.find(candidate => candidate.id === instanceId);
+    const connection = !instance ? connections.find(candidate => candidate.id === item.connectionId
+      && (item.connectionRevision === undefined || candidate.revision === item.connectionRevision)) : undefined;
+    const harnessId = instance?.providerId ?? connection?.harness;
+    const harnessName = harnessId && (harnesses.find(harness => harness.id === harnessId)?.name ?? harnessId);
+    const statusText = status === "completed" ? (completionTime(history[item.id]) ?? t("sessions.status.completed"))
+      : status === "cancelled" ? (zh ? "已中断" : "Interrupted") : t(`sessions.status.${status}` as MessageKey);
+    return <li key={item.id}>
+      <button type="button" className="session-inspector-agent" aria-current={session.id === item.id ? "page" : undefined}
+        onClick={() => onOpenSession(item.id)} title={title}>
+        <span className="session-inspector-agent-harness" title={[harnessName, model].filter(Boolean).join(" · ")} aria-hidden>
+          <ProviderAvatar providerId={harnessId ?? "custom"} size="sm" />
+          <span className="session-inspector-dot" data-status={status} />
+        </span>
+        <span className="session-inspector-agent-name">{title}</span>
+        {item.unreadCount > 0 && <span className="session-inspector-unread">{item.unreadCount}</span>}
+        <span className="session-inspector-status" data-status={status}>{statusText}</span>
+      </button>
+    </li>;
+  }
+  return <InspectorDisclosure className="session-inspector-lineage" label={t("sessions.panel.subSessions")}
+    summary={<span className="session-inspector-section-meta">{active > 0 && <b>{zh ? `${active} 运行中` : `${active} running`} · </b>}{children.length}</span>}>
     <ul>
-      {session.id !== root.id && <SessionEntryRow info={rootInfo} isMain active={false} onOpen={onOpenSession} />}
-      {subs.map(sub => <SubEntry key={sub.id} session={sub} team={team} active={session.id === sub.id} onOpen={onOpenSession} />)}
+      {session.id !== root.id && row({ item: root, title: root.title || t("sessions.panel.mainSession"), status: visibleSessionStatus(root.status, running[root.id]),
+        instanceId: root.target.type === "agent" ? root.target.instanceId : undefined, model: root.model })}
+      {children.slice(0, 4).map(row)}
     </ul>
-  </section>;
-}
-
-function SubEntry({ session, team, active, onOpen }: {
-  session: UiSession;
-  team?: UiTeam;
-  active: boolean;
-  onOpen: (id: string) => void;
-}): JSX.Element {
-  const info = useEntryInfo(session, team);
-  return <SessionEntryRow info={info} isMain={false} active={active} onOpen={onOpen} />;
+    {!children.length && showEmpty && <p className="session-inspector-muted">{zh ? "暂无子 Agent 会话" : "No sub-agent conversations"}</p>}
+    {children.length > 4 && <InspectorDisclosure className="session-inspector-more-agents"
+      label={zh ? "收起" : "Show fewer"} closedLabel={zh ? `展开全部 (${children.length})` : `Show all (${children.length})`} defaultOpen={false} triggerAfter>
+      <ul>{children.slice(4).map(row)}</ul>
+    </InspectorDisclosure>}
+  </InspectorDisclosure>;
 }

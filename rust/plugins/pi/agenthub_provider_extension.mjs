@@ -6,7 +6,7 @@ const MCP_TIMEOUT_MS = 30000;
 function mcpError(value) {
   if (!value) return "Unknown MCP error";
   if (typeof value === "string") return value;
-  if (value.message) return String(value.message);
+  if (value.message) return String(value.message) + (value.cause?.code ? " (" + value.cause.code + ")" : "");
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
@@ -152,19 +152,51 @@ class StdioMcpClient {
   }
 }
 
+async function readMcpEvent(stream, id) {
+  const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  let data = [];
+  try {
+    while (true) {
+      const {done,value} = await reader.read();
+      if (done) break;
+      buffer += value;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (line.startsWith("data:")) {
+          data.push(line.slice(5).trimStart());
+        } else if (!line && data.length) {
+          const event = data.join("\n");
+          data = [];
+          if (event === "[DONE]") continue;
+          const message = JSON.parse(event);
+          if (message.id === id) return message;
+        }
+      }
+    }
+    throw new Error("MCP stream closed before replying to request " + id);
+  } finally {
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 class HttpMcpClient {
   constructor(config) {
     this.config = config;
     this.nextId = 0;
     this.sessionId = undefined;
+    this.protocolVersion = undefined;
   }
 
   async start() {
-    await this.request("initialize", {
+    const initialized = await this.request("initialize", {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: "agenthub-pi", version: "0.2.5" }
     });
+    this.protocolVersion = initialized.protocolVersion;
     await this.notify("notifications/initialized", {});
   }
 
@@ -178,7 +210,8 @@ class HttpMcpClient {
         "content-type": "application/json",
         "accept": "application/json, text/event-stream",
         ...(this.config.headers || {}),
-        ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {})
+        ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
+        ...(this.protocolVersion ? { "mcp-protocol-version": this.protocolVersion } : {})
       },
       body: JSON.stringify(message),
       signal: requestSignal
@@ -187,27 +220,20 @@ class HttpMcpClient {
     if (sessionId) this.sessionId = sessionId;
     if (!response.ok) throw new Error("MCP HTTP " + response.status + ": " + (await response.text()).slice(0, 2000));
     if (response.status === 202 || response.status === 204) return undefined;
-    const text = await response.text();
-    if (!text.trim()) return undefined;
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("text/event-stream")) {
-      const messages = [];
-      for (const block of text.split(/\r?\n\r?\n/)) {
-        const data = block.split(/\r?\n/)
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart())
-          .join("\n");
-        if (!data || data === "[DONE]") continue;
-        try { messages.push(JSON.parse(data)); } catch { /* ignore non-JSON SSE data */ }
-      }
-      return messages.find((item) => item.id === message.id) || messages.at(-1);
+    if (message.id === undefined) {
+      await response.body?.cancel();
+      return undefined;
     }
-    return JSON.parse(text);
+    const contentType = response.headers.get("content-type") || "";
+    return contentType.includes("text/event-stream")
+      ? readMcpEvent(response.body, message.id)
+      : response.json();
   }
 
   async request(method, params, signal) {
     const id = ++this.nextId;
     const response = await this.post({ jsonrpc: "2.0", id, method, params }, signal);
+    if (response?.id !== id) throw new Error("MCP did not reply to " + method);
     if (response?.error) throw new Error(mcpError(response.error));
     return response?.result;
   }
@@ -221,7 +247,8 @@ class HttpMcpClient {
     try {
       await fetch(this.config.url, {
         method: "DELETE",
-        headers: { ...(this.config.headers || {}), "mcp-session-id": this.sessionId },
+        headers: { ...(this.config.headers || {}), "mcp-session-id": this.sessionId,
+          ...(this.protocolVersion ? { "mcp-protocol-version": this.protocolVersion } : {}) },
         signal: AbortSignal.timeout(2000)
       });
     } catch { /* best-effort session cleanup */ }

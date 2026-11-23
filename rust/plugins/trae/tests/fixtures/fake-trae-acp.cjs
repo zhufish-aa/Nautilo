@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const readline = require('node:readline');
+const assert = require('node:assert/strict');
 const args = process.argv.slice(2);
 if (args.includes('--version')) { console.log('traecli 2.0.0'); process.exit(0); }
 if (args.includes('--help')) { console.log('  acp  ACP server\n  exec  Run non-interactively'); process.exit(0); }
@@ -11,8 +12,9 @@ const notify = (update, sessionId = 'fixture-session') => emit({ method: 'sessio
 }});
 const update = (type, text, sessionId) => notify({ sessionUpdate: type, content: { type: 'text', text } }, sessionId);
 let pending;
+let mcpServers;
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-lines.on('line', text => {
+lines.on('line', async text => {
   const { id, method, params } = JSON.parse(text);
   if (!method) return;
   log(method);
@@ -21,12 +23,36 @@ lines.on('line', text => {
       emit({ id, error: { code: -32601, message: 'Use --acp' } });
     } else result(id, { protocolVersion: 1 });
   } else if (method === 'session/load' || method === 'session/new') {
+    mcpServers = params.mcpServers;
     if (method === 'session/load') update('agent_message_chunk', 'REPLAYED HISTORY MUST NOT APPEAR');
     result(id, { sessionId: 'fixture-session' });
   } else if (method === 'session/prompt') {
     const prompt = params.prompt.map(item => item.text).join('');
     update('agent_message_chunk', 'OTHER SESSION MUST NOT APPEAR', 'other-session');
-    if (prompt === 'first' || prompt === 'second') {
+    if (prompt === 'runtime-tools') {
+      try {
+        const server = mcpServers.find(item => item.name === 'nautilo_runtime');
+        assert.deepEqual(server.args, ['--local-mcp-stdio']);
+        const browser = mcpServers.find(item => item.name === 'nautilo_browser');
+        assert.deepEqual(browser.args, ['--local-mcp-stdio']);
+        assert.equal(mcpServers.find(item => item.name === 'user_mcp').type, 'http');
+        const { url } = JSON.parse(server.env.find(item => item.name === 'NAUTILO_LOCAL_MCP_SPEC').value);
+        const call = async (method, params) => (await fetch(url, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+        })).json();
+        const { result: { tools } } = await call('tools/list', {});
+        assert.deepEqual(tools.map(tool => tool.name), ['agenthub_delegate', 'agenthub_workflow_submit']);
+        const { result: receipt } = await call('tools/call', {
+          name: 'agenthub_delegate', arguments: { task: 'inspect' },
+        });
+        assert.equal(receipt.isError, false);
+        update('agent_message_chunk', receipt.content[0].text);
+      } catch (error) {
+        emit({ id, error: { code: -32603, message: String(error) } });
+        return;
+      }
+    } else if (prompt === 'first' || prompt === 'second') {
       const toolCallId = 'read:' + prompt;
       update('agent_thought_chunk', '');
       update('agent_thought_chunk', 'before:' + prompt);

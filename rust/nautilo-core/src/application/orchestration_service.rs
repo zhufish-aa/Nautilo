@@ -157,10 +157,11 @@ impl OrchestrationService {
                 let initialized = git.initialize_run(&current).await?;
                 service.save_project_run(&initialized)?;
             }
+            let user_message_id = user_message["id"].as_str().map(str::to_owned);
             if native_runtime_tools {
-                service.execute_main_turn(&project_run_id).await
+                service.execute_main_turn(&project_run_id, user_message_id).await
             } else {
-                service.plan(&project_run_id).await
+                service.plan(&project_run_id, user_message_id).await
             }
         });
         Ok(json!({ "projectRun": project_run, "mainSession": main_session }))
@@ -422,8 +423,8 @@ impl OrchestrationService {
         let service = self.clone_arc();
         let id = project_run_id.to_string();
         self.schedule(project_run_id, async move {
-            if native_runtime_tools { service.execute_main_turn(&id).await }
-            else { service.plan(&id).await }
+            if native_runtime_tools { service.execute_main_turn(&id, None).await }
+            else { service.plan(&id, None).await }
         });
         Ok(recovered)
     }
@@ -601,7 +602,7 @@ impl OrchestrationService {
         Ok(())
     }
 
-    async fn execute_main_turn(self: &Arc<Self>, project_run_id: &str) -> anyhow::Result<()> {
+    async fn execute_main_turn(self: &Arc<Self>, project_run_id: &str, user_message_id: Option<String>) -> anyhow::Result<()> {
         let project_run = self.require_project_run(project_run_id)?;
         let team = self.require_team(project_run.get("teamId").and_then(Value::as_str).unwrap_or(""))?;
         let main_session = self.require_main_session(&project_run)?;
@@ -647,6 +648,7 @@ impl OrchestrationService {
                     member_id: main.member.get("id").and_then(Value::as_str).map(str::to_string),
                     working_directory: self.working_directory(&project_run, None),
                     local_image_paths: if continuity.local_image_paths.is_empty() { None } else { Some(continuity.local_image_paths) },
+                    user_message_id,
                     ..Default::default()
                 },
             )
@@ -661,7 +663,7 @@ impl OrchestrationService {
         Ok(())
     }
 
-    async fn plan(self: &Arc<Self>, project_run_id: &str) -> anyhow::Result<()> {
+    async fn plan(self: &Arc<Self>, project_run_id: &str, user_message_id: Option<String>) -> anyhow::Result<()> {
         let project_run = self.require_project_run(project_run_id)?;
         let team = self.require_team(project_run.get("teamId").and_then(Value::as_str).unwrap_or(""))?;
         let main = self.members().session_main(&team, project_run.get("mainAgentInstanceId").and_then(Value::as_str))?;
@@ -723,6 +725,7 @@ impl OrchestrationService {
                     project_run_id: Some(project_run_id.to_string()),
                     member_id: main.member.get("id").and_then(Value::as_str).map(str::to_string),
                     message_kind: Some("planner_decision".to_string()),
+                    user_message_id,
                     working_directory: self.working_directory(&project_run, None),
                     local_image_paths: if continuity.local_image_paths.is_empty() { None } else { Some(continuity.local_image_paths) },
                     ..Default::default()

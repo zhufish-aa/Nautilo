@@ -531,14 +531,23 @@ impl PartStream {
     }
 
     fn update(&mut self, part: &Value, raw: &Value, delta: Option<&str>) -> Vec<Value> {
+        let mut snapshot = parse_opencode_part(part, raw, delta);
         let mut events = vec![];
         if let (Some(id), Some(kind)) = (part_message_id(part), part["type"].as_str()) {
+            if kind == "tool" {
+                let Some(tool) = snapshot.iter_mut().find(|event| event["kind"] == "tool") else {
+                    return snapshot;
+                };
+                if tool["phase"] == "started" && self.types.get(id).is_some_and(|previous| previous == "tool") {
+                    tool["phase"] = json!("updated");
+                }
+            }
             self.types.insert(id.to_string(), kind.to_string());
             for (properties, raw) in self.pending.remove(id).unwrap_or_default() {
                 events.extend(self.delta(&properties, &raw));
             }
         }
-        events.extend(parse_opencode_part(part, raw, delta));
+        events.extend(snapshot);
         if let (Some(id), Some(usage)) = (part_message_id(part), events.iter().find(|e| e["kind"] == "usage").cloned()) {
             let session = part["sessionID"].as_str().unwrap_or("");
             events.push(self.usage.entry(session.to_string()).or_default().update(id, &usage));
@@ -621,6 +630,8 @@ fn parse_opencode_event(value: &Value) -> Vec<Value> {
         "tool_use" => {
             let state = part.get("state").cloned().unwrap_or(Value::Null);
             let status = state.get("status").and_then(Value::as_str).unwrap_or("");
+            // Pending tool parts are argument drafts; the tool has not started.
+            if status == "pending" { return events; }
             events.push(json!({
                 "kind": "tool",
                 "callId": part.get("callID").cloned().unwrap_or(Value::Null),
@@ -1684,6 +1695,31 @@ async fn main() {
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+    #[test]
+    fn tool_pending_is_not_a_start_and_progress_keeps_the_same_call() {
+        let mut stream = PartStream::default();
+        let mut part = json!({"id":"part-read","type":"tool","tool":"read","callID":"call-read",
+            "state":{"status":"pending","input":{}}});
+        let snapshot = stream.update(&part, &Value::Null, None);
+        assert!(snapshot.iter().all(|event| event["kind"] != "tool"));
+
+        part["state"] = json!({"status":"running","input":{"filePath":"src/main.rs"}});
+        for phase in ["started", "updated"] {
+            let snapshot = stream.update(&part, &Value::Null, None);
+            let tool = snapshot.iter().find(|event| event["kind"] == "tool").unwrap();
+            assert_eq!(tool["callId"], "call-read");
+            assert_eq!(tool["phase"], phase);
+            assert_eq!(tool["input"]["filePath"], "src/main.rs");
+        }
+
+        part["state"]["status"] = json!("completed");
+        part["state"]["output"] = json!("file contents");
+        let snapshot = stream.update(&part, &Value::Null, None);
+        let tool = snapshot.iter().find(|event| event["kind"] == "tool").unwrap();
+        assert_eq!(tool["callId"], "call-read");
+        assert_eq!(tool["phase"], "completed");
+        assert_eq!(tool["output"], "file contents");
+    }
     #[test]
     fn usage_is_cumulative_deduplicated_and_separate_for_child_sessions() {
         let mut stream = PartStream::default();

@@ -1,444 +1,517 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
-  ArrowLeft,
-  ArrowRight,
-  RotateCw,
-  Globe,
-  Hand,
-  Play,
-  Plus,
-  X,
-  Trash2,
-  ZoomIn,
-  ZoomOut,
-  LayoutGrid,
-  MousePointer2,
-  House,
-  LockKeyhole,
-  MoreHorizontal,
+  ArrowLeft, ArrowRight, Camera, Check, Copy, Crosshair, Globe, Hand, LayoutGrid,
+  LockKeyhole, MonitorSmartphone, MoreHorizontal, Pin, Play, RotateCw, X,
 } from "lucide-react";
 import { getBridge } from "../../lib/bridge";
 import { useI18n } from "../../lib/i18n";
-import type { BrowserPanelState, BrowserTab } from "../../types/bridge";
+import { useUiReducedMotion } from "../../lib/ui-motion";
+import { toast } from "../../stores/toast";
+import type { BrowserPanelState } from "../../types/bridge";
+import type { BrowserOmniboxData, BrowserShellState } from "../../../../shared/browser-shell";
 import { WorkspaceDrawer } from "./WorkspaceDrawer";
 import { BrowserTabs } from "./BrowserTabs";
+import { BrowserDiagnostics } from "./BrowserDiagnostics";
+import { BrowserStart } from "./BrowserStart";
 
-function tabTitle(tab: BrowserTab, blank: string) {
-  if (!tab.url || tab.url === "about:blank") return blank;
-  return tab.title || tab.url;
+const emptyState:BrowserPanelState = {manual:false,title:"",url:"",busy:false};
+const emptySignals:BrowserShellState = {tabs:{},issues:[],pinned:false};
+const emptyOmnibox:BrowserOmniboxData = {ports:[],tabs:[],history:[]};
+const devices = [
+  {id:"desktop",label:"桌面",en:"Desktop",width:1440,height:900},
+  {id:"tablet",label:"平板",en:"Tablet",width:768,height:1024},
+  {id:"phone",label:"手机",en:"Phone",width:390,height:844},
+] as const;
+
+const isPage = (url:string) => !!url && url !== "about:blank";
+function addressUrl(text:string) {
+  const value = text.trim();
+  if (/^\d{1,5}$/.test(value) && Number(value) > 0 && Number(value) <= 65535) return "http://localhost:" + value;
+  if (/^[a-z][\w+.-]*:\/\//i.test(value)) return value;
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/i.test(value)) return "http://" + value;
+  if (/^[^\s/]+\.[^\s]+/.test(value)) return "https://" + value;
+  return "https://www.baidu.com/s?wd=" + encodeURIComponent(value);
 }
 
-export function BrowserDrawer({
-  sessionId,
-  onClose,
-  onOverview,
-  surfaceSuspended = false,
-}: {
-  sessionId: string;
-  onClose: () => void;
-  onOverview?: (keyboard?:boolean) => void;
-  surfaceSuspended?: boolean;
-}) {
-  const { locale } = useI18n(),
-    zh = locale === "zh-CN";
-  const app = getBridge()!;
-  const bridge = app.browser!;
-  const windowChrome = app.panels?.context?.kind === "browser" || app.panels?.context?.kind === "browser-spaces";
-  const viewport = useRef<HTMLDivElement>(null);
-  const [address, setAddress] = useState("");
-  const [overview, setOverview] = useState(false);
-  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
-  const [state, setState] = useState<BrowserPanelState>({
-    manual: false,
-    title: "",
-    url: "",
-    busy: false,
-  });
-  const addressInput = useRef<HTMLInputElement>(null);
-  const visibleTab = useRef<string>();
-  const tabStrip = useRef<HTMLDivElement>(null);
-  const livePage =
-    state.tabs !== undefined
-      ? Boolean(state.url && state.url !== "about:blank")
-      : state.manual;
-  useEffect(() => {
-    const selected = tabStrip.current?.querySelector<HTMLElement>(
-      '[aria-selected="true"]',
-    );
-    selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [state.tabId]);
-  const [error, setError] = useState("");
-  const editing = useRef(false);
-  const generation = useRef(0);
-  const report = (e: unknown) =>
-    setError(e instanceof Error ? e.message : String(e));
+export function browserDomain(url:string) {
+  try {return new URL(url).host;}
+  catch {return "";}
+}
 
+type Navigation = "control"|"open"|"home"|"new"|"select"|"close"|"back"|"forward"|"reload"|"zoom";
+type Suggestion = {key:string;title:string;url:string;kind:string;spaceId?:string;tabId?:string};
+
+export function BrowserDrawer({sessionId,onClose,onOverview,surfaceSuspended=false}:{
+  sessionId:string;
+  onClose:()=>void;
+  onOverview?:(keyboard?:boolean)=>void;
+  surfaceSuspended?:boolean;
+}) {
+  const app = getBridge()!, bridge = app.browser!;
+  const zh = useI18n().locale === "zh-CN";
+  const word = (cn:string,en:string) => zh ? cn : en;
+  const reducedMotion = useUiReducedMotion();
+  const detached = !!app.panels?.context;
+  const [state,setState] = useState(emptyState);
+  const [signals,setSignals] = useState(emptySignals);
+  const [omnibox,setOmnibox] = useState(emptyOmnibox);
+  const [count,setCount] = useState(0);
+  const [address,setAddress] = useState("");
+  const [focused,setFocused] = useState(false);
+  const [edited,setEdited] = useState(false);
+  const [choice,setChoice] = useState(-1);
+  const [cover,setCover] = useState<string|null>(null);
+  const [feedback,setFeedback] = useState<"copy"|"capture">();
+  const [picker,setPicker] = useState<"element"|"region">();
+  const [diagnostics,setDiagnostics] = useState(false);
+  const [notice,setNotice] = useState(true);
+  const [device,setDevice] = useState<typeof devices[number]>();
+  const [landscape,setLandscape] = useState(false);
+  const [deviceMenu,setDeviceMenu] = useState(false);
+  const [deviceCover,setDeviceCover] = useState("");
+  const [deviceTransition,setDeviceTransition] = useState<{from:DOMRect;image:string}>();
+  const [surfaceSize,setSurfaceSize] = useState({width:0,height:0});
+  const [error,setError] = useState("");
+  const generation = useRef(0), extrasRevision = useRef(0);
+  const editing = useRef(false), opening = useRef(false);
+  const addressInput = useRef<HTMLInputElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
+  const deviceArea = useRef<HTMLDivElement>(null);
+  const deviceTools = useRef<HTMLDivElement>(null);
+  const deviceShot = useRef<HTMLImageElement>(null);
+  const deviceMenuRequest = useRef(0);
+  const tabStrip = useRef<HTMLDivElement>(null);
+  const visibleTab = useRef<string>();
+  const tabId = state.tabId ?? "";
+  const tab = {spaceId:sessionId,tabId};
+  const page = isPage(state.url);
+  const active = state.ownership === "agent";
+  const current = signals.tabs[tabId];
+  const zoom = Math.round((state.zoomFactor ?? 1)*100);
+  const width = device ? landscape ? device.height : device.width : 0;
+  const height = device ? landscape ? device.width : device.height : 0;
+  const scale = device && surfaceSize.width && surfaceSize.height
+    ? Math.min(1,Math.max(1,surfaceSize.width-20)/width,Math.max(1,surfaceSize.height-20)/height) : 1;
+  const report = (err:unknown) => setError(err instanceof Error ? err.message : String(err));
+  const sync = (next:BrowserPanelState) => {
+    const changedTab = visibleTab.current !== next.tabId;
+    if (changedTab || !editing.current) setAddress(isPage(next.url) ? next.url : "");
+    if (changedTab) {
+      deviceMenuRequest.current++;
+      setDeviceMenu(false);
+      setDeviceCover("");
+      setDeviceTransition(undefined);
+    }
+    visibleTab.current = next.tabId;
+    setState(next);
+  };
+  const hydrate = async (probe:boolean) => {
+    try {setOmnibox(await bridge.shell("omnibox",{probe}));}
+    catch (err) {report(err);}
+  };
   useEffect(() => {
-    let disposed = false,
-      timer: ReturnType<typeof setTimeout>;
-    async function refresh() {
+    let disposed = false, running = false;
+    const refresh = async () => {
+      if (disposed || running || document.hidden) return;
+      running = true;
       const version = generation.current;
       try {
-        const next = await bridge.panel(sessionId, "state");
-        if (!disposed && version === generation.current && next) {
-          setState(next);
-          if (visibleTab.current !== next.tabId || !editing.current)
-            setAddress(next.url === "about:blank" ? "" : next.url);
-          visibleTab.current = next.tabId;
-        }
-      } catch (e) {
-        if (!disposed) report(e);
-      }
-      if (!disposed) timer = setTimeout(() => void refresh(), 900);
-    }
+        const next = await bridge.panel(sessionId,"state");
+        if (!disposed && version === generation.current && !opening.current && next) sync(next);
+      } catch (err) {if (!disposed) report(err);}
+      finally {running = false;}
+    };
+    const windows = () => void bridge.spaces("list").then(result => {if (!disposed) setCount(result.spaces.length);}).catch(report);
+    const timer = setInterval(() => void refresh(),650);
+    const windowsTimer = setInterval(windows,5000);
     void refresh();
+    windows();
+    void hydrate(false);
     return () => {
       disposed = true;
-      clearTimeout(timer);
-      void bridge.panel(sessionId, "hide").catch(() => {});
+      clearInterval(timer);
+      clearInterval(windowsTimer);
+      void bridge.panel(sessionId,"hide").catch(() => {});
     };
-  }, [bridge, sessionId]);
+  },[bridge,sessionId]);
+  useEffect(() => {
+    if (!page && tabId) void hydrate(true);
+  },[page,tabId]);
+  useEffect(() => {
+    let disposed = false;
+    const refresh = async () => {
+      const version = ++extrasRevision.current;
+      try {
+        const value = await bridge.shell("state",{spaceId:sessionId,tabId});
+        if (!disposed && version === extrasRevision.current) setSignals(value);
+      } catch (err) {if (!disposed) report(err);}
+    };
+    const remove = bridge.onShellChange(event => {
+      if (event.spaceId !== sessionId) return;
+      if (event.focusAddress) addressInput.current?.focus();
+      void refresh();
+    });
+    void refresh();
+    return () => {disposed=true;remove();};
+  },[bridge,sessionId,tabId]);
 
+  useLayoutEffect(() => {
+    const element = deviceArea.current;
+    if (!device || !element) return;
+    const measure = () => {
+      const width = element.clientWidth, height = element.clientHeight;
+      setSurfaceSize(previous => previous.width === width && previous.height === height ? previous : {width,height});
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    measure();
+    return () => observer.disconnect();
+  },[device,page]);
+  const suggestions:Suggestion[] = [];
+  if (focused) {
+    const value = edited ? address.toLowerCase().trim() : "";
+    const matches = (text:string) => !value || value.split(/\s+/).every(word => text.toLowerCase().includes(word));
+    for (const entry of omnibox.ports) {
+      const title = "localhost:"+entry;
+      if (matches(title)) suggestions.push({key:"port:"+entry,title,url:"http://"+title,kind:word("本机","Local")});
+    }
+    for (const entry of omnibox.tabs) {
+      if (entry.tabId !== tabId && matches(entry.title+" "+entry.url))
+        suggestions.push({key:"tab:"+entry.tabId,...entry,kind:word("切换标签","Switch tab")});
+    }
+    for (const entry of omnibox.history) {
+      if (matches(entry.title+" "+entry.url))
+        suggestions.push({key:"history:"+entry.url,...entry,kind:word("历史","History")});
+    }
+    suggestions.length = Math.min(suggestions.length,8);
+  }
+  const showSuggestions = suggestions.length > 0 && (!page || cover !== null);
+  const covered = page && showSuggestions;
+  useLayoutEffect(() => {
+    if (!deviceTransition || !deviceShot.current || !viewport.current) return;
+    const layer = deviceShot.current;
+    const from = deviceTransition.from, to = viewport.current.getBoundingClientRect();
+    if (!to.width || !to.height || reducedMotion) {setDeviceTransition(undefined);return;}
+    Object.assign(layer.style,{left:to.x+"px",top:to.y+"px",width:to.width+"px",height:to.height+"px"});
+    const moving = layer.animate([
+      {transform:`translate(${from.x-to.x}px,${from.y-to.y}px) scale(${from.width/to.width},${from.height/to.height})`},
+      {transform:"none"},
+    ],{duration:260,easing:"cubic-bezier(.22,1,.36,1)",fill:"both"});
+    let disposed = false;
+    void moving.finished.then(async () => {
+      if (disposed) return;
+      await bridge.panel(sessionId,"layout",{tabId,x:to.x,y:to.y,width:to.width,height:to.height});
+      if (!disposed && device) await bridge.shell("viewport",{...tab,device:{width,height,scale}});
+    }).finally(() => {
+      if (!disposed) setDeviceTransition(undefined);
+    }).catch(error => {if (!disposed) report(error);});
+    return () => {disposed=true;moving.cancel();};
+  },[deviceTransition,scale,reducedMotion,bridge,sessionId,tabId]);
   useEffect(() => {
     const element = viewport.current;
-    if (!livePage || !element || overview || surfaceSuspended) return;
+    if (!page || !tabId || !element || surfaceSuspended || covered || deviceMenu || deviceTransition) return;
+    let frame = 0;
+    let disposed = false;
     const update = () => {
-      const r = element.getBoundingClientRect();
-      const obscured =
-        document.hidden ||
-        !r.width ||
-        !r.height ||
-        !!document.querySelector(
-          '[aria-modal="true"],[data-radix-popper-content-wrapper],[role="alertdialog"]',
-        );
-      void bridge
-        .panel(sessionId, obscured ? "hide" : "layout", {
-          tabId: state.tabId,
-          x: r.x,
-          y: r.y,
-          width: r.width,
-          height: r.height,
-        })
-        .catch(report);
+      const rect = element.getBoundingClientRect();
+      const obscured = document.hidden || !rect.width || !rect.height || !!document.querySelector('[aria-modal="true"],[data-radix-popper-content-wrapper],[role="alertdialog"]');
+      void bridge.panel(sessionId,obscured ? "hide" : "layout",{
+        tabId,x:rect.x,y:rect.y,width:rect.width,height:rect.height,
+      }).then(async () => {
+        if (!disposed && !obscured && device) await bridge.shell("viewport",{spaceId:sessionId,tabId,device:{width,height,scale}});
+      }).catch(report);
     };
-    const resize = new ResizeObserver(update);
+    let waiting = false;
+    const queue = () => {
+      if (waiting) return;
+      waiting = true;
+      frame = requestAnimationFrame(() => {waiting=false;update();});
+    };
+    const resize = new ResizeObserver(queue);
+    const overlays = new MutationObserver(queue);
     resize.observe(element);
-    const overlays = new MutationObserver(update);
-    overlays.observe(document.body, { childList: true, subtree: true });
-    document.addEventListener("visibilitychange", update);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    overlays.observe(document.body,{childList:true,subtree:true});
+    document.addEventListener("visibilitychange",queue);
+    window.addEventListener("scroll",queue,true);
+    window.addEventListener("resize",queue);
     update();
     return () => {
+      disposed = true;
+      cancelAnimationFrame(frame);
       resize.disconnect();
       overlays.disconnect();
-      document.removeEventListener("visibilitychange", update);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-      void bridge
-        .panel(sessionId, "hide", { tabId: state.tabId })
-        .catch(() => {});
+      document.removeEventListener("visibilitychange",queue);
+      window.removeEventListener("scroll",queue,true);
+      window.removeEventListener("resize",queue);
+      void bridge.panel(sessionId,"hide",{tabId}).catch(() => {});
     };
-  }, [livePage, overview, state.tabId, sessionId, bridge, surfaceSuspended]);
+  },[bridge,sessionId,tabId,page,surfaceSuspended,covered,deviceMenu,deviceTransition,device,width,height,scale]);
 
-  async function command(
-    action:
-      | "control"
-      | "open"
-      | "home"
-      | "new"
-      | "select"
-      | "close"
-      | "back"
-      | "forward"
-      | "reload"
-      | "zoom",
-    value?: unknown,
-  ) {
-    setOverview(false);
+  const run = async (action:Navigation,value?:unknown) => {
     const version = ++generation.current;
+    opening.current = true;
     setError("");
     try {
-      const next = await bridge.panel(sessionId, action, value);
-      if (version === generation.current && next) {
-        setState(next);
-        if (!editing.current || visibleTab.current !== next.tabId)
-          setAddress(next.url === "about:blank" ? "" : next.url);
-        visibleTab.current = next.tabId;
-        if (action === "new" || action === "home") requestAnimationFrame(() => addressInput.current?.focus());
+      const result = await bridge.panel(sessionId,action,value);
+      if (result && version === generation.current) sync(result);
+    } catch (err) {if (version === generation.current) report(err);}
+    finally {if (version === generation.current) opening.current = false;}
+  };
+  const closeAddress = () => {
+    editing.current = false;
+    setFocused(false);
+    setEdited(false);
+    setChoice(-1);
+    setCover(null);
+    setAddress(isPage(state.url) ? state.url : "");
+  };
+  const navigate = (value:string) => {
+    addressInput.current?.blur();
+    closeAddress();
+    void run("open",{tabId,url:addressUrl(value)});
+  };
+  const startPicker = async (mode:"element"|"region") => {
+    try {
+      if (picker) {await bridge.shell("cancel",tab);return;}
+      setPicker(mode);
+      if (await bridge.shell("pick",{...tab,mode})) {
+        setFeedback("capture");
+        toast.success(word("已加入会话输入框","Added to chat draft"));
       }
-    } catch (e) {
-      report(e);
-    }
-  }
+    } catch (err) {report(err);}
+    finally {setPicker(undefined);}
+  };
+  const capture = async () => {
+    try {
+      if (await bridge.shell("capture",tab)) {
+        setFeedback("capture");
+        toast.success(word("截图已加入会话输入框","Screenshot added to chat draft"));
+      }
+    } catch (err) {report(err);}
+  };
   useEffect(() => {
-    if (state.tabId && state.url === "about:blank") addressInput.current?.focus();
-  }, [state.tabId]);
-  const tabOverview = () => {
-    if (overview) { setOverview(false); return; }
-    setOverview(true);
-    void bridge.panel(sessionId, "overview").then(next => { if (next?.thumbnails) setThumbnails(next.thumbnails); }).catch(report);
+    if (!feedback) return;
+    const timeout = setTimeout(() => setFeedback(undefined),1100);
+    return () => clearTimeout(timeout);
+  },[feedback]);
+  const copy = () => void navigator.clipboard.writeText(state.url).then(() => setFeedback("copy")).catch(report);
+  const select = async (suggestion:Suggestion) => {
+    if (!suggestion.spaceId) {navigate(suggestion.url);return;}
+    addressInput.current?.blur();
+    closeAddress();
+    try {
+      if (suggestion.spaceId !== sessionId) {
+        await app.panels!.open({kind:"browser",sessionId:suggestion.spaceId});
+        await bridge.panel(suggestion.spaceId,"select",{tabId:suggestion.tabId});
+      } else await run("select",{tabId:suggestion.tabId});
+    } catch (err) {report(err);}
+  };
+  const addressKeys = (event:KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {event.stopPropagation();event.currentTarget.blur();return;}
+    if (!suggestions.length || !["ArrowDown","ArrowUp"].includes(event.key)) return;
+    event.preventDefault();
+    setChoice(index => (index + (event.key === "ArrowDown" ? 1 : index < 0 ? suggestions.length : -1) + suggestions.length) % suggestions.length);
+  };
+  useEffect(() => {
+    const shortcut = (event:globalThis.KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        addressInput.current?.focus();
+      }
+      if (event.key === "Escape" && picker) {
+        event.stopPropagation();
+        void bridge.shell("cancel",tab).catch(report);
+      }
+    };
+    window.addEventListener("keydown",shortcut,true);
+    return () => window.removeEventListener("keydown",shortcut,true);
+  },[sessionId,tabId,picker,bridge]);
+  const dismissDeviceMenu = () => {
+    deviceMenuRequest.current++;
+    setDeviceMenu(false);
+    setDeviceCover("");
+  };
+  const changeDevice = async () => {
+    const request = ++deviceMenuRequest.current;
+    if (deviceMenu) {dismissDeviceMenu();return;}
+    const image = page ? await bridge.panel(sessionId,"preview").then(result=>result?.image).catch(()=>undefined) : undefined;
+    if (request !== deviceMenuRequest.current || !deviceTools.current) return;
+    setDeviceCover(image ?? "");
+    setDeviceMenu(true);
+  };
+  useEffect(() => {
+    if (!deviceMenu) return;
+    deviceTools.current?.querySelector<HTMLElement>("[role=menu] button")?.focus();
+    const dismiss = (event:PointerEvent) => {
+      if (!deviceTools.current?.contains(event.target as Node)) dismissDeviceMenu();
+    };
+    document.addEventListener("pointerdown",dismiss);
+    return () => document.removeEventListener("pointerdown",dismiss);
+  },[deviceMenu]);
+  const selectDevice = async (next:typeof devices[number]|undefined, rotated=false) => {
+    const from = viewport.current?.getBoundingClientRect();
+    if (!reducedMotion && from?.width && from.height && (next !== device || rotated !== landscape)) {
+      const image = deviceCover || await bridge.panel(sessionId,"preview").then(result=>result?.image).catch(()=>undefined);
+      if (image) setDeviceTransition({from,image});
+    }
+    setDevice(next);
+    setLandscape(rotated);
+    dismissDeviceMenu();
   };
   const more = async () => {
     const action = await app.menu.popup([
-      {id:"zoom-out",label:zh ? "缩小" : "Zoom out",enabled:(state.zoomFactor ?? 1) > .25},
-      {id:"zoom-reset",label:zh ? `缩放 ${Math.round((state.zoomFactor ?? 1)*100)}% · 恢复 100%` : `Zoom ${Math.round((state.zoomFactor ?? 1)*100)}% · Reset to 100%`},
-      {id:"zoom-in",label:zh ? "放大" : "Zoom in",enabled:(state.zoomFactor ?? 1) < 3},
+      {id:"devtools",label:word("打开或关闭开发者工具","Toggle developer tools"),enabled:page},
+      {id:"hard",label:word("清缓存强刷","Hard reload"),enabled:page},
+      {id:"system",label:word("用默认浏览器打开","Open in default browser"),enabled:/^https?:/.test(state.url)},
+      {id:"region",label:word("区域截屏入聊","Capture region to chat"),enabled:page},
+      {id:"home",label:word("返回起始页","Return to start page"),enabled:!!tabId},
       {id:"separator",label:"",type:"separator"},
-      {id:"tabs",label:zh ? "此窗口的标签页总览" : "Tabs in this window"},
-      ...(state.workspaceSource !== "window" ? [{id:"dock",label:zh ? "放回工作台" : "Dock in workbench"}] : []),
+      {id:"out",label:word("缩小","Zoom out"),enabled:zoom>25},
+      {id:"reset",label:word("恢复 100%","Reset to 100%")},
+      {id:"in",label:word("放大","Zoom in"),enabled:zoom<300},
+      ...(detached && state.workspaceSource !== "window" ? [{id:"dock",label:word("放回工作台","Dock in workbench")}] : []),
     ]);
-    if (action === "tabs") tabOverview();
-    if (action === "zoom-reset") await command("zoom",{tabId:state.tabId,factor:1});
-    if (action === "zoom-in" || action === "zoom-out") await command("zoom",{tabId:state.tabId,factor:Math.min(3,Math.max(.25,Math.round(((state.zoomFactor ?? 1)+(action === "zoom-in" ? .25 : -.25))*100)/100))});
-    if (action === "dock") { await bridge.panel(sessionId,"hide"); await app.panels?.dock(); }
+    if (action === "hard") await bridge.shell("reload",{...tab,mode:"hard"});
+    if (action === "devtools") await bridge.shell("devtools",tab);
+    if (action === "system") await app.shell.openExternal(state.url);
+    if (action === "region") await startPicker("region");
+    if (action === "home") await run("home",{tabId});
+    if (action === "dock") {await bridge.panel(sessionId,"hide");await app.panels?.dock();}
+    if (action === "in" || action === "out" || action === "reset")
+      await run("zoom",{tabId,factor:action==="reset" ? 1 : Math.min(3,Math.max(.25,(zoom+(action==="in"?25:-25))/100))});
   };
-  const controlsLabel = state.manual
-      ? zh
-        ? "交还 AI"
-        : "Return to AI"
-      : zh
-        ? "接管"
-        : "Take control";
-  const title = state.workspaceName || (zh ? "浏览器" : "Browser");
-  return (
-    <WorkspaceDrawer
-      open
-      onClose={onClose}
-      title={title}
-      className={`browser-workspace${windowChrome ? " browser-window-native" : ""}`}
-      windowChrome={windowChrome}
-      nativePanel={{ kind: "browser", sessionId }}
-      defaultWidth={760}
-      defaultMaximized
-      minWidth={360}
-      adjacentMinWidth={384}
-      resizable
-      storageKey="nautilo.browser.width"
-      headerContent={windowChrome ? <BrowserTabs tabs={state.tabs ?? []} selectedId={state.tabId} strip={tabStrip} zh={zh} onAction={(action,value) => void command(action,value)}/> :
-        <span className="flex items-center gap-2 text-sm font-medium">
-          <Globe size={16} />
-          {title}
-        </span>
-      }
-      headerActions={
-        <>
-          {windowChrome && <button type="button" className="browser-windows-button" title={zh ? "窗口总览" : "All windows"} aria-label={zh ? "窗口总览" : "All windows"} onClick={event => onOverview ? onOverview(event.detail === 0) : void app.panels?.open({kind:"browser-spaces"}).catch(report)}><LayoutGrid size={17}/></button>}
-          {!windowChrome && state.tabs && <button type="button" className={`workspace-panel-icon${overview ? " is-active" : ""}`}
-            title={zh ? "网页总览" : "Tab overview"} aria-label={zh ? "网页总览" : "Tab overview"} aria-pressed={overview}
-            onClick={tabOverview}><LayoutGrid size={16}/></button>}
-          {!windowChrome && state.zoomFactor !== undefined && (
-            <div className="browser-zoom">
-              <button
-                type="button"
-                className="workspace-panel-icon"
-                aria-label={zh ? "缩小网页" : "Zoom out"}
-                title={zh ? "缩小网页" : "Zoom out"}
-                disabled={state.zoomFactor <= 0.25}
-                onClick={() =>
-                  void command("zoom", {
-                    tabId: state.tabId,
-                    factor: Math.max(
-                      0.25,
-                      Math.round((state.zoomFactor! - 0.25) * 100) / 100,
-                    ),
-                  })
-                }
-              >
-                <ZoomOut size={14} />
-              </button>
-              <button
-                type="button"
-                className="browser-zoom-reset"
-                aria-label={zh ? "恢复网页缩放" : "Reset zoom"}
-                title={zh ? "恢复到 100%" : "Reset to 100%"}
-                onClick={() =>
-                  void command("zoom", { tabId: state.tabId, factor: 1 })
-                }
-              >
-                {Math.round(state.zoomFactor * 100)}%
-              </button>
-              <button
-                type="button"
-                className="workspace-panel-icon"
-                aria-label={zh ? "放大网页" : "Zoom in"}
-                title={zh ? "放大网页" : "Zoom in"}
-                disabled={state.zoomFactor >= 3}
-                onClick={() =>
-                  void command("zoom", {
-                    tabId: state.tabId,
-                    factor: Math.min(
-                      3,
-                      Math.round((state.zoomFactor! + 0.25) * 100) / 100,
-                    ),
-                  })
-                }
-              >
-                <ZoomIn size={14} />
-              </button>
-            </div>
-          )}
-          {!windowChrome && !state.tabs && (
-            <button
-              type="button"
-              className="workspace-panel-icon"
-              title={zh ? "关闭此网页" : "Close this page"}
-              aria-label={zh ? "关闭此网页" : "Close this page"}
-              onClick={() => {
-                onClose();
-                void bridge.panel(sessionId, "release").catch(report);
-              }}
-            >
-              <Trash2 size={15} />
-            </button>
-          )}
-        </>
-      }
-    >
-      {!windowChrome && state.tabs && !overview && <BrowserTabs tabs={state.tabs} selectedId={state.tabId} strip={tabStrip} zh={zh} onAction={(action,value) => void command(action,value)}/>}
-      {!overview && <div className="browser-navigation">
-        {state.tabs && (
-          <div className="browser-history">
-            {(
-              [
-                ["back", zh ? "后退" : "Back", ArrowLeft, state.canGoBack],
-                [
-                  "forward",
-                  zh ? "前进" : "Forward",
-                  ArrowRight,
-                  state.canGoForward,
-                ],
-                [
-                  "reload",
-                  zh ? "刷新网页" : "Reload page",
-                  RotateCw,
-                  !!state.url,
-                ],
-              ] as const
-            ).map(([action, label, Icon, enabled]) => (
-              <button
-                key={action}
-                type="button"
-                className="workspace-panel-icon"
-                aria-label={label}
-                title={label}
-                disabled={!enabled}
-                onClick={() => void command(action, { tabId: state.tabId })}
-              >
-                <Icon size={14} />
-              </button>
-            ))}
-          </div>
-        )}
-        {windowChrome && <button type="button" className="workspace-panel-icon" title={zh ? "主页" : "Home"} aria-label={zh ? "主页" : "Home"} onClick={() => void command("home",{tabId:state.tabId})}><House size={17}/></button>}
-        <form
-          className="browser-address"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (address.trim()) {
-              const value = address.trim();
-              const url = /^[a-z][\w+.-]*:\/\//i.test(value) ? value : /^(localhost|127\.0\.0\.1)(:|\/|$)/i.test(value) ? "http://"+value : /^[^\s/]+\.[^\s]+/.test(value) ? "https://"+value : "https://www.baidu.com/s?wd="+encodeURIComponent(value);
-              addressInput.current?.blur();
-              void command(
-                "open",
-                state.tabs ? { tabId: state.tabId, url } : url,
-              );
-            }
-          }}
-        >
-          {windowChrome && <span className="browser-site-icon" title={state.url.startsWith("https:") ? "HTTPS" : undefined}>{state.url.startsWith("https:") ? <LockKeyhole size={14}/> : <Globe size={14}/>}</span>}
-          <input
-            ref={addressInput}
-            className="min-w-0 flex-1 bg-transparent p-1 text-xs outline-none"
-            aria-label={zh ? "网址" : "URL"}
-            placeholder={zh ? "搜索或输入网址" : "Search or enter address"}
-            value={address}
-            onFocus={() => {
-              editing.current = true;
-            }}
-            onBlur={() => {
-              editing.current = false;
-            }}
-            onChange={(e) => setAddress(e.target.value)}
-          />
-          <button
-            type="submit"
-            className="workspace-panel-icon"
-            title={zh ? "打开网址" : "Open URL"}
-            aria-label={zh ? "打开网址" : "Open URL"}
-          >
-            <ArrowRight size={14} />
-          </button>
-        </form>
-        <button
-          type="button"
-          className="browser-control-button flex items-center gap-1.5 rounded-lg border border-line px-2 py-1.5 text-xs"
-          data-manual={state.manual}
-          aria-label={controlsLabel}
-          title={
-            state.tabs
-              ? zh
-                ? "你始终可以操作网页。可在这里暂停或恢复 AI 对此页的操作，AI 仍可读取。"
-                : "Pause or resume AI actions on this tab. You can always interact, and AI can still read."
-              : undefined
-          }
-          onClick={() =>
-            void command(
-              "control",
-              state.tabs
-                ? { tabId: state.tabId, manual: !state.manual }
-                : !state.manual,
-            )
-          }
-        >
-          {state.manual ? <Play size={13} /> : <Hand size={13} />}
-          <span className="browser-control-label">{controlsLabel}</span>
-        </button>
-        {windowChrome && <button type="button" className="workspace-panel-icon browser-more" aria-label={zh ? "浏览器菜单" : "Browser menu"} title={zh ? "浏览器菜单" : "Browser menu"} onClick={() => void more().catch(report)}><MoreHorizontal size={19}/></button>}
-      </div>}
-      {error && (
-        <div role="alert" className="px-3 py-1 text-xs text-danger">
-          {error}
-        </div>
-      )}
-      <div
-        ref={viewport}
-        data-browser-viewport=""
-        className={`relative min-h-0 flex-1 overflow-hidden bg-surface${overview ? " browser-overview" : ""}`}
-      >
-        {overview ? <>
-          <div className="browser-overview-heading"><h3>{zh ? "网页总览" : "Tabs"}<span>{state.tabs?.length ?? 0}</span></h3>
-            <button className="workspace-panel-icon" aria-label={zh ? "返回网页" : "Back to page"} onClick={() => setOverview(false)}><X size={18}/></button>
-          </div>
-          <div className="browser-space-grid">
-            {state.tabs?.map(tab => <button key={tab.id} className="browser-space" data-active={tab.ownership === "agent"} onClick={() => void command("select", {tabId: tab.id})}>
-              <div className="browser-space-preview">
-                {thumbnails[tab.id] ? <img src={thumbnails[tab.id]} alt=""/> : <div className="browser-space-placeholder"><Globe size={34}/><span>{tab.url !== "about:blank" ? tab.url : (zh ? "新标签页" : "New tab")}</span></div>}
-                {tab.ownership === "agent" && <span className="browser-space-running"><MousePointer2 size={12}/>{zh ? "AI 控制中" : "Agent in control"}</span>}
-              </div>
-              <div className="browser-space-caption"><span>{tabTitle(tab, zh ? "新标签页" : "New tab")}</span><span>{tab.manual ? (zh ? "你正在控制" : "Your control") : tab.label}</span></div>
-            </button>)}
-            <button className="browser-space browser-space-new" onClick={() => void command("new")} aria-label={zh ? "新建标签页" : "New tab"}><Plus size={36}/></button>
-          </div>
-        </> : !livePage &&
-          (state.image ? (
-            <img
-              src={state.image}
-              alt={zh ? "会话网页实时预览" : "Conversation page preview"}
-              className="absolute inset-0 h-full w-full object-contain object-top"
-            />
-          ) : (
-            <div className="grid h-full place-items-center px-6 text-center text-sm text-ink-3">
-              {state.url && state.url !== "about:blank"
-                ? zh
-                  ? "正在加载网页…"
-                  : "Loading page…"
-                : zh
-                  ? "输入网址，或让 AI 打开网页"
-                  : "Enter a URL or ask the agent to open a page"}
-            </div>
-          ))}
+  const title = state.workspaceName || word("浏览器","Browser");
+  const domain = browserDomain(state.url);
+  const parsed = domain ? new URL(state.url) : undefined;
+  const control = state.manual ? word("接管中 · 交还 AI","Manual · Return to AI")
+    : active ? word("AI 操控中","AI in control") : word("接管","Take control");
+  const takeControl = () => {setNotice(true);void run("control",{tabId,manual:!state.manual});};
+  const showOverview = (keyboard:boolean) => {
+    if (onOverview) onOverview(keyboard);
+    else void app.panels?.open({kind:"browser-spaces"}).catch(report);
+  };
+  const viewportContents = <div key={device ? "device" : "page"} ref={viewport} className="br-viewport" data-browser-viewport="" style={device ? {width:Math.round(width*scale),height:Math.round(height*scale)} : undefined}>
+    {covered && cover && <img src={cover} alt="" className="br-preview-cover"/>}
+    {deviceMenu && deviceCover && <img src={deviceCover} alt="" className="br-preview-cover"/>}
+  </div>;
+  return <WorkspaceDrawer open onClose={onClose} title={title} className={`browser-workspace${detached ? " browser-window-native" : ""}`} windowChrome={detached}
+    nativePanel={{kind:"browser",sessionId}} defaultWidth={760} defaultMaximized minWidth={360} adjacentMinWidth={384} resizable storageKey="nautilo.browser.width"
+    headerContent={<>
+      {!detached && <span className="br-session-mark" title={title} aria-label={title}><span className="br-dot" data-tone={active ? "blue" : "green"}/></span>}
+      <BrowserTabs tabs={state.tabs ?? []} selectedId={tabId} strip={tabStrip} zh={zh} signals={signals.tabs} onAction={(action,value) => {
+        setDiagnostics(false);
+        void run(action,value);
+      }}/>
+    </>}
+    headerActions={<>
+      <button className="br-icon br-window-count" title={word("浏览器窗口总览","Browser windows")} aria-label={word("浏览器窗口总览","Browser windows")} onClick={event => showOverview(event.detail===0)}><LayoutGrid/><span>{count}</span></button>
+      {detached && <button className="br-icon" title={word("窗口置顶","Keep window on top")} aria-label={word("窗口置顶","Keep window on top")} aria-pressed={signals.pinned} onClick={() => {
+        void bridge.shell("pin",{spaceId:sessionId,pinned:!signals.pinned}).then(pinned=>setSignals(previous=>({...previous,pinned}))).catch(report);
+      }}><Pin/></button>}
+      <button className="br-zoom" data-custom={zoom!==100} title={word("恢复网页缩放","Reset page zoom")} aria-label={word("恢复网页缩放","Reset page zoom")} disabled={!tabId} onClick={()=>void run("zoom",{tabId,factor:1})}>{zoom}%</button>
+    </>}>
+    <div className="browser-navigation" data-shutter={feedback === "capture"}>
+      <div className="br-navigation-group">
+        <button className="br-icon" disabled={!state.canGoBack} title={word("后退","Back")} aria-label={word("后退","Back")} onClick={() => void run("back",{tabId})}><ArrowLeft/></button>
+        <button className="br-icon" disabled={!state.canGoForward} title={word("前进","Forward")} aria-label={word("前进","Forward")} onClick={() => void run("forward",{tabId})}><ArrowRight/></button>
+        <button className="br-icon" disabled={!page && !current?.loading} title={current?.loading ? word("停止加载","Stop loading") : word("刷新 · Shift 强刷","Reload · Shift for hard reload")} aria-label={current?.loading ? word("停止加载","Stop loading") : word("刷新网页","Reload page")} onClick={event => {
+          if (current?.loading || event.shiftKey) void bridge.shell("reload",{...tab,mode:current?.loading ? "stop" : "hard"}).catch(report);
+          else void run("reload",{tabId});
+        }}>{current?.loading ? <X className="br-reload-change"/> : <RotateCw className="br-reload-change"/>}</button>
       </div>
-    </WorkspaceDrawer>
-  );
+      <form className="br-address" role="search" onSubmit={event => {
+        event.preventDefault();
+        if (choice>=0 && suggestions[choice]) void select(suggestions[choice]);
+        else if (address.trim()) navigate(address);
+      }}>
+        <span className="br-site">{state.url.startsWith("https:") ? <LockKeyhole/> : <Globe/>}</span>
+        <div className="br-address-edit">
+          {!focused && parsed && <span className="br-address-display" aria-hidden>{parsed.protocol}//<b>{domain}</b>{parsed.pathname}{parsed.search}{parsed.hash}</span>}
+          <input ref={addressInput} className={parsed && !focused ? "br-address-ghost" : ""} aria-label={word("网址","URL")} placeholder={word("搜索或输入网址","Search or enter address")}
+            spellCheck={false} autoComplete="off" value={address} aria-autocomplete="list" aria-controls={showSuggestions ? "br-suggestions" : undefined}
+            aria-activedescendant={choice>=0 && showSuggestions ? "br-suggestion-"+choice : undefined} onKeyDown={addressKeys}
+            onFocus={event => {
+              editing.current=true;
+              setFocused(true);
+              event.currentTarget.select();
+              void hydrate(true);
+              if (page) void bridge.panel(sessionId,"preview")
+                .then(result => {if(editing.current) setCover(result?.image ?? "");})
+                .catch(()=>{if(editing.current) setCover("");});
+            }}
+            onBlur={event => {if (!event.currentTarget.form?.contains(event.relatedTarget)) closeAddress();}}
+            onChange={event => {setAddress(event.target.value);setEdited(true);setChoice(-1);}}/>
+        </div>
+        {page && <button type="button" className="br-icon" title={word("复制链接","Copy URL")} aria-label={word("复制链接","Copy URL")} data-copied={feedback==="copy"} onMouseDown={event=>event.preventDefault()} onClick={copy}>{feedback==="copy"?<Check/>:<Copy/>}</button>}
+        {showSuggestions && <div className="br-suggestions" id="br-suggestions" role="listbox">
+          {suggestions.map((item,index)=> <button key={item.key} id={"br-suggestion-"+index} type="button" role="option" aria-selected={choice===index}
+            onMouseEnter={()=>setChoice(index)} onMouseDown={event=>event.preventDefault()} onClick={()=>void select(item)}>
+            <Globe/><span><b>{item.title}</b><small>{item.url}</small></span><em>{item.kind}</em>
+          </button>)}
+        </div>}
+      </form>
+      <div className="br-tools">
+        {!!current?.errors && <button className="br-radar" title={word("报错雷达","Diagnostics")} aria-label={word("报错雷达","Diagnostics")} aria-pressed={diagnostics}
+          onClick={() => {setDiagnostics(value=>!value);void bridge.shell("clear",{...tab,remove:false}).catch(report);}}>
+          <span className="br-dot" data-tone="danger"/>{current.errors}
+        </button>}
+        <button className="br-icon" disabled={!page} title={word("拾取网页元素","Pick element")} aria-label={word("拾取网页元素","Pick element")} aria-pressed={!!picker} onClick={() => void startPicker("element")}><Crosshair/></button>
+        <button className="br-icon" disabled={!page} title={word("截屏入聊 · Shift 选择区域","Capture to chat · Shift to select region")} aria-label={word("截屏入聊","Capture to chat")} aria-pressed={picker==="region"}
+          onClick={event => void(event.shiftKey ? startPicker("region") : capture())}>{feedback==="capture" ? <Check/> : <Camera/>}</button>
+        <div className="br-device-tools" ref={deviceTools} onBlur={event=>{
+          if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) dismissDeviceMenu();
+        }} onKeyDown={event=>{
+          if (!deviceMenu) return;
+          if (event.key === "Escape") {event.stopPropagation();dismissDeviceMenu();event.currentTarget.querySelector("button")?.focus();}
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("[role=menu] button:not(:disabled)")];
+            const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            buttons[(index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+          }
+        }}>
+          <button className="br-icon" title={word("响应式视口","Responsive viewport")} aria-label={word("响应式视口","Responsive viewport")} aria-pressed={!!device} aria-haspopup="menu" aria-expanded={deviceMenu} onClick={() => void changeDevice().catch(report)}><MonitorSmartphone/></button>
+          {deviceMenu && <div role="menu" className="br-device-menu" aria-label={word("视口预设","Viewport presets")}>
+            {[undefined,...devices].map(item=><button key={item?.id ?? "auto"} role="menuitemradio" aria-checked={device===item} type="button" onClick={()=>void selectDevice(item).catch(report)}>
+              <span>{item ? word(item.label,item.en) : word("自适应","Fit window")}</span>{item && <small>{item.width} × {item.height}</small>}{device===item && <Check/>}
+            </button>)}
+            <button role="menuitem" type="button" disabled={!device} onClick={()=>void selectDevice(device,!landscape).catch(report)}><span>{word("横竖屏翻转","Rotate viewport")}</span><RotateCw/></button>
+          </div>}
+        </div>
+        <span className="br-tool-divider" aria-hidden/>
+        <button className="br-control" disabled={!tabId} data-mode={state.manual?"manual":active?"agent":"ready"} aria-label={control} title={control} onClick={takeControl}>
+          {state.manual ? <Play/> : active ? <span className="br-dot" data-tone="blue" data-pulse/> : <Hand/>}
+          <span className="br-control-label">{control}</span>
+          {active && <span className="br-control-hover">{word("点击接管","Take control")}</span>}
+        </button>
+        <button className="br-icon" title={word("浏览器菜单","Browser menu")} aria-label={word("浏览器菜单","Browser menu")} onClick={() => void more().catch(report)}><MoreHorizontal/></button>
+      </div>
+      <span className="br-load-progress" data-loading={!!current?.loading} style={{transform:`scaleX(${current?.progress ?? 0})`}} aria-hidden/>
+    </div>
+    {state.manual && page && notice && <div className="br-takeover">
+      <Hand/><span>{word("已由你接管操作，完成后点击「交还 AI」继续执行","You have control. Return to AI when finished.")}</span>
+      <button className="br-icon" title={word("关闭提示","Dismiss hint")} aria-label={word("关闭提示","Dismiss hint")} onClick={()=>setNotice(false)}><X/></button>
+    </div>}
+    {error && <div role="alert" className="br-error">{error}<button className="br-icon" aria-label={word("关闭提示","Dismiss")} onClick={()=>setError("")}><X/></button></div>}
+    {!page ? <BrowserStart key={tabId} zh={zh} data={omnibox} onOpen={navigate} onProbe={()=>hydrate(true)}/> :
+      device ? <div className="br-device">
+        <div className="br-device-caption">
+          {word(device.label,device.en)} · {width} × {height}
+          <button className="br-icon" title={word("横竖屏翻转","Rotate viewport")} aria-label={word("横竖屏翻转","Rotate viewport")} onClick={()=>void selectDevice(device,!landscape).catch(report)}><RotateCw/></button>
+          <span>{Math.round(scale*100)}%</span>
+          <button className="br-icon" title={word("退出设备模式","Exit device mode")} aria-label={word("退出设备模式","Exit device mode")} onClick={()=>void selectDevice(undefined).catch(report)}><X/></button>
+        </div>
+        <div className="br-device-area" ref={deviceArea}>{viewportContents}</div>
+      </div> : viewportContents}
+    {deviceTransition && <img ref={deviceShot} className="br-device-shot" src={deviceTransition.image} alt=""/>}
+    {diagnostics && <BrowserDiagnostics key={tabId} issues={signals.issues} zh={zh}
+      onClose={()=>setDiagnostics(false)} onClear={()=>void bridge.shell("clear",{...tab,remove:true}).catch(report)}
+      onSend={async ids=>{
+        try {
+          const ok=await bridge.shell("draft",{...tab,issueIds:ids});
+          if(ok) toast.success(word("诊断已加入会话输入框","Diagnostics added to chat draft"));
+          return ok;
+        } catch(err) {report(err);return false;}
+      }}/>}
+  </WorkspaceDrawer>;
 }

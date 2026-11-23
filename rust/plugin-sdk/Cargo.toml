@@ -18,3 +18,4 @@ async-trait = "0.1"
 sha2 = "0.10"
 toml = "0.8"
 url = "2"
+uuid = { version = "1", features = ["v4"] }

@@ -42,20 +42,4 @@ class DesktopPresentationParityTest {
         fun actual(nodes: List<ToolCallBranch>): List<String> = nodes.flatMap { listOf(it.call.text("callId")) + actual(it.children) }
         assertEquals(rows(case.objects("expected")), actual(toolCallTree(case.objects("calls"))))
     }
-    @Test fun chronologicalSlotsAndCollapsedRowsMatchPc() = fixture.objects("scenarios").forEach { case ->
-        val events = case.objects("events")
-        val messages = events.filter { it.getJSONObject("data").text("kind") == "message" }.map { e ->
-            ChatMessage(e.text("id"), "agent", e.getJSONObject("data").text("text"), e.text("timestamp"), runId = "r", sequence = e.getLong("sequence"))
-        }
-        val activities = events.filter { it.getJSONObject("data").text("kind") != "message" }.map { e ->
-            val kind = when (e.getJSONObject("data").text("kind")) { "tool_activity" -> "tool"; "activity" -> "status"; else -> e.getJSONObject("data").text("kind") }
-            ActivityItem(e.text("id"), kind, e.text("id"), time = e.text("timestamp"), runId = "r", sequence = e.getLong("sequence"))
-        }
-        val turn = conversationTimeline(messages, activities, listOf(RunInfo("r", if (case.optBoolean("active")) "running" else "completed", "2026-11-14T00:00:00Z", ""))).single() as ConversationItem.Turn
-        val expected = case.getJSONObject("expected")
-        assertEquals(case.text("name"), expected.strings("order"), turn.parts.map { it.message?.id ?: it.activity!!.id })
-        assertEquals(case.text("name"), expected.text("result"), turn.answer?.id.orEmpty())
-        assertEquals(expected.optBoolean("completed"), turn.completed)
-        assertEquals(case.text("name"), expected.strings("collapsed"), turn.parts.filter { it.visible(false, turn.answer) }.map { it.message?.id ?: it.activity!!.id })
-    }
 }

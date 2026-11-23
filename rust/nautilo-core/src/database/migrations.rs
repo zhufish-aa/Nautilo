@@ -110,6 +110,7 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
         db.execute_batch("UPDATE workflow_runs SET pending_actions=(SELECT COUNT(*) FROM json_each(workflow_runs.data,'$.messages') WHERE json_extract(value,'$.status') IN ('queued','delivering','waiting_approval'));") .map_err(db_fail)?;
         set_schema_version(db,12)?;
     }
+    super::timeline::migrate(db)?;
     Ok(())
 }
 

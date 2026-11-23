@@ -1,29 +1,96 @@
-import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { useLayoutEffect, useRef, useState } from "react";
+import { motion } from "framer-motion";
 import { constrainWorkspacePreview } from "../../lib/workspace-state";
+import { useUiReducedMotion } from "../../lib/ui-motion";
 import { WorkPreviewPane } from "../work/WorkPreviewPane";
+import "../../styles/workspace-preview.css";
 
-/** Session-scoped contextual preview; no second conversation or mode is mounted. */
-export function WorkspacePreview({ sessionId, path, onClose }: { sessionId: string; path?: string; onClose(): void }): JSX.Element {
-  const [width, setWidth] = useState(460);
+const widthKey = "nautilo.workspacePreview.width";
+
+export interface PreviewFileRequest { path: string; diff?: string }
+
+export function WorkspacePreview({ sessionId, request, onClose, onQuote }: {
+  sessionId: string;
+  request: PreviewFileRequest;
+  onClose(): void;
+  onQuote(reference: string): void;
+}): JSX.Element {
+  const [width, setWidth] = useState(() => Number(localStorage.getItem(widthKey)) || 0);
+  const [available, setAvailable] = useState(1000);
+  const [wide, setWide] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const reduced = useUiReducedMotion();
   const panel = useRef<HTMLElement>(null);
-  const close = useRef<HTMLButtonElement>(null);
-  const start = useRef<{ x: number; width: number }>();
-  const clamp = (next: number): number => constrainWorkspacePreview(next, panel.current?.parentElement?.clientWidth ?? 1000);
-  useEffect(() => {
+  const drag = useRef<{ x: number; width: number; next?: number }>();
+  const overlay = window.innerWidth <= 1100;
+  const fitWidth = (next: number): number => overlay
+    ? Math.min(available, Math.max(300, next))
+    : constrainWorkspacePreview(next, available);
+  const actual = fitWidth(wide ? available : width || available * .45);
+
+  useLayoutEffect(() => {
+    const node = panel.current!;
+    const parent = node.parentElement!;
+    const measure = (): void => setAvailable(parent.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(parent);
     const previous = document.activeElement as HTMLElement | null;
-    close.current?.focus();
-    return () => { if (previous?.isConnected) previous.focus(); };
+    node.focus({ preventScroll: true });
+    return () => {
+      observer.disconnect();
+      if (previous?.isConnected && (node.contains(document.activeElement) || document.activeElement === document.body)) {
+        previous.focus({ preventScroll: true });
+      }
+    };
   }, []);
-  return <aside ref={panel} aria-label="文件预览" className="workspace-preview relative flex h-full shrink-0 flex-col border-l border-line bg-card" style={{ width }} onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
-    <div role="separator" aria-label="调整预览宽度" aria-orientation="vertical" aria-valuenow={width} aria-valuemin={300} tabIndex={0}
-      onPointerDown={(event) => { start.current = { x: event.clientX, width }; event.currentTarget.setPointerCapture(event.pointerId); }}
-      onPointerMove={(event) => { if (start.current) setWidth(clamp(start.current.width + start.current.x - event.clientX)); }}
-      onPointerUp={(event) => { start.current = undefined; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
-      onPointerCancel={() => { start.current = undefined; }}
-      onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setWidth((current) => clamp(current + (event.key === "ArrowLeft" ? 40 : -40))); } }}
-      className="absolute inset-y-0 -left-1 z-20 w-2 cursor-col-resize touch-none focus-visible:bg-accent/15" />
-    <header className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4"><span className="text-sm font-medium">预览</span><button ref={close} onClick={onClose} type="button" aria-label="关闭预览" className="rounded-md p-1.5 text-ink-3 hover:bg-panel focus-visible:ring-2 focus-visible:ring-accent"><X className="h-4 w-4" /></button></header>
-    <div className="min-h-0 flex-1"><WorkPreviewPane sessionId={sessionId} requestedPath={path} /></div>
-  </aside>;
+
+  function remember(next: number): void {
+    setWidth(next);
+    if (next) localStorage.setItem(widthKey, String(next));
+    else localStorage.removeItem(widthKey);
+  }
+
+  return <motion.aside ref={panel} aria-label="文件预览" className="workspace-preview" tabIndex={-1}
+    style={{ width: actual }} data-dragging={dragging} data-reduced-motion={reduced}
+    initial={reduced ? false : { opacity: 0 }}
+    animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: reduced ? 0 : .15, ease: [.2, .8, .2, 1] }}
+    onKeyDown={(event) => {
+      if (event.key === "Escape" && !event.defaultPrevented && !(event.target as Element).closest(".find-widget")) {
+        event.stopPropagation();
+        onClose();
+      }
+    }}>
+    <div role="separator" aria-label="调整预览宽度" aria-orientation="vertical" aria-valuenow={Math.round(actual)}
+      aria-valuemin={Math.min(300, available)} aria-valuemax={fitWidth(available)} tabIndex={0}
+      className="preview-resize"
+      onDoubleClick={() => { setWide(false); remember(0); }}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        drag.current = { x: event.clientX, width: actual };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setDragging(true);
+      }}
+      onPointerMove={(event) => {
+        if (!drag.current || event.clientX === drag.current.x && drag.current.next === undefined) return;
+        const next = fitWidth(drag.current.width + drag.current.x - event.clientX);
+        drag.current.next = next;
+        setWide(false);
+        setWidth(next);
+      }}
+      onLostPointerCapture={() => {
+        if (drag.current?.next !== undefined) remember(drag.current.next);
+        drag.current = undefined;
+        setDragging(false);
+      }}
+      onKeyDown={(event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home"].includes(event.key)) return;
+        event.preventDefault();
+        setWide(false);
+        remember(event.key === "Home" ? 0 : fitWidth(actual + (event.key === "ArrowLeft" ? 40 : -40)));
+      }} />
+    <WorkPreviewPane sessionId={sessionId} request={request} onClose={onClose} wide={wide}
+      onToggleWide={() => setWide(!wide)} onQuote={onQuote} />
+  </motion.aside>;
 }

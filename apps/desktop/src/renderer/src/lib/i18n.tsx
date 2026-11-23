@@ -754,7 +754,6 @@ const zh = {
       instanceInfo: "当前实例"
     },
     taskContext: {
-      heading: "主 Agent 发送的任务",
       details: "任务说明"
     },
     composer: {
@@ -1857,7 +1856,6 @@ const en: Messages = {
       instanceInfo: "Current instance"
     },
     taskContext: {
-      heading: "Task sent by the main agent",
       details: "Task details"
     },
     composer: {

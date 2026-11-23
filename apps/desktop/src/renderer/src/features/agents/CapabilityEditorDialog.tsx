@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type ChangeEvent } from "react";
-import { Check, Eye, EyeOff, FileUp, Pencil, Plus, Trash2, Wand2 } from "lucide-react";
+import { Check, Eye, EyeOff, FileUp, Plus, Trash2, Wand2 } from "lucide-react";
 import type {
   CapabilityKind,
   McpServerConfig,
@@ -9,7 +9,6 @@ import type {
 import { useI18n } from "../../lib/i18n";
 import { toDaemonProviderId, toUiProviderId } from "../../lib/core-mappers";
 import { useProviderMetas } from "../../lib/provider-catalog";
-import { capabilityOrigin, type CapabilityOriginKind } from "../../lib/capability-origin";
 import { cn } from "../../lib/utils";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -18,13 +17,12 @@ import { Switch } from "../../components/ui/Switch";
 import { TagInput } from "../../components/ui/TagInput";
 import { useProviderToolsStore } from "../../stores/provider-tools";
 import { toast } from "../../stores/toast";
-import { SkillDetails } from "./SkillDetails";
 import "./skill-dialog.css";
 import "./mcp-editor.css";
 
 export type CapabilityDialogState =
   | { mode: "create" }
-  | { mode: "view" | "edit"; capability: ProviderCapability };
+  | { mode: "edit"; capability: ProviderCapability; focusDescription?: boolean };
 
 interface KeyValueRow {
   key: string;
@@ -328,15 +326,11 @@ function Segmented<T extends string>({
 export function CapabilityEditorDialog({
   state,
   onChange,
-  onRemove,
-  originNames,
   defaultKind,
   defaultProviderId,
 }: {
   state: CapabilityDialogState | undefined;
   onChange: (state: CapabilityDialogState | undefined) => void;
-  onRemove: (capability: ProviderCapability) => void;
-  originNames: Record<CapabilityOriginKind, string>;
   defaultKind?: CapabilityKind;
   defaultProviderId?: string;
 }): JSX.Element {
@@ -357,11 +351,18 @@ export function CapabilityEditorDialog({
   const [runtimeTab, setRuntimeTab] = useState("");
   const quickRequest = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
   const open = state !== undefined;
   const capability = state && state.mode !== "create" ? state.capability : undefined;
-  const viewing = state?.mode === "view" ? state.capability : undefined;
+  const focusDescription = state?.mode === "edit" && state.focusDescription;
   const isSkill = (capability?.kind ?? defaultKind ?? form.kind) === "skill";
   const showQuickFill = !isSkill && (quickMode === "paste" || quickMode === "parsing");
+
+  useLayoutEffect(() => {
+    if (!focusDescription) return;
+    const frame = window.requestAnimationFrame(() => descriptionRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusDescription, capability?.id]);
 
   useLayoutEffect(() => {
     quickRequest.current++;
@@ -583,10 +584,6 @@ export function CapabilityEditorDialog({
     }
   };
 
-  const origin = viewing && capabilityOrigin(viewing);
-  const sourceLabel = origin && [originNames[origin.kind], origin.kind !== "builtin" && origin.label]
-    .filter(Boolean)
-    .join(" · ");
   const instructionLines = form.instructions ? form.instructions.split(/\r?\n/).length : 0;
   const tagsField = (
     <Field label={t("agents.tools.editor.tags")} className="skill-editor-tags">
@@ -600,7 +597,7 @@ export function CapabilityEditorDialog({
   );
   const nameField = (
     <Field label={t("agents.tools.editor.name")} htmlFor="capability-name" error={errors.name} className="skill-editor-required">
-      <Input id="capability-name" autoFocus={isSkill || !!capability} required value={form.name}
+      <Input id="capability-name" autoFocus={!focusDescription && (isSkill || !!capability)} required value={form.name}
         onChange={(event) => patch({ name: event.target.value })}
         placeholder={isSkill ? (zh ? "例如：数据库助手" : "e.g. Database assistant") : (zh ? "例如：filesystem" : "e.g. filesystem")}
       />
@@ -610,6 +607,8 @@ export function CapabilityEditorDialog({
     <Field label={t("agents.tools.editor.description")} htmlFor="capability-description">
       <Textarea
         id="capability-description"
+        ref={descriptionRef}
+        autoFocus={focusDescription}
         rows={2}
         value={form.description}
         onChange={(event) => patch({ description: event.target.value })}
@@ -671,24 +670,11 @@ export function CapabilityEditorDialog({
       onOpenChange={(next) => {
         if (!next && !saving) onChange(undefined);
       }}
-      title={viewing ? <>
-        <span className="skill-dialog-name" title={viewing.name}>{viewing.name}</span>
-        <span className="skill-dialog-source" title={sourceLabel}>{sourceLabel}</span>
-      </> : isSkill
+      title={isSkill
         ? (capability ? (zh ? "编辑 Skill" : "Edit Skill") : (zh ? "添加 Skill" : "Add Skill"))
         : (capability ? (zh ? "编辑 MCP 服务" : "Edit MCP server") : (zh ? "添加 MCP 服务" : "Add MCP server"))}
       widthClass={isSkill ? "capability-editor-dialog skill-dialog" : "capability-editor-dialog mcp-editor-dialog"}
       footer={
-        viewing ? <>
-          <Button variant="ghost" size="sm" className="skill-dialog-remove" onClick={() => onRemove(viewing)}>
-            <Trash2 size={14} aria-hidden />
-            {t("common.remove")}
-          </Button>
-          <Button variant="primary" size="sm" onClick={() => onChange({ mode: "edit", capability: viewing })}>
-            <Pencil size={14} aria-hidden />
-            {t("common.edit")}
-          </Button>
-        </> :
         <>
           <Button
             variant="ghost"
@@ -709,7 +695,6 @@ export function CapabilityEditorDialog({
         </>
       }
     >
-      {viewing ? <SkillDetails key={viewing.id} capability={viewing} /> :
       <div className={isSkill ? "skill-editor-form" : "skill-editor-form mcp-editor-form"}>
         {!defaultKind && <Field label={t("agents.tools.editor.kindLabel")}>
           <Segmented<CapabilityKind>
@@ -908,7 +893,7 @@ export function CapabilityEditorDialog({
             {errors.form}
           </p>
         )}
-      </div>}
+      </div>
     </Dialog>
   );
 }

@@ -19,7 +19,7 @@ interface ProviderToolsState {
   load: () => Promise<void>;
   save: (capability: ProviderCapability) => Promise<ProviderCapability>;
   toggle: (id: string, enabled: boolean) => Promise<void>;
-  toggleForHarness: (id: string, providerId: string, enabled: boolean) => Promise<void>;
+  toggleForHarness: (id: string, providers: string | string[], enabled: boolean) => Promise<void>;
   remove: (id: string) => Promise<void>;
   parseImport: (input: { source: CapabilityImportSource; text: string; fileName?: string }) => Promise<CapabilityImportPreview>;
   discoverMcp: (projectRoot?: string) => Promise<DiscoveredMcpSource[]>;
@@ -77,12 +77,13 @@ export const useProviderToolsStore = create<ProviderToolsState>((set, get) => ({
     set((state) => ({ tools: state.tools.filter((tool) => tool.id !== id) }));
   },
 
-  toggleForHarness: async (id, providerId, enabled) => {
+  toggleForHarness: async (id, providers, enabled) => {
+    const targets = (typeof providers === "string" ? [providers] : providers).filter(Boolean);
     const previous = harnessUpdates.get(id) ?? Promise.resolve();
     const update = previous.catch(() => undefined).then(async () => {
       const current = get().tools.find((tool) => tool.id === id);
-      if (!current || !providerId) return;
-      await get().save(setCapabilityEnabledFor(current, providerId, enabled));
+      if (!current || !targets.length) return;
+      await get().save(targets.reduce((tool, target) => setCapabilityEnabledFor(tool, target, enabled), current));
     });
     harnessUpdates.set(id, update);
     try { await update; }

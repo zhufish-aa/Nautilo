@@ -363,7 +363,7 @@ impl WorkflowService {
             plan["status"] = json!("approved");
             plan["runId"] = json!(run.id);
             crate::database::workflow_plans::decide(&tx, &plan)?;
-            committed = Some(Self::record_plan_event(&tx, &event_builder, &latest, &plan)?);
+            Self::update_plan_card(&tx, &event_builder, session_id, &plan)?;
         } else if policy.as_deref() == Some("ask_before_delegate") {
             let approval_id = Uuid::new_v4().to_string();
             let summary = format!("Run workflow {}",run.definition.name.as_deref().unwrap_or(&run.definition.id));

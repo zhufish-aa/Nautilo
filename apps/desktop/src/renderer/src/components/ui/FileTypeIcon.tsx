@@ -8,7 +8,7 @@ export function FileTypeIcon({ path, size = 16 }: { path: string; size?: number 
     const ts = extension === "ts";
     return <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden className="review-file-type">
       <rect width="24" height="24" rx="1" fill={ts ? "#3178C6" : "#E3BF46"} />
-      <text x="22" y="21" textAnchor="end" fill={ts ? "#fff" : "#242424"} fontFamily="Arial, sans-serif" fontWeight="700" fontSize="13">{ts ? "TS" : "JS"}</text>
+      <text x="22" y="21" textAnchor="end" fill={ts ? "#fff" : "#242424"} fontFamily="var(--app-font-sans)" fontWeight="700" fontSize="13">{ts ? "TS" : "JS"}</text>
     </svg>;
   }
   if (extension === "tsx" || extension === "jsx") return <Atom {...props} color="#2A9BAB" className="review-file-type" />;

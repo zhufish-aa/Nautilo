@@ -47,7 +47,7 @@ class ContextUsageTest {
             "usage" to json("events" to usageEvents)), initialize = true)
         assertEquals(ContextUsage(600, 1000), p.contextUsage())
         p.apply(event(501, json("contextUsed" to 200)))
-        p.history(json("items" to JSONArray(), "usage" to json("events" to JSONArray().put(event(2, json("contextUsed" to 900))))), older = true)
+        p.history(json("items" to JSONArray(), "usage" to json("events" to JSONArray().put(event(2, json("contextUsed" to 900))))))
         assertEquals(ContextUsage(200, 1000), p.contextUsage())
     }
 

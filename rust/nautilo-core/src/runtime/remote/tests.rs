@@ -632,7 +632,7 @@ async fn mobile_history_preserves_stream_position_beyond_the_activity_window() {
 }
 
 #[tokio::test]
-async fn legacy_omp_history_returns_resumed_reply_under_the_new_user_turn() {
+async fn omp_history_keeps_the_origin_of_late_replies() {
     let fixture = Fixture::new().await;
     let database = Database::open(&fixture.directory.join("test.sqlite")).unwrap();
     let repos = Repositories::new(&database.raw);
@@ -661,12 +661,11 @@ async fn legacy_omp_history_returns_resumed_reply_under_the_new_user_turn() {
     for projection in [&desktop, &mobile] {
         let items = projection["items"].as_array().unwrap();
         assert_eq!(items[0]["value"]["id"], "answer");
-        assert_eq!(items[0]["value"]["runId"], "resume");
-        assert!(items[0]["value"].get("background").is_none());
-        assert!(items[1..].iter().all(|item| item["value"]["runId"] == "old"));
+        assert_eq!(items[0]["value"]["background"], true);
+        assert!(items.iter().all(|item| item["value"]["runId"] == "old"));
     }
     let receipt = mobile["activity"].as_array().unwrap().iter().find(|event| event["sequence"] == 6).unwrap();
-    assert_eq!(receipt["runId"], "resume");
+    assert_eq!(receipt["runId"], "old");
     assert_eq!(repos.sessions().message("session", "answer").unwrap().unwrap()["runId"], "old");
     assert_eq!(repos.events().replay(Some("session"), None, None, None).unwrap()[5]["runId"], "old");
     drop(database);

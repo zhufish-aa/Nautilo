@@ -73,6 +73,8 @@ export type RemoteMethod =
   | "session.modes"
   | "sessions.list"
   | "session.history"
+  | "session.timeline.open"
+  | "session.timeline.wait"
   | "session.create"
   | "session.details"
   | "session.snapshot"

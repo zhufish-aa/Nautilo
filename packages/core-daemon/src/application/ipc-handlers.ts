@@ -14,6 +14,7 @@ import { projectPollHealIds, projectPollLastSequence, readProjectPoll } from "..
 import { IpcGateway } from "../ipc-gateway.js";
 import { join } from "node:path";
 import { Database } from "../database/index.js";
+import { openSessionTimeline, waitSessionTimeline } from "../database/session-timeline.js";
 import { AdapterRegistry } from "../adapters/index.js";
 import { EventService } from "../runtime/event-service.js";
 import { RunService } from "../runtime/run-service.js";
@@ -245,6 +246,8 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("session.list", async (input) => services.sessions.list(input));
   gateway.register("session.historyBatch", async ({ items }) => services.database.sessions.historyBatch(items));
   gateway.register("session.history", async ({ sessionId, cursor }) => services.database.sessions.history(sessionId, cursor));
+  gateway.register("session.timeline.open", async ({ sessionId }) => openSessionTimeline(services.database.connection.raw, sessionId));
+  gateway.register("session.timeline.wait", async ({ sessionId, revision, timeoutMs }) => waitSessionTimeline(services.database.connection.raw, sessionId, revision, timeoutMs));
   gateway.register("session.get", async ({ sessionId }) => services.sessions.get(sessionId));
   gateway.register("session.generateTitle", async ({ sessionId }) => services.runs.generateSessionTitle(sessionId));
   gateway.register("session.create", async (input) => services.sessions.create(input));

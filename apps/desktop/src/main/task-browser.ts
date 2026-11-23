@@ -27,6 +27,7 @@ import { BrowserPageEvents } from "./browser-page-events";
 import { BrowserFiles } from "./browser-files";
 import { browserLogin } from "./browser-login";
 import {fetchBrowser,pasteBrowser} from "./browser-page-tools";
+import { BrowserShell } from "./browser-shell";
 import type { BrowserSpace, BrowserSpacesInput, BrowserSpacesState } from "../shared/browser-spaces";
 import type {BrowserRunUpdate} from "@agenthub/event-protocol";
 import {
@@ -109,6 +110,46 @@ export class TaskBrowser {
   private hostSpace?: string;
   private previews?: BrowserSpacePreviews;
   private sessionCatalog?: () => Promise<{id:string;title:string;status?:string}[]>;
+  private closeWindowSpace?: (id:string) => void;
+  private readonly shell = new BrowserShell({
+    trusted: win => win === this.window || this.overviewWindows.has(win),
+    workbench: () => this.window,
+    overview: () => this.browserHost,
+    canUse: (win,id) => win === this.window || win === this.browserHost && id === this.hostSpace || win === this.panelWindows.get(id),
+    visible: (id,tabId,win) => {
+      const shown = this.visible.get(win);
+      return shown?.group.id === id && shown.page.id === tabId;
+    },
+    tabs: id => [...(this.groups.get(id)?.tabs.values() ?? [])].map(page => ({id:page.id,wc:page.view.webContents,busy:page.busy})),
+    target: (id,tabId) => {
+      const group = this.groups.get(id);
+      if (!group) throw Error("Unknown browser space");
+      const page = this.lookup(group,tabId ?? group.viewed);
+      return {id:page.id,wc:page.view.webContents,busy:page.busy};
+    },
+    boundSession: id => {
+      const workspace = this.groups.get(id) ?? this.savedWorkspaces.get(id);
+      return workspace?.parentId ?? (workspace?.source === "session" ? id : undefined);
+    },
+    spaces: () => this.spaces(),
+    catalog: () => {
+      const tabs = [];
+      for (const [spaceId, workspace] of this.savedWorkspaces) {
+        if (!this.groups.has(spaceId)) for (const tab of workspace.tabs) tabs.push({...tab,spaceId,tabId:tab.id,title:tab.title || tab.url});
+      }
+      for (const [spaceId, group] of this.groups) {
+        for (const page of group.tabs.values()) {
+          const tab = describe(page);
+          tabs.push({spaceId,tabId:tab.id,url:tab.url,title:tab.title || tab.url});
+        }
+      }
+      return tabs.filter(tab => tab.url && tab.url !== "about:blank").map(({spaceId,tabId,url,title}) => ({spaceId,tabId,url,title}));
+    },
+    close: id => {
+      this.closeWindowSpace?.(id);
+      this.closeSpace(id);
+    },
+  });
   private sessionMetadata = new Map<string, {title:string;status?:string}>();
   private metadataAt = 0;
   private cycleWindows?: () => void;
@@ -162,6 +203,7 @@ export class TaskBrowser {
   setSessionCatalog(load: () => Promise<{id:string;title:string;status?:string}[]>) { this.sessionCatalog = load; }
   setWindowCycle(cycle: () => void) { this.cycleWindows = cycle; }
   setWindowOpener(open: (id: string) => Promise<unknown>) { this.openWindow = open; }
+  setWindowSpaceCloser(close: (id:string) => void) { this.closeWindowSpace = close; }
 
   attachOverviewWindow(win: BrowserWindow) {
     this.overviewWindows.add(win);
@@ -281,14 +323,19 @@ export class TaskBrowser {
       if (!tab) return undefined;
       const win = this.panelWindows.get(id);
       const active = !!win && !win.isDestroyed() && win.isFocused() && (win !== this.browserHost || this.hostSpace === id);
-      const status: BrowserSpace["status"] = page?.manual ? (page.owner === "stopped" ? "stopped" : "user")
-        : group && [...group.tabs.values()].some(tab => tab.busy || tab.queued || tab.activity || tab.browserTask)
-          ? "running" : "ready";
+      const liveTabs = [...(group?.tabs.values() ?? [])];
+      const status: BrowserSpace["status"] = liveTabs.some(tab => !tab.manual && (tab.busy || tab.queued || tab.activity || tab.browserTask))
+        ? "running" : page?.manual ? (page.owner === "stopped" ? "stopped" : "user") : "ready";
+      const loaded = (group ? liveTabs.map(tab => describe(tab).url) : saved?.tabs.map(tab => tab.url) ?? [])
+        .some(url => url && url !== "about:blank");
       const name = this.spaceName(id) || tab.title || (group?.source === "window" || saved?.source === "window" ? "新窗口" : "浏览窗口");
       if (win && !win.isDestroyed() && (win !== this.browserHost || this.hostSpace === id)) win.setTitle("Nautilo · " + name);
       return { id, name, source: group?.source ?? saved?.source ?? "session", tabCount: group?.tabs.size ?? saved?.tabs.length ?? 0,
-        selectedTabId: tab.id, title: tab.title ?? "", url: tab.url, open: !!win && !win.isDestroyed(), active, status,
-        preview: input.previews && (!input.ids || input.ids.includes(id)) ? await this.previews?.image(id) : undefined } satisfies BrowserSpace;
+        selectedTabId: tab.id, title: tab.title ?? "", url: tab.url, favicon:tab.favicon, loaded,
+        errors:liveTabs.reduce((count,tab)=>count+this.shell.diagnostics.signals(tab.view.webContents).errors,0),
+        hasSession: !!(group?.parentId ?? saved?.parentId) || (group?.source ?? saved?.source) === "session",
+        open: !!win && !win.isDestroyed(), active, status,
+        preview: tab.url && tab.url !== "about:blank" && input.previews && (!input.ids || input.ids.includes(id)) ? await this.previews?.image(id) : undefined } satisfies BrowserSpace;
     }));
     const spaces = cards.filter((card): card is NonNullable<typeof card> => !!card);
     if (input.previews) {
@@ -746,6 +793,7 @@ export class TaskBrowser {
 
   private present(page: TaskPage) {
     if (!this.isVisible(page) || page.view.webContents.isDestroyed()) return;
+    if (page.busy && !page.manual) this.shell.cancelPicker(page.view.webContents);
     setBrowserPointerActive(page.view.webContents,!page.manual && !!(page.busy || page.activity || page.browserTask));
     showBrowserPresence(page.view.webContents, {
       mode: page.manual ? page.owner : page.busy || page.activity || page.browserTask ? "agent" : "ready", title: page.view.webContents.getTitle() || page.label,
@@ -1077,6 +1125,7 @@ export class TaskBrowser {
     this.park(view);
     const wc = view.webContents;
     this.configureProfile(wc.session);
+    this.shell.observe(group.id,wc,() => [...this.visible].find(([,shown])=>shown.page.view === view)?.[0]);
     const id = saved?.id ?? randomUUID();
     const page: TaskPage = {
       id,
@@ -1533,6 +1582,7 @@ export class TaskBrowser {
         continue;
       this.visible.delete(win);
       if (!win.isDestroyed() && !shown.page.view.webContents.isDestroyed()) {
+        this.shell.hidden(shown.page.view.webContents);
         win.contentView.removeChildView(shown.page.view);
         this.park(shown.page.view);
         shown.page.actions.surfaceChanged();
@@ -1542,6 +1592,10 @@ export class TaskBrowser {
 
   release(id: string) {
     for(const child of new Set([...this.savedWorkspaces.values(),...this.groups.values()].filter(group=>group.parentId === id).map(group=>group.id)))this.release(child);
+    this.closeSpace(id);
+  }
+
+  private closeSpace(id: string) {
     this.savedWorkspaces.delete(id);
     this.previews?.forget(id);
     this.disposeGroup(id);
@@ -1556,6 +1610,7 @@ export class TaskBrowser {
   }
 
   register() {
+    this.shell.register();
     ipcMain.handle("browser:profile",async (event,command:string,input:any={})=>{
       const win=BrowserWindow.fromWebContents(event.sender);
       if(!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame || (win !== this.window && !this.overviewWindows.has(win)))throw Error("Browser overview required");
@@ -1617,17 +1672,14 @@ export class TaskBrowser {
           if(command === "layout")return;
           throw Error("Select this browser space before changing its tabs");
         }
-        if (
-          command === "layout" &&
-          this.panelWindows.has(id) &&
-          win !== this.panelWindows.get(id)
-        )
-          return;
+        const panelOwner = this.panelWindows.get(id);
+        if (command === "layout" && panelOwner && panelOwner !== win && (panelOwner !== this.browserHost || this.hostSpace === id)) return;
         if (command === "release") return this.release(id);
         const group = this.group(id);
         if(command === "preview") {
           const page=this.lookup(group,group.viewed);
-          const image=await this.previews?.capture(id,page.view.webContents,page.id+"/"+page.view.webContents.getURL());
+          const {width,height}=page.view.getBounds();
+          const image=await this.previews?.capture(id,page.view.webContents,`${page.id}/${width}×${height}/${page.view.webContents.getURL()}`);
           return {...describe(page),image};
         }
         if (command === "overview") {

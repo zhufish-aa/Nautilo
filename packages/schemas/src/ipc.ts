@@ -73,6 +73,42 @@ export interface HistoryItem<T> { value: T; order: { createdAt: string; ordinal:
 export interface HistoryProjection<T> { cursor: HistoryCursor; reset: boolean; items: HistoryItem<T>[] }
 export interface SessionHistoryInput { sessionId: string; cursor?: HistoryCursor }
 export type SessionHistory = HistoryProjection<Message> & { session: Session };
+
+export interface TimelineBlock {
+  seq: number;
+  blockId: string;
+  runId: string | null;
+  kind: "user_prompt" | "user_append" | "thinking" | "assistant_text" | "assistant_note" | "tool_call" | "late_result"
+    | "interaction" | "approval" | "notice" | "legacy";
+  content: Record<string, unknown>;
+  sealed: boolean;
+  status: string | null;
+  result: Record<string, unknown> | null;
+}
+
+export interface TimelineTurn {
+  runId: string;
+  status: "running" | "completed" | "cancelled" | "failed";
+  durationMs: number | null;
+  finalBlockId: string | null;
+}
+
+export interface TimelineSnapshot {
+  revision: number;
+  blocks: TimelineBlock[];
+  turns: TimelineTurn[];
+}
+
+export type TimelineOperation =
+  | { type: "block_created"; block: TimelineBlock }
+  | { type: "block_delta"; blockId: string; text: string }
+  | { type: "block_updated"; blockId: string; sealed?: true; status?: string; result?: Record<string, unknown> };
+
+export interface TimelineChanges {
+  reset: boolean;
+  revision: number;
+  changes: { operations: TimelineOperation[]; turn: TimelineTurn | null }[];
+}
 export type ArtifactChangesInput = ({ sessionId: string; projectRunId?: never } | { projectRunId: string; sessionId?: never }) & { cursor?: HistoryCursor };
 
 export interface ProjectEventCursor extends HistoryCursor { sequence: number }
@@ -291,6 +327,8 @@ export interface IpcRequestMap {
   "orchestration.cancel": { input: { projectRunId: string }; output: ProjectRun };
   "session.list": { input: { projectId: string; memberId?: string }; output: Session[] };
   "session.history": { input: SessionHistoryInput; output: SessionHistory };
+  "session.timeline.open": { input: { sessionId: string }; output: TimelineSnapshot };
+  "session.timeline.wait": { input: { sessionId: string; revision: number; timeoutMs?: number }; output: TimelineChanges };
   "session.historyBatch": { input: { items: SessionHistoryInput[] }; output: { items: SessionHistory[] } };
   "session.get": { input: { sessionId: string }; output: { session: Session; messages: Message[] } };
   "session.generateTitle": { input: { sessionId: string }; output: { title?: string } };

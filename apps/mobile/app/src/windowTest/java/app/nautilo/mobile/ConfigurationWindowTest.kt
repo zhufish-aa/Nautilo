@@ -355,37 +355,17 @@ class ConfigurationWindowTest {
         assertButtonWithinActualWindow("session-config-apply")
     }
 
-    @Test fun finalReceiptsAndHistoryRefreshKeepTheActualMarkdownView() {
-        val projection = SessionProjection()
-        fun event(sequence: Int, type: String, id: String, text: String) = json("eventId" to "view-$sequence", "sequence" to sequence,
-            "type" to type, "runId" to "run", "timestamp" to "2026-11-14T01:00:01Z", "payload" to json("messageId" to id, "text" to text))
-        projection.apply(event(1, "agent.message_delta", "native", "你好"))
-        fun turn(complete: Boolean) = conversationTimeline(projection.messageList(), projection.activityList(),
-            listOf(RunInfo("run", if (complete) "completed" else "running", "2026-11-14T01:00:00Z", "2026-11-14T01:00:02Z"))).single() as ConversationItem.Turn
-        val current = mutableStateOf(turn(false))
-        var nativeRoot: View? = null
-        compose.setContent {
-            val view = LocalView.current
-            SideEffect { nativeRoot = view.rootView }
-            NautiloTheme { AssistantTurn(current.value) { InteractionCard(it, true, model) } }
-        }
-        fun findMarkdown(view: View): MarkdownView? {
-            if (view is MarkdownView) return view
-            if (view is ViewGroup) for (index in 0 until view.childCount) findMarkdown(view.getChildAt(index))?.let { return it }
-            return null
-        }
-        compose.waitForIdle()
-        val before = compose.runOnIdle { findMarkdown(requireNotNull(nativeRoot)) }
-        assertNotNull(before)
-        compose.runOnUiThread {
-            val receipt = event(2, "agent.message", "saved", "你好，已完成。")
-            receipt.getJSONObject("payload").put("providerMessageId", "native")
-            projection.apply(receipt)
-            projection.history(json("items" to JSONArray().put(json("value" to json("id" to "saved", "sender" to "agent", "text" to "你好，已完成。", "createdAt" to "2026-11-14T01:00:02Z")))))
-            current.value = turn(true)
-        }
-        compose.waitForIdle()
-        compose.runOnIdle { assertSame("Finalization remounted the message body", before, findMarkdown(requireNotNull(nativeRoot))) }
+    @Test fun finalAnswerStaysVisibleWithTheProcessCollapsed() {
+        val thought = MobileTimelineBlock(json("seq" to 1, "blockId" to "thought", "kind" to "thinking",
+            "runId" to "r", "sealed" to true, "content" to json("text" to "核对文件")))
+        val answer = MobileTimelineBlock(json("seq" to 2, "blockId" to "answer", "kind" to "assistant_text",
+            "runId" to "r", "sealed" to true, "content" to json("text" to "你好，已完成。")))
+        val timeline = MobileTimeline(2, listOf(thought, answer),
+            mapOf("r" to json("runId" to "r", "status" to "completed", "finalBlockId" to "answer", "durationMs" to 2000)))
+        compose.setContent { NautiloTheme { ChatScreen(state().copy(timeline = timeline), model) } }
+        compose.onNodeWithTag("timeline:answer").assertIsDisplayed()
+        compose.onNodeWithText("已完成，用时 2秒").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("timeline:answer").assertIsDisplayed()
     }
 
     @Test fun existingSessionActionsAreInsideTheRealDialogWindow() {

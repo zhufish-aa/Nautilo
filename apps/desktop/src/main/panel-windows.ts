@@ -67,6 +67,7 @@ export function registerPanelWindows(
           : target.projectId ? "project/" + target.projectId : "global");
       const existing = panels.get(key);
       if (existing && !existing.win.isDestroyed()) {
+        if (focusOnly && isBrowser(target) && (existing.target.kind !== target.kind || existing.target.sessionId !== target.sessionId)) return false;
         select(existing,target,userInitiated);
         await existing.ready;
         if(existing.win.isDestroyed())return false;
@@ -136,5 +137,10 @@ export function registerPanelWindows(
         else entry.win.close();
       }
   };
-  return Object.assign(closeForSession, { open, cycle });
+  const closeBrowserSpace = (id:string) => {
+    browserSpaces.delete(id);
+    const host = panels.get("browser-host");
+    if (host?.target.sessionId === id) select(host,{kind:"browser-spaces"});
+  };
+  return Object.assign(closeForSession, { open, cycle, closeBrowserSpace });
 }

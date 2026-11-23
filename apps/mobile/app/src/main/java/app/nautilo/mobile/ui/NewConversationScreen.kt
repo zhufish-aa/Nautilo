@@ -140,7 +140,7 @@ import app.nautilo.mobile.data.*
                         if (state.connected) Box(Modifier.align(Alignment.BottomEnd).offset(1.dp, 1.dp).size(7.dp)
                             .background(Green, CircleShape).border(1.dp, palette.inset, CircleShape))
                     }
-                    if (state.connected) state.latency?.let { Text("${it}ms", fontFamily = CodeFont, fontSize = 10.sp, color = Ink) }
+                    if (state.connected) state.latency?.let { Text("${it}ms", fontFamily = UiFont, fontSize = 10.sp, color = Ink) }
                 }
             }
         }

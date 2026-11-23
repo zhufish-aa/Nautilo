@@ -113,6 +113,41 @@ async fn two_acp_prompts_share_worker_and_split_thoughts_without_replay_or_id_al
     plugin.dispose().await;
 }
 
+#[tokio::test]
+async fn acp_injects_builtin_tools_and_routes_calls_to_each_resumed_turn() {
+    struct Daemon;
+    impl DaemonChannel for Daemon {
+        fn ask(&self, _: &str, _: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
+            panic!("unexpected interaction")
+        }
+        fn call_tool(&self, run_id: &str, name: &str, args: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
+            let receipt = format!("{run_id}:{name}:{}", args["task"].as_str().unwrap());
+            Box::pin(async move { json!({"success":true,"content":receipt}) })
+        }
+    }
+
+    let fixture = Fixture::new();
+    let plugin = TraePlugin::new();
+    plugin.set_daemon_channel(Arc::new(Daemon));
+    let mut request = fixture.request("runtime-tools", false);
+    request["runtimeTools"] = json!([
+        {"name":"agenthub_delegate","inputSchema":{"type":"object"}},
+        {"name":"agenthub_workflow_submit","inputSchema":{"type":"object"}},
+    ]);
+    request["mcpServers"] = json!([
+        {"name":"nautilo_browser","transport":"http","url":"http://127.0.0.1:4242/mcp","desktopBrowser":true},
+        {"name":"user_mcp","transport":"http","url":"http://127.0.0.1:4243/mcp"},
+    ]);
+    for (run, resume) in [("tools-a", None), ("tools-b", Some("fixture-session".into()))] {
+        let reused = resume.is_some();
+        let events = events_until_exit(plugin.start(run, request.clone(), resume).await.unwrap()).await;
+        assert_eq!(events.last().unwrap()["exitCode"], 0, "{events:?}");
+        assert_eq!(runtime_ready(&events)["reused"], reused);
+        assert_stream(&events, "message", &format!("trae-message:{run}"), &format!("{run}:agenthub_delegate:inspect"));
+    }
+    plugin.dispose().await;
+}
+
 #[test]
 fn thought_boundaries_do_not_emit_duplicate_or_phantom_completions() {
     let mut state = TraeAcpParseState::new("turn");

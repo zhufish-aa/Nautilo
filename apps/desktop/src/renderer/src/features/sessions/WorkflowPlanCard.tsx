@@ -36,9 +36,7 @@ export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: W
   const connectionCatalogs = useConnectionsStore(state => state.modelCatalogs);
   const archived = useSessionsStore(state => state.sessions.find(session => session.id === plan.sessionId)?.status === "archived");
   const edits = usePlanEdits(state => state.edits[plan.id] ?? NO_EDITS);
-  const [resolved, setResolved] = useState<WorkflowPlan>();
-  const shown = plan.status === "pending" ? resolved ?? plan : plan;
-  const pending = shown.status === "pending";
+  const pending = plan.status === "pending";
   const [expanded, setExpanded] = useState<string>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<"approve" | "reject">();
@@ -57,10 +55,9 @@ export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: W
     setBusy(action);
     setError("");
     try {
-      const updated = await requestCore<WorkflowPlan>("workflow.plan.decide", {
+      await requestCore<WorkflowPlan>("workflow.plan.decide", {
         sessionId: plan.sessionId, planId: plan.id, action, ...(action === "approve" ? { assignments: edits } : {})
       });
-      setResolved(updated);
       usePlanEdits.setState(state => {
         const next = { ...state.edits };
         delete next[plan.id];
@@ -74,12 +71,12 @@ export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: W
       setBusy(undefined);
     }
   };
-  const execution = shown.runId && runStatus ? executionLabels[runStatus] : undefined;
+  const execution = plan.runId && runStatus ? executionLabels[runStatus] : undefined;
   const [statusZh, statusEn, tone] = pending ? ["待确认", "Awaiting approval", "amber"]
-    : shown.status === "approved" ? execution ?? ["已确认", "Approved", "neutral"] : ["已拒绝", "Rejected", "danger"];
+    : plan.status === "approved" ? execution ?? ["已确认", "Approved", "neutral"] : ["已拒绝", "Rejected", "danger"];
   const pulse = pending || tone === "indigo";
   const StatusIcon = tone === "danger" ? X : tone === "amber" ? Clock3 : execution && runStatus === "cancelled" ? Square : Check;
-  const rows = shown.nodes.map(node => {
+  const rows = plan.nodes.map(node => {
     const assignment = selected(node.key, node.assignment);
     return { node, assignment, instance: instances.find(item => item.id === assignment.agentInstanceId) };
   });
@@ -89,20 +86,20 @@ export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: W
   }
   const teamLabel = [...harnesses.values()].join(" · ") + (harnesses.size > 1 ? (zh ? " 协同" : " working together") : "");
   return (
-    <article className="conversation-workflow-plan" data-status={shown.status} data-reduced={reducedMotion || undefined} aria-label={zh ? "工作流执行计划" : "Workflow execution plan"}>
+    <article className="conversation-workflow-plan" data-status={plan.status} data-reduced={reducedMotion || undefined} aria-label={zh ? "工作流执行计划" : "Workflow execution plan"}>
       <header className="workflow-plan-header" data-tone={tone}>
         <div className="workflow-plan-heading">
           <span className="workflow-plan-mark"><Workflow size={17} aria-hidden /></span>
           <div className="workflow-plan-title">
-            <small>{zh ? "执行计划" : "Execution plan"} · {zh ? `${shown.nodes.length} 个执行项` : `${shown.nodes.length} assignments`}</small>
-            <h3>{shown.template.name}</h3>
+            <small>{zh ? "执行计划" : "Execution plan"} · {zh ? `${plan.nodes.length} 个执行项` : `${plan.nodes.length} assignments`}</small>
+            <h3>{plan.template.name}</h3>
           </div>
           <span className="workflow-plan-status" role="status">
             {pulse ? <span className="workflow-plan-status-dot" aria-hidden /> : <StatusIcon size={12} aria-hidden />}
             {zh ? statusZh : statusEn}
           </span>
         </div>
-        {shown.summary && <p className="workflow-plan-summary">{shown.summary}</p>}
+        {plan.summary && <p className="workflow-plan-summary">{plan.summary}</p>}
       </header>
       {!!rows.length && <ol className="workflow-plan-steps">
         {rows.map(({ node, assignment, instance }, index) => {
@@ -158,7 +155,7 @@ export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: W
         })}
       </ol>}
       {error && <p role="alert" className="workflow-plan-error">{error}</p>}
-      {(pending || shown.runId && onViewExecution || shown.status === "rejected" && !archived) && <footer className="workflow-plan-footer">
+      {(pending || plan.runId && onViewExecution || plan.status === "rejected" && !archived) && <footer className="workflow-plan-footer">
         {harnesses.size > 0 && <div className="workflow-plan-team">
           <span className="workflow-plan-team-icons" aria-hidden>
             {Array.from(harnesses.keys(), providerId => <ProviderAvatar key={providerId} providerId={providerId} size="sm" />)}
@@ -171,7 +168,7 @@ export function WorkflowPlanCard({ plan, runStatus, onViewExecution }: { plan: W
             <button type="button" className="workflow-plan-confirm" disabled={!!busy || archived} onClick={() => void decide("approve")}>
               <Play size={13} aria-hidden />{busy === "approve" ? (zh ? "正在启动…" : "Starting…") : (zh ? "确认执行" : "Approve and run")}
             </button>
-          </> : shown.runId && onViewExecution ? <button type="button" className="workflow-plan-view" onClick={() => onViewExecution(shown.runId!)}>
+          </> : plan.runId && onViewExecution ? <button type="button" className="workflow-plan-view" onClick={() => onViewExecution(plan.runId!)}>
             <PanelRightOpen size={14} aria-hidden />{zh ? "查看执行" : "View execution"}
           </button> : <button type="button" onClick={() => useComposerDraftsStore.getState().setWorkflow(plan.sessionId, plan.template)}>
             <RotateCcw size={13} aria-hidden />{zh ? "重新引用" : "Reference again"}

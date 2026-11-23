@@ -123,8 +123,16 @@ internal fun previewText(bytes: ByteArray): String? {
     BoxWithConstraints(Modifier.fillMaxSize()) {
       val fontScale = LocalDensity.current.fontScale
       val gutter = (maxOf(4, rows.lastOrNull()?.line.toString().length) * 8 * fontScale + 14).dp
-      val columns: Int = remember(rows) { rows.maxOfOrNull { row -> row.text.fold(0) { width, char -> width + if (char.code > 255) 2 else 1 } } ?: 0 }
-      val codeWidth = (columns * 9 * fontScale + 12).dp.coerceAtLeast((maxWidth - gutter).coerceAtLeast(1.dp))
+      val context = LocalContext.current
+      val density = LocalDensity.current
+      val codeWidth = if (wrap) 1.dp else {
+          val textSize = with(density) { 14.sp.toPx() }
+          val widestLine = remember(rows, context, textSize) {
+              val paint = android.text.TextPaint().apply { typeface = readingTypeface(context); this.textSize = textSize }
+              rows.maxOfOrNull { paint.measureText(it.text) } ?: 0f
+          }
+          (with(density) { widestLine.toDp() } + 14.dp).coerceAtLeast((maxWidth - gutter).coerceAtLeast(1.dp))
+      }
       SelectionContainer {
         LazyColumn(Modifier.fillMaxSize().testTag("file-preview-code"), state = list, contentPadding = PaddingValues(vertical = 10.dp)) {
             itemsIndexed(rows) { _, row ->
@@ -134,10 +142,10 @@ internal fun previewText(bytes: ByteArray): String? {
                         ?: if (text.length > 200_000) withContext(Dispatchers.Default) { highlightCode(content, path, dark = dark) } else AnnotatedString(content)
                 }
                 Row(Modifier.fillMaxWidth().background(if (line == row.line) Selection else Color.Transparent).padding(end = 12.dp).padding(vertical = 1.dp), verticalAlignment = Alignment.Top) {
-                    Text(if (row.continuation) "↳" else "${row.line}", Modifier.width(gutter).padding(end = 12.dp), color = if (line == row.line) Ink else Secondary, fontFamily = CodeFont, fontSize = 12.sp, lineHeight = 22.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
-                    if (wrap) Text(colored, Modifier.weight(1f), color = Ink, fontFamily = CodeFont, fontSize = 14.sp, lineHeight = 22.sp)
+                    Text(if (row.continuation) "↳" else "${row.line}", Modifier.width(gutter).padding(end = 12.dp), color = if (line == row.line) Ink else Secondary, fontFamily = UiFont, fontSize = 12.sp, lineHeight = 22.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                    if (wrap) Text(colored, Modifier.weight(1f), color = Ink, fontFamily = UiFont, fontSize = 14.sp, lineHeight = 22.sp)
                     else Box(Modifier.weight(1f).horizontalScroll(horizontal)) {
-                        Text(colored, Modifier.width(codeWidth), color = Ink, fontFamily = CodeFont, fontSize = 14.sp, lineHeight = 22.sp, softWrap = false)
+                        Text(colored, Modifier.width(codeWidth), color = Ink, fontFamily = UiFont, fontSize = 14.sp, lineHeight = 22.sp, softWrap = false)
                     }
                 }
             }

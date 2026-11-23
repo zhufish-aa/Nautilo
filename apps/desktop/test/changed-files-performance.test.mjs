@@ -22,7 +22,7 @@ test('repeated edits append private fragments without mutating frozen input or e
 
 test('lightweight counts agree with full projection across replacement, withdrawal, groups and scopes', () => {
   const sequences = [[], [edit(1)], [edit(1), edit(2,'b')], [edit(1), native(2,['b'])], [edit(1), native(2,[])],
-    [row(1,{kind:'tool_group',items:[edit(2,'a'),edit(3,'b')]}), native(4,['c'])],
+    [edit(2,'a'),edit(3,'b'),native(4,['c'])],
     [row(1,{kind:'file_change',files:[{path:'old',additions:0,deletions:0}]},'previous'),edit(2),native(3,[])]];
   for (const events of sequences) assert.equal(countChangedFiles(events),collectChangedFiles(events).length);
 });

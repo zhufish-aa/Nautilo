@@ -121,7 +121,7 @@ import org.json.JSONObject
                     efforts = efforts, onEffortChange = { selectedEffort = it }, team = teamSelectionName(selectedTeam, state),
                     cancel = close, done = {
                         if (!changed) close()
-                        else if (switching && (state.messages.isNotEmpty() || state.runs.isNotEmpty())) confirmSwitch = true
+                        else if (switching && (state.timeline?.blocks.orEmpty().isNotEmpty() || state.runs.isNotEmpty())) confirmSwitch = true
                         else apply()
                     }, choose = { page = it }, catalog = catalog, modelId = selectedModel, selectModel = selectModel,
                     newSession = false, saving = state.changing, modelEditable = editable && !loading,

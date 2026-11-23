@@ -444,6 +444,14 @@ async fn workflow_conversation_plan_waits_for_review_and_executes_the_edited_nes
             panic!("No durable plan from the main Agent");
         }
     };
+    let plan_card = |id: &Value| {
+        let timeline = fixture.service.events.timeline_open("main-session").unwrap();
+        let mut matching = timeline["blocks"].as_array().unwrap().iter()
+            .filter(|block| block["content"]["payload"]["plan"]["id"] == *id);
+        let card = matching.next().expect("The plan has a timeline block");
+        assert!(matching.next().is_none(), "A plan has one timeline block");
+        card.clone()
+    };
     let rejected = make_plan("first").await;
     assert_eq!(rejected["status"], "pending");
     let event = fixture.service.events.replay(Some("main-session"), None, None, None).unwrap()
@@ -454,9 +462,13 @@ async fn workflow_conversation_plan_waits_for_review_and_executes_the_edited_nes
     assert_eq!(rejected["nodes"][1]["memberName"], "Explorer");
     assert_eq!(fixture.probe.child_turns.load(Ordering::SeqCst), 0);
     assert!(workflows::list(&fixture.db.lock().unwrap().raw, Some("main-session"), false).unwrap().is_empty());
+    let pending_rejection = plan_card(&rejected["id"]);
     assert_eq!(fixture.service.decide_plan(&json!({
         "sessionId":"main-session","planId":rejected["id"],"action":"reject"
     })).unwrap()["status"], "rejected");
+    let rejected_card = plan_card(&rejected["id"]);
+    assert_eq!(rejected_card["blockId"], pending_rejection["blockId"]);
+    assert_eq!(rejected_card["result"]["payload"]["plan"]["status"], "rejected");
     assert_eq!(fixture.probe.child_turns.load(Ordering::SeqCst), 0);
 
     let pending = make_plan("second").await;
@@ -467,8 +479,23 @@ async fn workflow_conversation_plan_waits_for_review_and_executes_the_edited_nes
         "sessionId":"main-session","planId":pending["id"],"action":"approve",
         "assignments":{"review/explore":{"agentInstanceId":"alternate","model":"review-model","connectionId":null}}
     });
+    let pending_card = plan_card(&pending["id"]);
+    let revision = fixture.service.events.timeline_open("main-session").unwrap()["revision"].as_i64().unwrap();
     let confirmed = fixture.service.decide_plan(&approval).unwrap();
     assert_eq!(confirmed["status"], "approved");
+    let approved_card = plan_card(&pending["id"]);
+    assert_eq!(approved_card["blockId"], pending_card["blockId"]);
+    assert_eq!(approved_card["seq"], pending_card["seq"]);
+    assert_eq!(approved_card["result"]["payload"]["plan"]["runId"], confirmed["runId"]);
+    let changes = crate::database::timeline::changes(&fixture.db.lock().unwrap().raw, "main-session", revision).unwrap();
+    assert!(changes["changes"].as_array().unwrap().iter().any(|batch| {
+        batch["operations"].as_array().unwrap().iter().any(|operation| {
+            operation["type"] == "block_updated" && operation["blockId"] == pending_card["blockId"]
+                && operation["status"] == "approved"
+        })
+    }));
+    let events = fixture.service.events.replay(Some("main-session"), None, None, None).unwrap();
+    assert_eq!(events.iter().filter(|event| event["type"] == "workflow.plan" && event["payload"]["plan"]["id"] == pending["id"]).count(), 1);
     assert_eq!(confirmed["template"]["revision"], 1);
     assert_eq!(confirmed["nodes"][0]["assignment"]["agentInstanceId"], "agent");
     assert_eq!(confirmed["nodes"][1]["assignment"]["agentInstanceId"], "alternate");

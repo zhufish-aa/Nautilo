@@ -54,7 +54,7 @@ export function FileRefChip({
         event.stopPropagation();
         if (imagePath && !onOpenLocalFile) {
           openLightbox({ src: artifactUrlForPath(reference.path), name: basename(reference.path), path: reference.path });
-        } else if (target === "local-preview") onOpenLocalFile!(reference.path);
+        } else if (target === "local-preview") onOpenLocalFile!(reference.line === undefined ? reference.path : reference.path + ":" + reference.line);
         else if (target === "external") void openFileWithToast(reference.path, t);
         else openFilePreview(reference);
       }}

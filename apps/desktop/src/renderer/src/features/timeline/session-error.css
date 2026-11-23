@@ -13,7 +13,7 @@
 .session-error-details summary::-webkit-details-marker { display: none; }
 .session-error-details summary > svg { transition: transform 140ms ease; }
 .session-error-details[open] summary > svg { transform: rotate(90deg); }
-.session-error-details summary code { margin-left: 7px; color: var(--ink-2); background: transparent; font: 500 11px/1.5 "JetBrains Mono Variable", Consolas, monospace; }
+.session-error-details summary code { margin-left: 7px; color: var(--ink-2); background: transparent; font: 500 11px/1.5 var(--app-font-sans); }
 .session-error-details > div { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 13px; color: var(--ink-2); font-size: 12px; }
 .session-error-details pre { margin: 9px 0 0; font: 500 13px/1.7 var(--app-font-sans); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); max-height: 260px; overflow: auto; }
 .session-error-card a:focus-visible, .session-error-card button:focus-visible, .session-error-card summary:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 3px; }

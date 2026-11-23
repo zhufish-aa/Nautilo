@@ -11,8 +11,6 @@
   gap: 16px;
   min-width: 0;
   width: 100%;
-  max-width: 1160px;
-  margin-inline: auto;
   container-type: inline-size;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
@@ -20,6 +18,7 @@
 .usage-overview h2 { color: var(--ink); font-size: 13px; font-weight: 600; }
 .usage-overview :is(button, a, select, svg[tabindex]):focus-visible { outline: 2px solid var(--usage-blue); outline-offset: 2px; }
 .usage-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 9px 14px; border-bottom: 1px solid var(--usage-edge); }
+.usage-toolbar-slot { display: contents; }
 .usage-overview .usage-view-tabs { display: flex; gap: 14px; }
 .usage-overview .usage-view-tabs button {
   position: relative;
@@ -31,7 +30,7 @@
   white-space: nowrap;
   font-size: 13px;
 }
-.usage-overview .usage-view-tabs button[aria-selected="true"] { border-color: var(--usage-blue); color: var(--ink); font-weight: 600; }
+.usage-overview .usage-view-tabs button[aria-selected="true"] { color: var(--ink); font-weight: 600; }
 .usage-actions, .usage-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
 .usage-actions { padding-block: 3px; }
 .usage-actions > :is(button, a) {
@@ -139,10 +138,6 @@
 .usage-expanded td > div { display: grid; grid-template-columns: minmax(90px, auto) 1fr; gap: 12px; padding-block: 3px; }
 .usage-expanded strong { color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
 .usage-more, .usage-table-empty { display: block; width: 100%; text-align: center; border-top: 1px solid var(--usage-edge); padding: 11px 10px; color: var(--ink-2); font-size: 12px; }
-.usage-overview .request-logs :is(.request-log-table, .request-log-toolbar label, .request-log-toolbar select) {
-  border-color: var(--usage-edge);
-  background: var(--usage-surface);
-}
 @container (max-width: 730px) {
   .usage-charts { grid-template-columns: minmax(0, 1fr); }
   .usage-charts > .usage-panel { padding-inline: 13px; }
@@ -164,11 +159,6 @@
   .usage-table td { font-size: 10px; }
   .usage-table :is(th, td):last-child { width: 49px; padding-inline-end: 5px; }
   .usage-row-status { font-size: 9px; gap: 3px; }
-  .usage-overview .request-logs :is(.request-log-columns, .request-log-summary) {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 46px) minmax(0, 46px) minmax(0, 66px);
-    gap: 6px;
-    padding-inline: 8px;
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   .usage-overview *, .usage-overview *::before { animation-duration: .01ms !important; transition-duration: .01ms !important; }
