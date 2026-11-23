@@ -400,6 +400,28 @@ struct PiParseState {
     tool_args: HashMap<String, (String, Value)>,
 }
 
+impl PiParseState {
+    fn start_message(&mut self) {
+        self.message_sequence += 1;
+        // The daemon remembers native origins across turns and worker restarts.
+        // A process-local counter can therefore attach a new reply to an old run.
+        // Allocate once per stream, not per event/run callback: idle callbacks
+        // must retain the same identity until this message actually finishes.
+        let id = Uuid::new_v4();
+        self.current_message_id = Some(format!("pi-message-{id}"));
+        self.current_thinking_id = Some(format!("pi-thinking-{id}"));
+        self.streamed_text = false;
+        self.streamed_thinking = false;
+    }
+
+    fn ensure_message(&mut self) {
+        // Native commands can send a complete assistant message without start.
+        if self.current_message_id.is_none() {
+            self.start_message();
+        }
+    }
+}
+
 fn pi_file_diff(name: &str, args: &Value) -> Option<Value> {
     let path = args.get("path").and_then(Value::as_str)?;
     let build = |operation: &str, before: &str, after: &str| {
@@ -464,17 +486,14 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
             if message.get("role").and_then(Value::as_str) != Some("assistant") {
                 return vec![];
             }
-            state.message_sequence += 1;
-            state.current_message_id = Some(format!("pi-message-{}", state.message_sequence));
-            state.current_thinking_id = Some(format!("pi-thinking-{}", state.message_sequence));
-            state.streamed_text = false;
-            state.streamed_thinking = false;
+            state.start_message();
             vec![]
         }
         "message_update" => {
             let delta = value.get("assistantMessageEvent").cloned().unwrap_or(Value::Null);
             match delta.get("type").and_then(Value::as_str) {
                 Some("text_delta") => {
+                    state.ensure_message();
                     state.streamed_text = true;
                     vec![json!({
                         "kind": "message",
@@ -485,6 +504,7 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
                     })]
                 }
                 Some("thinking_delta") => {
+                    state.ensure_message();
                     state.streamed_thinking = true;
                     vec![json!({
                         "kind": "thinking",
@@ -511,6 +531,7 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
             if message.get("role").and_then(Value::as_str) != Some("assistant") {
                 return vec![];
             }
+            state.ensure_message();
             let content = message.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
             let stop_reason = message.get("stopReason").and_then(Value::as_str).map(str::to_string);
             state.last_assistant_stop_reason = stop_reason.clone();
@@ -599,6 +620,10 @@ fn parse_pi_rpc_event_inner(value: &Value, state: &mut PiParseState) -> Vec<Valu
                         .unwrap_or_else(|| format!("Pi assistant stopped with {}", stop_reason.unwrap_or_else(|| "an unknown model error".to_string())))
                 }));
             }
+            // Only a native message boundary releases the identity. A user
+            // turn boundary can arrive while a late/idle stream is still open.
+            state.current_message_id = None;
+            state.current_thinking_id = None;
             events
         }
         "tool_execution_start" => {
@@ -1456,7 +1481,7 @@ fn handle_rpc_value(
             let _ = sender.send(json!({
                 "kind": "message",
                 "phase": "completed",
-                "messageId": "pi-compact",
+                "messageId": format!("pi-compact:{prompt_id}"),
                 "text": if nothing { "当前 Pi 会话没有可压缩的旧内容，无需压缩。" } else { "Pi 会话压缩完成。" },
                 "raw": value
             }));
@@ -1660,6 +1685,9 @@ fn copy_recursive(source: &std::path::Path, target: &std::path::Path) -> std::io
 async fn main() {
     agenthub_plugin_sdk::serve(PiPlugin::new()).await;
 }
+#[cfg(test)]
+mod stream_identity_tests;
+
 #[cfg(test)]
 mod audit_tests {
     use super::*;

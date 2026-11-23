@@ -12,12 +12,14 @@ mod quota;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, watch};
 
 use agenthub_plugin_sdk::jsonrpc::{JsonRpcClient, JsonRpcEvent};
 use agenthub_plugin_sdk::process::{self, ProcessEvent, ProcessHandle, ProcessRequest};
+use agenthub_plugin_sdk::session_pool::{self, SessionPool};
 use agenthub_plugin_sdk::ProviderPlugin;
 
 fn descriptor() -> Value {
@@ -105,9 +107,15 @@ async fn selected_trae_binary(instance: &Value) -> Option<TraeBinary> {
 struct TraePlugin {
     interactions: std::sync::Mutex<Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>>,
     runs: Arc<ActiveRuns>,
+    pool: SessionPool<AcpResident>,
 }
 
-type ActiveRuns = Mutex<HashMap<String, Option<ActiveProcess>>>;
+type ActiveRuns = Mutex<HashMap<String, ActiveRun>>;
+
+struct ActiveRun {
+    local_session: Option<String>,
+    process: Option<ActiveProcess>,
+}
 
 struct ActiveProcess {
     handle: ProcessHandle,
@@ -116,7 +124,7 @@ struct ActiveProcess {
 
 impl TraePlugin {
     fn new() -> Self {
-        Self { interactions: std::sync::Mutex::new(None), runs:Arc::default() }
+        Self { interactions: Mutex::new(None), runs: Arc::default(), pool: SessionPool::default() }
     }
 }
 
@@ -179,10 +187,18 @@ impl ProviderPlugin for TraePlugin {
         let interactions = self.interactions.lock().unwrap().clone();
         let runs = self.runs.clone();
         let run_id = run_id.to_string();
-        runs.lock().unwrap().insert(run_id.clone(), None);
+        let local_session = request["localSessionId"].as_str().filter(|id| !id.is_empty()).map(str::to_string);
+        let pool = self.pool.clone();
+        {
+            let mut active = runs.lock().unwrap();
+            anyhow::ensure!(!active.contains_key(&run_id), "Trae run is already active");
+            anyhow::ensure!(local_session.is_none() || !active.values().any(|run| run.local_session == local_session),
+                "Trae session already has an active turn");
+            active.insert(run_id.clone(), ActiveRun { local_session, process: None });
+        }
         tokio::spawn(async move {
-            let result = run(request, resume, sender.clone(), interactions, &runs, &run_id).await;
-            let process = runs.lock().unwrap().remove(&run_id).flatten();
+            let result = run(request, resume, sender.clone(), interactions, &runs, &run_id, &pool).await;
+            let process = runs.lock().unwrap().remove(&run_id).and_then(|run| run.process);
             if let Some(process) = process { process.handle.cancel().await; }
             if let Err(error) = result {
                 let _ = sender.send(json!({ "kind": "error", "message": error.to_string() }));
@@ -193,14 +209,17 @@ impl ProviderPlugin for TraePlugin {
     }
 
     async fn cancel(&self, run_id: &str) {
-        let process = self.runs.lock().unwrap().remove(run_id).flatten();
+        let process = self.runs.lock().unwrap().remove(run_id).and_then(|run| run.process);
         if let Some(process) = process {
             if let Some((session_id, cancelled)) = process.prompt {
                 process.handle.write(&format!("{}\n", json!({
                     "jsonrpc": "2.0", "method": "session/cancel", "params": { "sessionId": session_id }
                 })));
                 let _ = cancelled.send(true);
-                if tokio::time::timeout(std::time::Duration::from_millis(1200), process.handle.wait()).await.is_ok() {
+                // An interrupted ACP worker must not accept another prompt,
+                // even if it acknowledged cancellation and kept stdin open.
+                process.handle.end_stdin();
+                if tokio::time::timeout(Duration::from_millis(1200), process.handle.wait()).await.is_ok() {
                     return;
                 }
             }
@@ -208,8 +227,25 @@ impl ProviderPlugin for TraePlugin {
         }
     }
 
+    async fn release_session(&self, request: &Value) -> anyhow::Result<()> {
+        let Some(session) = request["localSessionId"].as_str() else { return Ok(()); };
+        // Same lock order as the successful turn handoff: once released, an
+        // in-flight turn must never put its worker back into the pool.
+        let (resident, processes) = {
+            let mut active = self.runs.lock().unwrap();
+            let ids: Vec<_> = active.iter().filter(|(_, run)| run.local_session.as_deref() == Some(session))
+                .map(|(id, _)| id.clone()).collect();
+            let processes: Vec<_> = ids.iter().filter_map(|id| active.remove(id).and_then(|run| run.process)).collect();
+            (self.pool.retire(session), processes)
+        };
+        if let Some(resident) = resident { resident.close().await; }
+        for process in processes { process.handle.cancel().await; }
+        Ok(())
+    }
+
     async fn dispose(&self) {
-        let processes: Vec<_> = self.runs.lock().unwrap().drain().filter_map(|(_,process)|process).collect();
+        let processes: Vec<_> = self.runs.lock().unwrap().drain().filter_map(|(_, run)| run.process).collect();
+        for worker in self.pool.drain() { worker.close().await; }
         for process in processes { process.handle.cancel().await; }
     }
 }
@@ -218,7 +254,7 @@ async fn register_process(runs: &ActiveRuns, run_id: &str, process: ProcessHandl
     let registered = {
         let mut runs = runs.lock().unwrap();
         if let Some(slot) = runs.get_mut(run_id) {
-            *slot = Some(ActiveProcess { handle: process.clone(), prompt: None });
+            slot.process = Some(ActiveProcess { handle: process.clone(), prompt: None });
             true
         } else { false }
     };
@@ -233,7 +269,24 @@ async fn run(
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
     runs: &ActiveRuns,
     run_id: &str,
+    pool: &SessionPool<AcpResident>,
 ) -> anyhow::Result<()> {
+    let key = request["localSessionId"].as_str().filter(|id| !id.is_empty()).map(str::to_string);
+    // Includes executable, cwd, bindings, environment and credentials, but
+    // excludes the prompt and attachments. In particular, never reuse a dead
+    // per-turn API proxy or a worker from a different configured account.
+    let identity = session_pool::identity(&request);
+    if let Some((previous, mut worker)) = key.as_deref().and_then(|key| pool.take(key)) {
+        if previous == identity && worker.session_id.as_deref() == resume.as_deref() && resume.is_some()
+            && worker.handle().is_some_and(ProcessHandle::is_alive) {
+            worker.stop_idle_reader().await;
+            if worker.handle().is_some_and(ProcessHandle::is_alive) {
+                return run_acp_turn(&request, resume, sender, interactions, runs, run_id, pool, key, identity,
+                    Some(worker), None).await;
+            }
+        }
+        worker.close().await;
+    }
     let Some(binary) = selected_trae_binary(&request["instance"]).await else {
         anyhow::bail!("未找到可用的 Trae CLI（traecli 或 trae-cli）");
     };
@@ -254,7 +307,8 @@ async fn run(
         return plain_run(&instance, &request, sender, runs, run_id).await;
     }
     let fallback = if modern_cli(&binary) { "--acp" } else { "acp" };
-    acp_run(&instance, &request, resume, sender, interactions, runs, run_id, fallback).await
+    run_acp_turn(&request, resume, sender, interactions, runs, run_id, pool, key, identity,
+        None, Some((&instance, fallback))).await
 }
 
 fn modern_cli(binary: &TraeBinary) -> bool {
@@ -484,8 +538,8 @@ async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSen
     env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
     env.insert("PYTHONUTF8".to_string(), "1".to_string());
     env.insert("PYTHONIOENCODING".to_string(), "utf-8".to_string());
-    let mut executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "trae-cli".to_string());
-    let mut args = trae_cli_args(instance, request);
+    let executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "trae-cli".to_string());
+    let args = trae_cli_args(instance, request);
     let started = process::start(&ProcessRequest {
         command: executable,
         args,
@@ -504,6 +558,7 @@ async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSen
     let mut bridge_ready = false;
     let mut streamed_message = false;
     let mut streamed_usage = false;
+    let fallback_message_id = format!("trae-cli-message:{run_id}");
     let mut events = started.events;
     while let Some(event) = events.recv().await {
         match event {
@@ -536,14 +591,14 @@ async fn plain_run(instance: &Value, request: &Value, sender: mpsc::UnboundedSen
                         anyhow::ensure!(trajectory["success"]==true,"Trae Agent did not complete the task; check the configured model and execution result");
                         let answer = trajectory["final_result"].as_str().or_else(||trajectory["llm_interactions"].as_array()?.iter().rev().find_map(|i|i["response"]["content"].as_str())).unwrap_or("");
                         anyhow::ensure!(!answer.trim().is_empty(),"Trae Agent returned no assistant response");
-                        if !streamed_message { let _ = sender.send(json!({"kind":"message","phase":"completed","text":answer})); }
+                        if !streamed_message { let _ = sender.send(json!({"kind":"message","phase":"completed","messageId":fallback_message_id,"text":answer})); }
                         if !streamed_usage {
                             for event in trajectory_usage(&trajectory) {
                                 let _ = sender.send(event);
                             }
                         }
                     } else if !text.is_empty() {
-                        let _ = sender.send(json!({ "kind": "message", "phase": "completed", "text": text }));
+                        let _ = sender.send(json!({ "kind": "message", "phase": "completed", "messageId": fallback_message_id, "text": text }));
                     }
                     let _ = sender.send(json!({ "kind": "status", "phase": "turn_completed" }));
                 } else {
@@ -627,147 +682,319 @@ fn trajectory_normalizes_openai_and_anthropic_cache_buckets() {
     assert!(trajectory_usage(&Value::Null).is_empty());
 }
 
-async fn acp_run(
-    instance: &Value,
+/// The ACP transport survives foreground prompts. The SDK reader keeps framing
+/// stdout for this process; an idle reader drains notifications between turns.
+struct AcpResident {
+    rpc: Arc<JsonRpcClient>,
+    process: Option<ProcessHandle>,
+    session_id: Option<String>,
+    idle_reader: Option<tokio::task::JoinHandle<()>>,
+    output: Arc<Mutex<AcpOutput>>,
+}
+
+struct AcpOutput { bytes: usize, max: usize }
+
+fn acp_output_limit(request: &Value) -> usize {
+    request["maxOutputBytes"].as_u64()
+        .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+        .unwrap_or(256 * 1024 * 1024)
+}
+
+impl AcpResident {
+    fn new(started: process::StartedProcess, max: usize) -> Self {
+        let process = started.handle;
+        let kill = process.clone();
+        let mut events = started.events;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let output = Arc::new(Mutex::new(AcpOutput { bytes: 0, max }));
+        let budget = output.clone();
+        // Limit actual process bytes before the JSON reader can accumulate an
+        // unterminated line. A resident worker resets the count on each turn.
+        tokio::spawn(async move {
+            let mut exceeded = false;
+            while let Some(event) = events.recv().await {
+                if let ProcessEvent::Stdout(text) | ProcessEvent::Stderr(text) = &event {
+                    if exceeded { continue; }
+                    exceeded = {
+                        let mut budget = budget.lock().unwrap();
+                        budget.bytes = budget.bytes.saturating_add(text.len());
+                        budget.bytes > budget.max
+                    };
+                    if exceeded {
+                        let _ = tx.send(ProcessEvent::Timeout { reason: "max_output".into() });
+                        kill.cancel().await;
+                        continue;
+                    }
+                }
+                if tx.send(event).is_err() { break; }
+            }
+        });
+        let rpc = Arc::new(JsonRpcClient::new(process.clone(), rx));
+        Self { rpc, process: Some(process), session_id: None, idle_reader: None, output }
+    }
+
+    fn handle(&self) -> Option<&ProcessHandle> { self.process.as_ref() }
+
+    fn begin_budget(&self, max: usize) {
+        *self.output.lock().unwrap() = AcpOutput { bytes: 0, max };
+    }
+
+    fn exceeded_output(&self) -> bool {
+        let output = self.output.lock().unwrap();
+        output.bytes > output.max
+    }
+
+    fn start_idle_reader(&mut self) {
+        self.begin_budget(256 * 1024 * 1024);
+        let rpc = self.rpc.clone();
+        self.idle_reader = Some(tokio::spawn(async move {
+            // ACP updates belong to the outstanding session/prompt. An
+            // unlabelled update outside it must not start the next reply.
+            while let Some(event) = rpc.next_event().await {
+                if !discard_idle_event(&rpc, event) { break; }
+            }
+        }));
+    }
+
+    async fn stop_idle_reader(&mut self) {
+        if let Some(reader) = self.idle_reader.take() {
+            reader.abort();
+            let _ = reader.await;
+        }
+    }
+
+    async fn close(mut self) {
+        self.stop_idle_reader().await;
+        if let Some(process) = self.process.as_ref() {
+            process.end_stdin();
+            if tokio::time::timeout(Duration::from_millis(900), process.wait()).await.is_err() {
+                process.cancel().await;
+            }
+        }
+        self.process.take();
+    }
+}
+
+impl Drop for AcpResident {
+    fn drop(&mut self) {
+        if let Some(reader) = self.idle_reader.take() { reader.abort(); }
+        if let Some(process) = self.process.take() {
+            // A deadline can drop an in-progress setup or prompt future.
+            tokio::spawn(async move { process.cancel().await; });
+        }
+    }
+}
+
+fn discard_idle_event(rpc: &JsonRpcClient, event: JsonRpcEvent) -> bool {
+    match event {
+        JsonRpcEvent::Request { id, method, .. } => match method.as_str() {
+            "session/request_permission" => rpc.respond(&id, json!({"outcome":{"outcome":"cancelled"}})),
+            "elicitation/create" => rpc.respond(&id, json!({"action":"cancel"})),
+            _ => rpc.respond_error(&id, -32601, &format!("Nautilo does not support ACP request {method}")),
+        },
+        JsonRpcEvent::Transport(ProcessEvent::Exit { .. }) => return false,
+        _ => {}
+    }
+    true
+}
+
+async fn next_acp_event(rpc: &JsonRpcClient, idle: Duration) -> anyhow::Result<Option<JsonRpcEvent>> {
+    let event = tokio::time::timeout(idle, rpc.next_event()).await.map_err(|_| AcpLimit("idle"))?;
+    if matches!(&event, Some(JsonRpcEvent::Transport(ProcessEvent::Timeout { reason })) if reason == "max_output") {
+        return Err(AcpLimit("max_output").into());
+    }
+    Ok(event)
+}
+
+#[derive(Debug)]
+struct AcpLimit(&'static str);
+impl std::fmt::Display for AcpLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Trae ACP exceeded its per-turn {} limit", self.0)
+    }
+}
+impl std::error::Error for AcpLimit {}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_acp_turn(
     request: &Value,
     resume: Option<String>,
     sender: mpsc::UnboundedSender<Value>,
     interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
     runs: &ActiveRuns,
     run_id: &str,
-    fallback: &str,
+    pool: &SessionPool<AcpResident>,
+    key: Option<String>,
+    identity: Value,
+    mut worker: Option<AcpResident>,
+    launch: Option<(&Value, &str)>,
 ) -> anyhow::Result<()> {
-    let mut env: HashMap<String, String> = request
-        .get("env")
-        .and_then(Value::as_object)
-        .map(|env| env.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
-        .unwrap_or_default();
-    env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
-    let executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "traecli".to_string());
-    let cwd = request.get("cwd").and_then(Value::as_str).map(str::to_string);
-
-    let spawn_acp = |acp_args: &[&str]| {
-        let mut args = base_args(instance);
-        args.extend(acp_args.iter().map(|s| s.to_string()));
-        process::start(&ProcessRequest {
-            command: executable.clone(),
-            args,
-            cwd: cwd.clone(),
-            env: Some(env.clone()),
-            timeout_ms: request.get("timeoutMs").and_then(Value::as_u64),
-            idle_timeout_ms: request.get("idleTimeoutMs").and_then(Value::as_u64),
-            // ACP can stream cumulative tool inputs; no plain-text 20 MB cap.
-            max_output_bytes: Some(request.get("maxOutputBytes").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(256 * 1024 * 1024)),
-            ..Default::default()
-        })
+    let total = Duration::from_millis(request["timeoutMs"].as_u64().unwrap_or(30 * 60_000));
+    let operation = execute_acp_turn(request, resume, &sender, interactions, runs, run_id, &mut worker, launch);
+    let result = tokio::time::timeout(total, operation).await.unwrap_or_else(|_| Err(AcpLimit("timeout").into()));
+    let exit_code = match result {
+        Ok(code) => code,
+        Err(error) => {
+            if let Some(worker) = worker.take() { worker.close().await; }
+            if let Some(limit) = error.downcast_ref::<AcpLimit>() {
+                let _ = sender.send(json!({"kind":"timeout","reason":limit.0}));
+            }
+            return Err(error);
+        }
     };
-
-    // CLI 2.0 documents --acp as the alternate entry point. Older builds can
-    // use bare acp. Keep the handshake deadline separate from the turn budget.
-    let initialize = json!({
-        "protocolVersion": 1,
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "elicitation": if interactions.is_some() { json!({"form": {}}) } else { Value::Null }
-        },
-        "clientInfo": { "name": "Nautilo", "version": "0.1.0" }
-    });
-    let mut started = spawn_acp(&["acp", "serve"])?;
-    register_process(runs, run_id, started.handle.clone()).await?;
-    let mut rpc = JsonRpcClient::new(started.handle.clone(), started.events);
-    if let Err(primary) = initialize_acp(&rpc, &initialize).await {
-        started.handle.cancel().await;
-        started = spawn_acp(&[fallback])?;
-        register_process(runs, run_id, started.handle.clone()).await?;
-        rpc = JsonRpcClient::new(started.handle.clone(), started.events);
-        initialize_acp(&rpc, &initialize).await.map_err(|fallback_error| {
-            anyhow::anyhow!("TRAE CLI ACP 启动失败（acp serve: {primary}；{fallback}: {fallback_error}）")
-        })?;
+    if let Some(mut worker) = worker {
+        {
+            let mut active = runs.lock().unwrap();
+            if let Some(key) = key.filter(|_| exit_code == 0 && !sender.is_closed() && worker.handle().is_some_and(ProcessHandle::is_alive)) {
+                if active.remove(run_id).is_some() {
+                    // Keep put/retire atomic with removal from the active map.
+                    worker.start_idle_reader();
+                    pool.put(key, identity, worker);
+                    let _ = sender.send(json!({"kind":"exit","exitCode":0}));
+                    return Ok(());
+                }
+            }
+        }
+        worker.close().await;
     }
-    let process = started.handle.clone();
+    let _ = sender.send(json!({"kind":"exit","exitCode":exit_code}));
+    Ok(())
+}
 
-    let mcp_servers = acp_mcp_servers(request);
+#[allow(clippy::too_many_arguments)]
+async fn execute_acp_turn(
+    request: &Value,
+    resume: Option<String>,
+    sender: &mpsc::UnboundedSender<Value>,
+    interactions: Option<Arc<dyn agenthub_plugin_sdk::InteractionChannel>>,
+    runs: &ActiveRuns,
+    run_id: &str,
+    worker: &mut Option<AcpResident>,
+    launch: Option<(&Value, &str)>,
+) -> anyhow::Result<i32> {
+    let reused = worker.is_some();
+    let max = acp_output_limit(request);
+    let idle = Duration::from_millis(request["idleTimeoutMs"].as_u64().unwrap_or(30 * 60_000));
+    if let Some(worker) = worker.as_ref() { worker.begin_budget(max); }
+    if let Some((instance, fallback)) = launch {
+        let mut env: HashMap<String, String> = request
+            .get("env").and_then(Value::as_object)
+            .map(|env| env.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+            .unwrap_or_default();
+        env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
+        let executable = str_of(instance, "executable").filter(|e| !e.is_empty()).unwrap_or_else(|| "traecli".to_string());
+        let cwd = request.get("cwd").and_then(Value::as_str);
+        let spawn = |entry: &[&str]| {
+            let mut args = base_args(instance);
+            args.extend(entry.iter().map(|s| s.to_string()));
+            // All limits are enforced for each ACP turn, not against the age
+            // of the resident CLI process.
+            process::start(&ProcessRequest { command: executable.clone(), args, cwd: cwd.map(str::to_string),
+                env: Some(env.clone()), ..Default::default() }).map(|started| AcpResident::new(started, max))
+        };
+        let initialize = json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "fs": { "readTextFile": false, "writeTextFile": false },
+                "elicitation": if interactions.is_some() { json!({"form": {}}) } else { Value::Null }
+            },
+            "clientInfo": { "name": "Nautilo", "version": "0.1.0" }
+        });
+        *worker = Some(spawn(&["acp", "serve"])?);
+        register_process(runs, run_id, worker.as_ref().unwrap().handle().unwrap().clone()).await?;
+        if let Err(primary) = initialize_acp(&worker.as_ref().unwrap().rpc, &initialize).await {
+            if worker.as_ref().unwrap().exceeded_output() { return Err(AcpLimit("max_output").into()); }
+            worker.take().unwrap().close().await;
+            *worker = Some(spawn(&[fallback])?);
+            register_process(runs, run_id, worker.as_ref().unwrap().handle().unwrap().clone()).await?;
+            if let Err(fallback_error) = initialize_acp(&worker.as_ref().unwrap().rpc, &initialize).await {
+                if worker.as_ref().unwrap().exceeded_output() { return Err(AcpLimit("max_output").into()); }
+                anyhow::bail!("TRAE CLI ACP 启动失败（acp serve: {primary}；{fallback}: {fallback_error}）");
+            }
+        }
+        let worker = worker.as_mut().unwrap();
+        let rpc = &worker.rpc;
+        let session_method = if resume.is_some() { "session/load" } else { "session/new" };
+        let mcp_servers = acp_mcp_servers(request);
+        let session_params = match &resume {
+            Some(session) => json!({ "sessionId": session, "cwd": cwd, "mcpServers": mcp_servers }),
+            None => json!({ "cwd": cwd, "mcpServers": mcp_servers }),
+        };
+        let (session_request_id, session_result) = rpc.request_with_id(session_method, session_params);
+        drop(session_result);
+        // session/load replays history before responding. It is never the
+        // output of the new prompt. Handle genuine setup requests separately.
+        let response = loop {
+            match next_acp_event(rpc, idle).await? {
+                Some(JsonRpcEvent::Response { id, result, error }) if same_id(&id, &json!(session_request_id)) => {
+                    if let Some(error) = error { anyhow::bail!(acp_error_message(&error)); }
+                    break result.ok_or_else(|| anyhow::anyhow!("Trae ACP {session_method} returned no result"))?;
+                }
+                Some(JsonRpcEvent::Request { id, method, params }) => {
+                    tokio::select! {
+                        _ = worker.handle().unwrap().wait() => anyhow::bail!("TRAE CLI ACP closed during {session_method}"),
+                        _ = answer_acp_request(rpc, &id, &method, &params, &interactions, run_id) => {}
+                    }
+                }
+                Some(JsonRpcEvent::Transport(ProcessEvent::Exit { .. })) | None => {
+                    anyhow::bail!("TRAE CLI ACP closed before {session_method} completed");
+                }
+                Some(_) => {}
+            }
+        };
+        let session_id = response["sessionId"].as_str().filter(|id| !id.is_empty()).map(str::to_string).or(resume);
+        let Some(session_id) = session_id else { anyhow::bail!("TRAE CLI ACP did not return a session id"); };
+        let _ = sender.send(json!({"kind":"session","providerSessionId":session_id}));
+        if let Err(error) = apply_acp_config(rpc, &session_id, &response, request).await {
+            if worker.exceeded_output() { return Err(AcpLimit("max_output").into()); }
+            return Err(error);
+        }
+        worker.session_id = Some(session_id);
+    }
+
+    let worker = worker.as_ref().ok_or_else(|| anyhow::anyhow!("TRAE CLI ACP process is missing"))?;
+    let process = worker.handle().unwrap();
+    let rpc = &worker.rpc;
+    let session_id = worker.session_id.as_deref().unwrap();
+    if reused {
+        register_process(runs, run_id, process.clone()).await?;
+    }
+    // Close the small handoff gap after stopping the previous idle reader.
+    // Do not spend a timer tick here if the queue is already empty.
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::ZERO, rpc.next_event()).await {
+        if !discard_idle_event(rpc, event) { anyhow::bail!("TRAE CLI ACP exited before the next prompt"); }
+    }
+    anyhow::ensure!(process.is_alive(), "TRAE CLI ACP exited before the next prompt");
+    if reused { let _ = sender.send(json!({"kind":"session","providerSessionId":session_id})); }
+    let _ = sender.send(json!({"kind":"status","phase":"runtime_ready",
+        "raw":{"providerId":"trae","transport":"acp","reused":reused,"pid":process.pid}}));
+    let prompt = agenthub_plugin_sdk::images::acp_prompt(request)?;
+    let (cancel, mut cancelled) = watch::channel(false);
+    let prompt_id = {
+        let mut active = runs.lock().unwrap();
+        let Some(entry) = active.get_mut(run_id).and_then(|run| run.process.as_mut()) else { return Ok(130); };
+        // Queue the prompt before cancellation can address this session.
+        let (id, _) = rpc.request_with_id("session/prompt", json!({"sessionId":session_id,"prompt":prompt}));
+        entry.prompt = Some((session_id.to_string(), cancel));
+        id
+    };
+    let _ = sender.send(json!({"kind":"status","phase":"turn_started"}));
     let mut state = TraeAcpParseState {
-        message_id: "trae-message-1".to_string(),
-        thinking_id: "trae-thinking-1".to_string(),
+        message_id: format!("trae-message:{run_id}"),
+        thinking_id: format!("trae-thinking:{run_id}"),
         ..Default::default()
     };
     let mut message_streamed = false;
     let mut thinking_streamed = false;
 
-    let session_method = if resume.is_some() { "session/load" } else { "session/new" };
-    let session_params = match &resume {
-        Some(session) => json!({ "sessionId": session, "cwd": cwd, "mcpServers": mcp_servers }),
-        None => json!({ "cwd": cwd, "mcpServers": mcp_servers }),
-    };
-    let (session_request_id, session_result) = rpc.request_with_id(session_method, session_params);
-    drop(session_result);
-    // Handle permission requests during setup. session/load can also replay
-    // history here, before the next prompt begins.
-    let session_response = loop {
-        match rpc.next_event().await {
-            Some(JsonRpcEvent::Response { id, result, error }) if same_id(&id, &json!(session_request_id)) => {
-                if let Some(error) = error {
-                    anyhow::bail!(acp_error_message(&error));
-                }
-                break result.ok_or_else(|| anyhow::anyhow!("Trae ACP {session_method} returned no result"))?;
-            }
-            Some(JsonRpcEvent::Request { id, method, params }) => {
-                tokio::select! {
-                    _ = process.wait() => anyhow::bail!("TRAE CLI ACP closed during {session_method}"),
-                    _ = answer_acp_request(&rpc, &id, &method, &params, &interactions, run_id) => {}
-                }
-            }
-            Some(JsonRpcEvent::Transport(ProcessEvent::Exit { .. })) | None => {
-                anyhow::bail!("TRAE CLI ACP closed before {session_method} completed");
-            }
-            Some(_) => {}
-        }
-    };
-    let session_id = session_response
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|id| !id.is_empty())
-        .or(resume);
-    let Some(session_id) = session_id else {
-        anyhow::bail!("TRAE CLI ACP did not return a session id");
-    };
-    let _ = sender.send(json!({ "kind": "session", "providerSessionId": session_id }));
-    apply_acp_config(&rpc, &session_id, &session_response, request).await?;
-    let prompt = agenthub_plugin_sdk::images::acp_prompt(request)?;
-    let (cancel, mut cancelled) = watch::channel(false);
-    let prompt_id = {
-        let mut active = runs.lock().unwrap();
-        let Some(entry) = active.get_mut(run_id).and_then(Option::as_mut) else {
-            let _ = sender.send(json!({ "kind": "exit", "exitCode": 130 }));
-            return Ok(());
-        };
-        // Queue the prompt before cancellation can address this session.
-        let (id, _) = rpc.request_with_id("session/prompt", json!({ "sessionId": session_id, "prompt": prompt }));
-        entry.prompt = Some((session_id.clone(), cancel));
-        id
-    };
-    let _ = sender.send(json!({ "kind": "status", "phase": "turn_started" }));
-
-    loop {
-        let Some(event) = rpc.next_event().await else {
-            break;
-        };
+    while let Some(event) = next_acp_event(rpc, idle).await? {
         match event {
-            JsonRpcEvent::Notification { method, params } if method == "session/update"
-                && params["sessionId"].as_str().is_none_or(|id| id == session_id) => {
+            JsonRpcEvent::Notification { method, params } if method == "session/update" && params["sessionId"].as_str().is_none_or(|id| id == session_id) => {
                 let update = params.get("update").cloned().unwrap_or(Value::Null);
                 for item in parse_trae_acp_update(&update, &mut state) {
-                    if item.get("kind").and_then(Value::as_str) == Some("message") {
-                        message_streamed = true;
-                    }
-                    if item.get("kind").and_then(Value::as_str) == Some("thinking") {
-                        thinking_streamed = true;
-                    }
-                    if sender.send(item).is_err() {
-                        return Ok(());
-                    }
+                    message_streamed |= item["kind"] == "message";
+                    thinking_streamed |= item["kind"] == "thinking";
+                    if sender.send(item).is_err() { return Ok(130); }
                 }
             }
             JsonRpcEvent::Request { id, method, params } => {
@@ -779,72 +1006,57 @@ async fn acp_run(
                     biased;
                     _ = cancelled.wait_for(|value| *value) => {
                         match method.as_str() {
-                            "session/request_permission" => rpc.respond(&id, json!({"outcome": {"outcome": "cancelled"}})),
-                            "elicitation/create" => rpc.respond(&id, json!({"action": "cancel"})),
+                            "session/request_permission" => rpc.respond(&id, json!({"outcome":{"outcome":"cancelled"}})),
+                            "elicitation/create" => rpc.respond(&id, json!({"action":"cancel"})),
                             _ => rpc.respond_error(&id, -32601, &format!("Nautilo does not support ACP request {method}")),
                         }
                     }
                     _ = process.wait() => break,
-                    _ = answer_acp_request(&rpc, &id, &method, &params, &interactions, run_id) => {}
+                    _ = answer_acp_request(rpc, &id, &method, &params, &interactions, run_id) => {}
                 }
             }
             JsonRpcEvent::Response { id, result, error } if same_id(&id, &json!(prompt_id)) => {
-                // The daemon coalesces delta buffers when a completed event
-                // carries no text.
                 if message_streamed {
-                    let _ = sender.send(json!({ "kind": "message", "phase": "completed", "messageId": state.message_id, "text": "" }));
+                    let _ = sender.send(json!({"kind":"message","phase":"completed","messageId":state.message_id,"text":""}));
                 }
                 if thinking_streamed {
-                    let _ = sender.send(json!({ "kind": "thinking", "phase": "completed", "messageId": state.thinking_id, "text": "" }));
+                    let _ = sender.send(json!({"kind":"thinking","phase":"completed","messageId":state.thinking_id,"text":""}));
                 }
                 if let Some(usage) = result.as_ref().and_then(|value| agenthub_plugin_sdk::usage::acp_prompt_usage(&value["usage"])) {
                     let _ = sender.send(usage);
                 }
                 let was_cancelled = *cancelled.borrow() || result.as_ref().is_some_and(|result| result["stopReason"] == "cancelled");
                 let phase = if was_cancelled { "turn_cancelled" } else if error.is_some() { "turn_failed" } else { "turn_completed" };
-                let _ = sender.send(json!({ "kind": "status", "phase": phase }));
+                let _ = sender.send(json!({"kind":"status","phase":phase}));
                 let exit_code = if was_cancelled { 130 } else { i32::from(error.is_some()) };
                 if let Some(error) = error.filter(|_| !was_cancelled) {
                     let message = if error.to_string().contains("keyring") && request.pointer("/instance/providerOptions/runtimeConnectionId").is_some() {
                         "当前安装的 Trae CLI 在执行自定义 API 前仍要求原生登录，但没有找到其登录凭据。请完成此 CLI 的登录，或为 Trae 插件指定支持直接 API 的 trae-agent 可执行文件。".to_string()
                     } else { acp_error_message(&error) };
-                    let _ = sender.send(json!({ "kind": "error", "message": message }));
+                    let _ = sender.send(json!({"kind":"error","message":message}));
                 }
-                // Let the CLI flush native session data before another turn
-                // opens the same session. Bound shutdown for older ACP builds.
-                process.end_stdin();
-                if tokio::time::timeout(std::time::Duration::from_millis(900), process.wait()).await.is_err() {
-                    process.cancel().await;
-                }
-                let _ = sender.send(json!({ "kind": "exit", "exitCode": exit_code }));
-                return Ok(());
+                return Ok(exit_code);
             }
-            JsonRpcEvent::Response { .. } => {}
-            JsonRpcEvent::Transport(event) => match event {
-                ProcessEvent::Stdout(text) => {
-                    let _ = sender.send(json!({ "kind": "raw", "stream": "stdout", "text": text }));
-                }
-                ProcessEvent::Stderr(text) => {
-                    let _ = sender.send(json!({ "kind": "raw", "stream": "stderr", "text": text }));
-                }
-                ProcessEvent::Exit { exit_code, .. } => {
-                    if *cancelled.borrow() { break; }
-                    anyhow::bail!("TRAE CLI ACP exited before session/prompt completed (exit code: {exit_code:?})");
-                }
-                ProcessEvent::Error(message) => {
-                    let _ = sender.send(json!({ "kind": "error", "message": message }));
-                }
-                ProcessEvent::Timeout { reason } => {
-                    let _ = sender.send(json!({ "kind": "timeout", "reason": reason }));
-                }
-            },
+            JsonRpcEvent::Transport(ProcessEvent::Stdout(text)) => {
+                let _ = sender.send(json!({"kind":"raw","stream":"stdout","text":text}));
+            }
+            JsonRpcEvent::Transport(ProcessEvent::Stderr(text)) => {
+                let _ = sender.send(json!({"kind":"raw","stream":"stderr","text":text}));
+            }
+            JsonRpcEvent::Transport(ProcessEvent::Exit { exit_code, .. }) => {
+                if *cancelled.borrow() { break; }
+                anyhow::bail!("TRAE CLI ACP exited before session/prompt completed (exit code: {exit_code:?})");
+            }
+            JsonRpcEvent::Transport(ProcessEvent::Error(message)) => {
+                let _ = sender.send(json!({"kind":"error","message":message}));
+            }
+            JsonRpcEvent::Transport(ProcessEvent::Timeout { reason }) => {
+                let _ = sender.send(json!({"kind":"timeout","reason":reason}));
+            }
             _ => {}
         }
     }
-    if *cancelled.borrow() {
-        let _ = sender.send(json!({ "kind": "exit", "exitCode": 130 }));
-        return Ok(());
-    }
+    if *cancelled.borrow() { return Ok(130); }
     anyhow::bail!("TRAE CLI ACP closed before session/prompt completed")
 }
 
@@ -1383,3 +1595,6 @@ mod audit_tests {
         assert_eq!(result["mcp_servers"], native["mcp_servers"]);
     }
 }
+
+#[cfg(test)]
+mod acp_tests;
