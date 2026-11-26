@@ -1176,17 +1176,8 @@ async fn run_pi(
                 let _ = sender.send(json!({ "kind": "timeout", "reason": reason }));
                 anyhow::bail!("Pi turn exceeded {reason} limit");
             }
-            ProcessEvent::Exit { exit_code, .. } => {
-                let model_failed = {let state=parse_state.lock().unwrap();state.model_error || matches!(state.last_assistant_stop_reason.as_deref(),Some("error"|"aborted"))};
-                if !terminal_status {
-                    let phase = if settled && exit_code == Some(0) && !model_failed { "turn_completed" } else { "turn_failed" };
-                    let _ = sender.send(json!({ "kind": "status", "phase": phase }));
-                }
-                // Pi RPC itself exits 0 after a failed model turn; normalize
-                // that so the failure is not overwritten as completed.
-                let code = if model_failed && exit_code == Some(0) { Some(1) } else { exit_code };
-                anyhow::ensure!(settled && code == Some(0), "Pi exited before a successful turn boundary");
-                break;
+            ProcessEvent::Exit { .. } => {
+                anyhow::bail!("Pi exited before a successful turn boundary");
             }
         }
     }
@@ -1195,7 +1186,17 @@ async fn run_pi(
     }.await;
     native.session_id=native_session_id;
     let failed = {let state=parse_state.lock().unwrap();state.model_error || matches!(state.last_assistant_stop_reason.as_deref(),Some("error"|"aborted"))};
-    runs.lock().unwrap().remove(run_id);
+    // cancel() removes the handle before stopping Pi. The daemon decides
+    // whether this was a user cancel or the end of an accepted workflow turn.
+    let cancelled = runs.lock().unwrap().remove(run_id).is_none();
+    if cancelled {
+        native.close().await;
+        let _ = sender.send(json!({"kind":"exit","exitCode":130,"signal":"cancelled"}));
+        return Ok(());
+    }
+    if result.is_err() && !terminal_status {
+        let _ = sender.send(json!({"kind":"status","phase":"turn_failed"}));
+    }
     if result.is_ok() && !failed && handle.is_alive() && !sender.is_closed() {
         if let (Some(host),Some(binding))=(&channel,request["sessionBindingId"].as_str()) {
             let idle_channel=agenthub_plugin_sdk::session_channel(&channel,&request);

@@ -15,7 +15,7 @@ import type { ComposerConfiguration } from "./SessionModelControl";
 import { useProvidersStore } from "../../stores/providers";
 import { SelectField } from "../../components/ui/Select";
 import { Composer } from "./Composer";
-import { NautiloMark } from "../../components/ui/IdentityAvatar";
+import { NautiloMark, ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { HarnessModeControl } from "./HarnessModeControl";
 import { ConnectionPicker } from "./ConnectionPicker";
 import { AddProjectDialog } from "../projects/AddProjectDialog";
@@ -134,7 +134,10 @@ export function NewConversation({ mode = "code", onCreated, active = true }: {
         <Folder size={14} aria-hidden />
         <SelectField aria-label={zh ? "选择项目" : "Choose project"} value={project?.id} onValueChange={setProjectId} options={projects.map((item) => ({ value: item.id, label: item.name }))} className="context-select" />
       </label> : <button type="button" className="starter-context-picker" onClick={() => setAddProject(true)}><Folder size={14} aria-hidden />{zh ? "选择项目" : "Choose project"}</button>}
-      <label className="starter-context-picker"><Box size={14} aria-hidden /><SelectField className="context-select" aria-label="Harness" value={instance?.id} placeholder="Harness" options={available.map((item) => ({ value: item.id, label: item.displayName }))} onValueChange={(id) => { setInstanceId(id); setConfiguration({}); }} /></label>
+      <label className="starter-context-picker starter-context-harness">
+        {instance ? <ProviderAvatar providerId={instance.providerId} size="sm" /> : <Box size={14} aria-hidden />}
+        <SelectField className="context-select" aria-label="Harness" value={instance?.id} placeholder="Harness" options={available.map((item) => ({ value: item.id, label: item.displayName }))} onValueChange={(id) => { setInstanceId(id); setConfiguration({}); }} />
+      </label>
       {instance && <label className="starter-context-picker" title={connection?.name ?? (zh ? "使用 Harness 原生配置" : "Use the harness’s native configuration")}><UserRound size={14} aria-hidden /><ConnectionPicker instance={instance} className="context-select" fallback={{ value: "__native", label: zh ? "原生配置" : "Native config" }} value={configuration.connectionId} onChange={selected => { setConfiguration(current => ({ agentMode: current.agentMode, permissionMode: current.permissionMode, connectionId: selected?.id, connectionRevision: selected?.revision })); }} /></label>}
       <label className="starter-context-picker">
         <Users size={14} aria-hidden />
@@ -148,6 +151,7 @@ export function NewConversation({ mode = "code", onCreated, active = true }: {
   return (
     <section className="new-conversation" data-active={active || undefined} onPointerMove={lightPointer} onPointerLeave={dimPointer} aria-label={zh ? "新建任务" : "New task"}>
       <div ref={backdrop} className="new-conversation-backdrop" aria-hidden="true">
+        <div className="new-conversation-aurora" />
         <div className="new-conversation-dots" />
         <div className="new-conversation-skylight" />
         <div className="new-conversation-spotlight" />
@@ -156,10 +160,16 @@ export function NewConversation({ mode = "code", onCreated, active = true }: {
       <div className="new-conversation-body">
         <div className="new-conversation-start">
           <div className="new-conversation-welcome">
-            <div className="new-conversation-emblem" aria-hidden><NautiloMark /></div>
+            <div className="new-conversation-emblem" aria-hidden>
+              <NautiloMark />
+            </div>
             <h1>{project
               ? (zh ? <>在 <span>{project.name}</span> 开始新任务</> : <>Start a task in <span>{project.name}</span></>)
               : (zh ? "准备开始什么任务？" : "What would you like to work on?")}</h1>
+            <p className="new-conversation-subtitle">
+              <i className="new-conversation-ready-dot" data-ready={canStart} aria-hidden />
+              <span>{zh ? "多 Agent 协同工作台 · 按 @ 快速引用技能、MCP 或工作流" : "Multi-agent workbench · Type @ to invoke skills, MCPs or workflows"}</span>
+            </p>
           </div>
           <Composer
             draftId="new:conversation"

@@ -1,10 +1,16 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Copy,
+  Grid3x3,
   Import,
+  LayoutPanelLeft,
   Plus,
+  RefreshCw,
   Search,
+  Sparkles,
   Wrench,
+  X,
 } from "lucide-react";
 import type { CapabilityKind, ProviderCapability } from "@agenthub/domain";
 import { isElectron } from "../../lib/bridge";
@@ -249,11 +255,13 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   };
 
   const actions = <div className="capability-heading-actions">
-    <Button variant="outline" size="sm" disabled={skills && !!toggling.length} onClick={() => setSyncOpen(true)}>{zh ? "原生同步" : "Native sync"}</Button>
-    <Button variant="outline" size="sm" disabled={skills && !!toggling.length} onClick={() => openImport()}>
+    <Button variant="outline" size="sm" className="skill-action-sync" disabled={skills && !!toggling.length} onClick={() => setSyncOpen(true)}>
+      <RefreshCw size={13} aria-hidden />{zh ? "原生同步" : "Native sync"}
+    </Button>
+    <Button variant="outline" size="sm" className="skill-action-import" disabled={skills && !!toggling.length} onClick={() => openImport()}>
       <Import size={14} aria-hidden />{t("agents.tools.import.button")}
     </Button>
-    <Button variant="primary" size="sm" disabled={skills && !!toggling.length} onClick={openCreate}>
+    <Button variant="primary" size="sm" className="skill-action-create" disabled={skills && !!toggling.length} onClick={openCreate}>
       <Plus size={15} aria-hidden />{kind === "mcp" ? (zh ? "添加 MCP" : "Add MCP") : (zh ? "添加 Skill" : "Add Skill")}
     </Button>
   </div>;
@@ -263,10 +271,16 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
       options={providers.map(provider => ({ value: provider.id, label: provider.name }))} />
   </div>;
   const search = <div className="capability-search relative">
-    <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-ink-3" aria-hidden />
+    <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-ink-3" aria-hidden />
     <Input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)}
-      placeholder={skills ? (zh ? "搜索名称、描述、标签与来源" : "Search names, descriptions, tags or sources") : t("agents.tools.searchPlaceholder")}
-      className="pl-9" aria-label={t("agents.tools.searchPlaceholder")} aria-keyshortcuts={skills ? "/" : undefined} />
+      placeholder={skills ? (zh ? "搜索名称、描述、标签或来源..." : "Search names, descriptions, tags or sources...") : t("agents.tools.searchPlaceholder")}
+      className={skills ? "pl-8 pr-8" : "pl-9"} aria-label={t("agents.tools.searchPlaceholder")} aria-keyshortcuts={skills ? "/" : undefined} />
+    {skills && (query ? (
+      <button type="button" className="skill-search-clear" onClick={() => { setQuery(""); searchRef.current?.focus(); }}
+        aria-label={zh ? "清空搜索" : "Clear search"}><X size={13} aria-hidden /></button>
+    ) : (
+      <kbd className="skill-search-kbd" aria-hidden>/</kbd>
+    ))}
   </div>;
   const filters: Array<{ id: string; label: string; count: number; warning?: boolean }> = [
     { id: "all", label: zh ? "全部" : "All", count: inventory.length },
@@ -277,10 +291,32 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   const sourceSelect = <SelectField value={sourceFilter} onValueChange={setSourceFilter}
     aria-label={zh ? "筛选来源" : "Filter by source"} className="capability-source-filter"
     options={[{ value: "all", label: zh ? "所有来源" : "All sources" }, ...Object.entries(originNames).map(([value, label]) => ({ value, label }))]} />;
+  const totalSkills = inventory.length;
+  const enabledPct = totalSkills ? (enabledCount / totalSkills) * 100 : 0;
+  const missingDisabledCount = skills ? inventory.filter(tool => !capabilityDescription(tool) && !capabilityEnabledFor(tool, daemonProviderId)).length : 0;
+  const missingPct = totalSkills ? (missingDisabledCount / totalSkills) * 100 : 0;
+  const originSummary = (["builtin", "local", "plugin", "custom"] as const)
+    .map(origin => {
+      const count = inventory.filter(tool => capabilityOrigin(tool).kind === origin).length;
+      const shortLabel = origin === "builtin" ? (zh ? "内置" : "Built-in")
+        : origin === "local" ? (zh ? "本机" : "Local")
+        : origin === "plugin" ? (zh ? "插件" : "Plugins")
+        : (zh ? "自定义" : "Custom");
+      return count > 0 ? `${shortLabel} ${count}` : "";
+    })
+    .filter(Boolean)
+    .join(" · ");
+  const onSpotlightMove = (event: ReactPointerEvent<HTMLElement>): void => {
+    if (reduced) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    event.currentTarget.style.setProperty("--mx", `${event.clientX - rect.left}px`);
+    event.currentTarget.style.setProperty("--my", `${event.clientY - rect.top}px`);
+  };
 
   return (
     <div
       className={`capability-panel capability-library skill-library relative ${kind === "mcp" ? "mcp-library" : ""}`}
+      data-reduced-motion={reduced}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
@@ -290,42 +326,88 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
             <h1>{kind === "mcp" ? (zh ? "MCP 服务" : "MCP servers") : (zh ? "Skills 技能" : "Skills")}</h1>
             {skills && <div className="skill-mode" data-matrix={matrix} role="group" aria-label={zh ? "技能视图" : "Skills view"}>
               <span aria-hidden />
-              <button type="button" aria-pressed={!matrix} onClick={() => setMatrix(false)}>{zh ? "工作台" : "Workbench"}</button>
-              <button type="button" aria-pressed={matrix} onClick={() => { setCopyFrom(""); setMatrix(true); }}>{zh ? "多 Harness 矩阵" : "Harness matrix"}</button>
+              <button type="button" aria-pressed={!matrix} onClick={() => setMatrix(false)}>
+                <LayoutPanelLeft size={13} aria-hidden />{zh ? "工作台" : "Workbench"}
+              </button>
+              <button type="button" aria-pressed={matrix} onClick={() => { setCopyFrom(""); setMatrix(true); }}>
+                <Grid3x3 size={13} aria-hidden />{zh ? "多 Harness 矩阵" : "Harness matrix"}
+              </button>
             </div>}
-            <AnimatePresence initial={false}>
-            {!matrix && <motion.div className="skill-target-context" key="harness-context"
-              initial={reduced ? false : { opacity: 0, y: -3 }} animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -3 }} transition={{ duration: reduced ? 0 : 0.14 }}>
+            {!skills && <div className="skill-target-context">
               {harness}
-              {skills && <details className="skill-copy-plan" onToggle={event => { if (!event.currentTarget.open) setCopyFrom(""); }}>
-                <summary>{zh ? "复制方案" : "Copy plan"}</summary>
-                <div className="skill-copy-popover" onKeyDown={event => {
-                  if (event.key === "Escape") {
-                    const details = event.currentTarget.closest("details");
-                    details?.querySelector("summary")?.focus();
-                    details?.removeAttribute("open");
-                  }
-                }}>
-                  <SelectField aria-label={zh ? "从 Harness 复制" : "Copy from Harness"} value={copyFrom} onValueChange={setCopyFrom}
-                    placeholder={zh ? "选择来源 Harness" : "Choose source Harness"}
-                    options={providers.filter(provider => provider.id !== providerId).map(provider => ({ value: provider.id, label: provider.name }))} />
-                  <div>
-                    <Button variant="outline" size="sm" disabled={!copyFrom || !providerId || !!toggling.length} onClick={event => { copyPlan(false); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{zh ? "合并启用项" : "Merge enabled"}</Button>
-                    <Button variant="outline" size="sm" disabled={!copyFrom || !providerId || !!toggling.length} onClick={event => { copyPlan(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{zh ? "覆盖方案" : "Replace plan"}</Button>
-                  </div>
-                </div>
-              </details>}
-              <span className="skill-library-count">{zh ? `${enabledCount} / ${inventory.length} 已启用` : `${enabledCount} / ${inventory.length} enabled`}
-                {skills && <small data-warn={indexTokens >= 1000} title={zh ? "按已启用技能的名称和描述估算。中日韩字符约 1 Token，其他字符约 4 个计 1 Token。实际用量取决于模型。" : "Estimated from enabled names and descriptions. About one token per CJK character or four other characters. Actual counts depend on the model."}>
-                  {zh ? ` · 索引 ~${indexTokens} tok` : ` · Index ~${indexTokens} tok`}
-                </small>}
-              </span>
-            </motion.div>}
-            </AnimatePresence>
+              <span className="skill-library-count">{zh ? `${enabledCount} / ${inventory.length} 已启用` : `${enabledCount} / ${inventory.length} enabled`}</span>
+            </div>}
           </div>
           {actions}
         </div>
+        {skills && <AnimatePresence initial={false}>
+          {!matrix && <motion.section
+            className="skill-kpi-deck"
+            key="harness-context"
+            aria-label={zh ? "当前技能配置概览" : "Active skill configuration overview"}
+            onPointerMove={onSpotlightMove}
+            initial={reduced ? false : { opacity: 0, height: 0, marginTop: -8 }}
+            animate={{ opacity: 1, height: "auto", marginTop: 0 }}
+            exit={reduced ? undefined : { opacity: 0, height: 0, marginTop: -8 }}
+            transition={{ duration: reduced ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <div className="skill-kpi-deck-inner">
+              <div className="skill-kpi-cell skill-kpi-harness">
+                <span className="skill-kpi-label">{zh ? "目标 Harness" : "Target Harness"}</span>
+                <div className="skill-kpi-controls">
+                  {harness}
+                  <details className="skill-copy-plan" onToggle={event => { if (!event.currentTarget.open) setCopyFrom(""); }}>
+                    <summary><Copy size={12} aria-hidden />{zh ? "复制方案" : "Copy plan"}</summary>
+                    <div className="skill-copy-popover" onKeyDown={event => {
+                      if (event.key === "Escape") {
+                        const details = event.currentTarget.closest("details");
+                        details?.querySelector("summary")?.focus();
+                        details?.removeAttribute("open");
+                      }
+                    }}>
+                      <SelectField aria-label={zh ? "从 Harness 复制" : "Copy from Harness"} value={copyFrom} onValueChange={setCopyFrom}
+                        placeholder={zh ? "选择来源 Harness" : "Choose source Harness"}
+                        options={providers.filter(provider => provider.id !== providerId).map(provider => ({ value: provider.id, label: provider.name }))} />
+                      <div>
+                        <Button variant="outline" size="sm" disabled={!copyFrom || !providerId || !!toggling.length} onClick={event => { copyPlan(false); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{zh ? "合并启用项" : "Merge enabled"}</Button>
+                        <Button variant="outline" size="sm" disabled={!copyFrom || !providerId || !!toggling.length} onClick={event => { copyPlan(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{zh ? "覆盖方案" : "Replace plan"}</Button>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <div className="skill-kpi-cell">
+                <span className="skill-kpi-label">
+                  <i className="skill-metric-dot" data-active={enabledCount > 0} aria-hidden />
+                  {zh ? "已启用技能" : "Enabled skills"}
+                </span>
+                <strong className="skill-kpi-value" data-accent={enabledCount > 0}>
+                  {enabledCount}<em> / {totalSkills}</em>
+                </strong>
+                <div className="skill-kpi-bar" aria-hidden>
+                  <span className="skill-kpi-bar-enabled" style={{ width: `${enabledPct}%` }} />
+                  <span className="skill-kpi-bar-missing" style={{ width: `${missingPct}%` }} />
+                </div>
+                <small className="skill-kpi-sub">{originSummary || (zh ? "暂无技能记录" : "No skills yet")}</small>
+              </div>
+              <div className="skill-kpi-cell">
+                <span className="skill-kpi-label">
+                  <Sparkles size={11} className="skill-kpi-spark" aria-hidden />
+                  {zh ? "索引开销估算" : "Estimated index"}
+                </span>
+                <strong className="skill-kpi-value" data-warn={indexTokens >= 1000}
+                  title={zh ? "按已启用技能的名称和描述估算。中日韩字符约 1 Token，其他字符约 4 个计 1 Token。实际用量取决于模型。" : "Estimated from enabled names and descriptions. About one token per CJK character or four other characters. Actual counts depend on the model."}>
+                  ~{indexTokens}<em> tok</em>
+                </strong>
+                <small className="skill-kpi-sub">
+                  {missingCount > 0
+                    ? (zh ? `${missingCount} 项缺少触发说明` : `${missingCount} missing description`)
+                    : (zh ? "所有技能触发说明完整" : "All skill descriptions complete")}
+                </small>
+              </div>
+            </div>
+          </motion.section>}
+        </AnimatePresence>}
         <div className="skill-library-toolbar">
           <SlidingTabs value={filterView} onChange={setView} items={filters} className="capability-underline-tabs" label={zh ? "启用状态" : "Enabled status"} />
           <div className="skill-library-filters">{search}{sourceSelect}</div>

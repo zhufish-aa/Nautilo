@@ -504,7 +504,9 @@ export function Composer({
     <div data-tour="sessions-composer" className={sessionId ? "composer shrink-0 bg-card px-4 pb-5 pt-3 sm:px-7" : "composer w-full shrink-0 bg-card"}>
       {sessionId && <QueuedFollowUpBar sessionId={sessionId} disabled={disabled} />}
       <div ref={boxRef} className="composer-box relative mx-auto w-full">
+        <div className="composer-nacre-rim" aria-hidden="true" />
         <div className="composer-pulse" aria-hidden="true" />
+        <div className="composer-send-streak" aria-hidden="true" />
         {contextControls}
         {picker.menu}
         <AnimatePresence>
@@ -721,6 +723,7 @@ export function Composer({
                 <Square size={12} className="composer-stop-icon" fill="currentColor" aria-hidden />
               </button>
             )}
+            <span className="composer-send-ripple" aria-hidden="true" />
             <span className="composer-launch-arrow" aria-hidden="true"><ArrowUp size={16} strokeWidth={2.4} /></span>
           </div>
         </div>
@@ -729,7 +732,7 @@ export function Composer({
         {starterWorkflows.map(template => <button key={template.id} type="button" title={template.name}
           aria-pressed={draft.workflow?.id === template.id} disabled={submitting || disabled}
           onMouseDown={event => event.preventDefault()} onClick={() => selectWorkflow(template, true)}>
-          <Workflow size={14} className="starter-workflow-icon" aria-hidden />
+          <span className="starter-launch-icon" data-kind="workflow" aria-hidden><Workflow size={13} className="starter-workflow-icon" /></span>
           <span className="starter-launch-name">@ {template.name}</span>
           <small>{template.definition.nodes.length}{locale === "zh-CN" ? " 节点" : template.definition.nodes.length === 1 ? " node" : " nodes"}</small>
         </button>)}
@@ -742,7 +745,7 @@ export function Composer({
             focusDraft(next.length);
             if (!reducedMotion) flashComposer(boxRef.current);
           }}>
-          <Icon size={15} aria-hidden />
+          <span className="starter-launch-icon" data-kind="prompt" aria-hidden><Icon size={13} /></span>
           <span className="starter-launch-name">{locale === "zh-CN" ? zh : en}</span>
         </button>)}
       </div>}

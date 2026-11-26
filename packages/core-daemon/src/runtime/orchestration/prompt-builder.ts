@@ -1,5 +1,7 @@
 import type { PlannedTask, Session, Task, TeamDefinition } from "@agenthub/domain";
 
+const USER_FACING_DELEGATION = "Refer to delegated work by name. Include internal task or child session IDs in the user-facing reply only if the user explicitly asks for those IDs.";
+
 export interface DelegationReceipt {
   taskId: string;
   title: string;
@@ -33,7 +35,8 @@ export class OrchestrationPromptBuilder {
       "[AGENTHUB_MAIN_TURN]",
       "Work on the user's request normally. You are not required to classify it or emit routing JSON.",
       delegation,
-      "Provider-native subagents (spawn_agent, Task, and similar tools) belong to the current Harness. They are distinct from Nautilo's configured members, connections, and models. Do not describe one as the other. Only report a configured dispatch after a successful Nautilo tool receipt; use its actual taskId and sessionId when asked where it ran.",
+      "Provider-native subagents (spawn_agent, Task, and similar tools) belong to the current Harness. They are distinct from Nautilo's configured members, connections, and models. Do not describe one as the other. Only report a configured dispatch after a successful Nautilo tool receipt.",
+      USER_FACING_DELEGATION,
       "Every delegated task must be self-contained. A child receives the task text and its own provider session; it cannot inspect the parent session, a sibling Agent session, or another Agent's pending result.",
       "Never ask one child Agent to obtain status, context, or output from another child Agent. Use plan dependencies when ordering matters; Nautilo supplies completed dependency outcomes to the dependent child.",
       "Delegation tools do not forward chat-only attachments or inline images. Do not tell a child to inspect 'the attached image' or other unseen conversation content. Handle the visual analysis yourself, or provide a verified child-readable workspace path plus all essential textual observations in the task.",
@@ -120,6 +123,7 @@ export class OrchestrationPromptBuilder {
       "Delegated outcomes are still unknown. Do not draw conclusions, make plans, or dispatch follow-up work that assumes a pending task's result; wait for Nautilo to deliver it.",
       "Proceed only with useful independent work whose scope does not overlap any delegated task.",
       "If there is no independent work left, give the user exactly one concise dispatch update and end this provider turn immediately.",
+      USER_FACING_DELEGATION,
       "Do not poll task status, repeatedly inspect the workspace, sleep, or loop while waiting; doing so only wastes tokens.",
       "Ending this provider turn does not stop the orchestration. Nautilo keeps the overall run active and will deliver child results back into this same provider session when they finish.",
       `Original goal:\n${goal}`,
@@ -137,6 +141,7 @@ export class OrchestrationPromptBuilder {
       "Do not dispatch new delegated tasks, retry, reassign, or take over failed work in this synthesis turn; those decisions belong to the next normal turn.",
       "Treat member results as reports, not proof. Verify important completion or artifact claims before presenting them as successful.",
       "If a delegated task failed, state the failure clearly and do not claim that task succeeded.",
+      USER_FACING_DELEGATION,
       `Goal:\n${goal}`,
       `Task outcomes:\n${JSON.stringify(tasks.map((task) => {
         const outcome = results.find((item) => item.taskId === task.id);

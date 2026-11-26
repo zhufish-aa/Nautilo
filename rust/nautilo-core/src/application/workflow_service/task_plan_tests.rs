@@ -38,6 +38,12 @@ async fn workflow_runtime_dispatch_replays_native_calls_and_keeps_approval_on_th
     let id = receipt["workflowRunId"].as_str().unwrap();
     let replayed: Value = serde_json::from_str(execute(call.clone()).await.unwrap()["content"].as_str().unwrap()).unwrap();
     assert_eq!(receipt, replayed);
+    let timeline = fixture.service.events.timeline_open("main-session").unwrap();
+    let original_cards = timeline["blocks"].as_array().unwrap().iter()
+        .filter(|block| block["content"]["type"] == "task.updated")
+        .collect::<Vec<_>>();
+    assert_eq!(original_cards.len(), 2);
+    assert!(original_cards.iter().all(|block| block["runId"] == "main-native-run"));
     let mut changed = call;
     changed["arguments"]["tasks"][0]["task"] = json!("Something else");
     assert_eq!(execute(changed).await.unwrap()["success"], false);
@@ -59,6 +65,17 @@ async fn workflow_runtime_dispatch_replays_native_calls_and_keeps_approval_on_th
         let expected = receipt["tasks"].as_array().unwrap().iter().find(|entry| entry["taskId"] == task["id"]).unwrap();
         assert_eq!(task["runSessionId"], expected["sessionId"]);
     }
+    let finished = fixture.service.events.timeline_open("main-session").unwrap();
+    let blocks = finished["blocks"].as_array().unwrap();
+    assert!(blocks.iter().all(|block| block["content"]["type"] != "handoff.created"));
+    let cards = blocks.iter().filter(|block| block["content"]["type"] == "task.updated").collect::<Vec<_>>();
+    assert_eq!(cards.len(), original_cards.len());
+    for (card, original) in cards.iter().zip(original_cards) {
+        assert_eq!(card["blockId"], original["blockId"]);
+        assert_eq!(card["seq"], original["seq"]);
+        assert_eq!(card["status"], "completed");
+    }
+    assert!(blocks.iter().all(|block| block["kind"] != "user_prompt" || block["content"]["sender"] == "user"));
 }
 
 #[tokio::test]

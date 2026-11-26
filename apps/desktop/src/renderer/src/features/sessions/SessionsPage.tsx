@@ -23,23 +23,45 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
     const composer = page?.querySelector(".composer-box");
     if (page && composer) {
       const bounds = page.getBoundingClientRect();
-      const exit = reducedMotion ? [] : Array.from(page.querySelectorAll<HTMLElement>(".new-conversation-backdrop, .new-conversation-welcome, .starter-launch"), element => {
-        const rect = element.getBoundingClientRect();
+      const composerRect = composer.getBoundingClientRect();
+      // Batch all DOM reads before any clones/writes to prevent layout thrashing.
+      const exitSources = reducedMotion ? [] : Array.from(
+        page.querySelectorAll<HTMLElement>(".new-conversation-backdrop, .new-conversation-welcome, .starter-launch"),
+        element => {
+          const rect = element.getBoundingClientRect();
+          const background = element.classList.contains("new-conversation-backdrop");
+          const opacities = background
+            ? [".new-conversation-aurora", ".new-conversation-skylight", ".new-conversation-spotlight"].map(selector => {
+                const node = element.querySelector<HTMLElement>(selector);
+                return [selector, node ? getComputedStyle(node).opacity : ""] as const;
+              })
+            : [];
+          return { element, rect, background, opacities };
+        }
+      );
+      const exit = exitSources.map(({ element, rect, background, opacities }) => {
         const copy = element.cloneNode(true) as HTMLElement;
         copy.inert = true;
-        Object.assign(copy.style, { position: "absolute", left: `${rect.left - bounds.left}px`, top: `${rect.top - bounds.top}px`, width: `${rect.width}px`, margin: "0" });
-        if (element.classList.contains("new-conversation-backdrop")) {
-          // Keep the current light levels after the focused input unmounts.
+        copy.dataset.exiting = "true";
+        Object.assign(copy.style, {
+          position: "absolute",
+          left: `${rect.left - bounds.left}px`,
+          top: `${rect.top - bounds.top}px`,
+          width: `${rect.width}px`,
+          margin: "0",
+          willChange: "transform, opacity",
+          contain: "layout style paint"
+        });
+        if (background) {
           copy.style.height = `${rect.height}px`;
-          for (const selector of [".new-conversation-skylight", ".new-conversation-spotlight"]) {
-            const previous = element.querySelector<HTMLElement>(selector);
+          for (const [selector, opacity] of opacities) {
             const next = copy.querySelector<HTMLElement>(selector);
-            if (previous && next) next.style.opacity = getComputedStyle(previous).opacity;
+            if (next && opacity) next.style.opacity = opacity;
           }
         }
         return copy;
       });
-      composerOrigin.current = { sessionId: id, rect: composer.getBoundingClientRect(), focused: composer.contains(document.activeElement), exit };
+      composerOrigin.current = { sessionId: id, rect: composerRect, focused: composer.contains(document.activeElement), exit };
     }
     openSession(id);
   };
@@ -53,25 +75,70 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
     if (reducedMotion || !composer.animate) return;
     const rect = composer.getBoundingClientRect();
     if (!rect.width || !origin.rect.width) return;
+
+    const dx = (origin.rect.left + origin.rect.width / 2) - (rect.left + rect.width / 2);
+    const dy = origin.rect.top - rect.top;
     const layer = exitLayer.current;
+    composer.dataset.launching = "true";
+    composer.style.willChange = "transform";
+
+    // Create all animations paused at t=0 so the browser locks the initial
+    // composited frame before starting playback on the first clean paint frame.
     const outgoing = origin.exit.map(element => {
       const background = element.classList.contains("new-conversation-backdrop");
+      const launch = element.classList.contains("starter-launch");
       if (background) workspace.current?.prepend(element);
       else layer?.append(element);
-      const fade = background ? element.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 260, easing: "ease-out", fill: "both" }) : element.animate([
-        { opacity: 1, transform: "translateY(0) scale(1)" },
-        { opacity: 0, transform: "translateY(-14px) scale(.98)" }
-      ], { duration: 180, easing: "ease-out", fill: "both" });
+      const fade = background
+        ? element.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 300, easing: composerEase, fill: "both" })
+        : launch
+          ? element.animate([
+              { opacity: 1, transform: "translate3d(0, 0, 0) scale(1)" },
+              { opacity: 0, transform: "translate3d(0, 14px, 0) scale(.97)" }
+            ], { duration: 220, easing: composerEase, fill: "both" })
+          : element.animate([
+              { opacity: 1, transform: "translate3d(0, 0, 0) scale(1)" },
+              { opacity: 0, transform: "translate3d(0, -24px, 0) scale(.96)" }
+            ], { duration: 250, easing: composerEase, fill: "both" });
+      fade.pause();
       fade.onfinish = () => element.remove();
       return fade;
     });
-    flashComposer(composer, true);
+
     const animation = composer.animate([
-      { transform: `translate(${origin.rect.left - rect.left}px, ${origin.rect.top - rect.top}px) scaleX(${origin.rect.width / rect.width})`, transformOrigin: "top left" },
-      { transform: "translate(0, 0) scaleX(1)", transformOrigin: "top left" }
-    ], { duration: 380, easing: composerEase });
-    return () => {
+      { transform: `translate3d(${dx}px, ${dy}px, 0) scale(.975)` },
+      { transform: "translate3d(0, 0, 0) scale(1)" }
+    ], { duration: 420, easing: composerEase, fill: "both" });
+    animation.pause();
+    animation.onfinish = () => {
       animation.cancel();
+      delete composer.dataset.launching;
+      composer.style.willChange = "";
+    };
+
+    const timeline = workspace.current?.querySelector<HTMLElement>(".session-chat-timeline");
+    const timelineRise = timeline?.animate?.([
+      { opacity: 0, transform: "translate3d(0, 14px, 0)" },
+      { opacity: 1, transform: "translate3d(0, 0, 0)" }
+    ], { duration: 320, delay: 50, easing: composerEase, fill: "both" });
+    timelineRise?.pause();
+    if (timelineRise) timelineRise.onfinish = () => timelineRise.cancel();
+
+    // Release all animations cleanly on the first post-mount animation frame
+    // so heavy React mount work never eats the first 20-30% of the motion.
+    const startFrame = requestAnimationFrame(() => {
+      outgoing.forEach(fade => fade.play());
+      animation.play();
+      timelineRise?.play();
+      flashComposer(composer, true, true);
+    });
+
+    return () => {
+      cancelAnimationFrame(startFrame);
+      animation.cancel();
+      delete composer.dataset.launching;
+      composer.style.willChange = "";
+      timelineRise?.cancel();
       outgoing.forEach(fade => fade.cancel());
       origin.exit.forEach(element => element.remove());
     };

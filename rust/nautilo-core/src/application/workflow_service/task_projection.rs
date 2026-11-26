@@ -163,7 +163,7 @@ pub(super) fn claim(
             continue;
         }
         repos.tasks().save(&task)?;
-        committed.push(task_event(db, event_builder, &main, &task)?);
+        committed.push(task_event(db, event_builder, &main, run, &task)?);
     }
     committed.extend(project(db, run, event_builder)?);
     Ok(committed)
@@ -214,13 +214,13 @@ fn append(
     db: &Connection,
     event_builder: &SessionEventBuilder,
     main: &Value,
-    task: &Value,
+    context: Value,
     kind: &str,
     payload: Value,
 ) -> CoreResult<Value> {
     let mut event = event_builder.prepare_for_session(
         main,
-        &json!({"projectRunId":task["projectRunId"],"taskId":task["id"]}),
+        &context,
         kind,
         payload,
     );
@@ -234,13 +234,17 @@ fn task_event(
     db: &Connection,
     event_builder: &SessionEventBuilder,
     main: &Value,
+    run: &WorkflowRun,
     task: &Value,
 ) -> CoreResult<Value> {
+    let invoking_run_id = run.task_projection.as_ref()
+        .and_then(|source| source.project_plan.as_ref())
+        .and_then(|plan| plan.invoking_run_id.as_deref());
     append(
         db,
         event_builder,
         main,
-        task,
+        json!({"projectRunId":task["projectRunId"],"taskId":task["id"],"runId":invoking_run_id}),
         "task.updated",
         json!({"taskId":task["id"],"status":task["status"],"assignedMemberId":task["assignedMemberId"],"workflowRunId":task["workflowRunId"],"workflowNodeId":task["workflowNodeId"],"workflowStatus":task["workflowStatus"],"attempt":task["attempt"]}),
     )
@@ -368,7 +372,7 @@ pub(super) fn project(
             if task != before {
                 task["updatedAt"] = json!(now_iso());
                 repos.tasks().save(&task)?;
-                committed.push(task_event(db, event_builder, &main, &task)?);
+                committed.push(task_event(db, event_builder, &main, run, &task)?);
             }
             continue;
         }
@@ -426,7 +430,11 @@ pub(super) fn project(
                 .is_none()
             {
                 repos.sessions().save_message(&json!({"id":message_id,"sessionId":run.session_id,"sender":"system","kind":"result","projectRunId":source.project_run_id,"taskId":identity.task_id,"fromMemberId":identity.member_id,"toMemberId":source.main_member_id,"attempt":identity.attempt,"workflowRunId":run.id,"text":summary,"createdAt":now_iso()}))?;
-                committed.push(append(db, event_builder, &main, &task, "handoff.created", json!({"fromMemberId":identity.member_id,"toMemberId":source.main_member_id,"summary":summary.chars().take(500).collect::<String>(),"artifactIds":[],"taskId":identity.task_id,"targetSessionId":run.session_id,"workflowRunId":run.id,"attempt":identity.attempt}))?);
+                committed.push(append(db, event_builder, &main,
+                    json!({"projectRunId":task["projectRunId"],"taskId":task["id"]}),
+                    "handoff.created",
+                    json!({"fromMemberId":identity.member_id,"toMemberId":source.main_member_id,"summary":summary.chars().take(500).collect::<String>(),"artifactIds":[],"taskId":identity.task_id,"targetSessionId":run.session_id,"workflowRunId":run.id,"attempt":identity.attempt}),
+                )?);
             }
             task["resultMessageId"] = json!(message_id);
             task["workflowReceiptKey"] = json!(key);
@@ -434,7 +442,7 @@ pub(super) fn project(
         if task != before {
             task["updatedAt"] = json!(now_iso());
             repos.tasks().save(&task)?;
-            committed.push(task_event(db, event_builder, &main, &task)?);
+            committed.push(task_event(db, event_builder, &main, run, &task)?);
         }
     }
     Ok(committed)

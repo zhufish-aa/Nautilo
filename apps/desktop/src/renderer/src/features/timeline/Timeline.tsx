@@ -22,14 +22,21 @@ import {
   Pencil,
   Terminal
 } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { SessionErrorCard } from "./SessionErrorCard";
 import { getBridge, requestCore } from "../../lib/bridge";
 import { useSessionsStore } from "../../stores/sessions";
+import { useTeamsStore } from "../../stores/teams";
+import { useAgentsStore } from "../../stores/agents";
+import { useConnectionsStore } from "../../stores/connections";
+import { useProviderMetas } from "../../lib/provider-catalog";
+import { parseSubagentResult } from "../../lib/subagent-result";
 import { useCoreFeatures } from "../../lib/use-core-features";
 import { delegationActivity } from "../../lib/delegation-activity";
+import { withoutDelegationReceipt } from "../../lib/orchestration-timeline-policy";
 import { cn, formatDateTime } from "../../lib/utils";
-import type { TimelineEvent } from "../../lib/types";
+import type { TimelineEvent, UiSession } from "../../lib/types";
 import type { CapabilityReference, WorkflowMention } from "@agenthub/domain";
 import { composerReferences, messageReferenceParts, referenceKey, referenceParts, ReferencePills } from "../sessions/ComposerReferences";
 import { WorkflowPlanCard } from "../sessions/WorkflowPlanCard";
@@ -39,7 +46,7 @@ import { Button } from "../../components/ui/Button";
 import { ensureProjectRunHydrated, resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
 import { toolActivityKind, toolActivityLabel, toolCommand, toolFilePath, toolInputFileDiff } from "../../lib/tool-display";
 import { MarkdownContent } from "./MarkdownContent";
-import { DelegationCard } from "./DelegationCard";
+import { SubagentGroup, type SubagentItemModel } from "./DelegationCard";
 import { CodeExecutionCard } from "./CodeExecutionCard";
 import { ProcessDisclosure } from "./ProcessDisclosure";
 import { ToolActivityIcon } from "./ToolActivityIcon";
@@ -499,7 +506,12 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
   streamActive: boolean;
   revealFromStart: boolean;
 }): JSX.Element {
-  const { sender, authorName, text, streaming, messageId, attachments, editedAt, workflowRef, references } = event.data;
+  const { sender, authorName, text: rawText, streaming, messageId, attachments, editedAt, workflowRef, references } = event.data;
+  const text = useSessionsStore(state => sender === "agent" && !streaming
+    ? withoutDelegationReceipt(rawText, (kind, id) => kind === "task"
+      ? state.tasks[event.sessionId]?.some(task => task.id === id) ?? false
+      : state.sessions.some(session => session.id === id && session.parentSessionId === event.sessionId))
+    : rawText);
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
@@ -709,41 +721,170 @@ function UsageLine({ event, locale }: { event: TimelineEvent & { data: { kind: "
   );
 }
 
-/** A provider CLI's native sub-agent dispatch, rendered like our own delegation cards. */
-function SubagentCard({ event, locale, onOpenSubagent }: { event: TimelineEvent & { data: { kind: "tool_activity" } }; locale: "zh-CN" | "en-US"; onOpenSubagent?: (eventId: string) => void }): JSX.Element {
-  const { t } = useI18n();
-  const { subagent } = event.data;
-  const status = event.data.status === "failed" ? "failed" : subagent?.status ?? event.data.status;
-  const tone = status === "running" ? "accent" : status === "done" ? "ok" : "danger";
-  const statusLabel = status === "running"
-    ? subagent?.background ? t("sessions.cards.subagentBackgroundRunning") : t("sessions.cards.running")
-    : status === "done"
-      ? t("sessions.status.completed")
-      : t("sessions.cards.failed");
-  const activityCount = subagent?.activities?.length ?? 0;
-  const activities = subagent?.activities ?? [];
-  const latest = [...activities].reverse().find(data => delegationActivity(data, locale === "zh-CN"));
-  const result = status === "done" ? [...activities].reverse().find(data => data.kind === "message" && data.sender === "agent" && !data.streaming) : undefined;
-  return (
-    <DelegationCard
-      name={subagent?.agentType || t("sessions.cards.subagent")}
-      task={subagent?.task}
-      status={statusLabel}
-      tone={tone}
-      running={status === "running"}
-      native
-      activity={delegationActivity(latest, locale === "zh-CN")}
-      result={delegationActivity(result, locale === "zh-CN")}
-      zh={locale === "zh-CN"}
-      meta={[subagent?.model, subagent?.background ? t("sessions.cards.subagentBackground") : undefined].filter((value): value is string => Boolean(value))}
-      actionLabel={activityCount > 0 ? t("sessions.cards.subagentDetailCount", { count: activityCount }) : t("sessions.cards.subagentDetail")}
-      onOpen={onOpenSubagent ? () => onOpenSubagent(event.id) : undefined}
-      input={event.data.input}
-      output={event.data.output}
-      toolName={event.data.toolName}
-      time={formatDateTime(event.timestamp, locale)}
-    />
+function formatReasoningLabel(effort: string | undefined): string | undefined {
+  if (!effort?.trim()) return undefined;
+  const normalized = effort.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const known: Record<string, string> = {
+    xhigh: "Extra High",
+    extra_high: "Extra High",
+    high: "High",
+    medium: "Medium",
+    low: "Low",
+    minimal: "Minimal",
+    max: "Max",
+    none: "None"
+  };
+  return known[normalized] ?? effort.trim();
+}
+
+function cleanSnippetText(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized ? normalized.slice(0, 320) : undefined;
+}
+
+function sessionElapsedMs(events?: TimelineEvent[], session?: UiSession, terminal = false): number | undefined {
+  let end: TimelineEvent | undefined;
+  for (const event of events ?? []) {
+    if (event.runId && event.data.kind === "activity" && event.data.phase === "completed") end = event;
+  }
+  if (end) {
+    const start = events?.find(event => event.runId === end!.runId && event.sequence < end!.sequence
+      && event.data.kind === "activity" && event.data.phase === "starting");
+    if (start) {
+      const elapsed = Date.parse(end.timestamp) - Date.parse(start.timestamp);
+      if (Number.isFinite(elapsed) && elapsed >= 0) return elapsed;
+    }
+  }
+  if (terminal && session) {
+    const startMs = Date.parse(session.createdAt);
+    const endMs = Date.parse(session.lastMessageAt ?? session.updatedAt);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs && endMs - startMs < 24 * 60 * 60 * 1000) {
+      return endMs - startMs;
+    }
+  }
+  return undefined;
+}
+
+function resolveSessionHarness(
+  session: UiSession | undefined,
+  teams: ReturnType<typeof useTeamsStore.getState>["teams"],
+  instances: ReturnType<typeof useAgentsStore.getState>["instances"],
+  connections: ReturnType<typeof useConnectionsStore.getState>["connections"],
+  harnesses: ReturnType<typeof useProviderMetas>
+): { providerId?: string; harnessName?: string; model?: string; effort?: string; memberName?: string } {
+  if (!session) return {};
+  const target = session.target;
+  const member = target.type === "member"
+    ? teams.find((team) => team.id === target.teamId)?.members.find((candidate) => candidate.id === target.memberId)
+    : undefined;
+  const instanceId = target.type === "agent" ? target.instanceId : member?.agentInstanceId;
+  const instance = instances.find((candidate) => candidate.id === instanceId);
+  const connection = !instance
+    ? connections.find((candidate) => candidate.id === session.connectionId
+      && (session.connectionRevision === undefined || candidate.revision === session.connectionRevision))
+    : undefined;
+  const providerId = instance?.providerId ?? connection?.harness;
+  const harnessName = providerId
+    ? (harnesses.find((harness) => harness.id === providerId)?.name ?? instance?.displayName ?? connection?.name ?? providerId)
+    : (instance?.displayName ?? connection?.name);
+  return {
+    providerId,
+    harnessName,
+    model: session.model || member?.model,
+    effort: formatReasoningLabel(session.reasoningEffort || member?.reasoningEffort),
+    memberName: member?.displayName
+  };
+}
+
+/** One or more consecutive provider-native sub-agent dispatches grouped cleanly. */
+export function NativeSubagentGroup({
+  events,
+  onOpenSubagent
+}: {
+  events: readonly (TimelineEvent & { data: { kind: "tool_activity" } })[];
+  onOpenSubagent?: (eventId: string) => void;
+}): JSX.Element | null {
+  const { t, locale } = useI18n();
+  const zh = locale === "zh-CN";
+  const sessionId = events[0]?.sessionId;
+  const owner = useSessionsStore((state) => sessionId ? state.sessions.find((item) => item.id === sessionId) : undefined);
+  const teams = useTeamsStore((state) => state.teams);
+  const instances = useAgentsStore((state) => state.instances);
+  const connections = useConnectionsStore((state) => state.connections);
+  const harnesses = useProviderMetas();
+
+  const ownerMeta = useMemo(
+    () => resolveSessionHarness(owner, teams, instances, connections, harnesses),
+    [owner, teams, instances, connections, harnesses]
   );
+
+  const items: SubagentItemModel[] = events.map((event) => {
+    const { subagent } = event.data;
+    const status = event.data.status === "failed" ? "failed" : subagent?.status ?? event.data.status;
+    const tone = status === "running" ? "accent" : status === "done" ? "ok" : "danger";
+    const statusLabel = status === "running"
+      ? subagent?.background ? t("sessions.cards.subagentBackgroundRunning") : t("sessions.cards.running")
+      : status === "done"
+        ? t("sessions.status.completed")
+        : t("sessions.cards.failed");
+    const activities = subagent?.activities ?? [];
+    const activityCount = activities.length;
+    const latest = [...activities].reverse().find((data) => delegationActivity(data, zh));
+    const resultEvent = status === "done"
+      ? [...activities].reverse().find((data) => data.kind === "message" && data.sender === "agent" && !data.streaming)
+      : undefined;
+    const parsedOutput = event.data.output ? parseSubagentResult(event.data.output) : undefined;
+    const resultText = delegationActivity(resultEvent, zh) ?? cleanSnippetText(parsedOutput?.body);
+    const activityText = delegationActivity(latest, zh);
+    const taskText = cleanSnippetText(subagent?.task);
+
+    const agentLabel = subagent?.agentType || t("sessions.cards.subagent");
+    const shortTask = taskText && taskText.length <= 56 && taskText.toLowerCase() !== agentLabel.toLowerCase() ? taskText : undefined;
+    const title = shortTask ?? agentLabel;
+    const metaParts = [
+      ownerMeta.harnessName,
+      shortTask && agentLabel !== shortTask ? agentLabel : undefined,
+      subagent?.model ?? ownerMeta.model,
+      subagent?.background ? t("sessions.cards.subagentBackground") : undefined
+    ].filter((value, idx, arr): value is string => Boolean(value) && arr.indexOf(value) === idx);
+
+    const snippet = status === "done"
+      ? (resultText ?? (shortTask ? undefined : taskText))
+      : (activityText ?? (shortTask ? undefined : taskText));
+    const snippetKind = status === "done" && resultText ? "result" : activityText ? "activity" : "task";
+    const startedAtMs = Date.parse(event.timestamp);
+
+    return {
+      id: event.id,
+      title,
+      status: statusLabel,
+      tone,
+      running: status === "running",
+      providerId: ownerMeta.providerId,
+      avatarLabel: agentLabel,
+      metaParts: metaParts.length ? metaParts : [zh ? "原生子 Agent" : "Native subagent"],
+      durationMs: parsedOutput?.usage?.durationMs,
+      startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : undefined,
+      snippet,
+      snippetKind,
+      actionLabel: activityCount > 0 ? t("sessions.cards.subagentDetailCount", { count: activityCount }) : t("sessions.cards.subagentDetail"),
+      onOpen: onOpenSubagent ? () => onOpenSubagent(event.id) : undefined,
+      input: event.data.input,
+      output: event.data.output,
+      toolName: event.data.toolName,
+      task: subagent?.task,
+      native: true,
+      time: formatDateTime(event.timestamp, locale)
+    };
+  });
+
+  return <SubagentGroup items={items} zh={zh} />;
+}
+
+/** A provider CLI's native sub-agent dispatch, rendered with the unified SubagentGroup. */
+function SubagentCard({ event, onOpenSubagent }: { event: TimelineEvent & { data: { kind: "tool_activity" } }; locale: "zh-CN" | "en-US"; onOpenSubagent?: (eventId: string) => void }): JSX.Element | null {
+  return <NativeSubagentGroup events={[event]} onOpenSubagent={onOpenSubagent} />;
 }
 
 function ArtifactCard({ event, locale, onOpenLocalFile }: {
@@ -830,55 +971,162 @@ function RecoveryDecisionCard({ event, locale }: { event: TimelineEvent & { data
   );
 }
 
-function TaskUpdateCard({ event, t, locale, onOpenSession }: { event: TimelineEvent & { data: { kind: "task_update" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string; onOpenSession?: (id: string) => void }): JSX.Element {
+const TASK_STATUS_TONE: Record<string, "muted" | "info" | "accent" | "ok" | "danger" | "warn"> = {
+  draft: "muted",
+  ready: "muted",
+  queued: "muted",
+  running: "accent",
+  completed: "ok",
+  failed: "danger",
+  cancelled: "muted",
+  blocked_dependency: "warn",
+  verifying: "info",
+  waiting_user: "warn",
+  waiting_approval: "warn",
+  review_required: "warn",
+  merge_ready: "info"
+};
+
+/** Groups one or more consecutive delegated subagent task_update events into one sleek obsidian panel. */
+export function TaskUpdateGroup({
+  events,
+  onOpenSession
+}: {
+  events: readonly (TimelineEvent & { data: { kind: "task_update" } })[];
+  onOpenSession?: (id: string) => void;
+}): JSX.Element | null {
+  const { t, locale } = useI18n();
+  const zh = locale === "zh-CN";
   const features = useCoreFeatures();
-  const child = useSessionsStore(state => state.sessions.find(session => session.id === event.data.sessionId || session.taskId === event.data.taskId));
-  const owner = useSessionsStore(state => state.sessions.find(session => session.id === event.sessionId));
-  const latest = useSessionsStore(state => {
-    const items = child ? state.events[child.id] : undefined;
-    return items && [...items].reverse().find(item => delegationActivity(item.data, locale === "zh-CN"));
-  });
-  const result = useSessionsStore(state => child && event.data.status === "completed" ? [...(state.events[child.id] ?? [])].reverse().find(item => item.data.kind === "message" && item.data.sender === "agent" && !item.data.streaming) : undefined);
-  const statusTone: Record<string, "muted" | "info" | "accent" | "ok" | "danger" | "warn"> = {
-    draft: "muted",
-    ready: "muted",
-    queued: "muted",
-    running: "accent",
-    completed: "ok",
-    failed: "danger",
-    cancelled: "muted",
-    blocked_dependency: "warn",
-    verifying: "info",
-    waiting_user: "warn",
-    waiting_approval: "warn",
-    review_required: "warn",
-    merge_ready: "info"
-  };
-  return (
-    <DelegationCard
-      name={event.data.memberName || (locale === "zh-CN" ? "委派任务" : "Delegated task")}
-      task={event.data.title}
-      status={t(`sessions.taskStatus.${event.data.status}` as MessageKey)}
-      tone={statusTone[event.data.status] ?? "muted"}
-      running={event.data.status === "running" || event.data.status === "verifying"}
-      cancelled={event.data.status === "cancelled"}
-      zh={locale === "zh-CN"}
-      onOpen={child && onOpenSession ? () => onOpenSession(child.id) : undefined}
-      actionLabel={event.data.status === "completed" ? (locale === "zh-CN" ? "查看结果" : "View result") : undefined}
-      activity={delegationActivity(latest?.data, locale === "zh-CN")}
-      result={delegationActivity(result?.data, locale === "zh-CN")}
-      onRetry={features.taskRetry && owner?.projectRunId && ["failed", "cancelled"].includes(event.data.status) ? async () => {
-        const projectRunId = owner?.projectRunId;
-        if (!projectRunId) return;
-        await requestCore("orchestration.retryTask", { projectRunId, taskId: event.data.taskId });
-        await ensureProjectRunHydrated(projectRunId);
-      } : undefined}
-      input={event.data.dispatchCall?.input}
-      output={event.data.dispatchCall?.output}
-      toolName={event.data.dispatchCall?.toolName}
-      time={formatDateTime(event.timestamp, locale as "zh-CN" | "en-US")}
-    />
+  const sessionId = events[0]?.sessionId;
+  const tasks = useSessionsStore((state) => sessionId ? state.tasks[sessionId] : undefined);
+  const sessions = useSessionsStore((state) => state.sessions);
+  const teams = useTeamsStore((state) => state.teams);
+  const instances = useAgentsStore((state) => state.instances);
+  const connections = useConnectionsStore((state) => state.connections);
+  const harnesses = useProviderMetas();
+
+  const owner = useMemo(
+    () => sessions.find((item) => item.id === sessionId),
+    [sessions, sessionId]
   );
+
+  const resolvedChildren = useMemo(
+    () => events.map((event) => sessions.find((item) => item.id === event.data.sessionId || item.taskId === event.data.taskId)),
+    [events, sessions]
+  );
+
+  const childIds = useMemo(
+    () => resolvedChildren.map((child) => child?.id).filter((id): id is string => Boolean(id)),
+    [resolvedChildren]
+  );
+
+  const childEventsById = useSessionsStore(
+    useShallow((state) => Object.fromEntries(childIds.map((id) => [id, state.events[id]])))
+  );
+
+  const items: SubagentItemModel[] = events.map((event, index) => {
+    const task = tasks?.find((candidate) => candidate.id === event.data.taskId);
+    const child = resolvedChildren[index];
+    const childEvents = child ? childEventsById[child.id] : undefined;
+
+    const latestEvent = childEvents
+      ? [...childEvents].reverse().find((item) => delegationActivity(item.data, zh))
+      : undefined;
+    const resultEvent = child && event.data.status === "completed"
+      ? [...(childEvents ?? [])].reverse().find((item) => item.data.kind === "message" && item.data.sender === "agent" && !item.data.streaming)
+      : undefined;
+
+    const dispatchOutput = event.data.dispatchCall?.output
+      ? parseSubagentResult(event.data.dispatchCall.output)
+      : undefined;
+
+    const memberFromTeams = event.data.memberId
+      ? teams.flatMap((team) => team.members).find((candidate) => candidate.id === event.data.memberId)
+      : undefined;
+    const childMeta = resolveSessionHarness(child, teams, instances, connections, harnesses);
+    const memberInstance = !childMeta.providerId && memberFromTeams
+      ? instances.find((candidate) => candidate.id === memberFromTeams.agentInstanceId)
+      : undefined;
+    const providerId = childMeta.providerId ?? memberInstance?.providerId;
+    const harnessName = childMeta.harnessName
+      ?? (providerId ? harnesses.find((harness) => harness.id === providerId)?.name ?? memberInstance?.displayName : undefined);
+    const model = childMeta.model ?? memberFromTeams?.model;
+    const effort = childMeta.effort ?? formatReasoningLabel(memberFromTeams?.reasoningEffort);
+
+    const memberName = task?.memberName ?? event.data.memberName ?? childMeta.memberName ?? memberFromTeams?.displayName;
+    const rawTaskTitle = task?.title ?? (event.data.title === event.data.taskId ? undefined : event.data.title);
+    const rawObjective = task?.objective ?? event.data.objective;
+    const cleanTaskTitle = cleanSnippetText(rawTaskTitle);
+    const cleanObjective = cleanSnippetText(rawObjective);
+
+    const hasShortTaskTitle = Boolean(cleanTaskTitle && cleanTaskTitle.length <= 54 && cleanTaskTitle !== memberName);
+    const headline = hasShortTaskTitle
+      ? cleanTaskTitle!
+      : (memberName || cleanTaskTitle || (zh ? "委派任务" : "Delegated task"));
+
+    const roleMeta = hasShortTaskTitle && memberName && !headline.includes(memberName) ? memberName : undefined;
+    const metaParts = [harnessName, model, effort, roleMeta]
+      .filter((value, idx, arr): value is string => Boolean(value) && arr.indexOf(value) === idx);
+
+    const isRunning = event.data.status === "running" || event.data.status === "verifying";
+    const isTerminal = ["completed", "failed", "cancelled"].includes(event.data.status);
+
+    const resultText = delegationActivity(resultEvent?.data, zh) ?? cleanSnippetText(dispatchOutput?.body);
+    const activityText = delegationActivity(latestEvent?.data, zh);
+    const promptFallback = cleanObjective ?? (!hasShortTaskTitle ? cleanTaskTitle : undefined);
+
+    const snippet = event.data.status === "completed"
+      ? (resultText ?? promptFallback)
+      : isRunning
+        ? (activityText ?? promptFallback)
+        : (resultText ?? activityText ?? promptFallback);
+    const snippetKind = event.data.status === "completed" && resultText
+      ? "result"
+      : isRunning && activityText
+        ? "activity"
+        : "task";
+
+    const durationMs = sessionElapsedMs(childEvents, child, isTerminal) ?? dispatchOutput?.usage?.durationMs;
+    const startTs = child?.createdAt ?? event.timestamp;
+    const startedAtMs = Date.parse(startTs);
+
+    return {
+      id: event.id,
+      title: headline,
+      status: t(`sessions.taskStatus.${event.data.status}` as MessageKey),
+      tone: TASK_STATUS_TONE[event.data.status] ?? "muted",
+      running: isRunning,
+      cancelled: event.data.status === "cancelled",
+      providerId,
+      avatarLabel: memberName || headline,
+      metaParts: metaParts.length ? metaParts : [zh ? "团队委派" : "Team task"],
+      durationMs,
+      startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : undefined,
+      snippet,
+      snippetKind,
+      onOpen: child && onOpenSession ? () => onOpenSession(child.id) : undefined,
+      actionLabel: event.data.status === "completed" ? (zh ? "查看结果" : "View result") : undefined,
+      onRetry: features.taskRetry && owner?.projectRunId && ["failed", "cancelled"].includes(event.data.status)
+        ? async () => {
+            const projectRunId = owner?.projectRunId;
+            if (!projectRunId) return;
+            await requestCore("orchestration.retryTask", { projectRunId, taskId: event.data.taskId });
+            await ensureProjectRunHydrated(projectRunId);
+          }
+        : undefined,
+      input: event.data.dispatchCall?.input,
+      output: event.data.dispatchCall?.output,
+      toolName: event.data.dispatchCall?.toolName,
+      time: formatDateTime(event.timestamp, locale)
+    };
+  });
+
+  return <SubagentGroup items={items} zh={zh} />;
+}
+
+function TaskUpdateCard({ event, onOpenSession }: { event: TimelineEvent & { data: { kind: "task_update" } }; t: (k: MessageKey, v?: Record<string, string | number>) => string; locale: string; onOpenSession?: (id: string) => void }): JSX.Element | null {
+  return <TaskUpdateGroup events={[event]} onOpenSession={onOpenSession} />;
 }
 
 function commandPresentation(command: string): { executor?: string; summary: string } {
@@ -1096,7 +1344,7 @@ function TimelineEventViewImpl({
     case "message":
       return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} streamActive={streamActive} revealFromStart={liveStarts?.has(event.id) ?? false} />;
     case "workflow_plan":
-      return <WorkflowPlanCard key={data.plan.id} plan={data.plan} runStatus={data.runStatus} onViewExecution={onOpenWorkflow}/>;
+      return <WorkflowPlanCard key={data.plan.id} plan={data.plan} runStatus={data.runStatus} onViewExecution={onOpenWorkflow} onOpenSession={onOpenSession} />;
     case "provider_ui":
       if (data.method === "open_url" && data.url) return <a href={data.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 py-1 text-[13px] text-accent underline underline-offset-4" onClick={(event) => { const bridge = getBridge(); if (bridge) { event.preventDefault(); void bridge.shell.openExternal(data.url!).catch(() => {}); } }}>{data.text || (locale === "zh-CN" ? "打开授权链接" : "Open authorization link")} ↗</a>;
       if (data.method !== "notify" || !data.text.trim()) return null;

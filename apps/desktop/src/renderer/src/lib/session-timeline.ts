@@ -56,7 +56,8 @@ export type TimelineEntry = { block: TimelineBlock }
 
 export function timelineEntries({ blocks, turns }: SessionTimeline): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
-  const lastProcess = new Map<TimelineTurn, TimelineEntry>();
+  const firstTurnRows = new Map<TimelineTurn, number>();
+  const summaries = new Map<number, TimelineTurn>();
   const runningTails = new Map<string, TimelineBlock>();
   for (const block of blocks) {
     if (block.runId && turns.get(block.runId)?.status === "running" &&
@@ -66,11 +67,23 @@ export function timelineEntries({ blocks, turns }: SessionTimeline): TimelineEnt
   }
   let group: Extract<TimelineEntry, { process: TimelineBlock[] }> | undefined;
   for (const block of blocks) {
-    const turn = block.runId ? turns.get(block.runId) : undefined;
+    const type = block.content.type;
+    if (type === "handoff.created") continue;
+    // The plan's ID is the run ID of the turn that proposed it.
+    const planId = type === "workflow.plan"
+      ? (block.content.payload as { plan?: { id?: string } } | undefined)?.plan?.id
+      : undefined;
+    const turn = turns.get(block.runId ?? planId ?? "");
     const reply = block.kind === "assistant_text" && block === runningTails.get(turn?.runId ?? "");
+    const card = type === "task.updated" || type === "workflow.plan";
     const process = turn && turn.finalBlockId !== block.blockId && !reply
       && ["thinking", "tool_call", "assistant_text", "assistant_note", "user_append", "notice"].includes(block.kind)
-      && !["workflow.plan", "run.failed"].includes(String(block.content.type));
+      && !card && type !== "run.failed";
+    if (turn && turn.status !== "running" && (process || card)) {
+      const firstRow = firstTurnRows.get(turn) ?? entries.length;
+      firstTurnRows.set(turn, firstRow);
+      if (process) summaries.set(firstRow, turn);
+    }
     if (!process) {
       group = undefined;
       entries.push({ block });
@@ -79,25 +92,12 @@ export function timelineEntries({ blocks, turns }: SessionTimeline): TimelineEnt
       if (group?.turn !== turn || block.kind === "user_append") {
         group = { turn, process: [] };
         entries.push(group);
-        lastProcess.set(turn, group);
       }
       group.process.push(block);
     }
   }
   return entries.flatMap<TimelineEntry>((entry, index) => {
-    if ("process" in entry) {
-      const { turn } = entry;
-      const next = entries[index + 1];
-      if (turn.status !== "running" && lastProcess.get(turn) === entry &&
-          (!turn.finalBlockId || (next && "block" in next && next.block.blockId === turn.finalBlockId))) {
-        return [{ summary: turn }, entry];
-      }
-    } else if ("block" in entry && entry.block.runId) {
-      const turn = turns.get(entry.block.runId);
-      if (turn?.finalBlockId === entry.block.blockId && lastProcess.has(turn) && lastProcess.get(turn) !== entries[index - 1]) {
-        return [{ summary: turn }, entry];
-      }
-    }
-    return [entry];
+    const summary = summaries.get(index);
+    return summary ? [{ summary }, entry] : [entry];
   });
 }

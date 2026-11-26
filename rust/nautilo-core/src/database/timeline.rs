@@ -233,6 +233,9 @@ impl Writer<'_> {
             return Ok(());
         };
         let mut message = parse(&raw)?;
+        if kind != "legacy" && message["sender"] != "user" {
+            return Ok(());
+        }
         if let Some(ids) = message["attachmentIds"]
             .as_array()
             .filter(|ids| !ids.is_empty())
@@ -357,6 +360,18 @@ pub(crate) fn record_event(db: &Connection, event: &Value) -> CoreResult<()> {
         turn: None,
     };
     match event_type {
+        "handoff.created" => return Ok(()),
+        "task.updated" => {
+            let (Some(id), Some(status)) = (payload["taskId"].as_str(), payload["status"].as_str())
+            else {
+                return Ok(());
+            };
+            let result = display_event(event);
+            if !writer.update_result(run, "notice", id, &result, status)? {
+                writer.seal()?;
+                writer.create("notice", run, result, true, Some(id), Some(status))?;
+            }
+        }
         "agent.message_delta" | "agent.thinking_delta" => {
             let kind = text_kind(event_type == "agent.thinking_delta", payload);
             let text = payload["text"].as_str().unwrap_or("");
@@ -512,8 +527,6 @@ pub(crate) fn record_event(db: &Connection, event: &Value) -> CoreResult<()> {
                 | "artifact.created"
                 | "planner.decision"
                 | "recovery.decision"
-                | "task.updated"
-                | "handoff.created"
                 | "workflow.plan"
                 | "verification.started"
                 | "verification.finished"
@@ -737,6 +750,12 @@ pub(crate) fn migrate(db: &Connection) -> CoreResult<()> {
             ).map_err(db_fail)? == 1 {
                 db.execute_batch(include_str!("timeline_workflow_plan_rows.sql")).map_err(db_fail)?;
             }
+            if db.execute(
+                "INSERT OR IGNORE INTO schema_meta(key,value) VALUES('timeline_orchestration_rows_v1','1')", [],
+            ).map_err(db_fail)? == 1 {
+                db.execute_batch(include_str!("timeline_orchestration_rows.sql")).map_err(db_fail)?;
+                db.execute_batch(include_str!("timeline.sql")).map_err(db_fail)?;
+            }
             return Ok(());
         }
         let mut sessions = db
@@ -814,7 +833,7 @@ pub(crate) fn migrate(db: &Connection) -> CoreResult<()> {
             .map_err(db_fail)?;
         }
         db.execute(
-            "INSERT INTO schema_meta(key,value) VALUES('timeline_v1','1'),('timeline_tool_rows_v1','1'),('timeline_workflow_plan_rows_v1','1')",
+            "INSERT INTO schema_meta(key,value) VALUES('timeline_v1','1'),('timeline_tool_rows_v1','1'),('timeline_workflow_plan_rows_v1','1'),('timeline_orchestration_rows_v1','1')",
             [],
         )
         .map_err(db_fail)?;

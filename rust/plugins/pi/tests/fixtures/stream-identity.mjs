@@ -21,6 +21,12 @@ for await (const line of createInterface({ input: process.stdin })) {
     model = { provider: frame.provider, id: frame.modelId };
     emit({ type: 'response', id: frame.id, success: true });
   } else if (frame.type === 'prompt') {
+    if (frame.message === 'hold-after-workflow-submit') {
+      emit({ type: 'tool_execution_end', toolCallId: 'submit', toolName: 'mcp_agenthub_workflow_submit',
+        result: { content: [{ type: 'text', text: '{"accepted":true}' }] }, isError: false });
+      continue;
+    }
+    if (frame.message === 'exit-before-settled') process.exit(0);
     const text = `${process.pid}:${++turns}:${frame.message}`;
     emit({ type: 'message_start', message: { role: 'assistant' } });
     if (frame.message === 'segments') {

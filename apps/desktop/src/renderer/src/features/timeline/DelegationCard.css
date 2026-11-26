@@ -1,27 +1,735 @@
-.delegation-card { margin-block: 12px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--ink); box-shadow: 0 2px 8px rgb(0 0 0 / .025); font-size: 13px; font-weight: var(--app-font-weight); }
-.delegation-card-heading { display: flex; align-items: center; gap: 10px; }
-.delegation-card-identity { flex: 1; min-width: 0; }
-.delegation-card-identity h3 { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
-.delegation-card-kind { display: flex; align-items: center; gap: 4px; margin-top: 2px; color: var(--ink-2); font-size: 11px; }
-.delegation-card-status { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; padding: 4px 8px; border-radius: 7px; color: var(--ink-2); background: var(--surface-soft, var(--panel)); font-size: 12px; font-weight: 500; }
-.delegation-card-status[data-tone="ok"] { color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--card)); }
-.delegation-card-status[data-tone="accent"], .delegation-card-status[data-tone="info"] { color: var(--accent); background: var(--accent-soft); }
-.delegation-card-status[data-tone="danger"] { color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--card)); }
-.delegation-card-status[data-tone="warn"] { color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--card)); }
-.delegation-card-task { margin-top: 13px; max-height: 10.5em; overflow-y: auto; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.75; }
-.delegation-card-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-top: 14px; }
-.delegation-card-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; min-width: 0; margin-top: 10px; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
-.delegation-card-open { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; padding: 5px 8px; border-radius: 7px; background: var(--surface-soft, var(--panel)); color: var(--ink); font-size: 12px; font-weight: 500; }
-.delegation-card-open:hover { background: var(--card-hover); }
-.delegation-card-open:disabled { opacity: .55; }
-.delegation-card-activity { margin-top: 12px; color: var(--ink-2); font-size: 13px; line-height: 1.65; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
-.delegation-card-activity[data-result="true"] { color: var(--ink); -webkit-line-clamp: 3; }
-.delegation-card-retry-error { margin-top: 10px; font-size: 12px; color: var(--danger); }
-.delegation-card-open:focus-visible, .delegation-card-details-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.delegation-card-details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
-.delegation-card-details-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 5px 0; border-radius: 4px; color: var(--ink-2); font-size: 12px; cursor: pointer; }
-.delegation-card-details-toggle:hover { color: var(--ink); }
-.delegation-card-details-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
-.delegation-card-tool { color: var(--ink-2); font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
-.delegation-card-details pre { margin-top: 8px; padding: 10px 12px; max-height: 220px; overflow: auto; border-radius: 8px; background: var(--surface-soft, var(--panel)); font-family: var(--font-mono); font-size: 12px; font-weight: 400; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 560px) { .delegation-card { padding: 14px; } .delegation-card-heading { flex-wrap: wrap; } }
+/* ==========================================================================
+ * Subagent Dispatch Group — Exact Reference Layout + Refined Fluid Motion
+ * ========================================================================== */
+
+.subagent-group {
+  --sg-surface: light-dark(var(--card), #111217);
+  --sg-row-hover: light-dark(rgba(15, 23, 42, 0.032), rgba(255, 255, 255, 0.035));
+  --sg-border: light-dark(rgba(15, 23, 42, 0.09), rgba(255, 255, 255, 0.085));
+  --sg-border-hover: light-dark(rgba(15, 23, 42, 0.14), rgba(255, 255, 255, 0.125));
+  --sg-ring-cutout: light-dark(var(--bg), #0b0d12);
+  --sg-badge-bg: light-dark(var(--surface-soft, #f1f5f9), #1c1d24);
+  --sg-sheen: light-dark(rgba(15, 23, 42, 0.024), rgba(255, 255, 255, 0.026));
+  --sg-title: light-dark(var(--ink), #f4f4f6);
+  --sg-snippet: light-dark(var(--ink-2), #b4b6c2);
+  --sg-meta: light-dark(var(--ink-3), #9193a0);
+  --sg-ok: light-dark(#15803d, #34d399);
+  --sg-running: light-dark(#2563eb, #60a5fa);
+  --sg-danger: light-dark(#dc2626, #f87171);
+  --sg-warn: light-dark(#b45309, #fbbf24);
+  --sg-ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  margin-block: 16px 18px;
+  color: var(--sg-title);
+  font-weight: var(--app-font-weight);
+}
+
+/* ---------- Collapsible Group Header (sits cleanly above the card) ---------- */
+
+.subagent-group-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 4px 2px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.subagent-group-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Overlapping circular provider avatar stack */
+.subagent-avatar-stack {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.subagent-stack-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--sg-badge-bg);
+  box-shadow:
+    0 0 0 2.5px var(--sg-ring-cutout),
+    inset 0 0 0 1px light-dark(rgba(15, 23, 42, 0.06), rgba(255, 255, 255, 0.07));
+  overflow: hidden;
+  transition:
+    margin-inline-start 280ms var(--sg-ease),
+    transform 280ms var(--sg-ease);
+}
+
+.subagent-stack-badge + .subagent-stack-badge {
+  margin-inline-start: -10px;
+}
+
+.subagent-stack-badge .identity-avatar,
+.subagent-stack-badge .provider-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.subagent-stack-badge .provider-avatar img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  border-radius: 999px;
+}
+
+.subagent-stack-overflow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  margin-inline-start: -8px;
+  padding-inline: 6px;
+  border-radius: 999px;
+  background: var(--sg-badge-bg);
+  box-shadow:
+    0 0 0 2.5px var(--sg-ring-cutout),
+    inset 0 0 0 1px var(--sg-border);
+  color: var(--sg-meta);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  transition: margin-inline-start 280ms var(--sg-ease);
+}
+
+/* Tasteful fan-out on header hover */
+@media (hover: hover) and (pointer: fine) {
+  .subagent-group-header:hover .subagent-stack-badge + .subagent-stack-badge {
+    margin-inline-start: -4px;
+  }
+  .subagent-group-header:hover .subagent-stack-overflow {
+    margin-inline-start: -3px;
+  }
+  .subagent-group-header:hover .subagent-stack-badge {
+    transform: translate3d(0, -1px, 0);
+  }
+}
+
+/* Delicate active orbit ring on running badge */
+.subagent-stack-badge[data-running="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: conic-gradient(from 0deg, transparent 58%, var(--sg-running) 94%, transparent 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 1.75px), #000 calc(100% - 1.25px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 1.75px), #000 calc(100% - 1.25px));
+  pointer-events: none;
+}
+
+/* Header title + status count */
+.subagent-group-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.subagent-group-title {
+  color: var(--sg-title);
+  font-size: 14.5px;
+  font-weight: 560;
+  line-height: 1.32;
+  letter-spacing: -0.01em;
+}
+
+.subagent-group-subtitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  color: var(--sg-meta);
+  font-size: 12.5px;
+  line-height: 1.32;
+}
+
+.subagent-tally-part {
+  display: inline-flex;
+  align-items: center;
+}
+
+.subagent-tally-part[data-tone="running"] {
+  color: var(--sg-running);
+}
+
+.subagent-tally-part[data-tone="failed"] {
+  color: var(--sg-danger);
+}
+
+.subagent-tally-part[data-tone="warn"] {
+  color: var(--sg-warn);
+}
+
+.subagent-tally-sep {
+  margin-inline: 5px;
+  opacity: 0.55;
+}
+
+/* Right duration + rotating chevron (^ when open, v when closed) */
+.subagent-group-trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  margin-inline-start: auto;
+  color: var(--sg-meta);
+}
+
+.subagent-group-duration {
+  font-size: 13px;
+  font-weight: 450;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  transition: color 160ms ease;
+}
+
+.subagent-group-chevron {
+  color: var(--sg-meta);
+  transform: rotate(0deg);
+  transition: transform 300ms var(--sg-ease), color 160ms ease;
+}
+
+.subagent-group[data-open="true"] .subagent-group-chevron {
+  transform: rotate(180deg);
+}
+
+.subagent-group-header:hover .subagent-group-chevron,
+.subagent-group-header:hover .subagent-group-duration {
+  color: var(--sg-title);
+}
+
+/* ---------- Smooth Grid Expand / Collapse Fold ---------- */
+
+.subagent-group-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translate3d(0, -6px, 0);
+  transition:
+    grid-template-rows 320ms var(--sg-ease),
+    opacity 220ms ease,
+    transform 320ms var(--sg-ease);
+}
+
+.subagent-group-fold[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.subagent-group-clip {
+  min-height: 0;
+  overflow: hidden;
+  padding: 1px;
+}
+
+/* ---------- Flat Airy Rounded Card Container (Exact Reference Match) ---------- */
+
+.subagent-group-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--sg-border);
+  border-radius: 18px;
+  background: var(--sg-surface);
+  overflow: hidden;
+  transition: border-color 200ms ease;
+}
+
+.subagent-group-panel:hover {
+  border-color: var(--sg-border-hover);
+}
+
+/* Whisper-quiet pointer sheen */
+.subagent-group-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    420px circle at var(--mx, 50%) var(--my, 0%),
+    var(--sg-sheen),
+    transparent 68%
+  );
+  opacity: 0;
+  transition: opacity 240ms ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.subagent-group-panel:hover::before {
+  opacity: 1;
+}
+
+/* Ultra-fine top shimmer line ONLY while any subagent is running */
+.subagent-group-panel[data-running="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1.5px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--sg-running) 52%, transparent) 50%,
+    transparent 100%
+  );
+  transform: translate3d(-100%, 0, 0);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* ---------- Individual Subagent Row (Airy Spacing, No Divider Lines) ---------- */
+
+.subagent-row {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  column-gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  transition: background-color 180ms ease;
+}
+
+.subagent-row[data-clickable="true"] {
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .subagent-row[data-clickable="true"]:hover {
+    background: var(--sg-row-hover);
+  }
+  .subagent-row[data-clickable="true"]:hover .subagent-row-chevron {
+    color: var(--sg-title);
+    transform: translate3d(3px, 0, 0);
+  }
+  .subagent-row[data-clickable="true"]:hover .subagent-row-duration {
+    color: var(--sg-snippet);
+  }
+}
+
+.subagent-row[data-clickable="true"]:active .subagent-row-main {
+  transform: scale(0.995);
+}
+
+.subagent-row[data-clickable="true"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Crisp solid status dot (no fuzzy glow on completed; gentle ripple only when running) */
+.subagent-status-dot {
+  position: relative;
+  width: 9px;
+  height: 9px;
+  margin-top: 6px;
+  justify-self: center;
+  border-radius: 999px;
+  background: var(--sg-meta);
+}
+
+.subagent-status-dot[data-tone="ok"] {
+  background: var(--sg-ok);
+}
+
+.subagent-status-dot[data-tone="accent"],
+.subagent-status-dot[data-tone="info"],
+.subagent-status-dot[data-running="true"] {
+  background: var(--sg-running);
+}
+
+.subagent-status-dot[data-tone="danger"] {
+  background: var(--sg-danger);
+}
+
+.subagent-status-dot[data-tone="warn"] {
+  background: var(--sg-warn);
+}
+
+/* Expanding GPU pulse ring ONLY while running */
+.subagent-status-dot[data-running="true"]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 999px;
+  border: 1.5px solid var(--sg-running);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.subagent-row-main {
+  min-width: 0;
+  transition: transform 140ms var(--sg-ease);
+}
+
+/* Line 1: Bold Title · Colored Inline Status ... Duration > */
+.subagent-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.subagent-row-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+}
+
+.subagent-row-title {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sg-title);
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.42;
+  letter-spacing: -0.01em;
+}
+
+.subagent-row-sep {
+  flex-shrink: 0;
+  color: var(--sg-meta);
+  font-size: 13px;
+  opacity: 0.65;
+}
+
+.subagent-row-status {
+  flex-shrink: 0;
+  color: var(--sg-meta);
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.42;
+}
+
+.subagent-row-status[data-tone="ok"] {
+  color: var(--sg-ok);
+}
+
+.subagent-row-status[data-tone="accent"],
+.subagent-row-status[data-tone="info"],
+.subagent-row-status[data-running="true"] {
+  color: var(--sg-running);
+}
+
+.subagent-row-status[data-tone="danger"] {
+  color: var(--sg-danger);
+}
+
+.subagent-row-status[data-tone="warn"] {
+  color: var(--sg-warn);
+}
+
+.subagent-row-trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.subagent-row-duration {
+  color: var(--sg-meta);
+  font-size: 13px;
+  font-weight: 450;
+  font-variant-numeric: tabular-nums;
+  transition: color 160ms ease;
+}
+
+.subagent-row-chevron {
+  color: var(--sg-meta);
+  transition: transform 220ms var(--sg-ease), color 160ms ease;
+}
+
+/* Line 2: Clean Provider Icon + Provider · Model · Effort */
+.subagent-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+  min-width: 0;
+}
+
+.subagent-row-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.subagent-row-avatar .identity-avatar,
+.subagent-row-avatar .provider-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 9px;
+}
+
+.subagent-row-avatar .provider-avatar img {
+  width: 17px;
+  height: 17px;
+  object-fit: contain;
+  border-radius: 999px;
+}
+
+.subagent-row-meta-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sg-meta);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* Line 3: 3-line Clamped Summary / Result Snippet */
+.subagent-row-snippet {
+  margin: 7px 0 0;
+  color: var(--sg-snippet);
+  font-size: 13.5px;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.subagent-row-snippet[data-kind="activity"] {
+  color: var(--sg-meta);
+  -webkit-line-clamp: 2;
+}
+
+/* Rare secondary actions (retry on failure, or raw call details when non-navigable) */
+.subagent-row-error {
+  margin: 8px 0 0;
+  color: var(--sg-danger);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.subagent-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.subagent-row-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--sg-border);
+  border-radius: 7px;
+  background: light-dark(rgba(15, 23, 42, 0.025), rgba(255, 255, 255, 0.03));
+  color: var(--sg-meta);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.subagent-row-action:hover:not(:disabled) {
+  border-color: var(--sg-border-hover);
+  background: light-dark(rgba(15, 23, 42, 0.05), rgba(255, 255, 255, 0.06));
+  color: var(--sg-title);
+}
+
+.subagent-row-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.subagent-row-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.subagent-row-action-chevron {
+  transition: transform 220ms var(--sg-ease);
+}
+
+.subagent-row-action[aria-expanded="true"] .subagent-row-action-chevron {
+  transform: rotate(180deg);
+}
+
+.subagent-row-action-retry {
+  color: var(--sg-title);
+}
+
+.subagent-row-details-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 240ms var(--sg-ease), opacity 180ms ease;
+}
+
+.subagent-row-details-fold[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.subagent-row-details-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.subagent-row-details {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--sg-border);
+}
+
+.subagent-row-tool {
+  color: var(--sg-meta);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.subagent-row-details pre {
+  margin: 7px 0 0;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--sg-border);
+  border-radius: 9px;
+  background: light-dark(var(--surface-soft), #090a0e);
+  color: var(--sg-snippet);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.58;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- GPU-Composited Keyframes & Motion Rules ---------- */
+
+@keyframes subagent-row-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 7px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes subagent-dot-pulse {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.72;
+  }
+  70% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+@keyframes subagent-stack-orbit {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@keyframes subagent-top-shimmer {
+  0% {
+    transform: translate3d(-100%, 0, 0);
+  }
+  100% {
+    transform: translate3d(100%, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-reduce-motion]) .subagent-group:not([data-reduced-motion="true"]) .subagent-row {
+    animation: subagent-row-enter 300ms var(--sg-ease) calc(var(--row-index, 0) * 45ms) both;
+  }
+
+  html:not([data-reduce-motion]) .subagent-group:not([data-reduced-motion="true"]) .subagent-status-dot[data-running="true"]::after {
+    animation: subagent-dot-pulse 2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  }
+
+  html:not([data-reduce-motion]) .subagent-group:not([data-reduced-motion="true"]) .subagent-stack-badge[data-running="true"]::after {
+    animation: subagent-stack-orbit 2.2s linear infinite;
+  }
+
+  html:not([data-reduce-motion]) .subagent-group:not([data-reduced-motion="true"]) .subagent-group-panel[data-running="true"]::after {
+    animation: subagent-top-shimmer 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-group-fold,
+  .subagent-row-details-fold,
+  .subagent-group-chevron,
+  .subagent-row-chevron,
+  .subagent-stack-badge,
+  .subagent-stack-overflow,
+  .subagent-row,
+  .subagent-row-main {
+    transition: none;
+  }
+}
+
+html[data-reduce-motion] .subagent-group-fold,
+html[data-reduce-motion] .subagent-row-details-fold,
+html[data-reduce-motion] .subagent-group-chevron,
+html[data-reduce-motion] .subagent-row-chevron,
+html[data-reduce-motion] .subagent-stack-badge,
+html[data-reduce-motion] .subagent-stack-overflow,
+html[data-reduce-motion] .subagent-row,
+html[data-reduce-motion] .subagent-row-main {
+  transition: none;
+}
+
+@media (max-width: 560px) {
+  .subagent-group-panel {
+    padding: 8px;
+    border-radius: 16px;
+  }
+  .subagent-row {
+    padding: 11px 10px;
+  }
+  .subagent-row-top {
+    gap: 8px;
+  }
+}

@@ -26,17 +26,30 @@ export function ToolStepGroup({ steps, open, onToggle, children }: {
   </ProcessDisclosure>;
 }
 
-export function TurnProcess({ events, liveTail, choices, setChoice, renderEvent }: {
+function isNativeSubagentEvent(event: TimelineEvent | undefined): event is TimelineEvent & { data: { kind: "tool_activity" } } {
+  return Boolean(event && event.data.kind === "tool_activity" && event.data.subagent);
+}
+
+export function TurnProcess({ events, liveTail, choices, setChoice, renderEvent, renderSubagentGroup }: {
   events: (TimelineEvent | undefined)[];
   liveTail: boolean;
   choices: Readonly<Record<string, boolean>>;
   setChoice: (id: string, open: boolean) => void;
   renderEvent: (event: TimelineEvent) => ReactNode;
+  renderSubagentGroup?: (events: readonly (TimelineEvent & { data: { kind: "tool_activity" } })[]) => ReactNode;
 }): JSX.Element {
   const nodes: ReactNode[] = [];
   for (let index = 0; index < events.length;) {
     const event = events[index++];
     if (!event) continue;
+    if (isNativeSubagentEvent(event) && renderSubagentGroup) {
+      const group: (TimelineEvent & { data: { kind: "tool_activity" } })[] = [event];
+      while (isNativeSubagentEvent(events[index])) {
+        group.push(events[index++] as TimelineEvent & { data: { kind: "tool_activity" } });
+      }
+      nodes.push(<div key={event.id}>{renderSubagentGroup(group)}</div>);
+      continue;
+    }
     if (!isToolClusterStep(event.data)) {
       const commentary = event.data.kind === "message" && event.data.sender === "agent";
       nodes.push(<div key={event.id} className={commentary ? "conversation-commentary" : undefined}>{renderEvent(event)}</div>);
@@ -45,7 +58,7 @@ export function TurnProcess({ events, liveTail, choices, setChoice, renderEvent 
     const steps = [event.data];
     const rows = [event];
     let next = events[index];
-    while (next && isToolClusterStep(next.data)) {
+    while (next && isToolClusterStep(next.data) && !(renderSubagentGroup && isNativeSubagentEvent(next))) {
       steps.push(next.data);
       rows.push(next);
       next = events[++index];

@@ -19,8 +19,8 @@ import { WorkflowLibrary } from "./WorkflowLibrary";
 import { Stepper, WorkflowFields } from "./WorkflowFields";
 import { WorkflowPrompt } from "./WorkflowPrompt";
 import { WorkflowWorkspace, type WorkspaceAction } from "./WorkflowAcceptance";
-import { WorkflowIncoming } from "./WorkflowDispatchCard";
-import { addableKinds, appendOutlet, blankWorkflow, canRemoveOutlet, cleanLayout, connectNodes, createNode, graphIssues, removeLink, type AddableKind, type InspectorTab } from "./workflow-editing";
+import { WorkflowRunInspector } from "./WorkflowRunInspector";
+import { appendOutlet, blankWorkflow, canRemoveOutlet, cleanLayout, connectNodes, createNode, graphIssues, removeLink, type AddableKind, type InspectorTab } from "./workflow-editing";
 import { edgeKey, findEdge, loopEdges, placeNodes, type Connection, type EdgeSelection, type Point } from "./workflow-geometry";
 import { applyStarter, eventProjection, initialLayout, nodeKinds, nodeLabel, nodeSize, nodeTone, statusLabels, workflowEventText } from "./workflow-model";
 import { buildWorkflowMotionPreview, type WorkflowMotionPreviewFrame } from "./workflow-motion-preview";
@@ -638,12 +638,13 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
     if (target.closest("input,textarea,select,[contenteditable=true],[role=menu],[role=combobox],[role=listbox]")) return;
     if (event.ctrlKey || event.metaKey) {
       if (event.key.toLowerCase() === "z") { event.preventDefault(); undo(event.shiftKey); }
+      if (event.key.toLowerCase() === "y") { event.preventDefault(); undo(true); }
       if (!canvasLocked && event.key.toLowerCase() === "d" && node && node.kind !== "main") { event.preventDefault(); cloneNode(node); }
       if (event.key.toLowerCase() === "c" && target.closest(".wf-canvas") && node?.kind !== "main" && node) {
         event.preventDefault(); copyNode(node.id);
       }
     }
-    if (!canvasLocked && event.key === "Delete" && target.closest(".wf-canvas")) {
+    if (!canvasLocked && (event.key === "Delete" || event.key === "Backspace") && target.closest(".wf-canvas")) {
       if (selectedEdge && edge) { event.preventDefault(); unlink(selectedEdge); }
       else if (node && node.id !== definition.entry) { event.preventDefault(); deleteNode(node.id); }
     }
@@ -656,9 +657,15 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
         {mode === "design" && <><button className="wf-icon-button" type="button" aria-label={libraryCollapsed ? "展开流程库" : "收起流程库"} aria-expanded={!libraryCollapsed} aria-controls="wf-library" title={libraryCollapsed ? "展开流程库" : "收起流程库"} onClick={toggleLibrary}>
           {libraryCollapsed ? <PanelLeftOpen size={15}/> : <PanelLeftClose size={15}/>}
         </button><i className="wf-toolbar-divider" aria-hidden/></>}
-        <input className="wf-title-input" aria-label="流程名称" size={Math.min(26, Math.max(10, (definition.name?.length ?? 8) * 2))} value={definition.name || ""} readOnly={mode === "run" || canvasLocked} onChange={event => change(next => { next.definition.name = event.target.value; })}/>
+        <input className="wf-title-input" aria-label="流程名称" title="点击编辑流程名称" size={Math.min(26, Math.max(10, (definition.name?.length ?? 8) * 2))} value={definition.name || ""} readOnly={mode === "run" || canvasLocked} onChange={event => change(next => { next.definition.name = event.target.value; })}/>
         {mode === "design" && <><span className="wf-header-stat">{definition.nodes.length} 节点 · {definition.edges.length} 连线</span><button type="button" className="wf-health"
-          data-tone={blockingIssues.length ? "error" : issues.length ? "warning" : "ok"} onClick={() => selectNode("")}>
+          data-tone={blockingIssues.length ? "error" : issues.length ? "warning" : "ok"}
+          title={issues.length ? "点击定位第一条诊断问题" : "查看流程概览"}
+          onClick={() => {
+            const first = blockingIssues[0] ?? issues[0];
+            if (first?.nodeId) showIssue(first);
+            else selectNode("");
+          }}>
           <i aria-hidden/>{blockingIssues.length ? `${blockingIssues.length} 项错误` : issues.length ? `${issues.length} 项提醒` : "校验通过"}
         </button></>}
       </>}</div>
@@ -667,6 +674,7 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
         label: runningNode ? nodeLabel(runningNode) + (runningNodes.length > 1 ? ` 等 ${runningNodes.length} 个节点` : "") : statusLabels[liveRun.status]
       } : undefined} completed={liveRun?.status === "completed" ? [liveRun.id] : undefined} />
       <div className="wf-header-actions">
+        {mode === "run" && inspection && !!run?.messages.length && <button type="button" onClick={() => setMessagesOpen(true)}><BellRing size={13}/><span>会话消息</span><small>{run.messages.length}</small></button>}
         {mode === "run" && sequence !== undefined && <button type="button" onClick={() => { setSequence(undefined); setFollowing(true); setReplaying(false); }}>退出回放</button>}
         {mode === "run" && run?.parentRunId && <button onClick={() => inspectRun(run.parentRunId!)}><ArrowLeft size={14}/>父流程</button>}
         {mode === "run" && !inspection && <button onClick={() => { setMode("design"); setParams(templateId ? { template: templateId } : {}); }}><ArrowLeft size={14}/>返回画板</button>}
@@ -691,11 +699,11 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
       onArchive={setArchiveTarget} onImport={() => importFile.current?.click()}
       onNew={() => openFromLibrary(undefined, true)} onOpen={template => openFromLibrary(template)} onDraft={() => openFromLibrary()}/>}
     <section className="wf-stage" aria-label={mode === "design" ? "流程画布" : "执行现场"}>
-      {mode === "run" && <div className="wf-stage-bar"><span><Workflow size={14}/>执行现场<small>{sequence === undefined ? "实时" : "历史回放"}</small></span>
+      {mode === "run" && !inspection && <div className="wf-stage-bar"><span><Workflow size={14}/>执行现场<small>{sequence === undefined ? "实时" : "历史回放"}</small></span>
         <div className="wf-stage-controls">
           {!!run?.messages.length && <button onClick={() => setMessagesOpen(true)}><BellRing size={14}/>会话消息 {run.messages.length}</button>}
-          {!inspection && <WorkflowSelect label="查看流程运行" value={runId} options={runOptions}
-            onChange={id => setParams({ ...(templateId ? { template: templateId } : {}), run: id })} />}
+          <WorkflowSelect label="查看流程运行" value={runId} options={runOptions}
+            onChange={id => setParams({ ...(templateId ? { template: templateId } : {}), run: id })} />
         </div>
       </div>}
       <WorkflowCanvas key={mode === "run" ? runId : definition.id} definition={definition} layout={layout} selected={selected} editing={mode === "design"} instances={projection.instances} events={projection.events} onSelect={selectNode} issues={issues}
@@ -710,35 +718,69 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
           cloneNode: id => cloneNode(definition.nodes.find(item => item.id === id)!), bypassNodes, removeNodes: deleteNodes, arrangeNodes, rewireSource, moveOutOfGroup,
           startFrom: kind => change(next => { next.definition = applyStarter(next.definition, kind); next.layout = initialLayout(next.definition); }) } : undefined}>
         {mode === "design" && <>
-          <button type="button" disabled={canvasLocked || !history.current.length} aria-label="撤销" title="撤销 · Ctrl / ⌘ + Z" onClick={() => undo()}><Undo2 size={15}/></button>
-          <button type="button" disabled={canvasLocked || !future.current.length} aria-label="重做" title="重做 · Ctrl / ⌘ + Shift + Z" onClick={() => undo(true)}><Redo2 size={15}/></button>
+          <button type="button" disabled={canvasLocked || !history.current.length} aria-label="撤销" title="撤销 · Ctrl / ⌘ + Z" onClick={() => undo()}><Undo2 size={15}/><span className="wf-dock-tooltip">撤销<kbd>Ctrl+Z</kbd></span></button>
+          <button type="button" disabled={canvasLocked || !future.current.length} aria-label="重做" title="重做 · Ctrl / ⌘ + Y" onClick={() => undo(true)}><Redo2 size={15}/><span className="wf-dock-tooltip">重做<kbd>Ctrl+Y</kbd></span></button>
           <i className="wf-toolbar-divider" aria-hidden/>
           <button type="button" aria-label="自动排列节点" title="自动排列节点" disabled={canvasLocked} onClick={arrangeLayout}><Scan size={15}/><span>整理</span></button>
-          <button type="button" aria-label="查找节点" title="查找 · Ctrl / ⌘ + K" onClick={() => setSearch("")}><Search size={15}/></button>
-          <WorkflowSelect label="添加节点" disabled={canvasLocked} placeholder="＋ 添加节点" options={addableKinds.map(kind => ({ value: kind, label: nodeKinds[kind] }))}
-            onChange={value => addNode(value as AddableKind)}/>
+          <button type="button" aria-label="查找节点" title="查找 · Ctrl / ⌘ + K" onClick={() => setSearch("")}><Search size={15}/><span className="wf-dock-tooltip">搜索画布<kbd>Ctrl+K</kbd></span></button>
+          <i className="wf-toolbar-divider" aria-hidden/>
         </>}
       </WorkflowCanvas>
-      {mode === "run" && run && <div className="wf-timeline" data-replay={sequence !== undefined}><div><strong>执行轨迹</strong><span>{sequence === undefined ? "实时记录" : replaying ? "正在回放" : "回放已暂停"}</span><output>{projection.events.length} / {run.events.length}</output></div>
+      {mode === "run" && run && <div className="wf-timeline" data-replay={sequence !== undefined}>
+        <div className="wf-timeline-bar">
+          <div className="wf-timeline-controls">
+            <button className="wf-playback" type="button" aria-label="起始事件" title="起始事件" disabled={!run.events.length} onClick={() => seek(0)}><SkipBack size={12}/></button>
+            <button className="wf-playback" type="button" aria-label="上一步" title="上一步" disabled={playbackIndex <= 0} onClick={() => seek(playbackIndex - 1)}><StepBack size={12}/></button>
+            <button className="wf-playback" type="button" disabled={!run.events.length} aria-label={replaying ? "暂停回放" : "播放执行记录"} title={replaying ? "暂停回放" : "回放轨迹"} onClick={() => {
+              if (!replaying && (sequence === undefined || playbackIndex >= run.events.length - 1)) seek(0);
+              setFollowing(true); setReplaying(!replaying);
+            }}>{replaying ? <Pause size={12}/> : <Play size={12}/>}</button>
+            <button className="wf-playback" type="button" aria-label="下一步" title="下一步" disabled={playbackIndex >= run.events.length - 1} onClick={() => seek(playbackIndex + 1)}><StepForward size={12}/></button>
+          </div>
+          <span className="wf-timeline-status-pill" data-live={sequence === undefined || undefined}>
+            <i aria-hidden/>{sequence === undefined ? "实时" : replaying ? "回放中" : "已暂停"}
+          </span>
+          <div className="wf-timeline-event-inline" title={latestEvent ? workflowEventText(latestEvent, definition) : undefined}>
+            {latestEvent && <time>{new Date(latestEvent.timestamp).toLocaleTimeString()}</time>}
+            <span>{latestEvent ? workflowEventText(latestEvent, definition) : "等待执行事件"}</span>
+          </div>
+          <output className="wf-timeline-counter">{projection.events.length} / {run.events.length}</output>
+        </div>
         {sequence !== undefined && <div className="wf-replay-grains" aria-hidden>{Array.from({length:20}, (_, index) => <i key={index} data-done={index < Math.round(projection.events.length / Math.max(1,run.events.length) * 20)}/>)}</div>}
-        <div className="wf-event-track">{run.events.map((event, index) => ({ event, index })).filter(({ event }) => ["node.activated","node.completed","node.reminded","workflow.needs_decision"].includes(event.type)).slice(-120).map(({event, index}) => <button key={event.sequence} aria-label={`定位事件 ${event.sequence} ${workflowEventText(event, definition)}`} title={workflowEventText(event, definition)} data-reminder={event.type === "node.reminded"} data-current={index <= playbackIndex} onClick={() => seek(index)} style={{ left: `${index / Math.max(1, run.events.length - 1) * 100}%` }}/>)}</div>
-        <input aria-label="定位执行事件" type="range" min={1} max={Math.max(1, run.events.length)} value={playbackIndex + 1} onChange={event => seek(Number(event.target.value) - 1)}/><p><time>{latestEvent && new Date(latestEvent.timestamp).toLocaleTimeString()}</time>{latestEvent ? workflowEventText(latestEvent, definition) : "等待执行事件"}</p>
-        <div className="wf-playback-buttons">
-          <button className="wf-playback" type="button" aria-label="起始事件" disabled={!run.events.length} onClick={() => seek(0)}><SkipBack size={12}/></button>
-          <button className="wf-playback" type="button" aria-label="上一步" disabled={playbackIndex <= 0} onClick={() => seek(playbackIndex - 1)}><StepBack size={12}/></button>
-          <button className="wf-playback" type="button" disabled={!run.events.length} aria-label={replaying ? "暂停回放" : "播放执行记录"} onClick={() => {
-            if (!replaying && (sequence === undefined || playbackIndex >= run.events.length - 1)) seek(0);
-            setFollowing(true); setReplaying(!replaying);
-          }}>{replaying ? <Pause size={12}/> : <Play size={12}/>}</button>
-          <button className="wf-playback" type="button" aria-label="下一步" disabled={playbackIndex >= run.events.length - 1} onClick={() => seek(playbackIndex + 1)}><StepForward size={12}/></button>
-        </div></div>}
+        <div className="wf-timeline-scrubber">
+          <div className="wf-event-track">{run.events.map((event, index) => ({ event, index })).filter(({ event }) => ["node.activated","node.completed","node.reminded","workflow.needs_decision"].includes(event.type)).slice(-120).map(({event, index}) => <button key={event.sequence} aria-label={`定位事件 ${event.sequence} ${workflowEventText(event, definition)}`} title={workflowEventText(event, definition)} data-reminder={event.type === "node.reminded"} data-current={index <= playbackIndex} onClick={() => seek(index)} style={{ left: `${index / Math.max(1, run.events.length - 1) * 100}%` }}/>)}</div>
+          <input aria-label="定位执行事件" type="range" min={1} max={Math.max(1, run.events.length)} value={playbackIndex + 1} onChange={event => seek(Number(event.target.value) - 1)}/>
+        </div>
+      </div>}
     </section>
     <section ref={inspector} className="wf-inspector" aria-label="节点详情">
-      {mode === "design" && <div className="wf-inspector-resize" role="separator" aria-label="属性栏宽度" aria-orientation="vertical" aria-valuemin={310} aria-valuemax={440} aria-valuenow={inspectorWidth} tabIndex={0}
+      {mode === "run" ? (
+        <WorkflowRunInspector
+          run={run}
+          definition={definition}
+          node={node}
+          selected={selected}
+          targetName={targetName}
+          latestInstance={latestInstance}
+          nodeInstances={nodeInstances}
+          assignment={assignment}
+          taskPrompt={taskPrompt}
+          inspectorNodeChoices={inspectorNodeChoices}
+          sequence={sequence}
+          busy={busy}
+          onSelectNode={selectNode}
+          onSelectInstance={setInstanceId}
+          onOpenSession={openConversation}
+          onInspectRun={inspectRun}
+          onControl={control}
+          onRetryInstance={setRetryInstance}
+        />
+      ) : <>
+      <div className="wf-inspector-resize" role="separator" aria-label="属性栏宽度" aria-orientation="vertical" aria-valuemin={310} aria-valuemax={440} aria-valuenow={inspectorWidth} tabIndex={0}
         onKeyDown={event => { if (["ArrowLeft","ArrowRight"].includes(event.key)) { event.preventDefault(); setInspectorWidth(width => Math.min(440, Math.max(310, width + (event.key === "ArrowLeft" ? 10 : -10)))); } }}
         onPointerDown={event => { if (event.button === 0) { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); } }}
-        onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) setInspectorWidth(Math.round(Math.max(310, Math.min(440, inspector.current!.getBoundingClientRect().right - event.clientX)))); }}/>}
-      {mode === "design" && node ? <header className="wf-node-heading" data-tone={nodeTone(node)}>
+        onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) setInspectorWidth(Math.round(Math.max(310, Math.min(440, inspector.current!.getBoundingClientRect().right - event.clientX)))); }}/>
+      {node ? <header className="wf-node-heading" data-tone={nodeTone(node)}>
         <div className="wf-node-identity">
           <WorkflowSelect label="选择节点" value={node.id} options={inspectorNodeChoices} onChange={selectNode}>
             <div className="wf-node-name-editor">
@@ -769,7 +811,7 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
               { value: "environment", label: "环境与容错", warning: !!node.workspace?.allowedPaths?.length || (node.maxAttempts ?? 1) > 1 }]}/>
         </fieldset>}
       </header> : <header>
-        <strong>{mode === "run" ? "本轮执行" : edge ? "连线属性" : "流程概览"}</strong>
+        <strong>{edge ? "连线属性" : "流程概览"}</strong>
         {!edge && <WorkflowSelect label="选择节点" placeholder="选择节点" value={selected || undefined} options={inspectorNodeChoices} onChange={selectNode}/>}
       </header>}
       {edge && selectedEdge && mode === "design" ? <fieldset className="wf-edge-inspector" disabled={canvasLocked}>
@@ -821,36 +863,48 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
         </section>
         <section>
           <h3>拓扑概览</h3>
-          <dl className="wf-overview-metrics">
-            <div data-tone="indigo"><dt><i/>节点总数</dt><dd>{definition.nodes.length}</dd></div>
-            <div data-tone="cyan"><dt><i/>连线与环路</dt><dd>{definition.edges.length} / {loop.size} 环</dd></div>
-            <div data-tone="amber"><dt><i/>结构化字段</dt><dd>{definition.nodes.reduce((total, node) => total + Object.keys(node.outputs ?? {}).length, 0)} 项</dd></div>
-          </dl>
-          <div className="wf-node-health"><span>节点健康度</span><div>{definition.nodes.map(node => {
-            const alerts = issues.filter(issue => issue.nodeId === node.id);
-            return <button type="button" key={node.id} data-tone={alerts.some(issue => !issue.warning) ? "error" : alerts.length ? "warning" : "ok"} title={nodeLabel(node)} aria-label={"定位 " + nodeLabel(node)} onClick={() => { selectNode(node.id); locateNode(node.id); }}><i/></button>;
-          })}</div></div>
+          <div className="wf-overview-kpis">
+            <div className="wf-overview-kpi">
+              <small>节点</small>
+              <strong>{definition.nodes.length}</strong>
+            </div>
+            <div className="wf-overview-kpi">
+              <small>连线</small>
+              <strong>{definition.edges.length}{loop.size > 0 && <span>/ {loop.size}环</span>}</strong>
+            </div>
+            <div className="wf-overview-kpi">
+              <small>产出字段</small>
+              <strong>{definition.nodes.reduce((total, node) => total + Object.keys(node.outputs ?? {}).length, 0)}</strong>
+            </div>
+          </div>
+          <div className="wf-field-title">节点健康度</div>
+          <div className="wf-overview-health-pills">
+            {definition.nodes.map(item => {
+              const alerts = issues.filter(issue => issue.nodeId === item.id);
+              const pillTone = alerts.some(issue => !issue.warning) ? "error" : alerts.length ? "warning" : "ok";
+              return <button type="button" key={item.id} className="wf-health-pill" data-tone={pillTone} title={"点击定位 " + nodeLabel(item)} aria-label={"定位 " + nodeLabel(item)} onClick={() => { selectNode(item.id); locateNode(item.id); }}>
+                <i aria-hidden/><span>{nodeLabel(item)}</span>
+              </button>;
+            })}
+          </div>
           <p className="wf-field-help">最多并行 {definition.limits?.maxParallel ?? 8} 个任务 · 超时 {Math.round((definition.limits?.timeoutMs ?? 3600000) / 60000)} 分钟</p>
         </section>
         <section>
           <h3>图谱与变量体检</h3>
           {!issues.length && <span className="wf-health-pass">拓扑就绪</span>}
           <ul className="wf-overview-issues" aria-label="待检查的问题">{issues.map(issue => <li key={issue.path + issue.message} data-warning={issue.warning}>
-            {issue.nodeId ? <button type="button" onClick={() => showIssue(issue)}><CircleAlert size={13}/>{issue.message}</button> : issue.message}
+            {issue.nodeId ? <button type="button" onClick={() => showIssue(issue)}>
+              <span style={{ display: "inline-flex", alignItems: "flex-start", gap: 6, minWidth: 0 }}><CircleAlert size={13}/><span>{issue.message}</span></span>
+              <span className="wf-issue-jump" aria-hidden>定位 →</span>
+            </button> : <span style={{ display: "block", padding: "9px 11px" }}>{issue.message}</span>}
           </li>)}</ul>
         </section>
       </div> :
-      <fieldset className="wf-inspector-grid" disabled={mode === "design" && canvasLocked}>{(mode === "run" || !node) && <div>
-        <h2>{node ? nodeLabel(node) : targetName(selected)}</h2><small>{node?.role || "控制节点"}</small>{mode === "run" && latestInstance && <><p className="wf-node-detail-state">{statusLabels[latestInstance.status]} · 第 {latestInstance.iteration} 次 {latestInstance.completedAt != null && `· ${((latestInstance.completedAt - latestInstance.createdAt) / 1000).toFixed(1)}s`}</p>
-        {assignment && latestInstance.sessionId && <div className="wf-executed-model">{assignment.providerId && <><ProviderAvatar providerId={assignment.providerId} size="sm"/>{providerMeta(assignment.providerId).name} · </>}{assignment.model || "原生默认模型"}</div>}
-        {nodeInstances.length > 1 && <WorkflowSelect label="选择节点执行实例" value={latestInstance.id} options={nodeInstances.map(instance => ({value:instance.id, label:`第 ${instance.iteration} 次 · ${statusLabels[instance.status]}`}))}
-          onChange={setInstanceId}/>}
-        {latestInstance.sessionId && <button className="wf-open-session" type="button" onClick={() => openConversation(latestInstance.sessionId!)}>打开子 Agent 会话 ↗</button>}</>}
-        {mode === "run" && latestInstance?.childRunId && <button onClick={() => inspectRun(latestInstance.childRunId!)}>展开子流程 ↗</button>}
-        {mode === "run" && !node && run && <button className="wf-open-session" type="button" onClick={() => openConversation(run.sessionId)}>打开主会话 ↗</button>}
+      <fieldset className="wf-inspector-grid" disabled={canvasLocked}>{!node && <div>
+        <h2>{targetName(selected)}</h2><small>控制节点</small>
       </div>}
       <div>{node?.kind === "agent" ? <>
-        {mode === "design" && inspectorTab === "instructions" && <div role="tabpanel" aria-label="指令与角色">
+        {inspectorTab === "instructions" && <div role="tabpanel" aria-label="指令与角色">
           <section className="wf-inspector-section">
             <div className="wf-field-title">基础配置</div>
             <div className="wf-inline-field wf-agent-field">角色<WorkflowSelect label="角色" value={node.role && Object.hasOwn(roles, node.role) ? node.role : "custom"}
@@ -864,34 +918,20 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
             <WorkflowPrompt key={node.id} definition={definition} node={node} onChange={text => editNode(node => { node.prompt = text; })}/>
           </section>
         </div>}
-        {mode === "run" && <><div className="wf-field-title">{latestInstance?.taskText ? "任务正文" : "任务提示词"}</div><div className="wf-prompt-read" tabIndex={0}><PromptText text={latestInstance ? taskPrompt : node.prompt}/></div></>}
-        {mode === "run" && latestInstance?.prompt && latestInstance.prompt !== taskPrompt && <details className="wf-dispatch-prompt"><summary>完整派发内容</summary><pre>{latestInstance.prompt}</pre></details>}
-        {mode === "run" && run && latestInstance && <WorkflowIncoming dispatch={{ run, instance: latestInstance }} zh />}
-        {mode === "run" && latestInstance?.submissionError && <p className="wf-node-submission-error">{latestInstance.submissionError}</p>}
-        {mode === "run" && !!Object.keys(latestInstance?.nativeWork?.children || {}).length && <div className="wf-native-work"><span>原生子 Agent</span>{Object.entries(latestInstance!.nativeWork!.children).map(([id, status]) => <div key={id}><code title={id}>{id}</code><small>{latestInstance!.nativeWork!.released ? "已停止" : latestInstance!.nativeWork!.detached ? "已交回原会话" : status === "running" ? "仍在执行，流程等待中" : status === "done" ? "已完成" : "执行失败"}</small></div>)}</div>}
-        {mode === "run" && !latestInstance?.result && latestInstance?.lastOutput && <details><summary>本轮已产出的内容</summary><pre>{latestInstance.lastOutput}</pre></details>}
       </> : node?.kind === "main" ? <p className="wf-control-description">从当前会话发起流程，同时派发已连接的出口。所有 Agent 节点的任务提示词将在启动前验证。</p> : node?.kind === "dispatch" ? <p className="wf-control-description">将输入同时发送给所有已连接的出口，由引擎自动推进。</p> : null}
-      {mode === "run" && run && latestInstance && <WorkflowWorkspace key={latestInstance.id} run={run} instance={latestInstance} interactive={sequence === undefined} busy={busy} onControl={control}/>}
-      {mode === "run" && run?.status === "running" && sequence === undefined && latestInstance?.status === "waiting_retry" && <div className="wf-command-review">
-        <p>{latestInstance.error || "此节点等待重试"}</p>
-        <div className="wf-workspace-actions">
-          <button disabled={busy} onClick={() => void control("decline_retry", latestInstance.id)}>按失败处理</button>
-          <button disabled={busy} className="wf-primary" onClick={() => setRetryInstance(latestInstance.id)}>重试此节点</button>
-        </div>
-      </div>}
-      {mode === "design" && issues.filter(issue => issue.nodeId === node?.id && !issue.exitId && !!issue.nodeId).map(issue =>
+      {issues.filter(issue => issue.nodeId === node?.id && !issue.exitId && !!issue.nodeId).map(issue =>
         <p key={issue.path + issue.message} className="wf-field-error">{issue.message}</p>
       )}
-      {node && <WorkflowFields key={node.id} node={node} definition={definition} templates={templates} verificationTemplates={verificationTemplates} readOnly={mode === "run"} tab={inspectorTab} onEdit={editNode}
+      {node && <WorkflowFields key={node.id} node={node} definition={definition} templates={templates} verificationTemplates={verificationTemplates} readOnly={false} tab={inspectorTab} onEdit={editNode}
         onInsertField={name => { editNode(node => { node.prompt = [node.prompt, name].filter(Boolean).join(" "); }); setInspectorTab("instructions"); }}/>}
       </div>
-      {node && (node.kind !== "agent" || mode === "run" || inspectorTab === "output") && (node.exits.length > 0 || mode === "design" && node.kind !== "join") && <div className="wf-exits">
-        <div className="wf-field-title">出口与路由{node.kind === "agent" && mode === "design" && <WorkflowSegments label="出口选择" value={node.exitMode || "one"}
+      {node && (node.kind !== "agent" || inspectorTab === "output") && (node.exits.length > 0 || node.kind !== "join") && <div className="wf-exits">
+        <div className="wf-field-title">出口与路由{node.kind === "agent" && <WorkflowSegments label="出口选择" value={node.exitMode || "one"}
           options={[{value:"one",label:"单选"},{value:"some",label:"多选"}]} onChange={value => editNode(node => { node.exitMode = value; })}/>}</div>
         {node.exits.map(exit => {
         const connection = findEdge(definition, { source: node.id, exit: exit.id });
         const issue = issues.find(issue => issue.nodeId === node.id && issue.exitId === exit.id && !issue.warning);
-        if (node.kind === "agent" && mode === "design") return <details className="wf-outlet-field" key={exit.id} data-issue={!!issue}
+        if (node.kind === "agent") return <details className="wf-outlet-field" key={exit.id} data-issue={!!issue}
           onPointerEnter={() => setHoveredOutlet({ source: node.id, exit: exit.id })} onPointerLeave={() => setHoveredOutlet(undefined)}>
           <summary><span className="wf-outlet-name" title={exit.name}>{exit.name}</span><span className="wf-outlet-destination"><span title={targetName(connection?.to)}>{targetName(connection?.to)}</span>{connection?.maxTraversals ? <span className="wf-outlet-limit">· ≤{connection.maxTraversals}轮</span> : null}</span></summary>
           <label className="wf-inline-field">出口名称<input value={exit.name} onChange={event => editNode(item => { item.exits.find(port => port.id === exit.id)!.name = event.target.value; })}/></label>
@@ -903,20 +943,20 @@ export function WorkflowsPage({ inspection }: { inspection?: { runId: string; on
             {canRemoveOutlet(node, exit.id) && <button type="button" onClick={() => deleteOutlet(node.id, exit.id)}><Trash2 size={13}/>删除出口</button>}</div>
         </details>;
         return <div className="wf-outlet-field" key={exit.id} data-issue={!!issue} onPointerEnter={() => setHoveredOutlet({ source: node.id, exit: exit.id })} onPointerLeave={() => setHoveredOutlet(undefined)}>
-          <div className="wf-exit-row"><span className="wf-port-dot"/><input aria-label={exit.name + "的出口名称"} readOnly={mode === "run"} value={exit.name} onChange={event => editNode(n => { n.exits.find(p => p.id === exit.id)!.name = event.target.value; })}/>
-            {mode === "design" && canRemoveOutlet(node, exit.id) && <button type="button" className="wf-icon-button wf-delete-outlet" aria-label={"删除出口 " + exit.name} title="删除出口" onClick={() => deleteOutlet(node.id, exit.id)}><Trash2 size={13}/></button>}
+          <div className="wf-exit-row"><span className="wf-port-dot"/><input aria-label={exit.name + "的出口名称"} value={exit.name} onChange={event => editNode(n => { n.exits.find(p => p.id === exit.id)!.name = event.target.value; })}/>
+            {canRemoveOutlet(node, exit.id) && <button type="button" className="wf-icon-button wf-delete-outlet" aria-label={"删除出口 " + exit.name} title="删除出口" onClick={() => deleteOutlet(node.id, exit.id)}><Trash2 size={13}/></button>}
           </div>
           <div className="wf-exit-target"><ChevronRight size={13}/>
-            <WorkflowSelect label={exit.name + "的目标"} disabled={mode === "run"} value={connection?.to || ""} options={targetChoices} onChange={value => {
+            <WorkflowSelect label={exit.name + "的目标"} value={connection?.to || ""} options={targetChoices} onChange={value => {
               if (value) connect({ source: node.id, exit: exit.id }, value);
               else unlink({ source: node.id, exit: exit.id });
             }}/>
           </div>
           {issue && <button type="button" className="wf-outlet-issue" onClick={() => showIssue(issue)}><CircleAlert size={12}/>{issue.message}</button>}
         </div>;
-      })}{mode === "design" && node.kind === "agent" && !definition.edges.some(edge => edge.from[0] === node.id) && <button className="wf-add-exit" onClick={() => addNode("agent", undefined, { source: node.id, exit: node.exits[0]?.id })}><Plus size={13}/>添加下游节点</button>}
-        {mode === "design" && (node.kind !== "join" || !node.exits.length) && <button className="wf-add-exit" onClick={() => editNode(node => { appendOutlet(node); })}><Plus size={13}/>添加出口</button>}</div>}
-      {mode === "run" && latestInstance?.result !== undefined && <div className="wf-result"><details><summary>提交结果</summary><pre>{JSON.stringify(latestInstance.result, null, 2)}</pre></details></div>}</fieldset>}
+      })}{node.kind === "agent" && !definition.edges.some(edge => edge.from[0] === node.id) && <button className="wf-add-exit" onClick={() => addNode("agent", undefined, { source: node.id, exit: node.exits[0]?.id })}><Plus size={13}/>添加下游节点</button>}
+        {(node.kind !== "join" || !node.exits.length) && <button className="wf-add-exit" onClick={() => editNode(node => { appendOutlet(node); })}><Plus size={13}/>添加出口</button>}</div>}
+      </fieldset>}</>}
     </section>
     </div>
     {inspection && run && sequence === undefined && <WorkflowWorkspace run={run} interactive={true} busy={busy} onControl={control}/>}

@@ -96,6 +96,7 @@ fun conversationTimeline(timeline: MobileTimeline): List<ConversationItem> {
     }
     var group: ConversationItem.Process? = null
     for (block in timeline.blocks) {
+        if (block.type == "handoff.created") continue
         val turn = timeline.turns[block.runId]
         val reply = block.kind == "assistant_text" && runningTails[block.runId] == block.id
         val foldable = turn != null && block.id != turn.text("finalBlockId")
@@ -138,7 +139,7 @@ fun conversationTimeline(timeline: MobileTimeline): List<ConversationItem> {
 
 private val replyTailKinds = setOf("assistant_text", "thinking", "tool_call", "user_append")
 private val processKinds = replyTailKinds + setOf("assistant_note", "notice")
-private val visibleNotices = setOf("workflow.plan", "run.failed")
+private val visibleNotices = setOf("workflow.plan", "task.updated", "run.failed")
 
 /** A tool run ends at every non-tool block. Never collect across a commentary or interaction. */
 internal fun toolClusters(blocks: List<MobileTimelineBlock>): List<List<MobileTimelineBlock>> = buildList {

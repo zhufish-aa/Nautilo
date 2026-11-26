@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { Activity, BellRing, Check, Circle, ClipboardPaste, Copy, CornerDownLeft, GitFork, GitMerge, Hand, Layers3, Link, Lock, Minus, MousePointer2, Orbit, Plus, RotateCcw, Scan, ScanEye, SkipForward, Trash2, Unlock, Workflow, X } from "lucide-react";
+import { Activity, BellRing, Check, Circle, ClipboardPaste, Copy, CornerDownLeft, GitFork, GitMerge, Hand, HelpCircle, Layers3, Link, Lock, Minus, MousePointer2, Orbit, Plus, RotateCcw, Scan, ScanEye, SkipForward, Trash2, Unlock, Workflow, X } from "lucide-react";
 import type { WorkflowDefinition, WorkflowLayout, WorkflowInstance, WorkflowEvent, WorkflowIssue, WorkflowRun } from "@agenthub/domain";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { providerMeta } from "../../lib/provider-catalog";
@@ -55,6 +55,32 @@ interface Props {
   locate?: { nodeId: string; exitId?: string; request: number; reveal?: boolean };
 }
 const icons = { main: Orbit, dispatch: GitFork, agent: Activity, join: GitMerge, condition: Layers3, call: Workflow };
+const kindDescriptions: Record<AddableKind, string> = {
+  agent: "派发子 Agent 执行具体任务",
+  condition: "按输出字段或条件规则分流",
+  dispatch: "并行向多路下游同时派发",
+  join: "等待并行分支结果汇齐",
+  call: "嵌套调用其他已保存流程"
+};
+const kindTones: Record<AddableKind, "indigo" | "cyan" | "amber" | "emerald" | "neutral"> = {
+  agent: "indigo",
+  condition: "amber",
+  dispatch: "cyan",
+  join: "emerald",
+  call: "neutral"
+};
+const canvasShortcuts = [
+  { keys: "双击空白", label: "在光标处快速添加节点" },
+  { keys: "双击节点/线", label: "行内重命名" },
+  { keys: "拖出 ＋", label: "连线或空白处建下游" },
+  { keys: "Space", label: "按住拖动画布" },
+  { keys: "Alt", label: "悬停透视上下游血缘" },
+  { keys: "V / H / C", label: "选择 / 抓手 / 连线" },
+  { keys: "F / 0", label: "适应画布 / 重置缩放" },
+  { keys: "M / L", label: "小地图 / 锁定画布" },
+  { keys: "Ctrl + K", label: "搜索画布节点与连线" },
+  { keys: "Ctrl + Z/Y", label: "撤销 / 重做" },
+] as const;
 const arrowTones = ["normal", "focus", "selected", "loop", "loop-focus", "active"] as const;
 const activeInstance = (instance: WorkflowInstance) => instance.status === "starting" || instance.status === "running" || instance.status === "verifying";
 const pointerTools = [
@@ -103,6 +129,7 @@ export function WorkflowCanvas({ definition, layout, selected, editing: design, 
   const [pinnedLineage, setPinnedLineage] = useState<string>();
   const [tooltip, setTooltip] = useState<string>();
   const [minimap, setMinimap] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [renaming, setRenaming] = useState<{ kind: "node" | "wire"; id: string; name: string }>();
   const [space, setSpace] = useState(false);
   const [pointerMode, setPointerMode] = useState<PointerMode>("select");
@@ -177,6 +204,8 @@ export function WorkflowCanvas({ definition, layout, selected, editing: design, 
     setViewport({ x: (clientWidth - width * zoom) / 2 - left * zoom, y: (clientHeight - height * zoom) / 2 - top * zoom, zoom });
   };
   const fitting = useRef(fit); fitting.current = fit;
+  const viewportRef = useRef(viewport); viewportRef.current = viewport;
+  const zoomByRef = useRef<(factor: number) => void>(() => {});
   useLayoutEffect(() => {
     const element = board.current;
     if (!element) return;
@@ -270,7 +299,14 @@ export function WorkflowCanvas({ definition, layout, selected, editing: design, 
           (!board.current?.contains(target) && !board.current?.matches(":hover"))) return;
       const mode = pointerTools.find(tool => tool.key.toLowerCase() === event.key.toLowerCase());
       if (mode && !locked) { event.preventDefault(); setPointerMode(mode.id); setLink(undefined); setMenu(undefined); }
-      if (event.key.toLowerCase() === "l") { event.preventDefault(); onLockChange?.(!locked); }
+      const lower = event.key.toLowerCase();
+      if (lower === "l") { event.preventDefault(); onLockChange?.(!locked); }
+      if (lower === "f") { event.preventDefault(); fitting.current(); }
+      if (lower === "m" && !isBlank) { event.preventDefault(); setMinimap(v => !v); }
+      if (event.key === "0") { event.preventDefault(); zoomByRef.current(1 / viewportRef.current.zoom); }
+      if (event.key === "+" || event.key === "=") { event.preventDefault(); zoomByRef.current(1.2); }
+      if (event.key === "-") { event.preventDefault(); zoomByRef.current(1 / 1.2); }
+      if (event.key === "?") { event.preventDefault(); setShortcutsOpen(v => !v); }
       if (event.key === " ") { event.preventDefault(); setSpace(true); }
     };
     const up = (event: KeyboardEvent) => { if (event.key === "Alt") setLineage(false); if (event.key === " ") setSpace(false); };
@@ -317,6 +353,7 @@ export function WorkflowCanvas({ definition, layout, selected, editing: design, 
       return { x: x - (x - current.x) * next / current.zoom, y: y - (y - current.y) * next / current.zoom, zoom: next };
     });
   }, []);
+  zoomByRef.current = zoomBy;
   useEffect(() => {
     const element = board.current;
     if (!element) return;
@@ -440,13 +477,17 @@ export function WorkflowCanvas({ definition, layout, selected, editing: design, 
     if (!editor) return { title: "", actions: [] };
     if (value.kind === "add") {
       const actions: MenuAction[] = addableKinds.map(kind => ({
-        label: nodeKinds[kind], icon: icons[kind], action: withClose(() => editor.add(kind, value.point, value.from, value.insert)),
+        label: nodeKinds[kind],
+        description: kindDescriptions[kind],
+        tone: kindTones[kind],
+        icon: icons[kind],
+        action: withClose(() => editor.add(kind, value.point, value.from, value.insert)),
       }));
       if (value.from) {
         const from = value.from;
-        actions.push({ label: "交回主会话", icon: CornerDownLeft, secondary: true, action: withClose(() => editor.connect(from, "$return")) });
+        actions.push({ label: "交回主会话", description: "结束分支并将结果交回主对话", tone: "emerald", icon: CornerDownLeft, secondary: true, action: withClose(() => editor.connect(from, "$return")) });
       } else if (!value.insert && editor.canPaste) {
-        actions.push({ label: "粘贴节点", icon: ClipboardPaste, secondary: true, action: withClose(() => editor.pasteNode(value.point)) });
+        actions.push({ label: "粘贴节点", icon: ClipboardPaste, shortcut: "Ctrl+V", secondary: true, action: withClose(() => editor.pasteNode(value.point)) });
       }
       return { title: value.insert ? "在线上插入节点" : value.from ? "添加下一步" : "添加节点", actions };
     }
@@ -504,8 +545,8 @@ export function WorkflowCanvas({ definition, layout, selected, editing: design, 
     data-motion-playing={motionPlaying} data-motion-reduced={motionReduced} tabIndex={0} aria-label="工作流画布"
     onKeyDown={event => {
       if ((event.target as Element).closest("input,textarea,[role=menu]")) return;
-      if (event.key === "Escape") { setLink(undefined); setMenu(undefined); setMultiple([]); setPointerMode("select"); setPinnedLineage(undefined); }
-      if (editing && event.key === "Delete" && multiple.length > 1) { event.preventDefault(); editor?.removeNodes(multiple); setMultiple([]); }
+      if (event.key === "Escape") { setLink(undefined); setMenu(undefined); setShortcutsOpen(false); setMultiple([]); setPointerMode("select"); setPinnedLineage(undefined); }
+      if (editing && (event.key === "Delete" || event.key === "Backspace") && multiple.length > 1) { event.preventDefault(); editor?.removeNodes(multiple); setMultiple([]); }
       if (editing && editor?.canPaste && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
         const { width, height, left, top } = board.current!.getBoundingClientRect();
         event.preventDefault(); editor.pasteNode(worldPoint({ x: left + width / 2, y: top + height / 2 }));
@@ -527,6 +568,13 @@ export function WorkflowCanvas({ definition, layout, selected, editing: design, 
         ? { ...start, kind: "marquee", extend: event.shiftKey } : { ...start, kind: "pan", base: viewport, nodeId });
     }}
     onPointerMove={move} onPointerUp={event => finish(event)} onPointerCancel={event => finish(event, true)} onLostPointerCapture={event => finish(event, true)}
+    onDoubleClick={event => {
+      if (!editing || !editor) return;
+      const target = event.target as Element;
+      if (target.closest("[data-node-id], [data-wire-key], .wf-dock, .wf-zoom, .wf-context-menu, .wf-minimap, .wf-shortcuts-popover, .wf-starters, .wf-batch, input, button")) return;
+      const at = screenPoint(event);
+      setMenu({ kind: "add", anchor: localPoint(at), point: worldPoint(at) });
+    }}
     onContextMenu={event => {
       if (!editing) return;
       event.preventDefault(); openMenu(screenPoint(event), event.target as Element);
@@ -761,11 +809,49 @@ export function WorkflowCanvas({ definition, layout, selected, editing: design, 
       </button>
       <i className="wf-toolbar-divider" aria-hidden/>
       {children}
+      {editing && editor && (
+        <button
+          type="button"
+          className="wf-dock-add"
+          aria-label="添加节点"
+          aria-expanded={menu?.kind === "add"}
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            const boardRect = board.current?.getBoundingClientRect();
+            if (!boardRect) return;
+            if (menu?.kind === "add") { setMenu(undefined); return; }
+            const centerScreen = { x: boardRect.left + boardRect.width / 2, y: boardRect.top + boardRect.height / 2 };
+            setMenu({
+              kind: "add",
+              point: worldPoint(centerScreen),
+              anchor: { x: rect.left - boardRect.left - 90, y: rect.top - boardRect.top - 290 }
+            });
+          }}
+        >
+          <Plus size={14} aria-hidden />
+          <span>添加节点</span>
+        </button>
+      )}
     </div>}
     {preview && <span className="wf-preview-status" role="status">{previewPlaying ? "正在预览" : "预览完成"}</span>}
-    <div className="wf-zoom"><button aria-label="缩小" onClick={() => zoomBy(1 / 1.2)}><Minus size={14}/></button><button aria-label="缩放重置为 100%" onClick={() => zoomBy(1 / viewport.zoom)}><output>{Math.round(viewport.zoom * 100)}%</output></button><button aria-label="放大" onClick={() => zoomBy(1.2)}><Plus size={14}/></button><i/><button aria-label="适应画布" onClick={fit}><Scan size={14}/></button>
-      {design && !isBlank && <button type="button" title="小地图" aria-label="小地图" aria-expanded={minimap} onClick={() => setMinimap(!minimap)}><Layers3 size={13}/></button>}
+    <div className="wf-zoom">
+      <button type="button" aria-label="缩小" title="缩小 (-)" onClick={() => zoomBy(1 / 1.2)}><Minus size={14}/></button>
+      <button type="button" aria-label="缩放重置为 100%" title="重置为 100% (0)" onClick={() => zoomBy(1 / viewport.zoom)}><output>{Math.round(viewport.zoom * 100)}%</output></button>
+      <button type="button" aria-label="放大" title="放大 (+)" onClick={() => zoomBy(1.2)}><Plus size={14}/></button>
+      <i/>
+      <button type="button" aria-label="适应画布" title="适应画布 (F)" onClick={fit}><Scan size={14}/></button>
+      {design && !isBlank && <button type="button" title="小地图 (M)" aria-label="小地图" aria-expanded={minimap} data-active={minimap || undefined} onClick={() => setMinimap(!minimap)}><Layers3 size={13}/></button>}
+      {design && <button type="button" title="操作指南与快捷键 (?)" aria-label="操作指南与快捷键" aria-expanded={shortcutsOpen} data-active={shortcutsOpen || undefined} onClick={() => setShortcutsOpen(v => !v)}><HelpCircle size={13}/></button>}
     </div>
+    {design && shortcutsOpen && <aside className="wf-shortcuts-popover" aria-label="画布操作指南">
+      <header>
+        <strong>画布操作与快捷键</strong>
+        <button type="button" aria-label="关闭操作指南" onClick={() => setShortcutsOpen(false)}><X size={13}/></button>
+      </header>
+      <dl>
+        {canvasShortcuts.map(item => <div key={item.keys}><dt><kbd>{item.keys}</kbd></dt><dd>{item.label}</dd></div>)}
+      </dl>
+    </aside>}
     {design && !isBlank && minimap && <div className="wf-minimap">
       <svg viewBox={`${bounds.left - 30} ${bounds.top - 30} ${bounds.width + 60} ${bounds.height + 60}`} aria-label="小地图定位"
         onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); recenterMinimap(event); }}

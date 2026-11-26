@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { conversationLocations, type ConversationLocation } from "../../lib/conversation-navigation";
-import { ClipboardList, FolderOpen } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
-import { TimelineEventView, type TimelineRow, TimelineViewport } from "../timeline/Timeline";
+import { NativeSubagentGroup, TaskUpdateGroup, TimelineEventView, type TimelineRow, TimelineViewport } from "../timeline/Timeline";
 import { ConversationTurnView } from "../timeline/ConversationTurnView";
 import { ProcessDisclosure } from "../timeline/ProcessDisclosure";
 import { TurnProcess } from "../timeline/ToolStepGroup";
 import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
+import { DelegatedTaskCard } from "./DelegatedTaskCard";
 import { Composer } from "./Composer";
 import { providerUiState } from "../../lib/provider-ui";
 import { useNativeTerminalState } from "../../lib/use-native-terminal";
@@ -34,7 +35,7 @@ import { useSessionTimeline } from "../../lib/use-session-timeline";
 import type { TimelineBlock } from "@agenthub/schemas";
 import { cachedChangedFileCount } from "../../lib/changed-files";
 import { latestTodoGoal } from "../../lib/todo-goal";
-import type { SessionTask, TimelineEvent } from "../../lib/types";
+import type { TimelineEvent } from "../../lib/types";
 import { TodoGoalCard } from "./TodoGoalCard";
 import { SessionInspector } from "./SessionInspector";
 import { SessionToolsInventory } from "./SessionToolsInventory";
@@ -62,29 +63,6 @@ function estimateShortMessageHeight(event: TimelineEvent): number | undefined {
   if (data.kind !== "message" || data.sender === "system" || data.attachments?.length || data.references?.length || data.workflowRef
     || data.text.length > 36 || /[\r\n]/.test(data.text)) return undefined;
   return data.sender === "user" ? 71 : 50;
-}
-
-function DelegatedTaskCard({ description, status }: { description: string; status?: SessionTask["status"] }): JSX.Element {
-  const { t } = useI18n();
-  const tone = status === "failed"
-    ? "danger"
-    : status === "completed"
-      ? "ok"
-      : status === "running"
-        ? "accent"
-        : "muted";
-
-  return (
-    <article className="rounded-xl border border-line bg-card px-4 py-3">
-      <div className="mb-1.5 flex flex-wrap items-center gap-2 text-ink-2">
-        <ClipboardList size={14} aria-hidden />
-        <h2 className="text-xs font-medium">{t("sessions.taskContext.details")}</h2>
-        {status && <StatusChip tone={tone} label={t(`sessions.taskStatus.${status}` as MessageKey)}
-          className="h-5 px-1.5 text-[10px]" />}
-      </div>
-      <p className="break-words whitespace-pre-wrap text-[13px] leading-relaxed text-ink-2">{description}</p>
-    </article>
-  );
 }
 
 export function SessionWorkbench({
@@ -287,12 +265,42 @@ export function SessionWorkbench({
     )
   });
   const timelineRows: TimelineRow[] = [];
-  if (taskDescription) timelineRows.push(shell("delegated", <DelegatedTaskCard description={taskDescription} status={delegatedTask?.status} />));
+  const latestDispatchNode = latestDispatch
+    ? latestDispatch.run.definition.nodes.find((node) => node.id === latestDispatch.instance.nodeId)
+    : undefined;
+  if (taskDescription) {
+    timelineRows.push(shell(
+      "delegated",
+      <DelegatedTaskCard
+        description={taskDescription}
+        status={delegatedTask?.status}
+        workflowName={latestDispatch?.run.definition.name}
+        nodeName={latestDispatchNode?.name}
+        role={latestDispatchNode?.role}
+        attempt={latestDispatch?.instance.attempt}
+        onOpenParent={session.parentSessionId ? () => onOpenSession(session.parentSessionId!) : undefined}
+      />
+    ));
+  }
   const timelineActions = { onEditMessage: handleEditMessage, onOpenSession, onOpenSubagent: handleOpenSubagent, onOpenWorkflow: handleOpenWorkflow, onOpenLocalFile };
   const renderEvent = (event: TimelineEvent): JSX.Element =>
     <TimelineEventView event={event} {...timelineActions} showAuthor={false} streamActive={active} liveStarts={timelineState?.liveStarts} />;
+  const renderSubagentGroup = (group: readonly (TimelineEvent & { data: { kind: "tool_activity" } })[]): JSX.Element | null =>
+    <NativeSubagentGroup events={group} onOpenSubagent={handleOpenSubagent} />;
   const closedProcessRows = new Set<string>();
-  for (const entry of entries) {
+  const pushProcessEntry = (entry: Extract<typeof entries[number], { process: unknown }>): void => {
+    const running = entry.turn.status === "running";
+    const open = running || (processChoices[entry.turn.runId] ?? false);
+    const key = entry.process[0].blockId;
+    if (!open) closedProcessRows.add(key);
+    timelineRows.push(shell(key, <ProcessDisclosure className="conversation-turn-process" open={open}>
+      <TurnProcess events={entry.process.map(block => projected.get(block.blockId))}
+        liveTail={running && entry === entries.at(-1)} choices={processChoices} setChoice={setProcessChoice}
+        renderEvent={renderEvent} renderSubagentGroup={renderSubagentGroup} />
+    </ProcessDisclosure>, { compact: true, estimatedHeight: open ? entry.process.length * 30 : 0 }));
+  };
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+    const entry = entries[entryIndex]!;
     if ("block" in entry) {
       const { block } = entry;
       if (block.kind === "interaction") {
@@ -301,6 +309,49 @@ export function SessionWorkbench({
       } else {
         const event = projected.get(block.blockId);
         if (!event) continue;
+        if (event.data.kind === "task_update") {
+          const group: (TimelineEvent & { data: { kind: "task_update" } })[] = [
+            event as TimelineEvent & { data: { kind: "task_update" } }
+          ];
+          const interleavedProcess: Extract<typeof entries[number], { process: unknown }>[] = [];
+          let lookahead = entryIndex + 1;
+          while (lookahead < entries.length) {
+            const candidate = entries[lookahead]!;
+            if ("block" in candidate && candidate.block.kind !== "interaction") {
+              const nextEvent = projected.get(candidate.block.blockId);
+              if (nextEvent && nextEvent.data.kind === "task_update"
+                && (!block.runId || !candidate.block.runId || candidate.block.runId === block.runId)) {
+                group.push(nextEvent as TimelineEvent & { data: { kind: "task_update" } });
+                entryIndex = lookahead;
+                lookahead++;
+                continue;
+              }
+              break;
+            }
+            if ("process" in candidate && block.runId && candidate.turn.runId === block.runId) {
+              // Parallel dispatches in one turn interleave tool_call process entries
+              // between task.updated blocks; bridge across them only if another task_update follows.
+              const hasVisibleCommentary = candidate.process.some((item) => {
+                const ev = projected.get(item.blockId);
+                return ev?.data.kind === "message" && ev.data.sender === "agent";
+              });
+              if (hasVisibleCommentary) break;
+              interleavedProcess.push(candidate);
+              lookahead++;
+              continue;
+            }
+            break;
+          }
+          // Only hoist process entries that actually sat between grouped tasks (not trailing ones).
+          const hoistedCount = interleavedProcess.filter((proc) => entries.indexOf(proc) < entryIndex).length;
+          for (let i = 0; i < hoistedCount; i++) pushProcessEntry(interleavedProcess[i]!);
+          timelineRows.push(shell(
+            block.blockId,
+            <TaskUpdateGroup events={group} onOpenSession={onOpenSession} />,
+            { estimatedHeight: 72 + group.length * 124 }
+          ));
+          continue;
+        }
         const result = !!block.runId && timeline?.turns.get(block.runId)?.finalBlockId === block.blockId;
         timelineRows.push(shell(block.blockId, renderEvent(event), { result, estimatedHeight: estimateShortMessageHeight(event) }));
       }
@@ -310,14 +361,7 @@ export function SessionWorkbench({
         <ConversationTurnView turn={entry.summary} expanded={open} onToggle={() => setProcessChoice(entry.summary.runId, !open)} />,
         { compact: true, estimatedHeight: 42 }));
     } else {
-      const running = entry.turn.status === "running";
-      const open = running || (processChoices[entry.turn.runId] ?? false);
-      const key = entry.process[0].blockId;
-      if (!open) closedProcessRows.add(key);
-      timelineRows.push(shell(key, <ProcessDisclosure className="conversation-turn-process" open={open}>
-        <TurnProcess events={entry.process.map(block => projected.get(block.blockId))}
-          liveTail={running && entry === entries.at(-1)} choices={processChoices} setChoice={setProcessChoice} renderEvent={renderEvent} />
-      </ProcessDisclosure>, { compact: true, estimatedHeight: open ? entry.process.length * 30 : 0 }));
+      pushProcessEntry(entry);
     }
   }
   if (timelineState?.error) timelineRows.push(shell("timeline-error", <p role="alert" className="text-sm text-danger">{timelineState.error}</p>));

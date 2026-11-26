@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, FolderOpen, Pencil, Trash2 } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import { AlertTriangle, Check, Copy, FileText, Folder, FolderOpen, Pencil, Trash2 } from "lucide-react";
 import type { ProviderCapability } from "@agenthub/domain";
+import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { getBridge } from "../../lib/bridge";
 import { capabilityEnabledFor } from "../../lib/capability-enablement";
 import { capabilityDescription, capabilityOrigin } from "../../lib/capability-origin";
 import { toDaemonProviderId } from "../../lib/core-mappers";
 import { useI18n } from "../../lib/i18n";
 import type { ProviderMeta } from "../../lib/types";
+import { useUiReducedMotion } from "../../lib/ui-motion";
 import { toast } from "../../stores/toast";
 import { MarkdownContent } from "../timeline/MarkdownContent";
+import { SkillOriginIcon } from "./SkillWorkbench";
 
 const absolutePath = /^(?:[a-z]:[/\\]|\\\\|\/)/i;
 
@@ -23,6 +27,7 @@ export function SkillDetails({ capability, sourceLabel, ready, providers, busy, 
   onSet: (providers: string[], enabled: boolean) => void;
 }): JSX.Element {
   const zh = useI18n().locale === "zh-CN";
+  const reduced = useUiReducedMotion();
   const [copied, setCopied] = useState<"name" | "path" | "content">();
   const [source, setSource] = useState(false);
   const description = capabilityDescription(capability);
@@ -83,12 +88,17 @@ export function SkillDetails({ capability, sourceLabel, ready, providers, busy, 
   return <article className="skill-inspector">
     <section className="skill-inspector-identity">
       <div className="skill-inspector-heading">
-        <div>
-          <h2 title={capability.name}>{capability.name}</h2>
-          <span className="skill-origin-tag" title={originHint}>{originHint}</span>
+        <div className="skill-inspector-title-row">
+          <span className="skill-inspector-icon" data-origin={origin.kind} aria-hidden>
+            <SkillOriginIcon kind={origin.kind} size={18} />
+          </span>
+          <div className="skill-inspector-title-copy">
+            <h2 title={capability.name}>{capability.name}</h2>
+            <span className="skill-origin-tag" data-origin={origin.kind} title={originHint}>{originHint}</span>
+          </div>
         </div>
         <div className="skill-inspector-actions">
-          <button type="button" disabled={busy} onClick={() => onEdit()}><Pencil size={13} />{zh ? "编辑" : "Edit"}</button>
+          <button type="button" className="skill-inspector-edit" disabled={busy} onClick={() => onEdit()}><Pencil size={13} />{zh ? "编辑" : "Edit"}</button>
           <button type="button" title={copyName} aria-label={copyName} data-copied={copied === "name"} onClick={() => void copy("name", capability.name)}>
             {copied === "name" ? <Check size={14} /> : <Copy size={14} />}
           </button>
@@ -96,10 +106,12 @@ export function SkillDetails({ capability, sourceLabel, ready, providers, busy, 
         </div>
       </div>
       {description ? <p className="skill-inspector-description">{description}</p> : <div className="skill-description-alert">
-        <span>{zh ? "缺少触发说明，Agent 更难自动找到此技能" : "A missing description makes this skill harder for agents to discover."}</span>
+        <AlertTriangle size={14} aria-hidden />
+        <span>{zh ? "缺少触发说明，Agent 更难自动发现此技能" : "A missing description makes this skill harder for agents to discover."}</span>
         <button type="button" disabled={busy} onClick={() => onEdit(true)}>{zh ? "去补充" : "Add description"}</button>
       </div>}
       {path && <div className="skill-inspector-path">
+        <Folder size={13} className="skill-path-icon" aria-hidden />
         <code title={path}>{path}</code>
         <button type="button" title={copyPath} aria-label={copyPath} data-copied={copied === "path"} onClick={() => void copy("path", path)}>
           {copied === "path" ? <Check size={13} /> : <Copy size={13} />}
@@ -107,24 +119,29 @@ export function SkillDetails({ capability, sourceLabel, ready, providers, busy, 
         {shell && absolutePath.test(path) && <button type="button" title={openLabel} aria-label={openLabel} onClick={() => void openFolder(path)}><FolderOpen size={14} /></button>}
       </div>}
       {!!tags.size && <div className="skill-inspector-tags" aria-label={zh ? "标签" : "Tags"}>
-        {[...tags].map(([key, tag]) => <span key={key}>{tag}</span>)}
+        {[...tags].map(([key, tag]) => <span key={key}>#{tag}</span>)}
       </div>}
     </section>
     <section className="skill-inspector-scope">
       <div className="skill-inspector-section-heading">
-        <h3>{zh ? "启用范围" : "Enabled for"} <span>{active.length} / {known.size} Harness</span></h3>
+        <h3>{zh ? "启用范围" : "Enabled for"} <span className="skill-scope-count" data-active={active.length > 0}>{active.length} / {known.size}</span></h3>
         <div>
           <button type="button" disabled={busy || !readyIds.some(id => !active.includes(id))} onClick={() => onSet(readyIds, true)}>{zh ? "全选就绪" : "Enable all ready"}</button>
           <button type="button" disabled={busy || !active.length} onClick={() => onSet(active, false)}>{zh ? "全关" : "Disable all"}</button>
         </div>
       </div>
       {ready.length ? <div className="skill-harness-chips">
-        {ready.map(provider => <button type="button" key={provider.id} disabled={busy}
-          aria-pressed={capabilityEnabledFor(capability, toDaemonProviderId(provider.id))}
-          onClick={() => {
-            const id = toDaemonProviderId(provider.id);
-            onSet([id], !capabilityEnabledFor(capability, id));
-          }}><i aria-hidden />{provider.name}</button>)}
+        {ready.map(provider => {
+          const id = toDaemonProviderId(provider.id);
+          const enabled = capabilityEnabledFor(capability, id);
+          return <button type="button" key={provider.id} disabled={busy}
+            aria-pressed={enabled}
+            onClick={() => onSet([id], !enabled)}>
+            <ProviderAvatar providerId={provider.id} size="sm" />
+            <span>{provider.name}</span>
+            <span className="skill-chip-state" aria-hidden>{enabled ? <Check size={10} strokeWidth={3} /> : null}</span>
+          </button>;
+        })}
       </div> : <p className="skill-inspector-muted">{zh ? "暂无已就绪的 Harness" : "No ready Harnesses"}</p>}
       {active.some(id => !readyIds.includes(id)) && <p className="skill-inspector-muted">
         {zh ? "已启用但未就绪" : "Enabled but unavailable"} · {active.filter(id => !readyIds.includes(id))
@@ -134,6 +151,7 @@ export function SkillDetails({ capability, sourceLabel, ready, providers, busy, 
     <section className="skill-inspector-reader">
       <div className="skill-reader-box">
         <div className="skill-reader-heading">
+          <FileText size={13} className="skill-reader-icon" aria-hidden />
           <strong>SKILL.md</strong>
           <small title={zh ? instructions.length + " 字符" : instructions.length + " characters"}>
             {lines} {zh ? "行" : "lines"} · {instructions.length} {zh ? "字符" : "chars"}
@@ -148,8 +166,27 @@ export function SkillDetails({ capability, sourceLabel, ready, providers, busy, 
           </button>
         </div>
         {!instructions ? <p className="skill-inspector-muted">{zh ? "暂无正文" : "No instructions"}</p>
-          : source ? <pre tabIndex={0}>{instructions}</pre>
-          : <div className="skill-reader-preview"><MarkdownContent source={instructions} document /></div>}
+          : <AnimatePresence mode="wait" initial={false}>
+            {source ? (
+              <motion.pre
+                key="source"
+                tabIndex={0}
+                initial={reduced ? false : { opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={reduced ? undefined : { opacity: 0, y: -3 }}
+                transition={{ duration: reduced ? 0 : 0.14 }}
+              >{instructions}</motion.pre>
+            ) : (
+              <motion.div
+                key="preview"
+                className="skill-reader-preview"
+                initial={reduced ? false : { opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={reduced ? undefined : { opacity: 0, y: -3 }}
+                transition={{ duration: reduced ? 0 : 0.14 }}
+              ><MarkdownContent source={instructions} document /></motion.div>
+            )}
+          </AnimatePresence>}
       </div>
     </section>
   </article>;

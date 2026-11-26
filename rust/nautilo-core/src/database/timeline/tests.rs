@@ -286,3 +286,46 @@ fn workflow_plan_migration_restores_one_card_at_the_original_position() {
     drop(db);
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn orchestration_migration_keeps_one_task_card_and_hides_the_internal_prompt() {
+    let path = std::env::temp_dir().join(format!("nautilo-timeline-task-{}.sqlite", Uuid::new_v4()));
+    let db = Database::open(&path).unwrap();
+    Repositories::new(&db.raw).sessions().save(&json!({"id":"s"})).unwrap();
+    db.raw.execute_batch("DELETE FROM schema_meta WHERE key='timeline_orchestration_rows_v1'").unwrap();
+    db.raw.execute(
+        "INSERT INTO workflow_runs(id,session_id,request_id,revision,status,data,updated_at) VALUES('w','s','request',1,'completed',?,0)",
+        [json!({"taskProjection":{"projectPlan":{"invokingRunId":"r1"}}}).to_string()],
+    ).unwrap();
+    let mut writer = Writer { db: &db.raw, session: "s", changes: vec![], turn: None };
+    let task = |status| json!({"type":"task.updated","payload":{"taskId":"task","workflowRunId":"w","status":status}});
+    writer.create("user_prompt", Some("r1"), json!({"sender":"user","text":"Delegate"}), true, None, None).unwrap();
+    writer.create("notice", None, task("ready"), true, None, None).unwrap();
+    writer.create("notice", None, task("completed"), true, None, None).unwrap();
+    writer.create("user_prompt", Some("r2"), json!({"sender":"system","text":"Private instructions"}), true, None, None).unwrap();
+    writer.create("assistant_text", Some("r2"), json!({"text":"Public result"}), true, None, None).unwrap();
+    writer.record().unwrap();
+    let before = open(&db.raw, "s").unwrap();
+    drop(db);
+
+    let db = Database::open(&path).unwrap();
+    let after = open(&db.raw, "s").unwrap();
+    let blocks = after["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks[0], before["blocks"][0]);
+    assert_eq!(blocks[1]["blockId"], before["blocks"][1]["blockId"]);
+    assert_eq!(blocks[1]["seq"], before["blocks"][1]["seq"]);
+    assert_eq!(blocks[1]["runId"], "r1");
+    assert_eq!(blocks[1]["status"], "completed");
+    assert_eq!(blocks[1]["result"], task("completed"));
+    assert_eq!(blocks[2], before["blocks"][4]);
+    assert_eq!(changes(&db.raw, "s", before["revision"].as_i64().unwrap()).unwrap()["reset"], true);
+
+    record_event(&db.raw, &json!({"sessionId":"s","type":"task.updated","payload":task("queued")["payload"]})).unwrap();
+    let updated = open(&db.raw, "s").unwrap();
+    assert_eq!(updated["blocks"].as_array().unwrap().len(), 3);
+    assert_eq!(updated["blocks"][1]["blockId"], blocks[1]["blockId"]);
+    assert_eq!(updated["blocks"][1]["status"], "queued");
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}

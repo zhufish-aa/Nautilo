@@ -152,6 +152,35 @@ fn assert_success(events: &[Value]) {
 }
 
 #[tokio::test]
+async fn mock_workflow_stop_after_received_submission_is_not_a_provider_error() {
+    let plugin = PiPlugin::new();
+    let run = "submitted-run";
+    let mut receiver = plugin.start(run, request("hold-after-workflow-submit"), None).await.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut events = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            if event["callId"] == "submit" && event["success"] == true {
+                plugin.cancel(run).await;
+            }
+            events.push(event);
+        }
+        events
+    }).await.expect("the cancelled Pi turn must close");
+    assert!(events.iter().any(|event| event["callId"] == "submit" && event["success"] == true));
+    assert!(events.iter().all(|event| event["kind"] != "error" && event["phase"] != "turn_failed"), "{events:?}");
+    assert_eq!(events.last().unwrap()["exitCode"], 130);
+}
+
+#[tokio::test]
+async fn mock_exit_without_native_completion_remains_a_failure() {
+    let plugin = PiPlugin::new();
+    let events = collect(&plugin, "unexpected-exit", request("exit-before-settled"), false).await;
+    assert!(events.iter().any(|event| event["phase"] == "turn_failed"), "{events:?}");
+    assert!(events.iter().any(|event| event["kind"] == "error"), "{events:?}");
+    assert_eq!(events.last().unwrap()["exitCode"], 1);
+}
+
+#[tokio::test]
 async fn mock_resident_turns_and_configuration_restart_keep_replies_separate() {
     let plugin = PiPlugin::new();
     let mut input = request("first");
