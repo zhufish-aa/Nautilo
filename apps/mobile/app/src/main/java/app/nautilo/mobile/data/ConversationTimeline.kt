@@ -11,6 +11,15 @@ data class MobileTimelineBlock(val value: JSONObject) {
     val result get() = value.optJSONObject("result")
     val sealed get() = value.getBoolean("sealed")
     val status get() = value.text("status")
+    val type get() = (result ?: content).text("type")
+    val payload get() = content.optJSONObject("payload") ?: JSONObject()
+    val toolPayload get(): JSONObject {
+        val resultPayload = result?.optJSONObject("payload") ?: return payload
+        return JSONObject(payload.toString()).apply {
+            resultPayload.keys().forEach { put(it, resultPayload.opt(it)) }
+        }
+    }
+    val isToolStep get() = kind == "tool_call" || type == "file.changed"
 }
 
 data class MobileTimeline(
@@ -68,37 +77,77 @@ data class MobileTimeline(
 sealed interface ConversationItem {
     val key: String
     data class Block(val block: MobileTimelineBlock) : ConversationItem { override val key get() = block.id }
-    data class Turn(val turn: JSONObject, val blocks: MutableList<MobileTimelineBlock>) : ConversationItem {
-        override val key get() = "process:" + (blocks.firstOrNull()?.id ?: turn.getString("finalBlockId"))
+    data class Process(val turn: JSONObject, val blocks: MutableList<MobileTimelineBlock>) : ConversationItem {
+        override val key get() = "process:" + blocks.first().id
+    }
+    data class Summary(val turn: JSONObject) : ConversationItem {
+        override val key get() = "summary:" + turn.getString("runId")
     }
 }
 
 fun conversationTimeline(timeline: MobileTimeline): List<ConversationItem> {
     val out = mutableListOf<ConversationItem>()
-    val turnsWithProcess = mutableSetOf<String>()
-    var group: ConversationItem.Turn? = null
+    val lastProcess = mutableMapOf<String, ConversationItem.Process>()
+    val runningTails = mutableMapOf<String, String>()
+    for (block in timeline.blocks) {
+        if (timeline.turns[block.runId]?.text("status") == "running" && block.kind in replyTailKinds) {
+            runningTails[block.runId] = block.id
+        }
+    }
+    var group: ConversationItem.Process? = null
     for (block in timeline.blocks) {
         val turn = timeline.turns[block.runId]
+        val reply = block.kind == "assistant_text" && runningTails[block.runId] == block.id
         val foldable = turn != null && block.id != turn.text("finalBlockId")
-            && block.kind !in setOf("user_prompt", "interaction", "approval", "late_result", "legacy")
+            && !reply && block.kind in processKinds && block.type !in visibleNotices
         if (!foldable) {
             group = null
             out += ConversationItem.Block(block)
         } else {
             val adjacent = group?.takeIf { it.turn === turn }
-                ?: ConversationItem.Turn(turn, mutableListOf()).also {
+                ?: ConversationItem.Process(turn, mutableListOf()).also {
                     group = it
                     out += it
-                    turnsWithProcess += block.runId
+                    lastProcess[block.runId] = it
                 }
             adjacent.blocks += block
         }
     }
-    return out.flatMap { entry ->
-        val block = (entry as? ConversationItem.Block)?.block
-        val turn = block?.let { timeline.turns[it.runId] }
-        if (block != null && turn != null && turn.text("finalBlockId") == block.id && block.runId !in turnsWithProcess)
-            listOf(ConversationItem.Turn(turn, mutableListOf()), entry)
-        else listOf(entry)
+    return buildList {
+        for ((index, entry) in out.withIndex()) {
+            when (entry) {
+                is ConversationItem.Process -> {
+                    val turn = entry.turn
+                    val finalId = turn.text("finalBlockId")
+                    val next = out.getOrNull(index + 1) as? ConversationItem.Block
+                    if (turn.text("status") != "running" && lastProcess[turn.text("runId")] === entry &&
+                        (finalId.isEmpty() || next?.block?.id == finalId)) add(ConversationItem.Summary(turn))
+                }
+                is ConversationItem.Block -> {
+                    val turn = timeline.turns[entry.block.runId]
+                    val process = lastProcess[entry.block.runId]
+                    if (turn != null && turn.text("finalBlockId") == entry.block.id &&
+                        process != null && process !== out.getOrNull(index - 1)) add(ConversationItem.Summary(turn))
+                }
+                is ConversationItem.Summary -> error("Summary is added after projecting timeline blocks")
+            }
+            add(entry)
+        }
+    }
+}
+
+private val replyTailKinds = setOf("assistant_text", "thinking", "tool_call", "user_append")
+private val processKinds = replyTailKinds + setOf("assistant_note", "notice")
+private val visibleNotices = setOf("workflow.plan", "run.failed")
+
+/** A tool run ends at every non-tool block. Never collect across a commentary or interaction. */
+internal fun toolClusters(blocks: List<MobileTimelineBlock>): List<List<MobileTimelineBlock>> = buildList {
+    var index = 0
+    while (index < blocks.size) {
+        val start = index++
+        if (blocks[start].isToolStep) {
+            while (index < blocks.size && blocks[index].isToolStep) index++
+        }
+        add(blocks.subList(start, index))
     }
 }

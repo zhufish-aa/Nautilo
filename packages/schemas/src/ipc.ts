@@ -132,7 +132,7 @@ export interface TerminalMetadata {
   exited?: boolean; exitCode?: number;
 }
 export interface SourceControlScope { sessionId?: string; projectId?: string }
-export interface CoreFeatures { sourceControl?: 1 | 2; sourceControlHistory?: 1; sourceControlHistoryPaging?: 1; sourceControlEditing?: 1; terminalTabs?: 1; composerDrafts?: 1; taskRetry?: 1; workflows?: 1; workflowPlans?: 1 }
+export interface CoreFeatures { sourceControl?: 1 | 2; sourceControlHistory?: 1; sourceControlHistoryPaging?: 1; sourceControlEditing?: 1; terminalTabs?: 1; composerDrafts?: 1; composerReferences?: 1; taskRetry?: 1; workflows?: 1; workflowPlans?: 1 }
 export interface SourceControlCommitSummary { hash: string; subject: string; author: string; committedAt: string }
 export interface SourceControlHistoryInput extends SourceControlScope { query?: string; cursor?: string; limit?: number }
 export interface SourceControlHistoryPage {
@@ -213,6 +213,7 @@ export interface IpcRequestMap {
   "workflow.templates": { input: undefined; output: WorkflowTemplate[] };
   "workflow.template": { input: { id: string; revision?: number }; output: WorkflowTemplate };
   "workflow.save": { input: { id: string; revision: number; name: string; definition: WorkflowDefinition; layout: WorkflowLayout }; output: WorkflowTemplate };
+  "workflow.archive": { input: WorkflowRef; output: { archived: true } };
   "workflow.validate": { input: { definition: WorkflowDefinition }; output: WorkflowValidation };
   "workflow.start": { input: WorkflowStart; output: WorkflowRun };
   "workflow.plan.decide": { input: { sessionId: string; planId: string; action: "approve" | "reject"; assignments?: Record<string, WorkflowPlanAssignment> }; output: WorkflowPlan };
@@ -298,10 +299,10 @@ export interface IpcRequestMap {
   "plugin.install": { input: { source: { kind: "local"; path: string } | { kind: "registry"; pluginId: string; registryUrl?: string } }; output: ProviderPluginInfo };
   "plugin.uninstall": { input: { pluginId: string }; output: { removed: true } };
   "plugin.setEnabled": { input: { pluginId: string; enabled: boolean }; output: ProviderPluginInfo };
-  "capability.list": { input: undefined; output: ProviderCapability[] };
+  "capability.list": { input: undefined | { sessionId?: string; agentInstanceId?: string; projectId?: string; connectionId?: string; connectionRevision?: number }; output: ProviderCapability[] };
   "capability.upsert": { input: ProviderCapability; output: ProviderCapability };
   "capability.remove": { input: { capabilityId: string }; output: { removed: true } };
-  "capability.diagnose": { input: { capabilityId: string }; output: import("./service-diagnostics.js").ServiceDiagnostic };
+  "capability.diagnose": { input: { capabilityId: string; scope?: IpcRequestMap["capability.list"]["input"] }; output: import("./service-diagnostics.js").ServiceDiagnostic };
   "capability.parseImport": { input: { source: CapabilityImportSource; text: string; fileName?: string }; output: CapabilityImportPreview };
   "capability.discoverMcp": { input: { projectRoot?: string }; output: { sources: DiscoveredMcpSource[] } };
   "capability.scanSkills": { input: { dir: string }; output: CapabilityScanResult };
@@ -319,7 +320,7 @@ export interface IpcRequestMap {
   "projectRun.list": { input: { projectId: string }; output: ProjectRun[] };
   "projectRun.poll": { input: ProjectPollInput; output: ProjectPollResult };
   "projectRun.get": { input: { projectRunId: string }; output: { projectRun: ProjectRun; mainSession: Session } };
-  "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string; messageId?: string; attachments?: MessageAttachmentInput[] }; output: { projectRun: ProjectRun; mainSession: Session } };
+  "orchestration.start": { input: { projectId: string; teamId: string; agentInstanceId?: string; goal: string; sessionId?: string; messageId?: string; attachments?: MessageAttachmentInput[]; references?: import("@agenthub/domain").CapabilityReferenceInput[] }; output: { projectRun: ProjectRun; mainSession: Session } };
   "orchestration.resolveDelegation": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.resolveMerge": { input: { projectRunId: string; approved: boolean; scope?: ApprovalScope }; output: ProjectRun };
   "orchestration.recover": { input: { projectRunId: string; memberId: string; mode: "resume" | "replace" }; output: ProjectRun };
@@ -335,11 +336,11 @@ export interface IpcRequestMap {
   "session.create": { input: { projectId: string; memberId: string; agentInstanceId?: string; teamId?: string; title?: string; connectionId?: string; connectionRevision?: number; model?: string; reasoningEffort?: string; permissionMode?: string; agentMode?: string }; output: Session };
   "session.upsert": { input: SessionUpsertInput; output: Session };
   "session.delete": { input: { sessionId: string }; output: { removed: true; sessionIds: string[] } };
-  "session.followUp": { input: { sessionId: string; text: string; messageId?: string; mode: "steer" | "queue" }; output: { accepted: true; mode: "steer" | "queue" } };
+  "session.followUp": { input: { sessionId: string; text: string; messageId?: string; mode: "steer" | "queue"; workflowRef?: WorkflowRef; references?: import("@agenthub/domain").CapabilityReferenceInput[] }; output: { accepted: true; mode: "steer" | "queue" } };
   "session.followUp.list": { input: { sessionId: string }; output: { items: Array<{ messageId: string; text: string; queuedAt: string }> } };
   "session.followUp.cancel": { input: { sessionId: string; messageId: string }; output: { cancelled: true } };
   "session.followUp.steer": { input: { sessionId: string; messageId: string }; output: { accepted: true; mode: "steer" | "queue" } };
-  "session.send": { input: { sessionId: string; text: string; messageId?: string; attachments?: MessageAttachmentInput[]; editMessageId?: string; workflowRef?: WorkflowRef }; output: { accepted: true; runId: string } };
+  "session.send": { input: { sessionId: string; text: string; messageId?: string; attachments?: MessageAttachmentInput[]; editMessageId?: string; workflowRef?: WorkflowRef; references?: import("@agenthub/domain").CapabilityReferenceInput[] }; output: { accepted: true; runId: string } };
   "slashCommand.list": { input: { sessionId: string }; output: SlashCommandDefinition[] };
   "slashCommand.execute": { input: { sessionId: string; commandId: string; argument?: string }; output: SlashCommandResult };
   "slashCommand.continue": { input: { sessionId: string; commandId: string; actionId: string; selectedOptionIds?: string[] }; output: SlashCommandResult };

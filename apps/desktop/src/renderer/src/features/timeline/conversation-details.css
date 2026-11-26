@@ -42,22 +42,33 @@
 }
 
 .conversation-message-row[data-process] { padding-block: 0; }
-.conversation-process-row[data-trace-step] { position: relative; }
-.conversation-process-row[data-trace-prev]::before,
-.conversation-process-row[data-trace-next]::after {
-  position: absolute;
-  z-index: 1;
-  inset-inline-start: calc(var(--conversation-step-axis) - 0.5px);
-  width: 1px;
-  background: var(--conversation-detail-border);
-  content: "";
-  pointer-events: none;
+.conversation-turn-process > .process-disclosure-fold > .process-disclosure-clip > .process-disclosure-body { padding: 0; }
+.conversation-turn-process .process-disclosure { font-weight: 400; }
+.conversation-turn-process .reasoning-card .markdown-content { font-weight: 400; }
+.conversation-turn-process .conversation-commentary { padding-block: 8px; }
+.conversation-commentary .conversation-message-actions { display: none; }
+.conversation-turn-process .conversation-commentary .markdown-content {
+  font-size: 13.5px;
+  font-weight: 400;
+  line-height: 1.65;
+  color: var(--ink-2);
 }
-.conversation-process-row[data-trace-prev]::before { inset-block-start: 0; block-size: calc(var(--conversation-step-height) / 2 - 8px); }
-.conversation-process-row[data-trace-next]::after { inset-block: calc(var(--conversation-step-height) / 2 + 8px) 0; }
-.conversation-turn-body > [data-trace-prev] { margin-block-start: -4px; }
-
-.file-activity-name { text-decoration: underline dotted var(--conversation-detail-muted); text-underline-offset: 3px; }
+.tool-step-group > .process-disclosure-fold > .process-disclosure-clip > .process-disclosure-body {
+  margin-inline-start: var(--conversation-step-axis);
+  padding: 0 0 0 7px;
+  border-inline-start: 1px solid var(--conversation-detail-border);
+}
+.tool-step-group-failures { color: var(--conversation-detail-removed); }
+.file-activity-name {
+  position: relative;
+  z-index: 1;
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.file-activity-name:hover { text-decoration: underline; text-underline-offset: 3px; }
 .conversation-inline-diff {
   --scm-number: var(--ink-3);
   --scm-sunken: var(--conversation-detail-header);
@@ -81,23 +92,16 @@
   padding-block-end: 4px;
   border-block-end: 0;
 }
-.conversation-turn-summary :is(.conversation-process-toggle, .conversation-process-label) {
+.conversation-turn-summary .conversation-process-toggle {
   min-height: 28px;
   gap: var(--conversation-step-gap);
   padding: 3px var(--conversation-step-inset);
   border-radius: 6px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  font-weight: 400;
 }
 .conversation-message-row:has(> .conversation-run-wait) { position: relative; padding-block: 0; }
-.conversation-run-wait,
-.conversation-turn[data-status="running"] > .conversation-turn-summary {
-  --wait-ink: #64748b;
-  --wait-highlight: #0f172a;
-  color: var(--wait-ink);
-}
-.dark :is(.conversation-run-wait, .conversation-turn[data-status="running"] > .conversation-turn-summary) {
-  --wait-ink: #8e95a5;
-  --wait-highlight: #e4e7f0;
-}
 .conversation-run-wait {
   display: inline-flex;
   max-width: 100%;
@@ -107,11 +111,8 @@
   font-size: 13px;
   line-height: 18px;
   vertical-align: top;
-}
-.conversation-run-wait[hidden] { position: absolute; inset-block-start: 0; display: none; opacity: 0; pointer-events: none; }
-.conversation-turn[data-status="running"] .conversation-turn-summary > :is(.conversation-process-toggle, .conversation-process-label) {
-  padding-inline: 0;
-  color: inherit;
+  color: var(--ink-3);
+  font-weight: 400;
 }
 .conversation-run-wait > svg, .conversation-wait-orbit { flex: none; }
 .conversation-wait-orbit {
@@ -119,24 +120,24 @@
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  box-shadow: inset 0 0 0 var(--conversation-activity-stroke) color-mix(in srgb, var(--nacre-indigo) 23%, transparent);
+  box-shadow: inset 0 0 0 var(--conversation-activity-stroke) color-mix(in srgb, var(--info) 23%, transparent);
 }
 .conversation-wait-orbit::after {
   position: absolute;
   inset: 0;
-  background: conic-gradient(transparent 62%, var(--nacre-indigo) 72%, var(--nacre-sky) 97%, transparent 99%);
+  background: conic-gradient(transparent 62%, var(--conversation-activity-ink) 97%, transparent 99%);
   mask-image: radial-gradient(circle closest-side,
     transparent calc(100% - var(--conversation-activity-stroke) - .25px),
     black calc(100% - var(--conversation-activity-stroke) + .25px), black calc(100% - .25px), transparent);
   content: "";
 }
 .conversation-wait-label { position: relative; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conversation-wait-sheen { display: none; }
 .conversation-wait-time { display: inline-flex; flex: none; align-items: center; gap: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .conversation-wait-divider { opacity: .6; }
 .conversation-turn-indicator { border-radius: 50%; color: var(--conversation-detail-muted); }
 .conversation-turn[data-status="completed"] .conversation-turn-indicator { background: var(--conversation-detail-success); color: var(--conversation-detail-added); }
 .conversation-turn[data-status="failed"] .conversation-turn-indicator { color: var(--conversation-detail-removed); }
+.conversation-turn[data-status="failed"] .conversation-process-toggle { color: var(--conversation-detail-removed); }
 .conversation-turn-chevron { flex: none; color: var(--conversation-detail-muted); opacity: .76; }
 .conversation-process-toggle[aria-expanded="true"] .conversation-turn-chevron { transform: rotate(90deg); }
 .chat-bubble-user { box-shadow: inset 0 0 0 1px var(--conversation-detail-border); }
@@ -158,41 +159,17 @@
   box-shadow: inset 0 0 0 var(--conversation-activity-stroke) color-mix(in srgb, currentColor 20%, transparent);
 }
 [data-activity-sweep] { position: relative; }
+.session-chat-timeline .process-disclosure-leading[data-activity-mark]::before,
+.session-chat-timeline .process-disclosure-leading[data-activity-mark]::after,
+.session-chat-timeline [data-activity-sweep]::after { display: none; }
 
 @media (hover: hover) and (pointer: fine) {
-  .conversation-turn-summary .conversation-process-toggle:hover { background: var(--conversation-detail-hover); }
-  .conversation-turn[data-status="running"] .conversation-process-toggle:hover { background: transparent; text-decoration: underline; text-underline-offset: 3px; }
+  .conversation-turn-summary .conversation-process-toggle:hover { background: var(--conversation-detail-hover); color: var(--ink); }
+  .conversation-process-toggle[aria-expanded="false"]:hover .conversation-turn-chevron { transform: translateX(2px); }
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  html:not([data-reduce-motion]) .conversation-run-wait {
-    transition: opacity 180ms var(--ease-out-ui), transform 180ms var(--ease-out-ui), display 180ms allow-discrete;
-  }
-  html:not([data-reduce-motion]) .conversation-run-wait[hidden] { transform: translateY(2px); }
   html:not([data-reduce-motion]) .conversation-wait-orbit::after { animation: conversation-activity-orbit 1s linear infinite; }
-  html:not([data-reduce-motion]) .conversation-wait-sheen {
-    position: absolute;
-    inset: 0;
-    display: block;
-    color: var(--wait-highlight);
-    mask-image: linear-gradient(105deg, transparent 20%, black 50%, transparent 80%);
-    pointer-events: none;
-    animation: conversation-wait-sweep 2.2s linear infinite;
-  }
-  html:not([data-reduce-motion]) .conversation-wait-sheen::before {
-    --wait-sweep-from: 88%;
-    --wait-sweep-to: -88%;
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    content: attr(data-label) / "";
-    animation: conversation-wait-sweep 2.2s linear infinite;
-  }
-  html:not([data-reduce-motion]) .conversation-wait-time { transition: opacity 180ms var(--ease-out-ui); }
-  @starting-style {
-    html:not([data-reduce-motion]) .conversation-run-wait:not([hidden]) { opacity: 0; transform: translateY(4px); }
-    html:not([data-reduce-motion]) .conversation-wait-time { opacity: 0; }
-  }
   html:not([data-reduce-motion]) .process-disclosure-leading[data-activity-mark]::after {
     background: conic-gradient(from 15deg, transparent 35%, color-mix(in srgb, currentColor 25%, transparent) 72%, currentColor 98%, transparent);
     mask-image: radial-gradient(circle closest-side,
@@ -220,12 +197,42 @@
 }
 
 @keyframes conversation-activity-orbit { to { transform: rotate(1turn); } }
-@keyframes conversation-wait-sweep {
-  from { transform: translateX(var(--wait-sweep-from, -88%)); }
-  75%, to { transform: translateX(var(--wait-sweep-to, 88%)); }
-}
 @keyframes conversation-activity-sweep {
   0% { clip-path: polygon(-38% 0, 0 0, -12% 100%, -50% 100%); opacity: 0; }
   22%, 55% { opacity: .8; }
   80%, 100% { clip-path: polygon(113% 0, 151% 0, 139% 100%, 101% 100%); opacity: 0; }
 }
+@keyframes nautilo-stream-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :root:not([data-reduce-motion]) [data-markdown-streaming] .stream-fade-seg {
+    animation: nautilo-stream-fade-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+.timeline-return-to-bottom {
+  position: absolute;
+  inset-block-end: 12px;
+  inset-inline: 0;
+  z-index: 10;
+  margin-inline: auto;
+  inline-size: max-content;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-card-value);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.timeline-return-to-bottom:hover { background: var(--card-hover); }
+.timeline-return-to-bottom:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

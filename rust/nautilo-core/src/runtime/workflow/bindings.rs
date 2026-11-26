@@ -48,7 +48,7 @@ impl Definition {
         let mut issues = Vec::new();
         for node in &self.nodes {
             let mut requirements = Vec::new();
-            if let Some(prompt) = &node.prompt {
+            if let Some(prompt) = node.prompt.as_ref().filter(|_| !node.bypass) {
                 for path in binding_paths(prompt) {
                     requirements.push(("prompt".into(), path, false));
                 }
@@ -104,7 +104,7 @@ impl Definition {
                 let from = |edge: &Edge| {
                     let source = self.node(&edge.from[0]);
                     let mut known = facts[source.id.as_str()].clone();
-                    if matches!(source.kind.as_str(), "agent" | "call" | "dispatch")
+                    if !source.bypass && matches!(source.kind.as_str(), "agent" | "call" | "dispatch")
                         && source.on_error.as_deref() != Some(edge.from[1].as_str())
                         && source.for_each.as_ref().and_then(|each| each.empty_exit.as_deref()) != Some(edge.from[1].as_str())
                     {
@@ -184,9 +184,9 @@ impl Definition {
             return Available::Unknown;
         }
         match node.kind.as_str() {
-            "agent" => field(&node.outputs, key, rest),
             "main" => field(&self.inputs, key, rest),
-            "dispatch" => common(inputs.get(node.id.as_str()).into_iter().flatten().map(|edge| {
+            "agent" if !node.bypass => field(&node.outputs, key, rest),
+            "agent" | "dispatch" => common(inputs.get(node.id.as_str()).into_iter().flatten().map(|edge| {
                 self.result_at(self.node(&edge.from[0]), Some(&edge.from[1]), path, inputs, depth + 1)
             })),
             "join" if node.wait == "all" && node.sources.iter().any(|source| source == key) => {

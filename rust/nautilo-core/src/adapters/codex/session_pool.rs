@@ -98,6 +98,13 @@ fn instance_key(request: &AdapterStartRequest) -> String {
     request.instance.get("id").and_then(Value::as_str)
         .or_else(|| request.instance.get("executable").and_then(Value::as_str)).unwrap_or("codex").to_string()
 }
+pub(super) fn resident(instance: &Value, session: &str) -> Option<Arc<PooledCodexAppServer>> {
+    let pools = MANAGER.lock().unwrap();
+    let id = instance["id"].as_str().or_else(||instance["executable"].as_str()).unwrap_or("codex");
+    let slot = pools.get(id)?.slots.get(session)?;
+    if !slot.committed || slot.closing { return None; }
+    slot.connection.as_ref().filter(|connection|connection.rpc.process_handle().is_alive()).cloned()
+}
 fn prune(pool: &mut InstancePool) {
     let slots = &pool.slots;
     let queue = &pool.queue;

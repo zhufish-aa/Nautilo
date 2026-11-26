@@ -2,6 +2,13 @@ export type CapabilityId = string;
 
 export type CapabilityKind = "skill" | "mcp";
 
+export type CapabilityReferenceInput =
+  | { kind: "skill"; id: CapabilityId }
+  | { kind: "mcp"; id: CapabilityId; tool?: string };
+
+/** The display name in a message is captured when the reference is sent. */
+export type CapabilityReference = CapabilityReferenceInput & { name: string; temporary?: boolean };
+
 export type McpTransport = "stdio" | "http";
 
 /** User-managed MCP server connection, injected into provider sessions at run time. */

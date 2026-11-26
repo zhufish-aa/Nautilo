@@ -559,6 +559,13 @@ pub fn start_codex_app_server_transient(request: AdapterStartRequest, resume_ses
 pub async fn shutdown_codex_app_server_pools() { session_pool::shutdown().await; }
 pub async fn release_session(request:&AdapterStartRequest)->CoreResult<()> {session_pool::release_session(request).await}
 
+pub(super) fn resource_client(instance: &Value, session: &Value) -> Option<Arc<JsonRpcProcessClient>> {
+    let thread = session["providerSessionId"].as_str()?;
+    let connection = session_pool::resident(instance, session["id"].as_str()?)?;
+    if connection.loaded_thread_id.lock().unwrap().as_deref() != Some(thread) { return None; }
+    Some(connection.rpc.clone())
+}
+
 fn start_single_connection(request: AdapterStartRequest, resume_session: Option<String>) -> CoreResult<AdapterRun> {
     let pooled = acquire_codex_app_server(&request)?;
     start_on_connection(request, resume_session, pooled, true)

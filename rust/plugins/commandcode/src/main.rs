@@ -768,6 +768,21 @@ impl CommandCodePlugin {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for CommandCodePlugin {
+    async fn native_resources(&self, instance: &Value, cwd: &str, _session: &Value) -> anyhow::Result<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{json_file, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let home = resources.home.join(".commandcode");
+        if !cwd.is_empty() {
+            resources.skills(&resources.cwd.join(".commandcode/skills"), &[]);
+            resources.skills(&resources.cwd.join(".agents/skills"), &[]);
+            let path = resources.cwd.join(".mcp.json");
+            resources.mcp(&path, &json_file(&path)["mcpServers"], &[]);
+        }
+        resources.skills(&home.join("skills"), &[]);
+        let path = home.join("mcp.json");
+        resources.mcp(&path, &json_file(&path)["mcpServers"], &[]);
+        Ok(resources.finish())
+    }
     async fn read_session_history(&self,request:&Value,session:&str)->anyhow::Result<Option<Value>>{history::read(request,session).await.map(Some)}
     fn native_terminal_supported(&self)->bool {true}
     async fn terminal_plan(&self,request:&Value,resume:Option<String>)->anyhow::Result<Value> {

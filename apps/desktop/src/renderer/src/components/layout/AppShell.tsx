@@ -99,7 +99,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
             <ResizeHandle label="调整侧栏宽度" value={sidebarWidth.width} min={180} max={480} onChange={sidebarWidth.resize} onCommit={sidebarWidth.save} reset={280}/>
           </div>
         )}
-        <div className={cn("flex min-h-0 min-w-0 flex-1 overflow-hidden", !isSettings && "workspace-stage")}>
+        <div className={cn("flex min-h-0 min-w-0 flex-1 overflow-hidden", !isSettings && (isWorkflows ? "workflow-shell" : "workspace-stage"))}>
           <main
             id="main-content"
             tabIndex={-1}

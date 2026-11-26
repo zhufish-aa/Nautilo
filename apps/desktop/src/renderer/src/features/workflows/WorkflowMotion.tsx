@@ -104,9 +104,8 @@ export function WorkflowStream({ path, repeat, playing, offset, duration, delay 
   return <>
     <path ref={line} d={path} fill="none" stroke="none"/>
     <g ref={dot} className="wf-stream" aria-hidden="true">
-      <ellipse cx="-5" rx="11" ry="3" opacity=".18"/>
-      <circle cx="-7" r="1.8" opacity=".45"/>
-      <circle r="3.8" className="wf-stream-core"/>
+      <circle r="3.1" opacity=".22"/>
+      <circle r="1.75" className="wf-stream-core"/>
     </g>
   </>;
 }

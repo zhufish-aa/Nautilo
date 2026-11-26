@@ -1,9 +1,9 @@
-import { useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { createPortal } from "react-dom";
 import type { SlashCommandDefinition, WorkflowTemplate } from "@agenthub/domain";
-import { ArrowUp, Bug, Check, FileText, FolderTree, GitPullRequest, Lightbulb, Loader2, Paperclip, Plus, Square, Target, Workflow, X } from "lucide-react";
+import { ArrowUp, AtSign, Bug, Check, FileText, FolderTree, GitPullRequest, Lightbulb, Loader2, Paperclip, Plus, Square, Target, Workflow, X } from "lucide-react";
 import { useI18n } from "../../lib/i18n";
 import { useUiReducedMotion } from "../../lib/ui-motion";
 import { configureWorkbenchSession, sendWorkbenchFollowUp, sendWorkbenchMessage, stopWorkbenchRun } from "../../lib/orchestration-runtime";
@@ -33,7 +33,7 @@ import { filterSlashCommands, parseSlashCommand, slashCommandQuery } from "./sla
 import { useSlashCommands } from "./slash-commands/useSlashCommands";
 import { QueuedFollowUpBar } from "./QueuedFollowUpBar";
 import { SessionHarnessModeControl } from "./HarnessModeControl";
-import { WorkflowMentionMenu, workflowQueryAt, type WorkflowQuery } from "./WorkflowMentionMenu";
+import { composerReferences, ReferenceIcon, ReferencePills, recordReferenceUse, referenceKey, referenceParts, referenceQueryAt, referenceText, useComposerReferences, type ComposerReference } from "./ComposerReferences";
 import { flashComposer } from "./composer-motion";
 import "./composer-motion.css";
 import "./workflow-plan.css";
@@ -47,6 +47,7 @@ const starterPrompts = [
 /** Chat composer plus per-session model/effort controls, matching the Codex interaction model. */
 export function Composer({
   sessionId,
+  projectId,
   targetName,
   running,
   disabled,
@@ -59,6 +60,7 @@ export function Composer({
   compactTarget
 }: {
   sessionId?: string;
+  projectId?: string;
   targetName?: string;
   running: boolean;
   disabled?: boolean;
@@ -101,6 +103,7 @@ export function Composer({
   const updateText = useComposerDraftsStore((state) => state.setText);
   const updateAttachments = useComposerDraftsStore((state) => state.setAttachments);
   const updateWorkflow = useComposerDraftsStore((state) => state.setWorkflow);
+  const updateReferences = useComposerDraftsStore((state) => state.setReferences);
   const submitting = useComposerDraftsStore((state) => !!state.pending[draftKey]);
   const failedSubmissions = useComposerDraftsStore((state) => state.failed[draftKey]);
   const persistenceError = useComposerDraftsStore((state) => state.persistenceErrors[draftKey]);
@@ -114,43 +117,86 @@ export function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const reducedMotion = useUiReducedMotion();
-  const workflowPlans = useCoreFeatures().workflowPlans === 1;
-  const canReference = workflowPlans && !goalSelected && !disabled && !session?.parentSessionId && session?.target.type !== "team";
+  const core = useCoreFeatures();
+  const canReference = core.workflowPlans === 1 && !goalSelected && !disabled && !session?.parentSessionId && session?.target.type !== "team";
+  const canAttach = core.composerReferences === 1 && !goalSelected && !disabled;
+  const nextTurnModel = useSessionsStore(state => sessionId ? state.nextTurnModels[sessionId] : undefined);
+  const connection = nextTurnModel ?? starterControls?.configuration;
+  const capabilityScope = useMemo(() => sessionId && !nextTurnModel ? { sessionId } : instanceId ? {
+    agentInstanceId: instanceId, projectId: session?.projectId ?? projectId,
+    connectionId: connection?.connectionId, connectionRevision: connection?.connectionRevision
+  } : undefined, [sessionId, nextTurnModel, instanceId, session?.projectId, projectId, connection?.connectionId, connection?.connectionRevision]);
+  const attached = composerReferences(draft.references, draft.workflow);
+  const textParts = referenceParts(editableText, attached);
+  const inlineKeys = new Set(textParts.flatMap(part => part.item ? [referenceKey(part.item)] : []));
+  const unplaced = attached.filter(item => !inlineKeys.has(referenceKey(item)));
+  const previewRef = useRef<HTMLDivElement>(null);
   const showStarter = !sessionId && !!onCreateSession;
-  const [mention, setMention] = useState<WorkflowQuery>();
-  const [workflowIndex, setWorkflowIndex] = useState(0);
-  const [workflowError, setWorkflowError] = useState(false);
-  const workflowMenuId = useId();
+  const composing = useRef(false);
   const templates = useWorkflowsStore(state => state.templates);
-  const templatesLoaded = useWorkflowsStore(state => state.loaded);
   const starterWorkflows = showStarter && canReference ? templates.slice(0, 3) : [];
-  const mentionOpen = canReference && mention !== undefined;
-  const matchingWorkflows = useMemo(() => mention
-    ? templates.filter(template => template.name.toLowerCase().includes(mention.text)).slice(0, 40)
-    : [], [templates, mention?.text]);
-  useEffect(() => { setWorkflowIndex(0); }, [mention?.text, draftKey]);
-  useEffect(() => { setMention(undefined); }, [draftKey]);
   useEffect(() => {
-    if (!mentionOpen && !(showStarter && canReference && !useWorkflowsStore.getState().loaded)) return;
-    let current = true;
-    setWorkflowError(false);
-    void useWorkflowsStore.getState().loadTemplates().catch(() => { if (current) setWorkflowError(true); });
-    return () => { current = false; };
-  }, [mentionOpen, showStarter, canReference]);
+    if (showStarter && canReference && !useWorkflowsStore.getState().loaded) void useWorkflowsStore.getState().loadTemplates().catch(() => undefined);
+  }, [showStarter, canReference]);
+  const picker = useComposerReferences({
+    scope: draftKey, capabilities: canAttach, workflows: canReference, providerId: instance?.providerId, capabilityScope,
+    selected: draft.references, selectedWorkflow: draft.workflow,
+    onChoose: (item, query) => {
+      const current = draft.references ?? [];
+      const key = referenceKey(item);
+      const text = textareaRef.current?.value ?? editableText;
+      const insert = inlineKeys.has(key) ? "" : referenceText(item) + "  ";
+      let before = text.slice(0, query.start), after = text.slice(query.end);
+      if (insert) after = after.replace(/^ {1,2}/, "");
+      if (item.kind === "workflow") {
+        if (draft.workflow && draft.workflow.id !== item.id) {
+          const previous = attached.filter(entry => entry.kind === "workflow");
+          before = referenceParts(before, previous).filter(part => !part.item).map(part => part.text).join("");
+          after = referenceParts(after, previous).filter(part => !part.item).map(part => part.text).join("");
+        }
+        updateWorkflow(draftKey, { id: item.id, name: item.name, revision: item.revision });
+      } else if (!current.some(ref => referenceKey(ref) === key)) {
+        if (current.length >= 24) { toast.error(zh ? "一轮最多引用 24 项能力。" : "Attach at most 24 capabilities per turn."); return; }
+        updateReferences(draftKey, [...current, item]);
+      }
+      const space = insert && query.trigger === "button" && before && !/\s$/.test(before) ? " " : "";
+      setValue(before + space + insert + after + quoteTail);
+      focusDraft(before.length + space.length + insert.length);
+    }
+  });
   function focusDraft(caret: number): void {
     textareaRef.current?.focus();
     requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
   }
   function selectWorkflow(template: WorkflowTemplate, fromShortcut = false): void {
-    if (mention) setValue(value.slice(0, mention.start) + value.slice(mention.end));
     updateWorkflow(draftKey, { id: template.id, revision: template.revision, name: template.name });
-    setMention(undefined);
-    focusDraft(mention?.start ?? value.length);
+    picker.close();
+    focusDraft(editableText.length);
     if (fromShortcut && !reducedMotion) flashComposer(boxRef.current);
+  }
+  function removeReference(item: ComposerReference): void {
+    const match = textParts.find(part => part.item && referenceKey(part.item) === referenceKey(item));
+    if (match) {
+      const end = match.start + match.text.length;
+      const caret = end + (editableText.slice(end).match(/^ {1,2}/)?.[0].length ?? 0);
+      editText(editableText.slice(0, match.start) + editableText.slice(caret));
+      focusDraft(match.start);
+      return;
+    }
+    if (item.kind === "workflow") updateWorkflow(draftKey);
+    else updateReferences(draftKey, draft.references?.filter(ref => referenceKey(ref) !== referenceKey(item)));
+  }
+  function editText(text: string): void {
+    if (inlineKeys.size) {
+      const remaining = new Set(referenceParts(text, attached).flatMap(part => part.item ? [referenceKey(part.item)] : []));
+      const removed = (item: ComposerReference) => inlineKeys.has(referenceKey(item)) && !remaining.has(referenceKey(item));
+      if (attached.some(item => item.kind === "workflow" && removed(item))) updateWorkflow(draftKey);
+      if (draft.references?.some(removed)) updateReferences(draftKey, draft.references.filter(item => !removed(item)));
+    }
+    setValue(text + quoteTail);
   }
   const editingMessage = useSessionsStore((state) => state.editingMessage?.sessionId === sessionId ? state.editingMessage : undefined);
   const cancelEditingMessage = useSessionsStore((state) => state.cancelEditingMessage);
-  const nextTurnModel = useSessionsStore(state => sessionId ? state.nextTurnModels[sessionId] : undefined);
   const hasQueuedFollowUps = useSessionsStore(state => !!(sessionId && state.queuedFollowUps[sessionId]?.length));
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const slash = useSlashCommands(sessionId);
@@ -160,13 +206,29 @@ export function Composer({
     () => snippetQ !== undefined ? filterSnippets(promptSnippets, snippetQ) : [],
     [snippetQ, promptSnippets]
   );
-  const snippetMenuOpen = !mentionOpen && snippetQ !== undefined && filteredSnippets.length > 0;
+  const snippetMenuOpen = !picker.open && snippetQ !== undefined && filteredSnippets.length > 0;
   const commandQuery = goalSelected || snippetQ !== undefined ? undefined : slashCommandQuery(value);
   const filteredCommands = useMemo(
     () => commandQuery ? filterSlashCommands(slash.commands, commandQuery) : [],
     [commandQuery, slash.commands]
   );
-  const commandMenuOpen = !mentionOpen && commandQuery !== undefined && slash.commands.length > 0;
+  const commandMenuOpen = !picker.open && commandQuery !== undefined && slash.commands.length > 0;
+  function updateReference(text: string, caret: number): void {
+    if (composing.current || (!canAttach && !canReference)) return;
+    if (picker.query?.trigger === "button" && caret >= picker.query.start) {
+      const search = text.slice(picker.query.start, caret);
+      if (search.length <= 80 && !search.includes("\n")) {
+        picker.update({ ...picker.query, end: caret, text: search.trim().toLowerCase() });
+        return;
+      }
+    }
+    const nativeQuery = slashCommandQuery(text);
+    const nativeCommand = parseSlashCommand(text, slash.commands) ||
+      (nativeQuery && nativeQuery.length > 1 && filterSlashCommands(slash.commands, nativeQuery).length > 0);
+    const allowSlash = canAttach && snippetQuery(text) === undefined && !nativeCommand;
+    const next = referenceQueryAt(text, caret, allowSlash);
+    picker.update(next && !referenceParts(text, attached).some(part => part.item && next.start >= part.start && next.start < part.start + part.text.length) ? next : undefined);
+  }
   // Native context compaction: providers whose catalog exposes /compact
   // (kimi/claude/codex/opencode) get the button; others hide it.
   const compactCommand = useMemo(
@@ -205,14 +267,17 @@ export function Composer({
     if (!editingMessage) return;
     updateText(draftKey, editingMessage.text);
     updateWorkflow(draftKey, editingMessage.workflowRef);
+    updateReferences(draftKey, editingMessage.references);
     focusDraft(editingMessage.text.length);
   }, [editingMessage]);
   // Queued follow-ups live in the sessions store (daemon queue + events).
 
   const canCompose = !!sessionId || !!onCreateSession;
   const waitsForNextTurn = !!nextTurnModel && (running || hasQueuedFollowUps);
-  const canSend = canCompose && !submitting && !running && !waitsForNextTurn && !importing && (goalSelected ? !!value.trim() && !planSelected : value.trim().length > 0 || attachments.length > 0 || !!draft.workflow) && !disabled && !submissionDisabledReason && (!draft.workflow || canReference);
-  const canFollowUp = !!sessionId && !goalSelected && !submitting && running && !waitsForNextTurn && !importing && !disabled && !editingMessage && !draft.workflow && attachments.length === 0 && value.trim().length > 0;
+  const hasReferences = !!draft.workflow || !!draft.references?.length;
+  const referencesAvailable = (!draft.workflow || canReference) && (!draft.references?.length || canAttach);
+  const canSend = canCompose && !submitting && !running && !waitsForNextTurn && !importing && (goalSelected ? !!value.trim() && !planSelected : value.trim().length > 0 || attachments.length > 0 || hasReferences) && !disabled && !submissionDisabledReason && referencesAvailable;
+  const canFollowUp = !!sessionId && !goalSelected && !submitting && running && !waitsForNextTurn && !importing && !disabled && !editingMessage && attachments.length === 0 && (value.trim().length > 0 || hasReferences) && referencesAvailable;
   const actionsDisabled = !canCompose || disabled || importing || running;
   const planDisabled = actionsDisabled || submitting || hasQueuedFollowUps || goalSelected;
   const toggleGoal = (): void => {
@@ -283,7 +348,7 @@ export function Composer({
     setValue("");
   };
   const tryRunSlashCommand = (): boolean => {
-    const parsed = !goalSelected && attachments.length === 0 && !draft.workflow ? parseSlashCommand(value, slash.commands) : undefined;
+    const parsed = !goalSelected && attachments.length === 0 && !hasReferences ? parseSlashCommand(value, slash.commands) : undefined;
     if (parsed && (parsed.command.availability === "always" || !running)) {
       runCommand(parsed.command, parsed.argument);
       return true;
@@ -299,6 +364,10 @@ export function Composer({
       store.finish(submission, locale === "zh-CN" ? "当前会话暂时无法引用工作流" : "Workflow references are unavailable in this conversation");
       return;
     }
+    if (submission.draft.references?.length && !canAttach) {
+      store.finish(submission, zh ? "当前桌面后台暂时不支持 Skill 或 MCP 引用，草稿已保留。" : "The current backend cannot send Skill or MCP references. Your draft is retained.");
+      return;
+    }
     if (submission.kind !== "message" && !running) submission = { ...submission, kind: "message" };
     try {
       const title = submission.draft.text.trim();
@@ -310,17 +379,20 @@ export function Composer({
       void deliverComposerSubmission(sent, async () => {
         const text = sent.draft.text.trim() || (sent.draft.workflow
           ? (locale === "zh-CN" ? "请为这次任务拟一份工作流执行计划。" : "Prepare a plan using the referenced workflow.")
+          : sent.draft.references?.length ? (zh ? "请使用我引用的能力协助这次任务。" : "Use the attached capabilities to help with this task.")
           : t("sessions.composer.attachmentPrompt"));
+        const references = sent.draft.references?.map(ref => ref.kind === "skill" ? { kind: ref.kind, id: ref.id } : { kind: ref.kind, id: ref.id, tool: ref.tool });
         if (sent.kind === "message") {
-          await sendWorkbenchMessage(destinationId, text, sent.draft.attachments, sent.editMessageId, sent.messageId, sent.draft.workflow);
+          await sendWorkbenchMessage(destinationId, text, sent.draft.attachments, sent.editMessageId, sent.messageId, sent.draft.workflow, references);
           // Do not cancel a different edit the user began while awaiting IPC.
           const currentEdit = useSessionsStore.getState().editingMessage;
           if (sent.editMessageId && currentEdit?.sessionId === destinationId && currentEdit.messageId === sent.editMessageId && useComposerDraftsStore.getState().drafts[destinationId] === sent.draft) cancelEditingMessage();
         } else {
-          const appliedMode = await sendWorkbenchFollowUp(destinationId, text, sent.kind, sent.messageId);
+          const appliedMode = await sendWorkbenchFollowUp(destinationId, text, sent.kind, sent.messageId, references, sent.draft.workflow);
           if (!appliedMode) throw new Error(locale === "zh-CN" ? "追加消息未被接受，内容已保留" : "Follow-up was not accepted. Your draft is retained.");
           if (sent.kind === "steer" && appliedMode === "queue") toast.info(t("sessions.composer.steerDowngraded"));
         }
+        recordReferenceUse(sent.draft.references, sent.draft.workflow);
       });
     } catch (error) {
       store.finish(submission, error instanceof Error ? error.message : String(error));
@@ -337,20 +409,35 @@ export function Composer({
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     // Enter confirms IME composition before it may submit a message.
-    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (mentionOpen) {
-      if (event.key === "Escape") { event.preventDefault(); setMention(undefined); return; }
-      if (matchingWorkflows.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (picker.keyDown(event)) return;
+    if (!event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey &&
+        (event.key === "ArrowLeft" || event.key === "ArrowRight") && event.currentTarget.selectionStart === event.currentTarget.selectionEnd) {
+      const caret = event.currentTarget.selectionStart;
+      const forward = event.key === "ArrowRight";
+      const part = textParts.find(({ item, start, text }) => item && (forward ? start <= caret && caret < start + text.length : start < caret && caret <= start + text.length));
+      if (part) {
         event.preventDefault();
-        const total = matchingWorkflows.length;
-        setWorkflowIndex(index => (index + (event.key === "ArrowDown" ? 1 : -1) + total) % total);
+        event.currentTarget.setSelectionRange(forward ? part.start + part.text.length : part.start, forward ? part.start + part.text.length : part.start);
         return;
       }
-      if (event.key === "Enter" && !event.shiftKey && matchingWorkflows[workflowIndex]) {
+    }
+    if (!picker.open && event.key === "Backspace" && event.currentTarget.selectionStart === event.currentTarget.selectionEnd) {
+      const caret = event.currentTarget.selectionStart;
+      const part = textParts.find(({ item, start, text }) => item && start + text.length <= caret &&
+        /^ {0,2}$/.test(editableText.slice(start + text.length, caret)));
+      if (part) {
         event.preventDefault();
-        selectWorkflow(matchingWorkflows[workflowIndex]);
+        editText(editableText.slice(0, part.start) + editableText.slice(caret));
+        focusDraft(part.start);
         return;
       }
+    }
+    if (!picker.open && event.key === "Backspace" && !editableText && event.currentTarget.selectionStart === 0 && hasReferences) {
+      event.preventDefault();
+      if (draft.workflow) updateWorkflow(draftKey);
+      else updateReferences(draftKey, draft.references?.slice(0, -1));
+      return;
     }
     if (snippetMenuOpen) {
       if (event.key === "ArrowDown") {
@@ -419,8 +506,7 @@ export function Composer({
       <div ref={boxRef} className="composer-box relative mx-auto w-full">
         <div className="composer-pulse" aria-hidden="true" />
         {contextControls}
-        {mentionOpen && <WorkflowMentionMenu id={workflowMenuId} templates={matchingWorkflows} active={workflowIndex}
-          loaded={templatesLoaded} error={workflowError} onSelect={selectWorkflow} onHighlight={setWorkflowIndex} zh={locale === "zh-CN"} />}
+        {picker.menu}
         <AnimatePresence>
           {snippetMenuOpen && (
             <SnippetMenu
@@ -489,11 +575,7 @@ export function Composer({
             ))}
           </div>
         )}
-        {draft.workflow && <div className="workflow-composer-reference">
-          <span className="workflow-reference-chip"><Workflow size={14} aria-hidden /><span>{draft.workflow.name}</span>
-            <button type="button" onClick={() => updateWorkflow(draftKey)} aria-label={locale === "zh-CN" ? "移除工作流引用" : "Remove workflow reference"}><X size={13}/></button>
-          </span>
-        </div>}
+        <ReferencePills items={unplaced} onRemove={removeReference} />
         {quotedFiles.length > 0 && <div className="workflow-composer-reference">
           {quotedFiles.map((file, index) => <span className="workflow-reference-chip" key={file + index}>
             <FileText size={14} aria-hidden /><span title={file}>{file.split(/[\\/]/).at(-1)}</span>
@@ -503,25 +585,54 @@ export function Composer({
             }}><X size={13} aria-hidden /></button>
           </span>)}
         </div>}
+        <div className="composer-reference-field" data-inline-references={inlineKeys.size > 0 || undefined}>
+        {inlineKeys.size > 0 && <div ref={previewRef} className="composer-reference-mirror composer-reference-input">
+          {textParts.map(({ item, start, text }) => item
+            ? <span className="composer-inline-reference" data-kind={item.kind} key={start}>
+                <span className="composer-inline-reference-icon">
+                  <span aria-hidden>@</span>
+                  <button type="button" disabled={disabled} aria-label={zh ? "移除 " + item.name + " 引用" : "Remove " + item.name}
+                    title={zh ? "移除引用" : "Remove reference"} onMouseDown={event => event.preventDefault()} onClick={() => removeReference(item)}>
+                    <ReferenceIcon item={item} /><X size={12} aria-hidden />
+                  </button>
+                </span><span aria-hidden>{text.slice(1)}</span>
+              </span>
+            : <span key={start} aria-hidden>{text}</span>)}
+        </div>}
         <textarea
           ref={textareaRef}
           value={editableText}
           onChange={event => {
-            setValue(event.target.value + quoteTail);
-            if (canReference) setMention(workflowQueryAt(event.target.value, event.target.selectionStart));
+            editText(event.target.value);
+            if (!(event.nativeEvent as InputEvent).isComposing) updateReference(event.target.value, event.target.selectionStart);
           }}
-          onClick={event => { if (canReference) setMention(workflowQueryAt(event.currentTarget.value, event.currentTarget.selectionStart)); }}
-          onBlur={() => setMention(undefined)}
+          onClick={event => {
+            const input = event.currentTarget;
+            const caret = input.selectionStart;
+            const part = caret === input.selectionEnd ? textParts.find(({ item, start, text }) => item && caret > start && caret < start + text.length) : undefined;
+            if (part) {
+              const edge = caret - part.start < part.text.length / 2 ? part.start : part.start + part.text.length;
+              input.setSelectionRange(edge, edge);
+            }
+            updateReference(input.value, input.selectionStart);
+          }}
+          onCompositionStart={event => { composing.current = true; event.currentTarget.parentElement?.setAttribute("data-composing", ""); picker.close(); }}
+          onCompositionEnd={event => { composing.current = false; event.currentTarget.parentElement?.removeAttribute("data-composing"); updateReference(event.currentTarget.value, event.currentTarget.selectionStart); }}
+          onBlur={() => picker.close()}
+          onScroll={event => { if (previewRef.current) previewRef.current.scrollTop = event.currentTarget.scrollTop; }}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           rows={2}
           disabled={!canCompose || disabled}
-          aria-controls={mentionOpen ? workflowMenuId : undefined}
-          aria-activedescendant={mentionOpen && matchingWorkflows[workflowIndex] ? workflowMenuId + "-" + workflowIndex : undefined}
-          placeholder={goalSelected ? (zh ? "写下要达成的目标和验收条件" : "Describe the goal and how to verify it") : zh ? (canReference ? "输入任务，或用 @ 引用已保存的工作流" : "今天帮你做些什么？输入任务，或添加文件") : (canReference ? "Describe a task, or type @ to reference a workflow" : "What can I help with? Describe a task, or add files")}
+          aria-controls={picker.open ? picker.id : undefined}
+          aria-activedescendant={picker.open ? picker.activeId : undefined}
+          placeholder={goalSelected ? (zh ? "写下要达成的目标和验收条件" : "Describe the goal and how to verify it")
+            : canAttach ? (zh ? "输入任务，或用 @ 引用 Skill、MCP 或工作流" : "Describe a task or type @ to attach capabilities")
+            : canReference ? (zh ? "输入任务，或用 @ 引用工作流" : "Describe a task or type @ to reference a workflow") : t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
           aria-label={t("sessions.composer.placeholder", { name: targetName ?? "Agent" })}
-          className="block max-h-48 min-h-[76px] w-full resize-none rounded-t-2xl bg-transparent px-4 pb-2 pt-4 text-[14px] leading-6 text-ink outline-none placeholder:text-ink-3/70 disabled:opacity-50"
+          className="composer-reference-input relative block max-h-48 min-h-[76px] w-full resize-none rounded-t-2xl bg-transparent text-ink outline-none placeholder:text-ink-3/70 disabled:opacity-50"
         />
+        </div>
         {failedSubmissions?.map((failedSubmission) => <div key={failedSubmission.submission.token} role="alert" className="flex flex-wrap items-center gap-2 px-4 pb-2 text-xs text-danger">
           <span className="min-w-0 flex-1" title={failedSubmission.submission.draft.text}>{connectionSendError(failedSubmission.error, locale === "zh-CN")} · {failedSubmission.submission.draft.text.slice(0, 48) || (locale === "zh-CN" ? "附件" : "Attachments")}</span>
           <button type="button" disabled={submitting || disabled || !!submissionDisabledReason || waitsForNextTurn || (failedSubmission.submission.kind === "message" && running)} onClick={() => dispatchSubmission(failedSubmission.submission.kind, failedSubmission.submission.token)} className="rounded px-2 py-1 text-ink-2 underline disabled:opacity-40">{failedSubmission.submission.kind !== "message" && !running ? (locale === "zh-CN" ? "作为新消息重试" : "Retry as new message") : (locale === "zh-CN" ? "重试未发送内容" : "Retry unsent content")}</button>
@@ -549,6 +660,18 @@ export function Composer({
               </Menu.Content>
             </Menu.Portal>
           </Menu.Root>
+          {(canAttach || canReference) && <button type="button" className="composer-reference-trigger"
+            aria-label={zh ? "引用 Skill、MCP 或工作流 (@)" : "Reference a Skill, MCP or workflow (@)"}
+            title={zh ? "引用 Skill、MCP 或工作流 (@)" : "Reference a Skill, MCP or workflow (@)"}
+            aria-expanded={picker.open} aria-controls={picker.open ? picker.id : undefined}
+            onMouseDown={event => event.preventDefault()} onClick={() => {
+              if (picker.open) { picker.close(); return; }
+              const caret = textareaRef.current?.selectionEnd ?? editableText.length;
+              focusDraft(caret);
+              picker.update({ start: caret, end: caret, text: "", trigger: "button" });
+            }}>
+            <AtSign size={15} aria-hidden />
+          </button>}
           {sessionId ? <SessionPermissionControl sessionId={sessionId} disabled={running || disabled} /> : starterControls && <PermissionModeSelect value={permissionMode} options={permissionModes} onChange={permissionMode => starterControls.onChange({ permissionMode })} />}
           {(goalSelected || planSelected) && <button type="button" className="composer-mode-label" disabled={goalSelected ? actionsDisabled : planDisabled}
             aria-label={goalSelected ? (zh ? "取消目标" : "Clear goal draft") : t("sessions.composer.planModeDisable")}
@@ -570,12 +693,12 @@ export function Composer({
             compactLoading={slash.loading}
           />
           <div className="composer-actions">
-            {(!running || (!submitting && (value.trim().length > 0 || attachments.length > 0))) && (
+            {(!running || (!submitting && (value.trim().length > 0 || attachments.length > 0 || hasReferences))) && (
               <button
                 type="button"
                 onClick={submit}
                 disabled={running ? !canFollowUp : !canSend}
-                aria-label={t(running && !waitsForNextTurn ? "sessions.composer.steer" : "sessions.composer.send")}
+                aria-label={running && hasReferences ? zh ? "排队到下一轮" : "Queue for the next turn" : t(running && !waitsForNextTurn ? "sessions.composer.steer" : "sessions.composer.send")}
                 title={waitsForNextTurn
                   ? (locale === "zh-CN" ? "本轮结束后，下一条使用所选模型" : "Send with the selected model after the current turn")
                   : submissionDisabledReason ?? t(running ? "sessions.composer.runningHint" : "sessions.composer.send")}
@@ -615,7 +738,7 @@ export function Composer({
             const prompt = locale === "zh-CN" ? promptZh : promptEn;
             const next = value.trim() ? `${value.trimEnd()}\n\n${prompt}` : prompt;
             setValue(next);
-            setMention(undefined);
+            picker.close();
             focusDraft(next.length);
             if (!reducedMotion) flashComposer(boxRef.current);
           }}>

@@ -557,6 +557,7 @@ export interface Message {
   correlationId?: string;
   attachmentIds?: ArtifactId[];
   workflowRef?: import("./workflows.js").WorkflowMention;
+  references?: import("./capabilities.js").CapabilityReference[];
   nativeIdentity?: { providerId?: string; providerSessionId: string; id: string; messageId?: string; source: "native-terminal" | "native-stream"; completed: boolean; turnStatus?: "running" | "completed" | "failed" | "cancelled" };
   nativeFiles?: Array<{ id: string; name: string; url?: string; unavailable: true }>;
   editedAt?: string;

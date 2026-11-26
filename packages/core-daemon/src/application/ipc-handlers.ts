@@ -154,7 +154,7 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
   gateway.register("composerDraft.list", async () => composerDrafts.list());
   gateway.register("composerDraft.write", async input => composerDrafts.write(input));
   gateway.register("health.get", async () => ({ status: "ok", version: "0.1.0", features: {sourceControl:2,sourceControlHistory:1,sourceControlHistoryPaging:1,sourceControlEditing:1,terminalTabs:1,composerDrafts:1,taskRetry:1} }));
-  for (const method of ["templates", "template", "save", "validate", "start", "list", "get", "control", "plan.decide"] as const) {
+  for (const method of ["templates", "template", "save", "archive", "validate", "start", "list", "get", "control", "plan.decide"] as const) {
     gateway.register(`workflow.${method}`, async () => {
       throw new CoreError("IPC_INVALID_REQUEST", { field: "backend", reason: "Workflows require the Rust daemon (health.features.workflows=1)." });
     });
@@ -237,7 +237,10 @@ export function registerIpcHandlers(gateway: IpcGateway, services: ApplicationSe
     return snapshot;
   });
   gateway.register("projectRun.get", async ({ projectRunId }) => services.orchestration.get(projectRunId));
-  gateway.register("orchestration.start", async (input) => services.orchestration.start(input));
+  gateway.register("orchestration.start", async (input) => {
+    if (input.references?.length) throw new CoreError("IPC_INVALID_REQUEST", { field: "references", reason: "Composer references require the Rust daemon." });
+    return services.orchestration.start(input);
+  });
   gateway.register("orchestration.resolveDelegation", async ({ projectRunId, approved, scope }) => services.orchestration.resolveDelegation(projectRunId, approved, scope));
   gateway.register("orchestration.resolveMerge", async ({ projectRunId, approved, scope }) => services.orchestration.resolveMerge(projectRunId, approved, scope));
   gateway.register("orchestration.recover", async ({ projectRunId, memberId, mode }) => services.orchestration.recover(projectRunId, memberId, mode));

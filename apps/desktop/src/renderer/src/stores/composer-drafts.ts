@@ -1,11 +1,12 @@
 import { create } from "zustand";
-import type { WorkflowMention } from "@agenthub/domain";
+import type { CapabilityReference, WorkflowMention } from "@agenthub/domain";
 import type { DesktopAttachment } from "../types/bridge";
 
 export interface ComposerDraft {
   text: string;
   attachments: DesktopAttachment[];
   workflow?: WorkflowMention;
+  references?: CapabilityReference[];
 }
 
 export const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
@@ -34,11 +35,12 @@ interface ComposerDraftsState {
   setText: (id: string, text: string) => void;
   setAttachments: (id: string, next: AttachmentUpdate) => void;
   setWorkflow: (id: string, workflow?: WorkflowMention) => void;
+  setReferences: (id: string, references?: CapabilityReference[]) => void;
   clear: (id: string) => void;
 }
 
 function updatedDrafts(drafts: Record<string, ComposerDraft>, id: string, draft: ComposerDraft): Record<string, ComposerDraft> {
-  if (draft.text || draft.attachments.length || draft.workflow) return { ...drafts, [id]: draft };
+  if (draft.text || draft.attachments.length || draft.workflow || draft.references?.length) return { ...drafts, [id]: draft };
   if (!(id in drafts)) return drafts;
   const next = { ...drafts };
   delete next[id];
@@ -60,7 +62,7 @@ export const useComposerDraftsStore = create<ComposerDraftsState>()((set, get) =
       : state.failed[id]?.find((entry) => entry.submission.token === retryToken)?.submission;
     if (retryToken !== undefined && !previous) return undefined;
     const draft = previous?.draft ?? state.drafts[id];
-    if (!draft || (!draft.text.trim() && !draft.attachments.length && !draft.workflow)) return undefined;
+    if (!draft || (!draft.text.trim() && !draft.attachments.length && !draft.workflow && !draft.references?.length)) return undefined;
     const submission: ComposerSubmission = { token: ++nextToken, messageId: previous?.messageId ?? crypto.randomUUID(), sourceKey: id, key: id, draft, kind: previous?.kind ?? kind, editMessageId: previous ? previous.editMessageId : editMessageId };
     set({ pending: { ...state.pending, [id]: submission } });
     return submission;
@@ -113,6 +115,10 @@ export const useComposerDraftsStore = create<ComposerDraftsState>()((set, get) =
     const current = state.drafts[id] ?? EMPTY_COMPOSER_DRAFT;
     return { drafts: updatedDrafts(state.drafts, id, { ...current, workflow }) };
   }),
+  setReferences: (id, references) => set((state) => {
+    const current = state.drafts[id] ?? EMPTY_COMPOSER_DRAFT;
+    return { drafts: updatedDrafts(state.drafts, id, { ...current, references: references?.length ? references : undefined }) };
+  }),
   clear: (id) => set((state) => ({ drafts: updatedDrafts(state.drafts, id, EMPTY_COMPOSER_DRAFT) }))
 }));
 
@@ -145,6 +151,9 @@ function validDraft(value: unknown): value is ComposerDraft {
     if (!workflow || typeof workflow.id !== "string" || typeof workflow.name !== "string" ||
       !Number.isSafeInteger(workflow.revision) || (workflow.revision ?? 0) < 1) return false;
   }
+  if (draft.references !== undefined && (!Array.isArray(draft.references) || draft.references.length > 24 ||
+    !draft.references.every(item => item && typeof item.id === "string" && typeof item.name === "string" &&
+      (item.kind === "skill" || (item.kind === "mcp" && (item.tool === undefined || typeof item.tool === "string")))))) return false;
   return typeof draft.text === "string" && Array.isArray(draft.attachments) && draft.attachments.every(item => {
     if (!item || typeof item !== "object") return false;
     const file = item as Record<string, unknown>;

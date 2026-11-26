@@ -1,5 +1,5 @@
-import { memo, useId } from "react";
-import { Check, PanelLeftClose, PanelLeftOpen, Plus, Workflow } from "lucide-react";
+import { memo, useState } from "react";
+import { Archive, Check, Copy, Download, Plus, Search, Upload } from "lucide-react";
 import type { WorkflowTemplate } from "@agenthub/domain";
 import { diagramBounds, diagramWires, loopEdges, placeNodes } from "./workflow-geometry";
 import { nodeTone } from "./workflow-model";
@@ -32,33 +32,41 @@ interface Props {
   draftActive: boolean;
   busy: boolean;
   collapsed: boolean;
-  onToggle(): void;
   onOpen(template: WorkflowTemplate): void;
+  onClone(template: WorkflowTemplate): void;
+  onExport(template: WorkflowTemplate): void;
+  onArchive(template: WorkflowTemplate): void;
+  onImport(): void;
   onNew(): void;
   onDraft(): void;
 }
 
-export function WorkflowLibrary({ templates, activeId, ready, showDraft, draftActive, busy, collapsed, onToggle, onOpen, onNew, onDraft }: Props) {
-  const listId = useId();
-  const toggleLabel = collapsed ? "展开流程库" : "收起流程库";
-  return <aside className="wf-library" aria-label="流程库" data-collapsed={collapsed}>
-    <header className="wf-rail-header">
-      {!collapsed && <span><Workflow size={15}/>流程库</span>}
-      <div className="wf-rail-actions">
-        {!collapsed && <button type="button" className="wf-icon-button" aria-label="新建流程" title="新建流程" disabled={busy} onClick={onNew}><Plus size={16}/></button>}
-        <button type="button" className="wf-icon-button" aria-label={toggleLabel} title={toggleLabel} aria-expanded={!collapsed} aria-controls={listId} onClick={onToggle}>
-          {collapsed ? <PanelLeftOpen size={15}/> : <PanelLeftClose size={15}/>}
-        </button>
+export function WorkflowLibrary({ templates, activeId, ready, showDraft, draftActive, busy, collapsed, onOpen, onClone, onExport, onArchive, onImport, onNew, onDraft }: Props) {
+  const [query, setQuery] = useState("");
+  const filtered = templates.filter(template => template.name.toLowerCase().includes(query.trim().toLowerCase()));
+  return <aside className="wf-library" aria-label="流程库" data-collapsed={collapsed} aria-hidden={collapsed || undefined}>
+    <div id="wf-library" className="wf-library-list" hidden={collapsed}>
+      <header className="wf-rail-header"><strong>流程库</strong></header>
+      <label className="wf-library-search"><Search size={13}/><input aria-label="搜索流程" placeholder="搜索流程" value={query} onChange={event => setQuery(event.target.value)}/></label>
+      <div className="wf-library-rows">
+        {showDraft && !query && <button type="button" className="wf-draft-link" aria-current={draftActive ? "true" : undefined} disabled={busy} onClick={onDraft}><span>未保存的草稿</span>{draftActive && <Check size={13}/>}</button>}
+        {filtered.map(template => <div key={template.id} className="wf-library-row">
+          <button type="button" className="wf-library-item" aria-label={"打开流程 " + template.name} aria-current={activeId === template.id ? "true" : undefined} disabled={busy} onClick={() => onOpen(template)}>
+            <Thumbnail template={template}/>
+            <span className="wf-library-caption"><strong title={template.name}>{template.name}</strong>{activeId === template.id && <Check size={13} aria-hidden/>}</span>
+          </button>
+          <div className="wf-library-item-actions">
+            <button type="button" aria-label={"复制副本 " + template.name} title="复制副本" onClick={() => onClone(template)}><Copy size={12}/></button>
+            <button type="button" aria-label={"导出 JSON " + template.name} title="导出 JSON" onClick={() => onExport(template)}><Download size={12}/></button>
+            <button type="button" aria-label={"删除 " + template.name} title="从流程库移除" onClick={() => onArchive(template)}><Archive size={12}/></button>
+          </div>
+        </div>)}
+        {!filtered.length && <div className="wf-library-empty" role="status">{!ready ? "正在加载流程…" : query ? "没有匹配的流程" : "暂无已保存的流程"}</div>}
       </div>
-    </header>
-    <div id={listId} className="wf-library-list" hidden={collapsed}>
-      {showDraft && <button type="button" className="wf-draft-link" aria-current={draftActive ? "true" : undefined} disabled={busy} onClick={onDraft}><span>未保存的草稿</span>{draftActive && <Check size={13}/>}</button>}
-      {templates.map(template => <button type="button" key={template.id} className="wf-library-item" aria-label={"打开流程 " + template.name} aria-current={activeId === template.id ? "true" : undefined} disabled={busy} onClick={() => onOpen(template)}>
-        <Thumbnail template={template}/>
-        <span className="wf-library-caption"><strong title={template.name}>{template.name}</strong>{activeId === template.id && <Check size={13} aria-hidden="true"/>}</span>
-      </button>)}
-      {ready && !templates.length && <div className="wf-library-empty">保存后的流程会显示在这里。</div>}
-      {!ready && <div className="wf-library-empty" role="status">正在加载流程…</div>}
+      <footer className="wf-library-footer">
+        <button type="button" aria-label="新建流程" disabled={busy} onClick={onNew}><Plus size={14}/>新建</button>
+        <button type="button" disabled={busy} onClick={onImport}><Upload size={13}/>导入 JSON</button>
+      </footer>
     </div>
   </aside>;
 }

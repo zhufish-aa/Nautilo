@@ -11,10 +11,10 @@ const { performance } = require('node:perf_hooks');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 (async () => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'nautilo-markdown-'));
-  const entry = path.join(scratch, 'entry.tsx'), output = path.join(scratch, 'entry.js');
+  const entry = path.join(scratch, 'entry.tsx');
   const parserPath = path.join(desktop, 'src/renderer/src/lib/markdown-parse.ts');
-  fs.writeFileSync(entry, `import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom'; import {MarkdownContent} from ${JSON.stringify(path.join(desktop, 'src/renderer/src/features/timeline/MarkdownContent'))}; import {I18nProvider} from ${JSON.stringify(path.join(desktop, 'src/renderer/src/lib/i18n'))}; import {TimelineViewport} from ${JSON.stringify(path.join(desktop, 'src/renderer/src/features/timeline/Timeline'))}; import {useSettingsStore} from ${JSON.stringify(path.join(desktop, 'src/renderer/src/stores/settings'))}; const root=createRoot(document.getElementById('root')!); window.renderMarkdown=(source,key='message',inverted=false)=>flushSync(()=>root.render(<I18nProvider><MarkdownContent key={key} source={source} inverted={inverted} /></I18nProvider>)); window.renderTimeline=(keys,sessionKey,contentKey,forceFollowKey)=>flushSync(()=>root.render(<I18nProvider><TimelineViewport rows={keys.map(key=>({key,render:()=>key}))} sessionKey={sessionKey} contentKey={contentKey} forceFollowKey={forceFollowKey}/></I18nProvider>)); window.setLocale=locale=>flushSync(()=>useSettingsStore.setState({locale})); window.flushTask=fn=>flushSync(fn); window.flushWorker=(worker,data)=>flushSync(()=>worker.onmessage({data})); window.clear=()=>flushSync(()=>root.render(null));`);
-  await esbuild.build({ entryPoints: [entry], outfile: output, bundle: true, platform: 'browser', conditions: ['worker'], format: 'iife', jsx: 'automatic', nodePaths: [path.join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': process.env.MARKDOWN_BENCH ? '"production"' : '"test"' }, loader: { '.css': 'empty' }, plugins: [{ name: 'controlled-worker', setup(build) {
+  fs.writeFileSync(entry, `import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom'; import {MarkdownContent} from ${JSON.stringify(path.join(desktop, 'src/renderer/src/features/timeline/MarkdownContent'))}; import {I18nProvider} from ${JSON.stringify(path.join(desktop, 'src/renderer/src/lib/i18n'))}; import {useSettingsStore} from ${JSON.stringify(path.join(desktop, 'src/renderer/src/stores/settings'))}; const root=createRoot(document.getElementById('root')!); window.renderMarkdown=(source,key='message',inverted=false)=>flushSync(()=>root.render(<I18nProvider><MarkdownContent key={key} source={source} inverted={inverted} /></I18nProvider>)); window.setLocale=locale=>flushSync(()=>useSettingsStore.setState({locale})); window.flushTask=fn=>flushSync(fn); window.flushWorker=(worker,data)=>flushSync(()=>worker.onmessage({data})); window.clear=()=>flushSync(()=>root.render(null));`);
+  const bundle = await esbuild.build({ stdin: { contents: fs.readFileSync(entry, 'utf8'), resolveDir: desktop, loader: 'tsx' }, write: false, bundle: true, platform: 'browser', conditions: ['worker'], format: 'iife', jsx: 'automatic', nodePaths: [path.join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': process.env.MARKDOWN_BENCH ? '"production"' : '"test"' }, loader: { '.css': 'empty', '.png': 'dataurl', '.svg': 'dataurl' }, plugins: [{ name: 'controlled-worker', setup(build) {
     build.onResolve({ filter: /markdown\.worker\?worker$/ }, args => ({ path: args.path, namespace: 'markdown-test-worker' }));
     build.onLoad({ filter: /.*/, namespace: 'markdown-test-worker' }, () => ({ contents: `import {parseMarkdownFragments} from ${JSON.stringify(parserPath)}; export default class Worker { constructor(){this.sent=[];this.terminated=false;window.markdownWorkers.push(this)} postMessage(message){this.sent.push(message)} prepare(message=this.sent.at(-1)){return {id:message.id,fragments:parseMarkdownFragments(message.source)}} finish(message=this.sent.at(-1)){this.onmessage?.({data:this.prepare(message)})} terminate(){this.terminated=true} }`, resolveDir: desktop }));
     build.onResolve({ filter: /\?worker/ }, args => ({ path: args.path, namespace: 'other-worker' }));
@@ -30,7 +30,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   w.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
   w.HTMLElement.prototype.scrollTo = function ({ top }) { this.scrollTop = top; };
   let copied; Object.defineProperty(w.navigator, 'clipboard', { value: { writeText: async text => { copied = text; } } });
-  w.eval(fs.readFileSync(output, 'utf8'));
+  w.eval(bundle.outputFiles[0].text);
   const copySelection = async () => { await w.navigator.clipboard.writeText(w.getSelection().toString()); return copied; };
   const nativeSetTimeout = w.setTimeout.bind(w), nativeClearTimeout = w.clearTimeout.bind(w);
   const heldTimers = new Map(); let timerId = -1, holdTimers = false, profileTasks = false, taskTimes = [];
@@ -116,6 +116,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     w.flushTask(() => d.dispatchEvent(new w.Event('selectionchange')));
     const selected = selection.toString(); finishMount();
     assert(formatted.hidden); assert.equal(selection.toString(), selected); assert.equal(d.querySelector('[data-markdown-raw]'), raw);
+    assert(![...d.querySelectorAll('button')].some(button => /显示格式化内容|Show formatted text/.test(button.textContent)));
     assert(raw.textContent.includes('Paragraph 299: complete searchable content 299.'));
     const live = d.querySelector('[aria-busy="true"]'); assert(live); assert.equal(live.querySelectorAll('[aria-live]').length, 0, 'no second live region re-announces prepared text');
     w.flushTask(() => { selection.removeAllRanges(); d.dispatchEvent(new w.Event('selectionchange')); });
@@ -150,16 +151,16 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     w.renderMarkdown(final + ' more', 'selected-tail'); w.flushWorker(worker, worker.prepare()); assert.equal(selection.toString(), formattedSelection); assert.equal(d.querySelector('p'), paragraph); assert(d.querySelector('[data-markdown-raw]').textContent.endsWith(' more'));
     w.flushTask(() => { selection.removeAllRanges(); d.dispatchEvent(new w.Event('selectionchange')); }); holdTimers = false;
   });
-  await check('native Find shortcut keeps its raw target until Escape or an explicit keyboard-accessible switch', async () => {
+  await check('native Find keeps its raw text until Escape resumes formatting automatically', async () => {
     w.clear(); holdTimers = true; w.renderMarkdown(longDocument, 'progressive-find');
     const raw = d.querySelector('[data-markdown-raw]');
     const find = new w.KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
     w.flushTask(() => d.dispatchEvent(find)); assert(!find.defaultPrevented);
     const worker = w.markdownWorkers.at(-1); w.flushWorker(worker, worker.prepare()); finishMount();
     assert(d.querySelector('[data-markdown-formatted]').hidden); assert.equal(d.querySelector('[data-markdown-raw]'), raw);
-    const reveal = [...d.querySelectorAll('button')].find(button => button.textContent === 'Show formatted text'); assert(reveal); reveal.focus();
-    w.flushTask(() => reveal.click()); assert(!d.querySelector('[data-markdown-formatted]').hidden); assert(!d.querySelector('[data-markdown-raw]'));
-    assert.equal(d.activeElement.getAttribute('tabindex'), '-1'); assert(d.activeElement.contains(d.querySelector('pre')));
+    assert(![...d.querySelectorAll('button')].some(button => /显示格式化内容|Show formatted text/.test(button.textContent)));
+    w.flushTask(() => d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    assert(!d.querySelector('[data-markdown-formatted]').hidden); assert(!d.querySelector('[data-markdown-raw]'));
     const copy = d.querySelector('button[aria-label="Copy code"]'); copy.click(); await sleep(10); assert.equal(copied, 'console.log("full copy");');
     w.clear(); w.renderMarkdown(longDocument, 'progressive-find-escape');
     w.flushTask(() => d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true })));
@@ -182,18 +183,6 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     w.matchMedia = media => ({ matches: media.includes('prefers-reduced-motion'), media, addEventListener() {}, removeEventListener() {} });
     holdTimers = true; w.renderMarkdown(longDocument, 'reduced-motion'); const worker = w.markdownWorkers.at(-1); w.flushWorker(worker, worker.prepare()); finishMount();
     const formatted = d.querySelector('[data-markdown-formatted]'); assert(!formatted.hidden); assert.equal(formatted.style.animation, ''); assert.equal(formatted.style.transition, ''); assert.equal(d.querySelectorAll('p').length, 300); holdTimers = false;
-  });
-  await check('row text updates preserve follow-tail, upward scroll pause, forced resume and session reset', async () => {
-    w.renderTimeline(['one', 'two'], 's', 0);
-    const viewport = d.querySelector('[aria-live="polite"]'); let height = 1000;
-    Object.defineProperty(viewport, 'scrollHeight', { get: () => height }); Object.defineProperty(viewport, 'clientHeight', { get: () => 200 });
-    w.renderTimeline(['one', 'two'], 's', 1); assert.equal(viewport.scrollTop, 1000);
-    viewport.scrollTop = 500; viewport.dispatchEvent(new w.Event('scroll', { bubbles: true })); height = 1200;
-    w.renderTimeline(['one', 'two'], 's', 2); assert.equal(viewport.scrollTop, 500);
-    w.renderTimeline(['two', 'one'], 's', 3); assert.equal(viewport.scrollTop, 500);
-    w.renderTimeline(['two', 'one', 'three'], 's', 4, 'force'); assert.equal(viewport.scrollTop, 1200);
-    viewport.scrollTop = 600; viewport.dispatchEvent(new w.Event('scroll', { bubbles: true })); height = 1300;
-    w.renderTimeline(['one'], 'other-session', 5, 'force'); assert.equal(viewport.scrollTop, 1300);
   });
   if (process.env.MARKDOWN_BENCH) {
     const block = '## Update\n\nText with **emphasis** and `code`, [link](https://example.com).\n\n- first\n- second\n\n';

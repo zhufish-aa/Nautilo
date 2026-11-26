@@ -8,7 +8,15 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import * as jsx from 'react/jsx-runtime';
 const source=readFileSync(new URL('../src/renderer/src/features/sessions/RunActivityIndicator.tsx',import.meta.url),'utf8');
 const exports={};let locale='en';
-vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,{exports,require:name=>name==='react'?React:name==='react/jsx-runtime'?jsx:name==='lucide-react'?{Activity:()=>null}:{useI18n:()=>({locale})}});
+const modules = {
+  react: React, 'react/jsx-runtime': jsx, 'lucide-react': { Activity: () => null },
+  'framer-motion': { AnimatePresence: ({ children }) => children,
+    motion: { div: ({ initial, animate, exit, transition, ...props }) => React.createElement('div', props) } },
+  '../../lib/i18n': { useI18n: () => ({ locale }) },
+  '../../lib/ui-motion': { useUiReducedMotion: () => true },
+  '../../lib/tool-display': { toolActivityKind: name => name === 'bash' ? 'command' : 'tool' },
+};
+vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,{exports,require:name=>modules[name]});
 const render=(phase,status='running')=>renderToStaticMarkup(React.createElement(exports.RunActivityIndicator,{lifecycle:{status,startedAt:'2026-01-01'},events:[{id:'q',timestamp:'2026-01-02',data:{kind:'activity',phase}}]}));
 test('shared provider queue is visible and does not pretend to be approval or reasoning',()=>{
  const html=render('provider_queued');assert(html.includes('Agent busy · queued'));assert(html.includes('role="status"'));assert(!html.includes('approval'));assert(!html.includes('Thinking'));assert(html.includes('aria-hidden="true"'));
@@ -16,7 +24,7 @@ test('shared provider queue is visible and does not pretend to be approval or re
 });
 test('startup stays visible before the CLI returns content and terminal states clear the indicator',()=>{
  const startup=render('starting');
- assert(render('queued').includes('Request sent'));assert.match(startup,/>Waiting for agent</);assert.doesNotMatch(startup,/conversation-wait-time|0s/);
+ assert(render('queued').includes('Request sent'));assert.match(startup,/>Waiting for agent</);assert.match(startup,/conversation-wait-time.*0s/);
  assert.equal(render('provider_queued','cancelled'),'');assert.equal(render('provider_queued','failed'),'');assert(render('thinking').includes('Thinking'));
 });
 
@@ -43,9 +51,13 @@ test('approval wait keeps its label visible without running effects',()=>{
  assert.match(html,/Waiting for your approval/);
  assert.doesNotMatch(html,/conversation-wait-orbit|conversation-wait-sheen/);
 });
-test('live tool rows and replies do not duplicate the indicator',()=>{
- for(const event of [progress('tool_activity',{status:'running'}),progress('reasoning',{streaming:true}),progress('message',{sender:'agent',streaming:true}),progress('message',{sender:'agent',streaming:false})])assert.match(renderEvents([event]),/hidden="" aria-hidden="true"/);
- assert.match(renderEvents([progress('command',{status:'running'})]),/hidden="" aria-hidden="true"/);
+test('the frontier stays visible while reasoning, calling tools or replying',()=>{
+ assert.match(renderEvents([progress('reasoning',{streaming:true})]),/>Thinking</);
+ assert.match(renderEvents([progress('message',{sender:'agent',streaming:true})]),/>Responding</);
+ assert.match(renderEvents([progress('tool_activity',{status:'running',toolName:'bash'})]),/>Running a command</);
+ const command = renderEvents([progress('command',{status:'running'})]);
+ assert.match(command,/>Running a command</);
+ assert.equal(command.match(/conversation-wait-orbit/g).length,1);
  assert(renderEvents([progress('command',{status:'running'})],{status:'running',reason:'cancelling'}).includes('Stopping'));
  assert.equal(renderEvents([],{status:'completed'}),'');
 });

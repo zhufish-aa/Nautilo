@@ -1,43 +1,6 @@
 @import "../workflows/workflow-tokens.css";
 
 
-.workflow-mention-menu {
-  position: absolute;
-  z-index: 20;
-  bottom: calc(100% + 8px);
-  left: 8px;
-  width: min(328px, calc(100% - 16px));
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--card);
-  box-shadow: 0 14px 32px rgb(0 0 0 / .13), 0 3px 7px rgb(0 0 0 / .06);
-}
-.workflow-mention-header, .workflow-mention-empty {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 10px 12px;
-  color: var(--ink-3);
-  font-size: 12px;
-}
-.workflow-mention-options { max-height: min(240px, 36dvh); overflow: auto; padding: 0 5px 5px; }
-.workflow-mention-options:empty { padding: 0; }
-.workflow-mention-options button {
-  width: 100%;
-  min-width: 0;
-  min-height: 36px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  border-radius: 7px;
-  text-align: left;
-  font-size: 12px;
-}
-.workflow-mention-options button:is(:hover, [aria-selected="true"]) { background: var(--card-hover); }
-.workflow-mention-icon { flex-shrink: 0; color: var(--ink-2); }
-.workflow-mention-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workflow-mention-revision { color: var(--ink-3); font-variant-numeric: tabular-nums; font-size: 11px; }
 .workflow-composer-reference { padding: 10px 16px 0; }
 .workflow-reference-chip {
   display: inline-flex;
@@ -190,7 +153,7 @@
   border-radius: 7px;
   text-align: start;
 }
-.workflow-plan-step > .process-disclosure-row:is(:hover, :focus-visible, [aria-expanded="true"]) {
+.workflow-plan-step > .process-disclosure-row:is(:hover, :focus-within, :has([aria-expanded="true"])) {
   background: color-mix(in srgb, var(--wf-ink-main) 4%, transparent);
 }
 .workflow-plan-step > .process-disclosure-row::before {
@@ -203,7 +166,7 @@
   background: var(--wf-plan-tone-ink);
   opacity: 0;
 }
-.workflow-plan-step > .process-disclosure-row:is(:hover, :focus-visible, [aria-expanded="true"])::before { opacity: 1; }
+.workflow-plan-step > .process-disclosure-row:is(:hover, :focus-within, :has([aria-expanded="true"]))::before { opacity: 1; }
 .workflow-plan-step .process-disclosure-leading { display: inline-flex; gap: 8px; width: auto; height: auto; }
 .workflow-plan-index {
   min-width: 2ch;
@@ -295,7 +258,7 @@
   transform: rotate(90deg);
 }
 .workflow-plan-step[data-open] > .process-disclosure-row .process-disclosure-chevron { transform: rotate(270deg); }
-.workflow-plan-step > .process-disclosure-row:is(:hover, :focus-visible, [aria-expanded="true"]) .process-disclosure-chevron { color: var(--wf-ink-secondary); opacity: 1; }
+.workflow-plan-step > .process-disclosure-row:is(:hover, :focus-within, :has([aria-expanded="true"])) .process-disclosure-chevron { color: var(--wf-ink-secondary); opacity: 1; }
 .workflow-plan-step .process-disclosure-body { padding: 5px 12px 12px 42px; }
 .workflow-plan-task { margin: 0; color: var(--wf-ink-secondary); font-size: 12px; font-weight: 400; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .workflow-plan-task + .workflow-plan-configuration { margin-top: 9px; }
@@ -343,7 +306,6 @@
 .workflow-plan-actions .workflow-plan-view:hover { border-color: var(--wf-border-hover); background: var(--wf-plan-action-hover); }
 .workflow-plan-view svg { color: var(--wf-ink-muted); }
 .conversation-workflow-plan :is(button, a, select):focus-visible { outline: 2px solid var(--wf-selection-stroke); outline-offset: -2px; }
-.workflow-mention-options button:focus-visible { outline: 2px solid var(--ink-3); outline-offset: -2px; }
 
 @media (prefers-reduced-motion: no-preference) {
   .conversation-workflow-plan:not([data-reduced]) .workflow-plan-status-dot::after {

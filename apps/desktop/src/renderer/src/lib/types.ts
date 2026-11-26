@@ -9,6 +9,7 @@ import type {
   VerificationCommandTemplate,
   WorkspaceMode,
   WorkflowMention,
+  CapabilityReference,
   WorkflowPlan
 } from "@agenthub/domain";
 import type { CodeExecution, ToolFileDiff } from "@agenthub/event-protocol";
@@ -339,7 +340,7 @@ export interface MessageAttachmentView {
 }
 
 export type TimelinePayload =
-    | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string; attachments?: MessageAttachmentView[]; editedAt?: string; workflowRef?: WorkflowMention }
+    | { kind: "message"; sender: "user" | "agent" | "system"; authorName?: string; text: string; streaming?: boolean; messageId?: string; attachments?: MessageAttachmentView[]; editedAt?: string; workflowRef?: WorkflowMention; references?: CapabilityReference[] }
   | { kind: "workflow_plan"; plan: WorkflowPlan; runStatus?: string }
   | { kind: "provider_ui"; method: string; key?: string; text: string; url?: string }
   | { kind: "activity"; phase: "queued" | "provider_queued" | "starting" | "thinking" | "responding" | "completed" | "stopped"; detail?: string }

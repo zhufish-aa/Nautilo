@@ -1,9 +1,44 @@
 import type { WorkflowDefinition, WorkflowIssue, WorkflowLayout, WorkflowNode } from "@agenthub/domain";
-import { edgeKey, findEdge, type Connection, type EdgeSelection } from "./workflow-geometry";
+import { edgeKey, findEdge, graphReachable, loopEdges, type Connection, type EdgeSelection } from "./workflow-geometry";
 import { nodeKinds, nodeLabel } from "./workflow-model";
 
 export const addableKinds = ["agent", "condition", "dispatch", "join", "call"] as const;
 export type AddableKind = typeof addableKinds[number];
+export type InspectorTab = "instructions" | "output" | "environment";
+
+export function promptVariables(definition: WorkflowDefinition, node: WorkflowNode) {
+  const upstream = graphReachable(definition.edges, node.id, true);
+  const inputs = Object.keys(definition.inputs ?? {}).map(key => ({ label: key, path: "input." + key, description: undefined }));
+  const outputs = definition.nodes
+    .filter(source => source.id !== node.id && !source.bypass && upstream.has(source.id))
+    .flatMap(source => Object.keys(source.outputs ?? {}).map(key => ({
+      label: nodeLabel(source) + " · " + key, path: `steps.${source.id}.latest.result.${key}`, description: source.outputDescriptions?.[key],
+    })));
+  return [
+    { label: "全局输入", entries: inputs },
+    { label: "上游可达输出", entries: outputs },
+    { label: "本节点待提交字段", entries: Object.keys(node.outputs ?? {}).map(key => ({ label: key, path: key, literal: true, description: node.outputDescriptions?.[key] })) },
+  ];
+}
+
+export function unknownPromptPaths(definition: WorkflowDefinition, node: WorkflowNode): Set<string> {
+  const upstream = graphReachable(definition.edges, node.id, true);
+  const unknown = new Set<string>();
+  for (const match of (node.prompt || "").matchAll(/\\\{\{|\{\{\s*([^{}]*?)\s*\}\}/g)) {
+    const path = match[1]?.trim();
+    if (path === undefined) continue;
+    const [root, key, version, result, field] = path.split(".");
+    if (["input", "incoming", "item", "exit", "steps"].includes(root) && Object.hasOwn(node.fallbacks ?? {}, path) && root !== "exit") continue;
+    if (["input", "steps", "exit", "incoming"].includes(path) || root === "incoming" || root === "item" && node.forEach) continue;
+    if (root === "input" && Object.hasOwn(definition.inputs ?? {}, key)) continue;
+    if (root === "exit" && node.exits.some(port => port.id === key)) continue;
+    if (root === "steps" && key !== node.id && upstream.has(key) &&
+      (!(version === "latest" && result === "result" && field) ||
+        definition.nodes.some(source => source.id === key && !source.bypass && (source.kind !== "agent" || Object.hasOwn(source.outputs ?? {}, field))))) continue;
+    unknown.add(path);
+  }
+  return unknown;
+}
 
 export function blankWorkflow(): { definition: WorkflowDefinition; layout: WorkflowLayout; revision: number } {
   return {
@@ -24,6 +59,7 @@ export function createNode(kind: AddableKind, definition: WorkflowDefinition): W
       ? "处理 {{input.question}}，并提交结果。"
       : "处理交给你的任务，并提交结果。";
     node.outputs = { summary: "text" };
+    node.outputDescriptions = { summary: "简要写明完成了什么，以及最重要的结论。" };
   }
   if (kind === "join") { node.scope = definition.entry; node.wait = "all"; }
   if (kind === "dispatch") node.dispatch = "all";
@@ -121,6 +157,19 @@ export function graphIssues(definition: WorkflowDefinition, backend: WorkflowIss
   for (const node of definition.nodes) if (!reached.has(node.id)) {
     issues.push({ path: "incoming", nodeId: node.id, message: `「${nodeLabel(node)}」还没有接入流程。从前一步拖线连接到它。` });
   }
+  for (const node of definition.nodes) {
+    if (node.kind === "agent" && !node.bypass) for (const binding of unknownPromptPaths(definition, node)) {
+      issues.push({ path: "prompt", nodeId: node.id, message: `「${nodeLabel(node)}」的 {{${binding}}} 未声明，可能导致运行时缺失。` });
+    }
+    if (node.kind === "agent" && !node.bypass && Object.keys(node.outputs ?? {}).length && !/提交|交付|返回|submit|deliver|return/i.test(node.prompt ?? "")) {
+      issues.push({ path: "prompt", nodeId: node.id, warning: true, message: `「${nodeLabel(node)}」的提示词未提及提交结果。` });
+    }
+    if (node.kind === "condition" && !node.otherwise) issues.push({ path: "otherwise", nodeId: node.id, warning: true, message: `「${nodeLabel(node)}」缺少默认出口。` });
+  }
+  for (const index of loopEdges(definition.edges)) {
+    const edge = definition.edges[index];
+    if (!edge.maxTraversals) issues.push({ path: "loop", nodeId: edge.from[0], exitId: edge.from[1], warning: true, message: "回环需要设置轮次上限和超限去向。" });
+  }
   for (const issue of backend) {
     const destination = issue.message.match(/([^\s.]+)\.([^\s.]+) must have one connected destination/);
     if (destination && issues.some(local => local.nodeId === destination[1] && local.exitId === destination[2])) continue;
@@ -132,7 +181,10 @@ export function graphIssues(definition: WorkflowDefinition, backend: WorkflowIss
     if (raw.includes("has duplicate or empty exits") && issues.some(local => local.path === "exit.name")) continue;
     if (issue.nodeId && issue.exitId && issues.some(local => local.nodeId === issue.nodeId && local.exitId === issue.exitId)) continue;
     const place = `${node ? "「" + nodeLabel(node) + "」" : "流程"}${exit ? "的「" + exit.name + "」" : ""}`;
-    const translation = destination ? `${place}需要连接到一个目标。`
+    const binding = raw.match(/may receive no value for (.+?)\. Use a required field/);
+    if (binding && issues.some(local => local.nodeId === node?.id && local.path === "prompt" && local.message.includes("{{" + binding[1] + "}}"))) continue;
+    const translation = binding ? `${place}的 {{${binding[1]}}} 在部分路线中可能没有值。请检查上游字段或填写默认值。`
+      : destination ? `${place}需要连接到一个目标。`
       : /cycle|loop|traversal/i.test(raw) ? "回环需要设置通过次数和次数用尽后的下一步。"
       : /reachable/i.test(raw) ? "有节点还没有接入流程。"
       : /role|prompt/i.test(raw) ? `${place}需要填写角色和任务提示词。`

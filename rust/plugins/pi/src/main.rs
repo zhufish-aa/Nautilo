@@ -537,6 +537,29 @@ impl PiPlugin {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for PiPlugin {
+    async fn native_resources(&self, instance: &Value, cwd: &str, session: &Value) -> anyhow::Result<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{json_file, strings, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let home = resources.path("PI_CODING_AGENT_DIR").unwrap_or_else(||resources.home.join(".pi/agent"));
+        let config = json_file(&home.join("settings.json"));
+        if strings(&instance["baseArgs"]).contains(&"--no-skills") || config["skills"]["enabled"] == false {
+            return Ok(resources.finish());
+        }
+        if let Some(commands) = session["commands"].as_array() {
+            for command in commands.iter().filter(|command|command["source"] == "skill") {
+                if let Some(path) = command["path"].as_str() { resources.skills(std::path::Path::new(path), &[]); }
+            }
+            return Ok(resources.finish());
+        }
+        if !cwd.is_empty() {
+            resources.skills(&resources.cwd.join(".pi/skills"), &[]);
+            resources.skills(&resources.cwd.join(".agents/skills"), &[]);
+        }
+        resources.skills(&home.join("skills"), &[]);
+        resources.skills(&resources.home.join(".agents/skills"), &[]);
+        for path in strings(&config["skills"]) { resources.skills(&home.join(path), &[]); }
+        Ok(resources.finish())
+    }
     async fn read_session_history(&self,request:&Value,session:&str)->anyhow::Result<Option<Value>>{history::read(request,session).await.map(Some)}
     fn native_terminal_supported(&self)->bool {true}
     async fn release_session(&self,request:&Value)->anyhow::Result<()> {if let Some(native)=self.pool.retire(request["localSessionId"].as_str().unwrap_or("")){native.close().await;}Ok(())}

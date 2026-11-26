@@ -18,12 +18,12 @@ const { markdownEntitiesPlugin } = await import(`data:text/javascript,${encodeUR
 const optimizer = markdownEntitiesPlugin().config().optimizeDeps;
 // Use normal browser conditions, just as Vite's dev prebundler does. There
 // is no document in this test runtime: selecting the DOM entry fails here.
-const parsedBundle = await build({ stdin: { contents: 'export { parseMarkdownFragments } from "./src/renderer/src/lib/markdown-parse"; export { normalizeMarkdownLocalLinks } from "./src/renderer/src/lib/file-references";', resolveDir: fileURLToPath(new URL("..", import.meta.url)) }, bundle: true, platform: "browser", plugins: optimizer.esbuildOptions.plugins, format: "esm", write: false, define: { "process.env.NODE_ENV": '"test"' } });
+const parsedBundle = await build({ stdin: { contents: 'export { parseMarkdownFragments, parseMarkdownBlocks } from "./src/renderer/src/lib/markdown-parse"; export { updateStreamingMarkdown } from "./src/renderer/src/lib/streaming-markdown"; export { normalizeMarkdownLocalLinks } from "./src/renderer/src/lib/file-references";', resolveDir: fileURLToPath(new URL("..", import.meta.url)) }, bundle: true, platform: "browser", plugins: optimizer.esbuildOptions.plugins, format: "esm", write: false, define: { "process.env.NODE_ENV": '"test"' } });
 const temporary = await mkdtemp(path.join(tmpdir(), "nautilo-markdown-test-"));
 after(() => rm(temporary, { recursive: true, force: true }));
 const parserFile = path.join(temporary, "parser.mjs");
 await writeFile(parserFile, parsedBundle.outputFiles[0].text);
-const { parseMarkdownFragments, normalizeMarkdownLocalLinks } = await import(pathToFileURL(parserFile).href);
+const { parseMarkdownFragments, parseMarkdownBlocks, updateStreamingMarkdown, normalizeMarkdownLocalLinks } = await import(pathToFileURL(parserFile).href);
 const queueSource = await readFile(new URL("../src/renderer/src/lib/markdown-worker-queue.ts", import.meta.url), "utf8");
 const compiled = ts.transpileModule(queueSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 const { MarkdownWorkerQueue } = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(compiled)}`);
@@ -67,6 +67,32 @@ test("unchanged parsed fragments are exact-equal; late references invalidate ear
   const before = parseMarkdownFragments(`[target]\n\n${gap}`);
   const after = parseMarkdownFragments(`[target]\n\n${gap}[target]: https://example.com\n`);
   assert.notEqual(before[0], after[0]);
+});
+
+test("live Markdown freezes completed root blocks and resolves forward references on completion", () => {
+  const first = "[Local](C:\\code\\file.ts) and [later][ref].\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n";
+  const prefix = first + "- item\n\n";
+  const before = updateStreamingMarkdown(undefined, prefix, true);
+  assert.equal(before.offset, first.length);
+  assert.equal(before.fixed.length, 2);
+  const after = updateStreamingMarkdown(before, prefix + "  More **details", true);
+  assert.equal(after.fixed, before.fixed, "frozen paragraphs and tables are reused by identity");
+  assert.match(after.tail[0], /"tagName":"ul"/);
+  assert.match(after.tail[0], /"tagName":"strong"/);
+  const final = prefix + "  More **details**\n\n[ref]: https://example.com\n";
+  const settled = parseMarkdownFragments(final, true);
+  assert.match(settled[0], /https:\/\/example.com/);
+  assert.equal(settled[1], before.fixed[1], "unchanged tables remain the same after final resolution");
+});
+
+test("incomplete bold, inline code, and a large open fence preserve their readings", () => {
+  const inline = parseMarkdownBlocks("Use **bold content with `inline", true)[0].serialized;
+  assert.match(inline, /"tagName":"strong"/);
+  assert.match(inline, /"tagName":"code"/);
+  const code = "```js\n" + 'const text = "<script>";\r\n'.repeat(500) + "\n";
+  assert.deepEqual(parseMarkdownBlocks(code, true), parseMarkdownBlocks(code));
+  const stableBold = parseMarkdownBlocks("Use **bold*", true)[0].serialized;
+  assert.equal(stableBold, parseMarkdownBlocks("Use **bold**")[0].serialized);
 });
 
 function harness() {

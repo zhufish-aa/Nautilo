@@ -1,5 +1,6 @@
 use super::*;
 use crate::adapters::registry::AdapterRegistry;
+use crate::application::session_service::SessionService;
 use crate::adapters::{
     AdapterCapabilities, AdapterDetectionResult, AdapterEvent, AdapterResumeRequest, AdapterRun,
     AdapterStartRequest, AgentCliAdapter,
@@ -38,6 +39,7 @@ struct Probe {
     child_turns: AtomicUsize,
     cancellations: Arc<AtomicUsize>,
     calls: Mutex<Vec<(String, Option<String>, String)>>,
+    mcp_names: Mutex<Vec<Vec<String>>>,
     background: Mutex<Vec<Arc<dyn Fn(AdapterEvent) + Send + Sync>>>,
     releases: AtomicUsize,
     directories: Mutex<Vec<String>>,
@@ -50,6 +52,8 @@ impl Probe {
             native.clone(),
             request.prompt.clone(),
         ));
+        self.mcp_names.lock().unwrap().push(request.mcp_servers.iter().flatten()
+            .filter_map(|server| server["name"].as_str().map(str::to_owned)).collect());
         let child = request
             .runtime_tools
             .as_ref()
@@ -206,6 +210,10 @@ impl Probe {
 }
 #[async_trait::async_trait]
 impl AgentCliAdapter for Probe {
+    async fn native_resources(&self, _instance: &Value, _cwd: &str, _session: &Value) -> CoreResult<Vec<Value>> {
+        Ok(vec![json!({"id":"native:skill:ledger","kind":"skill","name":"Ledger guide","enabled":true,
+            "skill":{"instructions":"Check native ledger currency."}})])
+    }
     fn provider_id(&self) -> &str {
         "workflow-fixture"
     }
@@ -290,6 +298,7 @@ impl Fixture {
             child_turns: AtomicUsize::new(0),
             cancellations: Arc::new(AtomicUsize::new(0)),
             calls: Mutex::new(Vec::new()),
+            mcp_names: Mutex::new(Vec::new()),
             background: Mutex::new(Vec::new()),
             releases: AtomicUsize::new(0),
             directories: Mutex::new(Vec::new()),
@@ -372,6 +381,55 @@ impl Fixture {
             json!(self.service.get(id).unwrap())
         );
     }
+}
+
+#[tokio::test]
+async fn composer_references_reach_the_harness_only_on_the_selected_turn() {
+    let fixture = Fixture::new(Behavior::Submit, false);
+    {
+        let db = fixture.db.lock().unwrap();
+        let capabilities = Repositories::new(&db.raw).capabilities();
+        capabilities.save(&json!({"id":"pdf","kind":"skill","name":"PDF","enabled":false,
+            "providerIds":[],"skill":{"instructions":"Check ledger subtotals before totaling."}}), &now_iso()).unwrap();
+        capabilities.save(&json!({"id":"ledger","kind":"mcp","name":"Ledger","enabled":true,
+            "providerIds":["workflow-fixture"],"mcp":{"transport":"http","url":"http://127.0.0.1:43121/mcp"}}), &now_iso()).unwrap();
+        capabilities.save(&json!({"id":"other","kind":"mcp","name":"Another Harness","enabled":true,
+            "providerIds":["workflow-fixture-alt"],"mcp":{"transport":"http","url":"http://127.0.0.1:43121/mcp"}}), &now_iso()).unwrap();
+    }
+    let sessions = SessionService::new(fixture.db.clone());
+    sessions.set_run_pipeline(fixture.service.runs.clone(), fixture.service.events.clone());
+    let catalog = fixture.service.runs.composer_catalog(&json!({"sessionId":"main-session"})).await.unwrap();
+    assert_eq!(catalog.iter().map(|item|item["id"].as_str().unwrap()).collect::<Vec<_>>(), ["ledger", "native:skill:ledger"]);
+    let error = sessions.send(&json!({"sessionId":"main-session","messageId":"rejected","text":"Check the invoice",
+        "references":[{"kind":"skill","id":"pdf"}]})).await.unwrap_err();
+    assert!(error.to_string().contains("no longer available"));
+    for (id, references) in [("attached", json!([
+        {"kind":"skill","id":"native:skill:ledger","name":"Untrusted renderer label"},
+        {"kind":"mcp","id":"ledger","tool":"read_invoice"},
+        {"kind":"mcp","id":"ledger","tool":"read_invoice"}
+    ])), ("plain", Value::Null)] {
+        sessions.send(&json!({"sessionId":"main-session","messageId":id,"text":"Check the invoice","references":references})).await.unwrap();
+        for _ in 0..200 {
+            if !fixture.service.runs.session_busy("main-session") { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    let calls = fixture.probe.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].2.contains("Check native ledger currency."));
+    assert!(calls[0].2.contains("read_invoice"));
+    assert!(!calls[1].2.contains("NAUTILO_COMPOSER_REFERENCES"));
+    let names = fixture.probe.mcp_names.lock().unwrap();
+    assert!(names[0].iter().any(|name| name.eq_ignore_ascii_case("ledger")));
+    assert_eq!(names[0], names[1], "referencing an enabled service never changes the startup configuration");
+    let db = fixture.db.lock().unwrap();
+    let repos = Repositories::new(&db.raw);
+    let message = repos.sessions().message("main-session", "attached").unwrap().unwrap();
+    assert_eq!(message["references"], json!([
+        {"kind":"skill","id":"native:skill:ledger","name":"Ledger guide"},
+        {"kind":"mcp","id":"ledger","name":"Ledger","tool":"read_invoice"}
+    ]));
+    assert_eq!(repos.capabilities().get("pdf").unwrap().unwrap()["enabled"], false);
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

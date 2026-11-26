@@ -384,6 +384,18 @@ impl Default for KimiCodeAdapter {
 
 #[async_trait::async_trait]
 impl AgentCliAdapter for KimiCodeAdapter {
+    async fn native_resources(&self, instance: &Value, cwd: &str, _session: &Value) -> CoreResult<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{json_file, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let home = crate::runtime::security::environment_policy::login_profile_directory(instance)?
+            .map(std::path::PathBuf::from).or_else(||resources.path("KIMI_CODE_HOME"))
+            .unwrap_or_else(||resources.home.join(".kimi-code"));
+        if !cwd.is_empty() { resources.skills(&resources.cwd.join(".agents/skills"), &[]); }
+        resources.skills(&home.join("skills"), &[]);
+        let path = home.join("mcp.json");
+        resources.mcp(&path, &json_file(&path)["mcpServers"], &[]);
+        Ok(resources.finish())
+    }
     fn native_capabilities(&self,instance:&Value)->Value {
         let caps=self.capabilities();
         let legacy=json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty});

@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import ts from "typescript";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 const sourceUrl = new URL("../src/renderer/src/lib/tool-display.ts", import.meta.url);
+const require = createRequire(import.meta.url);
+const { build } = createRequire(require.resolve("vite/package.json"))("esbuild");
 
 test("shared event icons recognize native names across harnesses", async () => {
   const { toolActivityKind } = await loadToolDisplay();
@@ -30,16 +32,9 @@ test("PTC details decode code and recover older truncated inputs", async () => {
   assert.equal(partial.truncated, true);
 });
 
-async function loadToolDisplay() {
-  const source = await readFile(sourceUrl, "utf8");
-  const transpiled = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022
-    }
-  }).outputText;
-  return import(`data:text/javascript;charset=utf-8,${encodeURIComponent(transpiled)}`);
-}
+const toolDisplay = build({ entryPoints: [fileURLToPath(sourceUrl)], bundle: true, format: "esm", write: false })
+  .then(({ outputFiles }) => import(`data:text/javascript;charset=utf-8,${encodeURIComponent(outputFiles[0].text)}`));
+const loadToolDisplay = () => toolDisplay;
 
 test("Kimi file tools show their target path in the activity label", async () => {
   const { toolActivityLabel } = await loadToolDisplay();
@@ -102,4 +97,37 @@ test("truncated historical Kimi Write input still exposes a partial added-file d
     after: "first line\nsecond",
     truncated: true
   });
+});
+
+test("tool cluster summaries count unique files, actual command calls, and failures", async () => {
+  const { formatToolClusterSummary: summary } = await loadToolDisplay();
+  const tool = (toolName, input, status = "done") => ({ kind: "tool_activity", toolName, input: JSON.stringify(input), status });
+  const read = tool("Read", { path: "stream.ts" });
+  const edit = tool("Edit", { path: "stream.ts" });
+  const create = tool("create_file", { path: "new-file.ts" });
+  const command = { kind: "command", status: "failed", command: "pnpm test" };
+  assert.equal(summary([edit, read, read, create]).label, "读取 1 个文件 · 编辑 1 个文件 · 创建 1 个文件");
+  assert.equal(summary([command, { ...command, status: "running" }]).label, "正在运行命令 · 2");
+  assert.equal(summary([command, { ...command, status: "running" }]).failed, 1);
+  assert.equal(summary([command, create, edit, read, tool("web_search", {})]).label, "读取 1 个文件 · 编辑 1 个文件 · 等 3 项操作");
+  assert.equal(summary([tool("mcp__nautilo_0__browser_run", {}), tool("browser_eval", {})]).label, "操作了 2 次浏览器");
+});
+
+test("tool clusters use MCP server identity and keep isolated calls as single steps", async () => {
+  const { formatToolClusterSummary: summary, toolActivityLabel } = await loadToolDisplay();
+  const call = (toolName, status = "done", input) => ({ kind: "tool_activity", toolName, status, input });
+  const browser = call("Playwright/browser_snapshot");
+  const github = call("mcp__GitHub__list_issues");
+  assert.equal(summary([browser]).standalone, true);
+  assert.equal(summary([browser, browser]).label, "调用了 Playwright · 2 次");
+  assert.equal(summary([browser, browser, github]).label, "调用了 Playwright (2) · GitHub (1)");
+  assert.equal(summary([browser, github, call("mcp__Notes__list")]).label, "调用了 3 个 MCP 服务 · 3 次");
+  assert.equal(summary([browser, call("Playwright/click", "running")]).label, "正在调用 Playwright · click (2)");
+  assert.equal(summary([call("web_search")]).standalone, true);
+  assert.equal(summary([call("lookup"), call("lookup")]).label, "调用了 2 次 lookup");
+  assert.equal(summary([call("lookup"), call("translate")]).label, "调用了 2 次工具");
+  assert.equal(toolActivityLabel(browser.toolName, "done", undefined, "zh-CN"), "调用了 Playwright · browser_snapshot");
+  assert.equal(toolActivityLabel("web_search", "done", '{"query":"Nautilo"}', "zh-CN"), "搜索网页 · Nautilo");
+  assert.equal(toolActivityLabel("web_search", "done", "Nautilo", "zh-CN"), "搜索网页 · Nautilo");
+  assert.equal(toolActivityLabel("mcp", "done", '{"serverName":"GitHub","toolName":"list_issues","arguments":{}}', "zh-CN"), "调用了 GitHub · list_issues");
 });

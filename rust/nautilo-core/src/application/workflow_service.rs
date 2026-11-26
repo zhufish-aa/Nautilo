@@ -139,6 +139,12 @@ impl WorkflowService {
             Err(message) => json!({"valid":false,"issues":[{"path":"definition","message":message}]}),
         }
     }
+    pub fn archive_template(&self, input: &Value) -> CoreResult<Value> {
+        let id = input["id"].as_str().ok_or_else(|| invalid("id", "A template id is required"))?;
+        let revision = input["revision"].as_u64().ok_or_else(|| invalid("revision", "A template revision is required"))?;
+        workflows::archive_template(&self.db.lock().unwrap().raw, id, revision)?;
+        Ok(json!({"archived":true}))
+    }
     pub fn save_template(&self, input: &Value) -> CoreResult<Value> {
         let def: Definition = serde_json::from_value(input["definition"].clone())
             .map_err(|e| invalid("definition", &e.to_string()))?;
@@ -403,7 +409,7 @@ impl WorkflowService {
     }
     fn bindings(&self, parent: &Value, def: &Definition, input: &Value) -> CoreResult<Value> {
         let mut result = serde_json::Map::new();
-        let roles = def.nodes.iter().flat_map(|node| {
+        let roles = def.nodes.iter().filter(|node| !node.bypass).flat_map(|node| {
             node.role.iter().chain(node.dynamic_subflow.iter().flat_map(|policy| policy.roles.iter()))
         });
         for role in roles {
@@ -418,7 +424,7 @@ impl WorkflowService {
         for node in def
             .nodes
             .iter()
-            .filter(|n| n.kind == "agent" && n.session.as_deref() == Some("reuse"))
+            .filter(|n| n.kind == "agent" && !n.bypass && n.session.as_deref() == Some("reuse"))
         {
             if result[node.role.as_deref().unwrap()]["capabilities"]["nativeResume"] != true {
                 return Err(invalid("session",&format!("{} requires native session reuse; select a supporting Harness or fresh sessions",node.id)));
@@ -1335,6 +1341,16 @@ pub(super) fn public_view(run: &WorkflowRun) -> Value {
     value.as_object_mut().unwrap().remove("launchFingerprint");
     value.as_object_mut().unwrap().remove("taskProjection");
     value.as_object_mut().unwrap().remove("approvedNodes");
+    let assignments = run.definition.nodes.iter().filter(|node| node.kind == "agent" && !node.bypass).filter_map(|node| {
+        let binding = run.binding_for(node);
+        let display = [("providerId", &binding["agentSnapshot"]["providerId"]), ("model", &binding["model"])]
+            .into_iter()
+            .filter(|(_, value)| value.is_string())
+            .map(|(key, value)| (key.to_owned(), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        (!display.is_empty()).then(|| (node.id.clone(), Value::Object(display)))
+    }).collect::<serde_json::Map<_, _>>();
+    if !assignments.is_empty() { value["assignments"] = Value::Object(assignments); }
     fn hide_workspace(value:&mut Value) {
         if let Some(workspace)=value.as_object_mut() {
             workspace.remove("project");

@@ -56,6 +56,8 @@ export class SessionService {
     return { removed: true, sessionIds: this.database.sessions.deleteTree(session.id) };
   }
   async followUp(input: IpcRequestMap["session.followUp"]["input"]): Promise<{ accepted: true; mode: "steer" | "queue" }> {
+    if (input.references?.length) throw new CoreError("IPC_INVALID_REQUEST", { field: "references", reason: "Composer references require the Rust daemon." });
+    if (input.workflowRef) throw new CoreError("IPC_INVALID_REQUEST", { field: "workflowRef", reason: "Workflow references require the Rust daemon." });
     const text = input.text.trim();
     if (!text) throw new CoreError("IPC_INVALID_REQUEST", { field: "text", reason: "Guidance cannot be empty." });
     this.healFollowUps(input.sessionId);
@@ -277,6 +279,7 @@ export class SessionService {
     return updated;
   }
   async send(input: IpcRequestMap["session.send"]["input"]): Promise<{ accepted: true; runId: string }> {
+    if (input.references?.length) throw new CoreError("IPC_INVALID_REQUEST", { field: "references", reason: "Composer references require the Rust daemon." });
     if (input.workflowRef) throw new CoreError("IPC_INVALID_REQUEST", { field: "backend", reason: "Workflow plans require the Rust daemon." });
     // Heal replayed zombie queue entries before this run's events make the
     // renderer re-read the journal (see healFollowUps).

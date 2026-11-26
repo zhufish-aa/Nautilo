@@ -8,15 +8,14 @@ const PROGRESSIVE_FRAGMENT_THRESHOLD = 4;
 /** Prepare a large first formatted snapshot across separate tasks, then reveal
  * without remounting. All source stays visible/selectable/findable, and every
  * formatted node exists before switching. Streaming retains its fast path. */
-export function useInitialMarkdownMount(fragments: readonly string[] | undefined, held: boolean): {
+export function useInitialMarkdownMount(fragments: readonly string[] | undefined, held: boolean, liveTreeMounted = false): {
   count: number;
   showFormatted: boolean;
-  held: boolean;
 } {
   const [count, setCount] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const length = fragments?.length ?? 0;
-  const progressive = typeof window !== "undefined" && !revealed && length > PROGRESSIVE_FRAGMENT_THRESHOLD;
+  const progressive = typeof window !== "undefined" && !liveTreeMounted && !revealed && length > PROGRESSIVE_FRAGMENT_THRESHOLD;
   const prepared = !progressive || count >= length;
   const showFormatted = fragments !== undefined && (revealed || (prepared && !held));
   const generation = useRef(0);
@@ -37,5 +36,5 @@ export function useInitialMarkdownMount(fragments: readonly string[] | undefined
     return () => { generation.current++; clearTimeout(timer); };
   }, [progressive, prepared, count, length]);
 
-  return { count: progressive ? Math.min(count, length) : length, showFormatted, held: Boolean(fragments && prepared && held) };
+  return { count: progressive ? Math.min(count, length) : length, showFormatted };
 }

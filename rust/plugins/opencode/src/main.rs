@@ -866,6 +866,33 @@ async fn read_plan(cwd: &str, question: &Value) -> Value {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for OpenCodePlugin {
+    async fn native_resources(&self, instance: &Value, cwd: &str, _session: &Value) -> anyhow::Result<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{json_file, jsonc, strings, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let home = resources.path("OPENCODE_CONFIG_DIR").unwrap_or_else(||resources.path("XDG_CONFIG_HOME")
+            .unwrap_or_else(||resources.home.join(".config")).join("opencode"));
+        let mut configs = ["opencode.jsonc", "opencode.json"].map(|name| home.join(name)).into_iter().collect::<Vec<_>>();
+        if !cwd.is_empty() && resources.env_value("OPENCODE_DISABLE_PROJECT_CONFIG").as_deref() != Some("true") {
+            configs.splice(0..0, ["opencode.jsonc", "opencode.json"].map(|name| resources.cwd.join(name)));
+            resources.skills(&resources.cwd.join(".opencode/skills"), &[]);
+            resources.skills(&resources.cwd.join(".opencode/skill"), &[]);
+            resources.skills(&resources.cwd.join(".agents/skills"), &[]);
+        }
+        if let Some(path) = resources.path("OPENCODE_CONFIG") { configs.insert(0, path); }
+        if let Some(content) = resources.env_value("OPENCODE_CONFIG_CONTENT") {
+            let config = jsonc(&content);
+            resources.mcp(&home.join("opencode.json"), &config["mcp"], &[]);
+            for path in strings(&config["skills"]["paths"]) { resources.skills(&resources.cwd.join(path), &[]); }
+        }
+        for path in configs {
+            let config = json_file(&path);
+            resources.mcp(&path, &config["mcp"], &[]);
+            for dir in strings(&config["skills"]["paths"]) { if let Some(parent) = path.parent() { resources.skills(&parent.join(dir), &[]); } }
+        }
+        resources.skills(&home.join("skills"), &[]);
+        resources.skills(&home.join("skill"), &[]);
+        Ok(resources.finish())
+    }
     fn native_terminal_supported(&self) -> bool {
         true
     }

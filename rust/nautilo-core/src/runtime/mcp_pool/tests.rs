@@ -31,6 +31,7 @@ async fn three_turns_share_one_pid_and_handshake_but_isolate_changed_identity() 
     let file = dir.join("fixture.mjs");
     std::fs::write(&file, include_str!("test-server.mjs")).unwrap();
     let spec = json!({"name":"quality-fixture","transport":"stdio","command":"node","args":[file],"cwd":dir,"env":{"QUALITY_AUTH":"first-secret"}});
+    assert!(pool.available_tools(&spec, "").await.is_none());
     let mut original_pid = Value::Null;
     for turn in 0..3 {
         let binding = pool.binding(&spec, "").unwrap();
@@ -44,6 +45,8 @@ async fn three_turns_share_one_pid_and_handshake_but_isolate_changed_identity() 
         let body: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         if turn == 0 { original_pid = body["pid"].clone(); }
         assert_eq!(body["pid"], original_pid);
+        let available = pool.available_tools(&spec, "").await.unwrap();
+        assert_eq!(available, vec![json!({"name":"echo","pid":original_pid})]);
         let observed = pool.observations(&[binding]);
         let counters = &observed["servers"][0]["processes"][0];
         assert_eq!(counters["initializations"], 1);

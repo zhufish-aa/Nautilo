@@ -9,9 +9,11 @@ export interface WorkflowNode {
   kind: "main" | "dispatch" | "agent" | "join" | "condition" | "call";
   exits: WorkflowExit[];
   role?: string;
+  bypass?: boolean;
   prompt?: string;
   completion?: "tool" | "structured_final";
   outputs?: Record<string, WorkflowType>;
+  outputDescriptions?: Record<string, string>;
   exitMode?: "one" | "some";
   dispatch?: "all";
   session?: "fresh" | "reuse";
@@ -51,6 +53,7 @@ export interface WorkflowDefinition {
   schemaVersion: 1;
   id: string;
   name?: string;
+  description?: string;
   entry: string;
   inputs?: Record<string, WorkflowType>;
   inputDefaults?: Record<string, unknown>;
@@ -122,7 +125,7 @@ export interface WorkflowInstance {
   nativeWork?: { runId: string; lastSequence: number; children: Record<string, "running" | "done" | "failed">; closed: boolean; released: boolean; detached: boolean; error?: string };
   branches?: string[]; result?: unknown; error?: string;
   lastOutput?: string; submissionError?: string;
-  reminders: number; completedAt?: number; nextReminderAt?: number; deadlineAt?: number;
+  reminders: number; completedAt?: number | null; nextReminderAt?: number; deadlineAt?: number;
   createdAt: number; updatedAt: number;
 }
 export interface WorkflowEvent {
@@ -140,6 +143,7 @@ export interface WorkflowRun {
   approvalId?: string;
   id: string; revision: number; sessionId: string; projectId: string; requestId: string;
   definition: WorkflowDefinition; inputs: Record<string, unknown>; bindings: Record<string, WorkflowBinding>;
+  assignments?: Record<string, { providerId?: string; model?: string }>;
   layout?: WorkflowLayout;
   status: "running" | "paused" | "finalizing" | "completed" | "needs_decision" | "cancelled" | "failed";
   acceptance?: WorkflowAcceptance;

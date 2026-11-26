@@ -14,6 +14,7 @@ pub fn migrate(db: &Connection) -> CoreResult<()> {
         CREATE TABLE IF NOT EXISTS assistant_records (id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS composer_drafts (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS workflow_templates (id TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(id,revision));
+        CREATE TABLE IF NOT EXISTS workflow_template_archives (id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS workflow_plans (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS workflow_runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, request_id TEXT NOT NULL, revision INTEGER NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL, lease_owner TEXT, lease_until INTEGER, UNIQUE(session_id,request_id));
         CREATE INDEX IF NOT EXISTS idx_workflow_runs_session ON workflow_runs(session_id,updated_at DESC);

@@ -167,6 +167,32 @@ impl OmpPlugin {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for OmpPlugin {
+    async fn native_resources(&self, instance: &Value, cwd: &str, _session: &Value) -> anyhow::Result<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{json_file, strings, yaml, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let profile = resources.env_value("OMP_PROFILE").or_else(||resources.env_value("PI_PROFILE"));
+        let root = resources.home.join(resources.env_value("PI_CONFIG_DIR").unwrap_or_else(||".omp".into()));
+        let home = profile.filter(|profile| profile != "default").map(|profile|root.join("profiles").join(profile).join("agent"))
+            .or_else(||resources.path("PI_CODING_AGENT_DIR")).unwrap_or_else(||root.join("agent"));
+        let args = strings(&instance["baseArgs"]);
+        let config = yaml(&home.join("config.yml"));
+        if !args.contains(&"--no-skills") && config["skills"]["enabled"] != false {
+            if !cwd.is_empty() {
+                resources.skills(&resources.cwd.join(".omp/skills"), &[]);
+                resources.skills(&resources.cwd.join(".agents/skills"), &[]);
+            }
+            resources.skills(&home.join("skills"), &[]);
+        }
+        if !args.contains(&"--no-mcp") && config["mcp"]["enabled"] != false {
+            if !cwd.is_empty() {
+                let path = resources.cwd.join(".mcp.json");
+                resources.mcp(&path, &json_file(&path)["mcpServers"], &[]);
+            }
+            let path = home.join("mcp.json");
+            resources.mcp(&path, &json_file(&path)["mcpServers"], &[]);
+        }
+        Ok(resources.finish())
+    }
     async fn read_session_history(&self,request:&Value,session:&str)->anyhow::Result<Option<Value>>{history::read(request,session).await.map(Some)}
     fn native_terminal_supported(&self)->bool {true}
     async fn release_session(&self,request:&Value)->anyhow::Result<()> {if let Some(native)=self.pool.retire(request["localSessionId"].as_str().unwrap_or("")){native.close().await;}Ok(())}

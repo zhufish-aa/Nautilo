@@ -18,11 +18,11 @@ test('StrictMode keeps displaying successive reasoning snapshots before completi
     stdin: { resolveDir: desktop, loader: 'tsx', contents: `
       import React, { StrictMode } from 'react';
       import { createRoot } from 'react-dom/client';
-      import { useStreamingText } from '${hook}';
+      import { useSmoothStreamText } from '${hook}';
       const root = createRoot(document.getElementById('root'));
       function Output({ text, streaming }) {
-        const visible = useStreamingText(text, streaming, 'reasoning');
-        return <output data-streaming={streaming}>{visible}</output>;
+        const visible = useSmoothStreamText(text, streaming);
+        return <output data-streaming={streaming}>{visible.text}</output>;
       }
       window.qa = { render: (text, streaming = true) => root.render(<StrictMode><Output text={text} streaming={streaming}/></StrictMode>), close: () => root.unmount() };
     ` },
@@ -56,7 +56,7 @@ test('StrictMode keeps displaying successive reasoning snapshots before completi
   }
 });
 
-test('streamed Markdown keeps formatted nodes through delayed parsing and completion', {
+test('streamed Markdown fades only new spans and keeps frozen blocks through completion', {
   skip: !JSDOM && 'Set NAUTILO_JSDOM_PATH to an isolated jsdom installation',
 }, async () => {
   const desktop = fileURLToPath(new URL('..', import.meta.url));
@@ -71,8 +71,8 @@ test('streamed Markdown keeps formatted nodes through delayed parsing and comple
       const layout = () => window.layouts++;
       window.layouts = 0;
       window.qa = {
-        render: (source, streaming = true) => root.render(<MarkdownContent source={source} streaming={streaming} onContentLayout={layout}/>),
-        finish: () => { const job = window.jobs.shift(); job.worker.onmessage?.({data:{id:job.message.id,fragments:parseMarkdownFragments(job.message.source)}}); },
+        render: (source, streaming = true, fade = true, key = 'live') => root.render(<MarkdownContent key={key} source={source} streaming={streaming} fade={fade} onContentLayout={layout}/>),
+        finish: () => { const job = window.jobs.shift(); job.worker.onmessage?.({data:{id:job.message.id,fragments:parseMarkdownFragments(job.message.source, job.message.blockwise)}}); },
         close: () => root.unmount()
       };
     ` },
@@ -97,26 +97,49 @@ test('streamed Markdown keeps formatted nodes through delayed parsing and comple
       while (!predicate() && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
       assert.ok(predicate());
     };
-    const first = 'Already visible **reasoning**.\n\n';
-    dom.window.qa.render(first);
+    const first = 'Already visible **reasoning**.';
+    dom.window.qa.render(first, true, false);
     await wait(() => doc.querySelector('strong'));
     const paragraph = doc.querySelector('p');
-    const large = first + '1. Keep this list formatted. '.repeat(360);
+    const firstWord = paragraph.querySelector('[data-stream-segment]');
+    assert.equal(firstWord.textContent, 'Already ');
+    assert.equal(firstWord.classList.contains('stream-fade-seg'), false, 'existing stream snapshots stay static');
+    const longer = first + ' 中文👩‍👩‍👧‍👦 mixed.';
+    dom.window.qa.render(longer);
+    await wait(() => paragraph.textContent === longer.replaceAll('**', ''));
+    assert.equal(paragraph.querySelector('[data-stream-segment]'), firstWord);
+    assert.equal(firstWord.classList.contains('stream-fade-seg'), false);
+    const incoming = [...paragraph.querySelectorAll('.stream-fade-seg')];
+    assert(incoming.some(span => span.textContent.includes('中文')));
+    const fading = incoming.at(-1);
+    fading.dispatchEvent(new dom.window.Event('animationend'));
+    assert.equal(fading.classList.contains('stream-fade-seg'), false);
+    const buglessCopy = 'const content = "<script>";\n'.repeat(500);
+    const large = longer + '\n\n```js\n' + buglessCopy;
     dom.window.qa.render(large);
-    await wait(() => dom.window.jobs.length === 1);
-    assert.equal(doc.querySelector('[data-markdown-raw]'), null, 'pending tokens must not insert a second raw block');
-    assert.equal(doc.querySelector('p'), paragraph, 'visible nodes must survive the worker transition');
-    const before = dom.window.layouts;
-    dom.window.qa.finish();
-    await wait(() => doc.querySelector('ol'));
+    await wait(() => doc.querySelector('pre code')?.textContent === buglessCopy);
+    assert.equal(dom.window.jobs.length, 0, 'the live suffix never submits a whole-message parse');
+    assert.equal(doc.querySelector('pre .hljs-keyword'), null, 'leave a growing code block plain');
+    assert.equal(doc.querySelector('[data-markdown-raw]'), null);
     assert.equal(doc.querySelector('p'), paragraph);
-    assert.ok(dom.window.layouts > before, 'follow-tail must run after formatted content commits');
-    dom.window.qa.render(large + '\n\nFinal sentence.', false);
+    let copied;
+    Object.defineProperty(dom.window.navigator, 'clipboard', { value: { async writeText(value) { copied = value; } } });
+    doc.querySelector('button[aria-label="复制代码"]').click();
+    await wait(() => copied !== undefined);
+    assert.equal(copied, buglessCopy.trimEnd());
+    const before = dom.window.layouts;
+    dom.window.qa.render(large + '```\n\nFinal sentence.', false, false);
     await wait(() => dom.window.jobs.length === 1);
     assert.equal(doc.querySelector('[data-markdown-raw]'), null, 'completion must not flash an unformatted tail');
     dom.window.qa.finish();
     await wait(() => doc.querySelector('.markdown-content').textContent.includes('Final sentence.'));
     assert.equal(doc.querySelector('p'), paragraph);
+    assert.equal(paragraph.querySelector('[data-stream-segment]'), firstWord);
+    assert.ok(doc.querySelector('pre .hljs-keyword'));
+    assert.ok(dom.window.layouts > before, 'content layout is reported after the final parse');
     assert.equal(doc.querySelector('[data-markdown-raw]'), null);
+    dom.window.qa.render('Stored **history**. 👋', false, true, 'history');
+    await wait(() => doc.querySelector('p')?.textContent === 'Stored history. 👋');
+    assert.equal(doc.querySelector('.stream-fade-seg'), null);
   } finally { dom.window.qa?.close(); dom.window.close(); }
 });

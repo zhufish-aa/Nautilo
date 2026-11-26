@@ -312,10 +312,7 @@ impl SessionService {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().get(session_id)?.ok_or_else(|| not_found("session", session_id))?
         };
-        let workflow_reference = input.get("workflowRef").filter(|value| !value.is_null()).map(|reference| {
-            let db = self.db.lock().unwrap();
-            crate::application::workflow_service::workflow_reference(&db.raw, &session, reference)
-        }).transpose()?;
+        let workflow_reference = self.resolve_workflow_reference(&session, input)?;
         let existing_messages = {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().messages(session_id)?
@@ -335,6 +332,8 @@ impl SessionService {
                 return Err(crate::errors::CoreError::details(crate::errors::ErrorCode::IpcInvalidRequest, details));
             }
         }
+        let agent = MemberRouter::new(self.db.clone()).resolve_session(&session)?;
+        let references = self.runs()?.validate_composer_references(&session, &agent, &input["references"]).await?;
         let attachment_inputs: Vec<Value> = input.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default();
         let attachments = MessageAttachmentService::new(self.db.clone()).save(&session, &attachment_inputs)?;
         let (artifacts, project_root) = {
@@ -353,7 +352,6 @@ impl SessionService {
                 .and_then(|project| project.get("rootPath").and_then(Value::as_str).map(str::to_string));
             (merge_artifacts(session_artifacts, project_run_artifacts), root)
         };
-        let agent = MemberRouter::new(self.db.clone()).resolve_session(&session)?;
         let needs_runtime_tool_migration = agent.get("providerId").and_then(Value::as_str) == Some("codex")
             && session.get("teamId").is_some()
             && session.get("projectRunId").is_some()
@@ -369,11 +367,7 @@ impl SessionService {
             },
             &attachments,
         );
-        if let Some(reference) = &workflow_reference {
-            current_text.push_str(&format!(
-                "\n\n[NAUTILO_WORKFLOW_REFERENCE]\n{reference}\nThe user has referenced this saved workflow. Decide whether it fits their request. If it fits, use agenthub_workflow_plan_context (possibly MCP-namespaced) to inspect this revision and team roster. Write the task for every Agent node and match it to an enabled team member, or a configured Harness when there is no team. Fill the declared workflow inputs from the user's request and submit one plan with agenthub_workflow_propose. On acceptance, tell the user the plan is ready for review and end your turn. If information is missing or the workflow does not fit, ask or explain in the conversation. During this planning turn do not dispatch, start the workflow or carry out its tasks. The user decides from the editable plan card."
-            ));
-        }
+        append_workflow_reference(&mut current_text, workflow_reference.as_ref());
         let turn_context = build_bound_turn_context(&session, TurnContextInput {
             current_text: &current_text,
             messages: &existing_messages,
@@ -386,7 +380,7 @@ impl SessionService {
             workspace_root: project_root.as_deref(),
         })?;
         let attachment_ids: Vec<Value> = attachments.iter().filter_map(|a| a.get("id").cloned()).collect();
-        let message = match edited_message {
+        let mut message = match edited_message {
             Some(edited) => {
                 let mut updated = edited.as_object().cloned().unwrap_or_default();
                 updated.insert("text".to_string(), json!(text));
@@ -423,6 +417,7 @@ impl SessionService {
                 Value::Object(message)
             }
         };
+        references.write_message(&mut message);
         {
             let db = self.db.lock().unwrap();
             Repositories::new(&db.raw).sessions().save_message(&message)?;
@@ -453,6 +448,13 @@ impl SessionService {
         Ok(json!({ "accepted": true, "runId": run_id }))
     }
 
+    fn resolve_workflow_reference(&self, session: &Value, input: &Value) -> CoreResult<Option<Value>> {
+        input.get("workflowRef").filter(|value| !value.is_null()).map(|reference| {
+            let db = self.db.lock().unwrap();
+            crate::application::workflow_service::workflow_reference(&db.raw, session, reference)
+        }).transpose()
+    }
+
     /// session.followUp — steer mid-turn when the provider supports it,
     /// otherwise queue as the next turn.
     pub async fn follow_up(&self, input: &Value) -> CoreResult<Value> {
@@ -469,9 +471,8 @@ impl SessionService {
             Repositories::new(&db.raw).sessions().get(session_id)?.ok_or_else(|| not_found("session", session_id))?
         };
         let runs = self.runs()?;
-        // Only providers with an in-flight steer channel can inject mid-turn;
-        // every other CLI takes the queue path.
-        if mode == "steer" && runs.can_steer(session_id) {
+        let workflow_reference = self.resolve_workflow_reference(&session, input)?;
+        if mode == "steer" && !has_composer_references(input) && runs.can_steer(session_id) {
             let mut message = follow_up_message(&session, &text);
             if let Some(id) = input.get("messageId").and_then(Value::as_str).filter(|id| !id.is_empty()) { message["id"] = json!(id); }
             let id = message["id"].as_str().unwrap().to_owned();
@@ -500,8 +501,11 @@ impl SessionService {
             )
         };
         let agent = MemberRouter::new(self.db.clone()).resolve_session(&session)?;
+        let references = runs.validate_composer_references(&session, &agent, &input["references"]).await?;
+        let mut current_text = text.clone();
+        append_workflow_reference(&mut current_text, workflow_reference.as_ref());
         let turn_context = build_bound_turn_context(&session, TurnContextInput {
-            current_text: &text,
+            current_text: &current_text,
             messages: &existing_messages,
             artifacts: &artifacts,
             current_attachments: &[],
@@ -511,6 +515,10 @@ impl SessionService {
             workspace_root: project_root.as_deref(),
         })?;
         let mut message = follow_up_message(&session, &text);
+        references.write_message(&mut message);
+        if let Some(reference) = &workflow_reference {
+            message["workflowRef"] = reference.clone();
+        }
         if let Some(id) = input.get("messageId").and_then(Value::as_str).filter(|id| !id.is_empty()) { message["id"] = json!(id); }
         {
             let db = self.db.lock().unwrap();
@@ -558,6 +566,7 @@ impl SessionService {
                         member_id: queued_member_id,
                         synchronize_provider_context: queued_recovered,
                         queue_key: Some(queued_message_id.clone()),
+                        workflow_reference,
                         ..Default::default()
                     },
                 )
@@ -717,6 +726,10 @@ impl SessionService {
         };
         let entry = self.pending_follow_up(session_id, message_id)
             .ok_or_else(|| invalid("messageId", "Follow-up is no longer queued."))?;
+        if Repositories::new(&self.db.lock().unwrap().raw).sessions().message(session_id, message_id)?
+            .is_some_and(|message| has_composer_references(&message)) {
+            return Err(invalid("references", "带有能力引用的消息会在下一轮发送。"));
+        }
         let runs = self.runs()?;
         if !runs.can_steer(session_id) { return Ok(json!({ "accepted": true, "mode": "queue" })); }
         if !runs.steer_queued(session_id, message_id, entry["text"].as_str().unwrap_or(""),
@@ -797,6 +810,19 @@ fn descendant_session_ids(sessions: &[Value], root_id: &str) -> Vec<String> {
 
 /// Builds the user message JSON shared by send/followUp (message shape only;
 /// run kickoff stays in the run pipeline port).
+fn has_composer_references(value: &Value) -> bool {
+    !value["workflowRef"].is_null()
+        || (!value["references"].is_null() && !value["references"].as_array().is_some_and(Vec::is_empty))
+}
+
+fn append_workflow_reference(prompt: &mut String, reference: Option<&Value>) {
+    if let Some(reference) = reference {
+        prompt.push_str(&format!(
+            "\n\n[NAUTILO_WORKFLOW_REFERENCE]\n{reference}\nThe user has referenced this saved workflow. Decide whether it fits their request. If it fits, use agenthub_workflow_plan_context (possibly MCP-namespaced) to inspect this revision and team roster. Write the task for every Agent node and match it to an enabled team member, or a configured Harness when there is no team. Fill the declared workflow inputs from the user's request and submit one plan with agenthub_workflow_propose. On acceptance, tell the user the plan is ready for review and end your turn. If information is missing or the workflow does not fit, ask or explain in the conversation. During this planning turn do not dispatch, start the workflow or carry out its tasks. The user decides from the editable plan card."
+        ));
+    }
+}
+
 pub fn follow_up_message(session: &Value, text: &str) -> Value {
     let mut message = Map::new();
     message.insert("id".to_string(), json!(Uuid::new_v4().to_string()));

@@ -12,9 +12,8 @@ function hasSelection(element: HTMLElement | null): boolean {
 
 /** Do not replace a selected snapshot or a native Find raw-text target. Source
  * appends remain readable in a stable text node while formatting is held. */
-export function useMarkdownInteractionGuard(root: RefObject<HTMLDivElement>, raw: RefObject<HTMLDivElement>): { held: boolean; release: () => void } {
+export function useMarkdownInteractionGuard(root: RefObject<HTMLDivElement>, raw: RefObject<HTMLDivElement>): boolean {
   const [findActive, setFindActive] = useState(false);
-  const [forced, setForced] = useState(false);
   const [, selectionChanged] = useState(0);
   const selected = hasSelection(root.current);
   const previousSelection = useRef(selected);
@@ -25,7 +24,6 @@ export function useMarkdownInteractionGuard(root: RefObject<HTMLDivElement>, raw
       const current = hasSelection(root.current);
       if (current || previousSelection.current) {
         previousSelection.current = current;
-        setForced(false);
         selectionChanged((value) => value + 1);
       }
     };
@@ -33,7 +31,6 @@ export function useMarkdownInteractionGuard(root: RefObject<HTMLDivElement>, raw
       // Never prevent native Find. Menu-invoked browser Find cannot reliably
       // be observed by page JS and is not claimed to preserve its active hit.
       if (raw.current && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "f") {
-        setForced(false);
         setFindActive(true);
       } else if (event.key === "Escape") setFindActive(false);
     };
@@ -41,5 +38,5 @@ export function useMarkdownInteractionGuard(root: RefObject<HTMLDivElement>, raw
     document.addEventListener("keydown", key, true);
     return () => { document.removeEventListener("selectionchange", selection); document.removeEventListener("keydown", key, true); };
   }, [root, raw]);
-  return { held: !forced && (findActive || selected), release: () => { setForced(true); setFindActive(false); } };
+  return findActive || selected;
 }

@@ -90,7 +90,7 @@ impl OrchestrationService {
 
     // ------------------------------------------------------------ public API
 
-    pub fn start(self: &Arc<Self>, input: &Value) -> CoreResult<Value> {
+    pub async fn start(self: &Arc<Self>, input: &Value) -> CoreResult<Value> {
         let project_id = input.get("projectId").and_then(Value::as_str).unwrap_or("");
         let team_id = input.get("teamId").and_then(Value::as_str).unwrap_or("");
         let project = Repositories::new(&self.db.lock().unwrap().raw)
@@ -105,6 +105,7 @@ impl OrchestrationService {
         if goal.is_empty() {
             return Err(crate::errors::invalid("goal", ""));
         }
+        let references = self.runs.validate_composer_references(input, &main.agent, &input["references"]).await?;
 
         let now = now_iso();
         let native_runtime_tools = team.get("mainMemberId").is_none() && input.get("agentInstanceId").is_some();
@@ -133,7 +134,7 @@ impl OrchestrationService {
             .unwrap()
             .insert("mainSessionId".to_string(), main_session.get("id").cloned().unwrap_or(Value::Null));
         Repositories::new(&self.db.lock().unwrap().raw).project_runs().save(&project_run)?;
-        let user_message = self.messages().user_goal(&main_session, &project_run, input.get("messageId").and_then(Value::as_str))?;
+        let user_message = self.messages().user_goal(&main_session, &project_run, input.get("messageId").and_then(Value::as_str), references.message)?;
 
         let service = self.clone_arc();
         let attachments_input = input.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default();

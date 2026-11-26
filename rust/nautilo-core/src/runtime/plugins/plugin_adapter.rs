@@ -365,6 +365,12 @@ pub struct PluginClient {
 
 #[async_trait::async_trait]
 impl AgentCliAdapter for PluginClient {
+    async fn native_resources(&self, instance: &Value, cwd: &str, session: &Value) -> CoreResult<Vec<Value>> {
+        if self.capabilities["nativeResources"] != true { return Ok(Vec::new()); }
+        self.inner.call("nativeResources", json!({"instance":instance,"cwd":cwd,"session":session})).await
+            .map_err(|error| crate::errors::invalid("nativeResources", &error.to_string()))?
+            .as_array().cloned().ok_or_else(|| crate::errors::invalid("nativeResources", "The Harness returned an invalid resource list."))
+    }
     fn native_capabilities(&self,instance:&Value)->Value {
         let mut profile=agenthub_plugin_sdk::capabilities::describe(self.provider_id(),instance,&self.capabilities);
         profile["interactions"]["nativeTerminal"]=json!(self.capabilities["terminalPlan"]==true);

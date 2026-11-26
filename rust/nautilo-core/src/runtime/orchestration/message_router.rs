@@ -17,7 +17,7 @@ impl MessageRouter {
         Self { db }
     }
 
-    pub fn user_goal(&self, session: &Value, project_run: &Value, message_id: Option<&str>) -> CoreResult<Value> {
+    pub fn user_goal(&self, session: &Value, project_run: &Value, message_id: Option<&str>, references: Vec<Value>) -> CoreResult<Value> {
         self.save(
             session,
             &json!({
@@ -27,6 +27,7 @@ impl MessageRouter {
                 "projectRunId": project_run.get("id").cloned().unwrap_or(Value::Null),
                 "toMemberId": project_run.get("mainMemberId").cloned().unwrap_or(Value::Null),
                 "attachmentIds": [],
+                "references": (!references.is_empty()).then_some(references),
                 "text": project_run.get("goal").cloned().unwrap_or(Value::Null)
             }),
         )

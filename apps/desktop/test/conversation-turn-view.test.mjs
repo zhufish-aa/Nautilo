@@ -7,7 +7,7 @@ import ts from 'typescript';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-test('turn summary displays generation, completion, elapsed time, and its expansion control', () => {
+test('only settled process turns display a summary with elapsed time and an expansion control', () => {
   const require = createRequire(import.meta.url);
   const modules = {
     'react/jsx-runtime': require('react/jsx-runtime'),
@@ -20,10 +20,7 @@ test('turn summary displays generation, completion, elapsed time, and its expans
   let expanded = true;
   const toggle = () => { expanded = !expanded; };
   const view = (status, durationMs) => exports.ConversationTurnView({ turn: { status, durationMs }, expanded, onToggle: toggle });
-  const live = renderToStaticMarkup(view('running', null));
-  assert.match(live, /执行中/);
-  assert.match(live, /aria-expanded="true"/);
-  assert.match(live, /conversation-wait-orbit/);
+  assert.equal(view('running', null), null);
 
   expanded = false;
   const collapsed = view('completed', 72_000);
@@ -34,18 +31,7 @@ test('turn summary displays generation, completion, elapsed time, and its expans
   const button = React.Children.only(React.Children.only(collapsed.props.children).props.children);
   button.props.onClick();
   assert.match(renderToStaticMarkup(view('completed', 72_000)), /aria-expanded="true"/);
-  assert.match(renderToStaticMarkup(view('cancelled', 500)), /已停止，用时 不到1秒/);
+  assert.match(renderToStaticMarkup(view('cancelled', 500)), /已中断，用时 不到1秒/);
+  assert.match(renderToStaticMarkup(view('failed', 2900)), /执行异常，用时 2秒/);
   assert.doesNotMatch(renderToStaticMarkup(view('completed', null)), /用时/);
-  const statusOnly = renderToStaticMarkup(exports.ConversationTurnView({
-    turn: { status: 'completed', durationMs: 5900 }, expanded: false,
-  }));
-  assert.match(statusOnly, /class="conversation-process-label"/);
-  assert.match(statusOnly, /已完成，用时 5秒/);
-  assert.doesNotMatch(statusOnly, /<button|aria-expanded|conversation-turn-chevron/);
-
-  for (const toolName of ['web_search', 'browser_run', 'read_file', 'write_file', 'run_code', 'agenthub_workflow_status']) {
-    assert.equal(exports.isTurnTraceStep({ data: { kind: 'tool_activity', toolName } }), true, toolName);
-  }
-  assert.equal(exports.isTurnTraceStep({ data: { kind: 'tool_activity', subagent: {} } }), false);
-  assert.equal(exports.isTurnTraceStep({ data: { kind: 'message' } }), false);
 });

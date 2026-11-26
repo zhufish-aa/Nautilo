@@ -771,6 +771,35 @@ impl ClaudeCodeAdapter {
 
 #[async_trait::async_trait]
 impl AgentCliAdapter for ClaudeCodeAdapter {
+    async fn native_resources(&self, instance: &Value, cwd: &str, _session: &Value) -> CoreResult<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{json_file, strings, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let custom_home = crate::runtime::security::environment_policy::login_profile_directory(instance)?
+            .map(std::path::PathBuf::from).or_else(||resources.path("CLAUDE_CONFIG_DIR"));
+        let home = custom_home.clone().unwrap_or_else(||resources.home.join(".claude"));
+        let path = custom_home.unwrap_or_else(||resources.home.clone()).join(".claude.json");
+        let config = json_file(&path);
+        let project = &config["projects"][cwd];
+        let mut disabled = strings(&project["disabledMcpServers"]);
+        disabled.extend(strings(&config["disabledMcpServers"]));
+        if !cwd.is_empty() {
+            resources.skills(&resources.cwd.join(".claude/skills"), &[]);
+            resources.mcp(&path, &project["mcpServers"], &disabled);
+            let settings = json_file(&resources.cwd.join(".claude/settings.local.json"));
+            let project_path = resources.cwd.join(".mcp.json");
+            let mut file_servers = json_file(&project_path)["mcpServers"].clone();
+            if settings["enableAllProjectMcpServers"] != true {
+                if let Some(items) = file_servers.as_object_mut() {
+                    let accepted = strings(&settings["enabledMcpjsonServers"]);
+                    items.retain(|name, _|accepted.contains(&name.as_str()));
+                }
+            }
+            resources.mcp(&project_path, &file_servers, &disabled);
+        }
+        resources.skills(&home.join("skills"), &[]);
+        resources.mcp(&path, &config["mcpServers"], &disabled);
+        Ok(resources.finish())
+    }
     fn native_capabilities(&self,instance:&Value)->Value {
         let caps=self.capabilities();
         let legacy=json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty});

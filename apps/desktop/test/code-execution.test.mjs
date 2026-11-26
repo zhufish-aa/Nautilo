@@ -12,7 +12,7 @@ test('PTC UI exposes actual nested tools and keeps description, expansion and re
     import React from'react';import{createRoot}from'react-dom/client';import{flushSync}from'react-dom';
     import{CodeExecutionCard}from'./src/renderer/src/features/timeline/CodeExecutionCard';
     const root=createRoot(document.getElementById('root'));window.qa={render:data=>flushSync(()=>root.render(<CodeExecutionCard data={data} locale='zh-CN'/>)),close:()=>flushSync(()=>root.unmount())};
-  `},bundle:true,platform:'browser',format:'iife',jsx:'automatic',write:false,nodePaths:[join(desktop,'node_modules')],define:{'process.env.NODE_ENV':'"test"'},loader:{'.css':'empty'}});
+  `},bundle:true,platform:'browser',format:'iife',jsx:'automatic',write:false,nodePaths:[join(desktop,'node_modules')],define:{'process.env.NODE_ENV':'"test"'},loader:{'.css':'empty','.png':'dataurl','.svg':'dataurl'}});
   const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost',runScripts:'outside-only',pretendToBeVisual:true});const w=dom.window;
   const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
   const data={kind:'tool_activity',toolName:'run_code',status:'running',input:JSON.stringify({description:'Render final check frame',code:'await tools.pwsh({command:"render"})'}),codeExecution:{calls:[
@@ -21,14 +21,17 @@ test('PTC UI exposes actual nested tools and keeps description, expansion and re
   try{
     w.eval(bundle.outputFiles[0].text);w.qa.render(data);
     const labels=()=>[...w.document.querySelectorAll('.process-disclosure-row')];
+    const trigger=index=>labels()[index].querySelector('.process-disclosure-trigger');
+    assert.equal(labels().length,1);
+    trigger(0).click();await tick();
     assert.equal(labels().length,3);assert.ok(labels()[0].textContent.includes('Render final check frame'));
     assert.ok(labels()[1].textContent.includes('取消后台任务'));assert.ok(labels()[1].textContent.includes('已请求取消'));
     assert.ok(labels()[2].textContent.includes('运行命令'));assert.ok(labels()[2].textContent.includes('Check Python and Pillow availability'));
-    labels()[0].click();labels()[2].click();await tick();
-    const expandedShell=labels()[2];assert.equal(expandedShell.getAttribute('aria-expanded'),'true');
+    trigger(2).click();await tick();
+    const expandedShell=trigger(2);assert.equal(expandedShell.getAttribute('aria-expanded'),'true');
     assert.ok(w.document.body.textContent.includes('python --version'));
     const next=structuredClone(data);next.status='done';next.codeExecution.calls[1].status='done';next.codeExecution.calls[1].output='Python 3.13.14';w.qa.render(next);
-    assert.equal(labels()[2],expandedShell);assert.equal(expandedShell.getAttribute('aria-expanded'),'true');
+    assert.equal(trigger(2),expandedShell);assert.equal(expandedShell.getAttribute('aria-expanded'),'true');
     assert.ok(w.document.body.textContent.includes('Python 3.13.14'));assert.ok(labels()[0].textContent.includes('Render final check frame'));
     assert.ok(w.document.querySelector('pre code').textContent.includes('await tools.pwsh'));
   }finally{w.qa?.close();w.close();}

@@ -124,7 +124,7 @@ impl WorkflowService {
         for node in &definition.nodes {
             let name = node.name.clone().unwrap_or_else(|| node.id.clone());
             path.push(node.id.clone());
-            if node.kind == "agent" {
+            if node.kind == "agent" && !node.bypass {
                 let role = node.role.clone().expect("validated Agent role");
                 slots.push(Slot {
                     key: slot_key(path), path: path.clone(), name: name.clone(),

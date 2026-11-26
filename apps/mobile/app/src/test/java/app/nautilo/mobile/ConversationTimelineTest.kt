@@ -26,7 +26,8 @@ class ConversationTimelineTest {
     private fun visible(timeline: MobileTimeline) = conversationTimeline(timeline).map {
         when (it) {
             is ConversationItem.Block -> it.block.id
-            is ConversationItem.Turn -> it.turn.text("status") + ":" + it.blocks.joinToString(",") { block -> block.id }
+            is ConversationItem.Process -> it.turn.text("status") + ":" + it.blocks.joinToString(",") { block -> block.id }
+            is ConversationItem.Summary -> it.key
         }
     }
 
@@ -45,7 +46,7 @@ class ConversationTimelineTest {
             json("type" to "block_delta", "blockId" to "b2", "text" to "ought"),
             json("type" to "block_updated", "blockId" to "b2", "sealed" to true),
         ) + blocks.subList(2, 7).map(::created)))
-        assertEquals(listOf("b1", "running:b2,b3,b4,b5,b6,b7"), visible(running))
+        assertEquals(listOf("b1", "running:b2,b3,b4,b5,b6", "b7"), visible(running))
         assertThrows(IllegalArgumentException::class.java) {
             running.apply(page(3, listOf(json("type" to "block_delta", "blockId" to "b2", "text" to "again"))))
         }
@@ -55,7 +56,7 @@ class ConversationTimelineTest {
         val reopened = snapshot(4, blocks, listOf(done, next))
         assertEquals(reopened.blocks.map { it.value.toString() }, live.blocks.map { it.value.toString() })
         assertEquals(visible(reopened), visible(live))
-        assertEquals(listOf("b1", "completed:b2,b3,b4,b5,b6", "b7", "b8", "b9", "running:b10"), visible(live))
+        assertEquals(listOf("b1", "summary:r1", "completed:b2,b3,b4,b5,b6", "b7", "b8", "b9", "running:b10"), visible(live))
     }
 
     @Test fun answeredInteractionUpdatesInPlaceAndKeepsItsResult() {
@@ -66,20 +67,56 @@ class ConversationTimelineTest {
         val resolved = initial.apply(page(2, listOf(
             json("type" to "block_updated", "blockId" to "b2", "status" to "resolved", "result" to json("text" to "Answer"))
         )))
-        assertEquals(listOf("completed:b1", "b2", "completed:b3"), visible(resolved))
+        assertEquals(listOf("completed:b1", "b2", "summary:r", "completed:b3"), visible(resolved))
         assertEquals("Answer", resolved.blocks[1].result?.text("text"))
     }
 
-    @Test fun directReplyKeepsItsDurationWithoutAnExpandableProcess() {
+    @Test fun directReplyHasNoProcessSummaryLiveOrAfterReopen() {
         val blocks = listOf(block(1, "user_prompt", "r", "Hello"), block(2, "assistant_text", "r", "Hello!"))
         val done = turn("r", "completed", "b2")
         val live = snapshot(1, blocks, listOf(turn("r", "running"))).apply(page(2, emptyList(), done))
         val reopened = snapshot(2, blocks, listOf(done))
-        assertEquals(listOf("b1", "completed:", "b2"), visible(live))
+        assertEquals(listOf("b1", "b2"), visible(live))
         assertEquals(visible(reopened), visible(live))
-        val status = conversationTimeline(reopened)[1] as ConversationItem.Turn
-        assertEquals("process:b2", status.key)
-        assertEquals(3400, status.turn.getInt("durationMs"))
-        assertTrue(status.blocks.isEmpty())
+    }
+
+    @Test fun toolClustersKeepCommentaryAndSeparateApprovalsInOrder() {
+        val blocks = listOf(
+            block(1, "tool_call", "r", "first"),
+            block(2, "tool_call", "r", "second"),
+            block(3, "assistant_note", "r", "commentary"),
+            block(4, "tool_call", "r", "third"),
+            block(5, "approval", "r", "approve"),
+            block(6, "tool_call", "r", "fourth"),
+            block(7, "assistant_text", "r", "answer"),
+        )
+        val initial = snapshot(1, blocks, listOf(turn("r", "running")))
+        val process = conversationTimeline(initial).filterIsInstance<ConversationItem.Process>()
+        assertEquals(listOf("b1,b2", "b3", "b4"), toolClusters(process.first().blocks).map { group -> group.joinToString(",") { it.id } })
+        assertEquals(listOf("running:b1,b2,b3,b4", "b5", "running:b6", "b7"), visible(initial))
+        val cancelled = snapshot(2, blocks, listOf(turn("r", "cancelled", "b7")))
+        assertEquals(listOf("cancelled:b1,b2,b3,b4", "b5", "summary:r", "cancelled:b6", "b7"), visible(cancelled))
+    }
+
+    @Test fun summariesCountActualFilesCommandsAndMcpServices() {
+        fun step(seq: Int, name: String, input: JSONObject = JSONObject(), status: String = "done") =
+            MobileTimelineBlock(block(seq, "tool_call", "r", "")
+                .put("status", status)
+                .put("content", json("type" to "tool.finished", "payload" to json("toolName" to name, "inputSummary" to input.toString()))))
+        val read = step(1, "read", json("filePath" to "src/a.kt"))
+        val edit = step(2, "edit_file", json("path" to "src/b.kt"))
+        val create = step(3, "create_file", json("path" to "src/c.kt"))
+        val command = step(4, "Bash", json("command" to "test"), "failed")
+        assertEquals("读取 1 个文件 · 编辑 1 个文件 · 创建 1 个文件", formatToolClusterSummary(listOf(edit, read, read, create)).label)
+        val mixed = formatToolClusterSummary(listOf(read, edit, create, command, step(5, "web_search")))
+        assertEquals("读取 1 个文件 · 编辑 1 个文件 · 等 3 项操作", mixed.label)
+        assertEquals(1, mixed.failed)
+        val playwright = step(6, "Playwright/browser_snapshot")
+        val github = step(7, "mcp__GitHub__list_issues")
+        assertTrue(formatToolClusterSummary(listOf(playwright)).standalone)
+        assertEquals("调用了 Playwright · 2 次", formatToolClusterSummary(listOf(playwright, playwright)).label)
+        assertEquals("调用了 Playwright (2) · GitHub (1)", formatToolClusterSummary(listOf(playwright, playwright, github)).label)
+        assertEquals("调用了 3 个 MCP 服务 · 3 次", formatToolClusterSummary(listOf(playwright, github, step(8, "Notes/list"))).label)
+        assertEquals("搜索网页 · Nautilo", toolActivityLabel("web_search", "done", "Nautilo"))
     }
 }

@@ -7,6 +7,7 @@ pub mod capability_import;
 pub mod capability_service;
 pub mod core_daemon;
 pub mod composer_drafts;
+pub(crate) mod composer_references;
 pub mod interaction_service;
 pub mod ipc_handlers;
 pub mod orchestration_service;

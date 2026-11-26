@@ -2,8 +2,6 @@
 package app.nautilo.mobile.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -26,7 +25,13 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
@@ -51,41 +56,102 @@ import kotlinx.coroutines.launch
     val keyboard = LocalSoftwareKeyboardController.current
     val dragged by list.interactionSource.collectIsDraggedAsState()
     var follow by rememberSaveable(state.host?.id, state.session?.id) { mutableStateOf(true) }
+    var choices by rememberSaveable(state.host?.id, state.session?.id) { mutableStateOf(hashMapOf<String, Boolean>()) }
     var showModels by remember { mutableStateOf(false) }
     var showModes by remember { mutableStateOf(false) }
     val entries = remember(state.timeline) { state.timeline?.let(::conversationTimeline).orEmpty() }
-    val atBottom by remember { derivedStateOf { list.layoutInfo.visibleItemsInfo.lastOrNull()?.index.let { it == null || it >= list.layoutInfo.totalItemsCount - 2 } } }
-    LaunchedEffect(dragged) {
-        if (dragged) snapshotFlow { atBottom }.collect { follow = it }
-        else if (atBottom) follow = true
+    val previousTimeline = remember(state.host?.id, state.session?.id) { arrayOfNulls<MobileTimeline>(1) }
+    val reveal = remember(state.timeline) {
+        val previous = previousTimeline[0]
+        val current = state.timeline
+        if (previous != null && current != null && current.revision > previous.revision) {
+            val tail = previous.blocks.lastOrNull()?.seq ?: 0L
+            current.blocks.takeLastWhile { it.seq > tail }.filter { !it.sealed }.map { it.id }.toMutableSet()
+        } else mutableSetOf()
     }
-    LaunchedEffect(entries.lastOrNull()?.key, state.timeline?.revision, state.busy) {
+    SideEffect { previousTimeline[0] = state.timeline }
+    val activeTurn = state.timeline?.turns?.values?.lastOrNull { it.text("status") == "running" }
+    val runId = activeTurn?.text("runId") ?: state.runId
+    val live = activeTurn != null || running(state.runStatus) && state.timeline?.turns?.get(runId) == null
+    val latest = remember(state.timeline, runId) {
+        state.timeline?.blocks?.lastOrNull { it.runId == runId && it.kind in setOf("tool_call", "thinking", "assistant_text", "assistant_note", "approval", "interaction") }
+    }
+    val startedAt = state.runs.firstOrNull { it.id == runId }?.startedAt.orEmpty()
+    val threshold = with(LocalDensity.current) { 48.dp.roundToPx() }
+    val atBottom by remember(list, threshold) { derivedStateOf {
+        val layout = list.layoutInfo
+        val tail = layout.visibleItemsInfo.lastOrNull()
+        !list.canScrollForward || tail != null && tail.index == layout.totalItemsCount - 1 &&
+            tail.offset + tail.size + layout.afterContentPadding - layout.viewportEndOffset <= threshold
+    } }
+    val readScroll = remember(list, threshold) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y > 0 && list.canScrollBackward) follow = false
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && consumed.y < 0 && atBottom) follow = true
+                return Offset.Zero
+            }
+        }
+    }
+    fun pinAfterLayout() {
+        if (follow && !dragged && !list.isScrollInProgress && list.layoutInfo.totalItemsCount > 0) {
+            list.requestScrollToItem(list.layoutInfo.totalItemsCount - 1)
+        }
+    }
+    LaunchedEffect(list) {
+        snapshotFlow { list.canScrollForward }.collect { canScroll -> if (!canScroll) follow = true }
+    }
+    LaunchedEffect(entries.lastOrNull()?.key, state.timeline?.revision, state.busy, live) {
         // One layout-frame pin, not a new smooth-scroll animation for every token.
         // Explicit "back to latest" below still animates; dragging always wins.
         withFrameNanos { }
-        if (follow && !dragged && list.layoutInfo.totalItemsCount > 0) list.scrollToItem(list.layoutInfo.totalItemsCount - 1)
+        pinAfterLayout()
     }
     Column(Modifier.fillMaxSize().imePadding()) {
         Box(Modifier.weight(1f)) {
-            LazyColumn(state = list, modifier = Modifier.fillMaxSize().pointerInput(Unit) { awaitEachGesture { awaitFirstDown(requireUnconsumed = false); focus.clearFocus(); keyboard?.hide() } }, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyColumn(state = list, modifier = Modifier.fillMaxSize().testTag("chat-timeline").nestedScroll(readScroll)
+                .pointerInput(Unit) { awaitEachGesture { awaitFirstDown(requireUnconsumed = false); focus.clearFocus(); keyboard?.hide() } },
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(entries, key = { it.key }) { entry ->
-                    Box(Modifier.testTag("timeline:" + entry.key).animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = spring(stiffness = Spring.StiffnessMedium, dampingRatio = Spring.DampingRatioNoBouncy))) {
+                    Box(Modifier.testTag("timeline:" + entry.key).onSizeChanged { pinAfterLayout() }) {
                         when (entry) {
-                            is ConversationItem.Block -> TimelineBlockContent(entry.block, state, model)
-                            is ConversationItem.Turn -> AssistantTurn(entry) { block -> TimelineBlockContent(block, state, model) }
+                            is ConversationItem.Block -> {
+                                TimelineBlockContent(entry.block, state, model, reveal = entry.block.id in reveal)
+                                SideEffect { reveal.remove(entry.block.id) }
+                            }
+                            is ConversationItem.Process -> {
+                                val running = entry.turn.text("status") == "running"
+                                val open = running || choices[entry.turn.text("runId")] == true
+                                AssistantTurn(entry, open, running && entry === entries.lastOrNull(), choices,
+                                    { id, value -> choices = HashMap(choices).apply { put(id, value) } }) { block ->
+                                    TimelineBlockContent(block, state, model, inProcess = true, reveal = block.id in reveal)
+                                    SideEffect { reveal.remove(block.id) }
+                                }
+                            }
+                            is ConversationItem.Summary -> {
+                                val id = entry.turn.text("runId")
+                                TurnSummary(entry, choices[id] == true) {
+                                    choices = HashMap(choices).apply { put(id, choices[id] != true) }
+                                }
+                            }
                         }
                     }
                 }
                 item("progress") {
-                    if (state.busy || state.timeline == null) Row(Modifier.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TurnFrontier(live, runId, startedAt, latest)
+                    if (!live && (state.busy || state.timeline == null)) Row(Modifier.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         NSpinner(Modifier.size(16.dp), strokeWidth = 1.7.dp)
                         Text("正在同步会话", fontSize = 13.sp, color = Secondary)
                     }
-                    else if (entries.isEmpty()) EmptyView(Icons.Outlined.ChatBubbleOutline, "继续电脑上的工作", "消息和任务会同步到这台手机。")
+                    else if (!live && entries.isEmpty()) EmptyView(Icons.Outlined.ChatBubbleOutline, "继续电脑上的工作", "消息和任务会同步到这台手机。")
                 }
                 item("end") { Spacer(Modifier.height(2.dp)) }
             }
-            if (!atBottom) NFloatingActionButton(onClick = { follow = true; scope.launch { list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } },
+            if (!follow && list.canScrollForward) NFloatingActionButton(onClick = { follow = true; scope.launch { list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = MobilePalette.floating, contentColor = Ink) { Icon(Icons.Outlined.ArrowDownward, "回到最新消息", Modifier.size(18.dp)) }
         }
         Composer(state, model, { showModels = true }, { showModes = true }) { follow = true }
@@ -118,7 +184,7 @@ import kotlinx.coroutines.launch
                         Text(name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     } }
                     if (message.text.isNotBlank() && !(message.attachments.isNotEmpty() && message.text == "请查看附件。")) {
-                        Text(message.text, color = Ink, fontSize = 17.sp, lineHeight = 27.sp)
+                        SelectionContainer { Text(message.text, color = Ink, fontSize = 17.sp, lineHeight = 27.sp) }
                     }
                 }
             }

@@ -574,6 +574,42 @@ impl Default for CodexAdapter {
 
 #[async_trait::async_trait]
 impl AgentCliAdapter for CodexAdapter {
+    async fn native_resources(&self, instance: &Value, cwd: &str, session: &Value) -> CoreResult<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{toml, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let account = crate::runtime::security::environment_policy::login_profile_directory(instance)?;
+        let home = account.map(std::path::PathBuf::from).or_else(||resources.path("CODEX_HOME"))
+            .unwrap_or_else(||resources.home.join(".codex"));
+        let path = home.join("config.toml");
+        let config = toml(&path);
+        let disabled = config["skills"]["config"].as_array().into_iter().flatten()
+            .filter(|skill|skill["enabled"] == false)
+            .filter_map(|skill|std::path::Path::new(skill["path"].as_str()?).canonicalize().ok()).collect::<Vec<_>>();
+        let live = if let Some(client) = app_server::resource_client(instance, session) {
+            tokio::time::timeout(std::time::Duration::from_millis(350), client.request("skills/list", json!({"cwds":[cwd]})))
+                .await.ok().and_then(Result::ok)
+        } else { None };
+        if let Some(entries) = live.as_ref().and_then(|reply|reply["data"].as_array()) {
+            for skill in entries.iter().filter_map(|entry|entry["skills"].as_array()).flatten().filter(|skill|skill["enabled"] == true) {
+                if let Some(path) = skill["path"].as_str() { resources.skills(std::path::Path::new(path), &disabled); }
+            }
+        } else {
+            if !cwd.is_empty() { resources.skills(&resources.cwd.join(".agents/skills"), &disabled); }
+            resources.skills(&resources.home.join(".agents/skills"), &disabled);
+            resources.skills(&home.join("skills"), &disabled);
+            resources.skills(&home.join("skills/.system"), &disabled);
+        }
+        resources.mcp(&path, &config["mcp_servers"], &[]);
+        Ok(resources.finish())
+    }
+    async fn resident_mcp_tools(&self, instance: &Value, session: &Value, server: &str) -> Option<Vec<Value>> {
+        let client = app_server::resource_client(instance, session)?;
+        let params = json!({"threadId":session["providerSessionId"],"serverName":server,"detail":"toolsAndAuthOnly"});
+        let result = tokio::time::timeout(std::time::Duration::from_millis(700), client.request("mcpServerStatus/list", params)).await.ok()?.ok()?;
+        let entry = result["data"].as_array()?.iter().find(|entry|entry["name"] == server)?;
+        if entry["toolsError"].is_string() { return None; }
+        Some(entry["tools"].as_object()?.values().cloned().collect())
+    }
     fn native_capabilities(&self,instance:&Value)->Value {
         let caps=self.capabilities();
         let legacy=json!({"structuredOutput":caps.structured_output,"textOutput":caps.text_output,"interactiveStdin":caps.interactive_stdin,"nativeResume":caps.native_resume,"pty":caps.pty});

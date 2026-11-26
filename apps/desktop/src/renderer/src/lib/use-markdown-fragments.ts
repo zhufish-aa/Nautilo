@@ -14,13 +14,13 @@ function getQueue(): MarkdownWorkerQueue {
 /** Only parser work moves off-thread. All text remains available, and every
  * accepted snapshot is parsed as a complete document. Completion/cancellation
  * submits the newest source without dropping it or waiting for another token. */
-export function useMarkdownFragments(source: string, preserveFormatting = false): { fragments: string[] | undefined; pending: boolean; unformatted: string } {
+export function useMarkdownFragments(source: string, preserveFormatting = false, enabled = true, blockwise = false): { fragments: string[] | undefined; pending: boolean; unformatted: string } {
   const [parsed, setParsed] = useState<{ source: string; fragments: string[] }>();
   const [failed, setFailed] = useState(false);
   const latestSource = useRef(source);
   latestSource.current = source;
-  const asynchronous = !failed && source.length >= ASYNC_MARKDOWN_THRESHOLD && typeof Worker !== "undefined";
-  const synchronous = useMemo(() => asynchronous ? undefined : parseMarkdownFragments(source), [source, asynchronous]);
+  const asynchronous = enabled && !failed && source.length >= ASYNC_MARKDOWN_THRESHOLD && typeof Worker !== "undefined";
+  const synchronous = useMemo(() => enabled && !asynchronous ? parseMarkdownFragments(source, blockwise) : undefined, [source, enabled, asynchronous, blockwise]);
   const subscription = useRef<ReturnType<MarkdownWorkerQueue["subscribe"]>>();
   // A previously parsed short prefix remains visible during the transition to
   // the worker path, with the same fragment keys/components and focus state.
@@ -39,16 +39,16 @@ export function useMarkdownFragments(source: string, preserveFormatting = false)
         // An older append is useful progress. An obsolete replacement or a
         // result for a disposed message must never overwrite the new source.
         if (latestSource.current === parsedSource || latestSource.current.startsWith(parsedSource)) setParsed({ source: parsedSource, fragments });
-      }, () => setFailed(true));
+      }, () => setFailed(true), blockwise);
     } catch { setFailed(true); }
     return () => { subscription.current?.dispose(); subscription.current = undefined; };
-  }, [asynchronous]);
+  }, [asynchronous, blockwise]);
 
   useEffect(() => {
     if (asynchronous) subscription.current?.update(source);
-  }, [source, asynchronous]);
+  }, [source, asynchronous, blockwise]);
 
-  const visible = previous.current;
+  const visible = enabled ? previous.current : undefined;
   const compatible = visible && (source === visible.source || source.startsWith(visible.source));
   return { fragments: compatible ? visible.fragments : undefined, pending: !compatible || visible.source !== source, unformatted: compatible ? source.slice(visible.source.length) : source };
 }

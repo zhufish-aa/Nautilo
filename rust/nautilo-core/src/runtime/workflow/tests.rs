@@ -50,6 +50,38 @@ fn complete(run: &mut WorkflowRun, node: &str, branch: &str, summary: &str, now:
     run.execution_finished(&id, true, None, now + 1).unwrap();
 }
 #[test]
+fn workflow_bypass_forwards_input_without_creating_a_native_run() {
+    let mut def = definition();
+    let skipped = def.nodes.iter_mut().find(|node| node.id == "a").unwrap();
+    skipped.bypass = true;
+    skipped.prompt = Some("{{incoming.previous.missing}}".into());
+    let mut run = WorkflowRun::start("skip".into(), "s".into(), "p".into(), "req".into(), def,
+        json!({"question":"actual input"}), json!({}), 1000).unwrap();
+    let skipped = run.instances.iter().find(|instance| instance.node_id == "a").unwrap();
+    assert_eq!(skipped.status, "completed");
+    assert_eq!(skipped.completed_at, Some(1000));
+    assert!(skipped.prompt.is_none() && skipped.run_id.is_none() && skipped.session_id.is_none());
+    assert!(run.events.iter().any(|event| event.r#type == "node.skipped"));
+    complete(&mut run, "b", "时序证据", "trace", 1010);
+    let judge = run.instances.iter().find(|instance| instance.node_id == "judge").unwrap();
+    assert!(judge.prompt.as_deref().unwrap().contains("actual input"));
+}
+#[test]
+fn workflow_output_descriptions_follow_the_field_schema_into_the_agent_instructions() {
+    let mut def = definition();
+    let node = def.nodes.iter_mut().find(|node| node.id == "a").unwrap();
+    node.output_descriptions.insert("summary".into(), "一句话写明发现。".into());
+    let instruction = node.submission_instruction();
+    assert!(instruction.contains(r#"Result fields: {"summary":"text"}"#));
+    assert!(instruction.contains(r#"Result field descriptions: {"summary":"一句话写明发现。"}"#));
+    def.validate().unwrap();
+    let round_trip: Definition = serde_json::from_value(serde_json::to_value(&def).unwrap()).unwrap();
+    assert_eq!(round_trip.node("a").output_descriptions["summary"], "一句话写明发现。");
+    assert!(round_trip.node("b").output_descriptions.is_empty());
+    def.nodes.iter_mut().find(|node| node.id == "a").unwrap().outputs.clear();
+    assert!(def.validate().unwrap_err().contains("undeclared result field: summary"));
+}
+#[test]
 fn workflow_parallel_join_waits_for_each_execution_and_submission_in_either_order() {
     let mut run = run();
     assert_eq!(
@@ -612,6 +644,11 @@ fn workflow_renderer_fixture_preserves_parallel_review_and_missing_submission_ev
         return;
     };
     let mut r = run();
+    r.bindings = json!({
+        "Explorer":{"agentSnapshot":{"providerId":"codex"},"model":"qa-explorer"},
+        "Analyst":{"agentSnapshot":{"providerId":"claude-code"},"model":"qa-analyst"},
+        "Verifier":{"agentSnapshot":{"providerId":"codex"},"model":"qa-verifier"}
+    });
     r.definition.name = Some("并行定位与交叉验证".into());
     for (id, name) in [
         ("main", "主 Agent"),

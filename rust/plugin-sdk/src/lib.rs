@@ -25,6 +25,7 @@ pub mod images;
 pub mod usage;
 pub mod connection;
 pub mod native_config;
+pub mod native_resources;
 pub mod process;
 pub mod event_stream;
 pub mod extension_ui;
@@ -184,6 +185,10 @@ pub trait ProviderPlugin: Send + Sync {
         })
     }
     async fn detect(&self, instance: &Value) -> Value;
+    /// Read the resources of the selected native profile without launching a turn.
+    async fn native_resources(&self, _instance: &Value, _cwd: &str, _session: &Value) -> anyhow::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
     /// Optional per-invocation native wire negotiation, for CLIs whose API
     /// protocol differs between installed versions. Advertise this with
     /// descriptor.connectionProtocolDiscovery; old plugins need no changes.

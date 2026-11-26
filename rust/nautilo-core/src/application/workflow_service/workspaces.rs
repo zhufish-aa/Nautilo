@@ -91,7 +91,10 @@ impl WorkflowService {
         for instance in run
             .instances
             .iter_mut()
-            .filter(|instance| run.definition.node(&instance.node_id).kind == "agent")
+            .filter(|instance| {
+                let node = run.definition.node(&instance.node_id);
+                node.kind == "agent" && !node.bypass
+            })
         {
             instance.acceptance = Some(Acceptance::default());
         }

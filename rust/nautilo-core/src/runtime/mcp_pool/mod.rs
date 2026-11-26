@@ -128,6 +128,14 @@ impl McpPool {
         }).collect::<Vec<_>>()})
     }
 
+    pub async fn available_tools(&self, server: &Value, cwd: &str) -> Option<Vec<Value>> {
+        let binding = self.binding(server, cwd)?;
+        let worker = self.workers.lock().unwrap().iter().find(|(key, worker)| {
+            key.starts_with(&binding.prefix) && worker.alive() && worker.observation()["initializeMs"].is_number()
+        }).map(|(_, worker)|worker.clone())?;
+        worker.available_tools().await
+    }
+
     fn worker(&self, spec: &Value, first: &Value, dedicated: bool) -> anyhow::Result<Arc<Worker>> {
         let mut workers = self.workers.lock().unwrap();
         anyhow::ensure!(

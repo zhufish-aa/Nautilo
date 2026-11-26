@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Check, Circle, Loader2, TriangleAlert } from "lucide-react";
+import { Check, Circle, TriangleAlert } from "lucide-react";
 import { browserActivity, browserStepLabel } from "../../lib/browser-display";
 import { ProcessDisclosure } from "./ProcessDisclosure";
 
@@ -19,7 +19,7 @@ export function BrowserActivity({name,status,input,output,zh}: {name:string;stat
     running={status === "running"} failed={status === "failed"}>
       <ol className="space-y-1">
         {steps.map((step:any,index:number)=><li key={step.id ?? index} className="flex min-w-0 items-start gap-2 py-1 text-ink-2">
-          <span className="mt-0.5 shrink-0">{step.status === "completed" ? <Check size={13} className="text-ok"/> : step.status === "failed" ? <TriangleAlert size={13} className="text-danger"/> : step.status === "running" ? <Loader2 size={13} className="animate-spin"/> : <Circle size={11} className="text-ink-3"/>}</span>
+          <span className="mt-0.5 shrink-0">{step.status === "completed" ? <Check size={13} className="text-ok"/> : step.status === "failed" ? <TriangleAlert size={13} className="text-danger"/> : <Circle size={11} className={step.status === "running" ? "fill-current text-info" : "text-ink-3"}/>}</span>
           <span className="min-w-0 break-words">{browserStepLabel(step,zh)}{step.error && <span className="mt-1 block text-xs text-danger">{step.error.message}</span>}</span>
           {step.verification?.verified && <span className="ml-auto shrink-0 text-[11px] text-ok">{zh?"已验证":"Verified"}</span>}
         </li>)}

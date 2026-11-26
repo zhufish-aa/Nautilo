@@ -73,7 +73,19 @@ test('native discovery and saved connections support changing the next message w
     let savedExisting;
     let blockSwitch = false;
     w.agenthub = { core: { request: async ({ method, input }) => {
-      if (method === 'health.get') return { features: { workflowPlans: 1 } };
+      if (method === 'health.get') return { features: { workflowPlans: 1, composerReferences: 1 } };
+      if (method === 'capability.list') {
+        assert.equal(input.sessionId, 'old');
+        return [
+          { id: 'native:skill:pdf', name: 'PDF', kind: 'skill', enabled: true, providerIds: ['deepseek'], updatedAt: now },
+          { id: 'browser', name: 'Playwright', kind: 'mcp', enabled: true, providerIds: ['deepseek'], updatedAt: now },
+          { id: 'disabled-pdf', name: 'PDF disabled', kind: 'skill', enabled: false, providerIds: ['deepseek'], updatedAt: now },
+          { id: 'unrelated', name: 'Other harness', kind: 'mcp', enabled: true, providerIds: ['codex'], updatedAt: now }
+        ];
+      }
+      if (method === 'capability.diagnose') return {
+        steps: [{ id: 'initialize', state: 'passed' }], toolCount: 1, tools: [{ name: 'browser_snapshot' }]
+      };
       if (method === 'workflow.templates') return Array.from({ length: 4 }, (_, index) => ({
         id: `workflow-${index}`, revision: 2, name: `已保存流程 ${index + 1}`, definition: { nodes: [{}, {}] }
       }));
@@ -314,6 +326,57 @@ test('native discovery and saved connections support changing the next message w
     assert.equal(savedSwitch.connectionRevision, 1);
     assert.equal(savedSwitch.reasoningEffort, '');
     assert.equal(q.sessions.getState().nextTurnModels.old, undefined);
+
+    const editor = () => d.querySelector('textarea');
+    const key = (name) => editor().dispatchEvent(new w.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+    const input = async (text, caret = text.length) => {
+      editor().focus();
+      Object.getOwnPropertyDescriptor(w.HTMLTextAreaElement.prototype, 'value').set.call(editor(), text);
+      editor().setSelectionRange(caret, caret);
+      editor().dispatchEvent(new w.InputEvent('input', { bubbles: true }));
+      await settle();
+    };
+    await input('用@pd 处理账单', 4);
+    assert.match(d.querySelector('.composer-reference-list [role="option"]').textContent, /PDF.*原生/);
+    assert.doesNotMatch(d.querySelector('.composer-reference-list').textContent, /PDF disabled|Other harness/);
+    key('Enter');
+    await settle();
+    assert.equal(editor().value, '用@PDF  处理账单');
+    assert.equal(editor().selectionStart, 7);
+    assert.equal(d.querySelector('.composer-reference-mirror [data-kind="skill"]').textContent, '@PDF');
+    assert.ok(d.querySelector('.composer-inline-reference-icon svg'), 'render an icon within the reference');
+    assert.equal(d.querySelector('.composer-reference-strip'), null);
+
+    await input('用@PDF 处理账单，再用 @Play');
+    key('ArrowRight');
+    await settle();
+    assert.match(d.querySelector('.composer-reference-back').textContent, /Playwright.*工具.*1/);
+    assert.match(d.querySelector('.composer-reference-list [role="option"]').textContent, /browser_snapshot/);
+    key('Enter');
+    await settle();
+    assert.equal(editor().value, '用@PDF 处理账单，再用 @Playwright / browser_snapshot  ');
+    send().click();
+    await settle();
+    assert.equal(deliveries[1].text, '用@PDF 处理账单，再用 @Playwright / browser_snapshot');
+    assert.deepEqual(JSON.parse(JSON.stringify(deliveries[1].references)), [
+      { kind: 'skill', id: 'native:skill:pdf' }, { kind: 'mcp', id: 'browser', tool: 'browser_snapshot' }
+    ]);
+    d.querySelector('.composer-reference-trigger').click();
+    await settle();
+    assert.equal(editor().value, '', 'opening the menu from the toolbar leaves the draft untouched');
+    assert.match(d.querySelector('.composer-reference-list [role="option"]').textContent, /Playwright \/ browser_snapshot/);
+    key('Tab');
+    await settle();
+    assert.match(d.querySelector('.composer-reference-tabs [aria-pressed="true"]').textContent, /Skill/);
+    key('Escape');
+    await settle();
+    assert.equal(d.querySelector('.composer-reference-list'), null);
+    await input('下一步 /');
+    assert.match(d.querySelector('.composer-reference-tabs [aria-pressed="true"]').textContent, /工作流/);
+    editor().dispatchEvent(new w.CompositionEvent('compositionstart', { bubbles: true }));
+    await settle();
+    assert.equal(key('Enter'), true, 'the composer does not take over the IME confirmation key');
+    assert.equal(deliveries.length, 2);
     assert.deepEqual(errors, []);
   } finally {
     dom?.window.close();

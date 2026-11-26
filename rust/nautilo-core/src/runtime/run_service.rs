@@ -112,6 +112,72 @@ pub struct RunCompletionSnapshot {
 }
 
 impl RunService {
+    async fn native_composer_resources(&self, session: &Value, agent: &Value) -> CoreResult<Vec<Value>> {
+        let provider = agent["providerId"].as_str().unwrap_or("");
+        let (cwd, context) = {
+            let db = self.db.lock().unwrap();
+            let cwd = crate::application::composer_references::project_root(&db.raw, session)?.unwrap_or_default();
+            let mut context = session.clone();
+            if let Some(id) = session["id"].as_str().filter(|_|session["providerSessionId"].is_string()) {
+                let latest = Repositories::new(&db.raw).events().latest_type(id, "provider.commands_updated")?;
+                if let Some(event) = latest.filter(|event|event["payload"]["providerId"] == provider) {
+                    context["commands"] = event["payload"]["commands"].clone();
+                }
+            }
+            (cwd, context)
+        };
+        let mut items = self.adapters.get(provider)?.native_resources(agent, &cwd, &context).await?;
+        for item in &mut items { item["providerIds"] = json!([provider]); }
+        Ok(items)
+    }
+
+    pub(crate) async fn composer_catalog(&self, scope: &Value) -> CoreResult<Vec<Value>> {
+        use crate::application::composer_references;
+        let (session, agent) = composer_references::scope(&self.db.lock().unwrap().raw, scope)?;
+        let native = self.native_composer_resources(&session, &agent).await?;
+        composer_references::catalog(&self.db.lock().unwrap().raw, &agent, native)
+    }
+
+    pub(crate) async fn composer_mcp_tools(&self, scope: &Value, id: &str) -> CoreResult<Value> {
+        use crate::application::composer_references;
+        use crate::runtime::service_probe::{report, step, finish};
+        let (session, agent) = composer_references::scope(&self.db.lock().unwrap().raw, scope)?;
+        let provider = agent["providerId"].as_str().unwrap_or("");
+        let native = agenthub_plugin_sdk::native_resources::is_native(id);
+        let capability = if native {
+            self.native_composer_resources(&session, &agent).await?.into_iter().find(|item| item["id"] == id)
+        } else { Repositories::new(&self.db.lock().unwrap().raw).capabilities().get(id)? }
+            .filter(|item|item["kind"] == "mcp" && composer_references::enabled_for(item, provider))
+            .ok_or_else(||crate::errors::not_found("capability", id))?;
+        let server = capability_to_mcp_server(&capability).ok_or_else(||invalid_field("capabilityId", "MCP server is unavailable"))?;
+        let name = if native { capability["name"].as_str() } else { server["name"].as_str() }.unwrap_or_default();
+        let started = std::time::Instant::now();
+        let mut diagnostic = report(id, capability["updatedAt"].as_str().unwrap_or(""), "mcp_handshake");
+        let tools = self.adapters.get(provider)?.resident_mcp_tools(&agent, &session, name).await;
+        let tools = if tools.is_none() && !native {
+            let cwd = composer_references::project_root(&self.db.lock().unwrap().raw, &session)?.unwrap_or_default();
+            if let Some(pool) = self.mcp_pool.get() { pool.available_tools(&server, &cwd).await } else { None }
+        } else { tools };
+        if let Some(tools) = tools {
+            step(&mut diagnostic, "initialize", "passed", started, None, None);
+            let tools = tools.into_iter().filter_map(|tool|Some(json!({"name":tool["name"].as_str()?}))).collect::<Vec<_>>();
+            diagnostic["toolCount"] = json!(tools.len());
+            diagnostic["tools"] = json!(tools);
+        } else {
+            step(&mut diagnostic, "initialize", "failed", started, Some("MCP_NOT_RESIDENT"), None);
+        }
+        Ok(finish(diagnostic, started))
+    }
+
+    pub(crate) async fn validate_composer_references(&self, session: &Value, agent: &Value, input: &Value) -> CoreResult<crate::application::composer_references::ComposerReferences> {
+        use crate::application::composer_references;
+        let native = if composer_references::needs_native(input) {
+            let agent = crate::application::connection_service::resolve_session_connection(&self.db.lock().unwrap().raw, session, agent)?.0;
+            self.native_composer_resources(session, &agent).await?
+        } else { Vec::new() };
+        composer_references::resolve(&self.db.lock().unwrap().raw, input, agent, &native)
+    }
+
     pub fn start_mcp_pool(&self) -> anyhow::Result<()> {
         let pool = crate::runtime::mcp_pool::McpPool::start()?;
         let (servers, cwd) = {
@@ -484,6 +550,22 @@ impl RunService {
             crate::application::connection_service::resolve_session_connection(&db.raw, session, agent)?
         };
         let agent = &resolved_agent;
+        let session_id = session["id"].as_str().unwrap_or("");
+        let attached = {
+            let db = self.db.lock().unwrap();
+            let message = match context.user_message_id.as_deref().or(context.queue_key.as_deref()) {
+                Some(id) => Repositories::new(&db.raw).sessions().message(session_id, id)?,
+                None => None,
+            };
+            message.map(|mut value| value["references"].take()).unwrap_or(Value::Null)
+        };
+        let native = if crate::application::composer_references::needs_native(&attached) {
+            self.native_composer_resources(session, agent).await?
+        } else { Vec::new() };
+        let references = crate::application::composer_references::resolve(&self.db.lock().unwrap().raw, &attached, agent, &native)?;
+        let mcp_servers = self.resolve_mcp_servers(agent, session_id)?;
+        let mut prompt = prompt.to_string();
+        references.append_to_prompt(&mut prompt);
         // An explicit per-model context window from the instance editor wins;
         // live discovery only runs when nothing is configured.
         let session_model = session.get("model").and_then(Value::as_str).unwrap_or("");
@@ -720,7 +802,7 @@ impl RunService {
             native_terminal_live: None,
             instance: agent.clone(),
             local_session_id: session.get("id").and_then(Value::as_str).map(str::to_string),
-            prompt: prompt.to_string(),
+            prompt,
             cwd: context
                 .working_directory
                 .clone()
@@ -762,7 +844,7 @@ impl RunService {
                 })
             },
             skills: Some(self.resolve_skills(agent)),
-            mcp_servers: Some(self.resolve_mcp_servers(agent, session["id"].as_str().unwrap_or(""))?),
+            mcp_servers: Some(mcp_servers),
             provider_command: context.provider_command.clone(),
             session_events: Some(background.events),
             session_interaction: Some(background.interaction),

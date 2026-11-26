@@ -31,5 +31,5 @@ useProjectsStore.setState({ projects: [{ id: "qa-project", name: "Nautilo", root
 ] }] });
 (window as unknown as { workflowQa: unknown }).workflowQa = { calls, advanceRunSnapshot };
 createRoot(document.getElementById("root")!).render(<React.StrictMode><BrowserRouter><I18nProvider><div className={params.has("conversation") ? undefined : "workflows-route-surface"} style={{ maxWidth: 1720, margin: "0 auto", padding: "32px 40px", height: "100dvh", overflow: "auto" }}>
-  {params.has("conversation") ? <SessionWorkbench sessionId="qa-main" drawer={null} onOpenDrawer={() => {}} onCloseDrawer={() => {}} onOpenSession={() => {}}/> : <WorkflowsPage/>}
+  {params.has("conversation") ? <SessionWorkbench sessionId="qa-main" drawer={null} onOpenDrawer={() => {}} onCloseDrawer={() => {}} onOpenSession={() => {}}/> : <WorkflowsPage inspection={params.has("inspection") ? { runId: params.get("inspection")!, onOpenSession: () => {} } : undefined}/>}
 </div></I18nProvider></BrowserRouter></React.StrictMode>);

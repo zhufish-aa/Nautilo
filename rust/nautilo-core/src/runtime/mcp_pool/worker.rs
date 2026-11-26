@@ -129,6 +129,28 @@ impl Worker {
     }
     pub fn pid(&self) -> Option<u32> { self.process.pid }
     pub fn observation(&self) -> Value { self.metrics.snapshot(self.pid(), self.shared) }
+    pub async fn available_tools(&self) -> Option<Vec<Value>> {
+        let client = uuid::Uuid::new_v4().to_string();
+        let (sender, mut inbox) = mpsc::unbounded_channel();
+        self.clients.lock().unwrap().insert(client.clone(), sender);
+        let result = tokio::time::timeout(std::time::Duration::from_millis(450), async {
+            let mut tools = Vec::new();
+            let mut params = json!({});
+            for id in 0..16 {
+                self.send(&client, json!({"jsonrpc":"2.0","id":id,"method":"tools/list","params":params}));
+                while let Some(reply) = inbox.recv().await {
+                    if reply["id"] != id { continue; }
+                    tools.extend(reply["result"]["tools"].as_array()?.iter().cloned());
+                    let Some(cursor) = reply["result"]["nextCursor"].as_str() else { return Some(tools); };
+                    params = json!({"cursor":cursor});
+                    break;
+                }
+            }
+            None
+        }).await.ok().flatten();
+        self.detach(&client);
+        result
+    }
     pub fn shared(&self) -> bool {
         self.shared
     }

@@ -246,6 +246,10 @@ pub struct AdapterDetectionResult {
 
 #[async_trait::async_trait]
 pub trait AgentCliAdapter: Send + Sync {
+    async fn native_resources(&self, _instance: &Value, _cwd: &str, _session: &Value) -> CoreResult<Vec<Value>> {
+        Ok(Vec::new())
+    }
+    async fn resident_mcp_tools(&self, _instance: &Value, _session: &Value, _server: &str) -> Option<Vec<Value>> { None }
     async fn list_modes(&self, _instance: &Value, _context: Option<&Value>) -> CoreResult<Value> {
         Ok(serde_json::json!({"modes":[]}))
     }

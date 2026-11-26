@@ -14,7 +14,8 @@ import type {
   Task,
   TeamDefinition,
   VerificationResult,
-  WorkflowMention
+  WorkflowMention,
+  CapabilityReferenceInput
 } from "@agenthub/domain";
 import type { RuntimeEvent } from "@agenthub/event-protocol";
 import type { HistoryCursor, HistoryItem, HistoryProjection, SessionHistory, ProjectEventCursor, ProjectPollInput, ProjectPollSnapshot, ProjectPollResult, SessionUpsertInput, TimelineBlock } from "@agenthub/schemas";
@@ -257,7 +258,7 @@ export async function refreshAssistantTarget(sessionId: string): Promise<void> {
   }
 }
 
-export async function sendWorkbenchMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], editMessageId?: string, submissionMessageId?: string, workflowRef?: WorkflowMention): Promise<void> {
+export async function sendWorkbenchMessage(sessionId: string, text: string, attachments: DesktopAttachment[] = [], editMessageId?: string, submissionMessageId?: string, workflowRef?: WorkflowMention, references?: CapabilityReferenceInput[]): Promise<void> {
   const state = useSessionsStore.getState();
   const initialSession = state.sessions.find((item) => item.id === sessionId);
   if (!initialSession) throw new Error(`Session ${sessionId} is missing`);
@@ -292,7 +293,7 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
       if (session.projectRunId && activeProjectRunId === session.projectRunId) {
         const domainSession = toDomainSession(session);
         await requestCore<DomainSession>("session.upsert", domainSession);
-        const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text, messageId, attachments, editMessageId });
+        const result = await requestCore<{ accepted: true; runId: string }>("session.send", { sessionId, text, messageId, attachments, editMessageId, references });
         acceptedRunId = result.runId;
         acceptedProjectRunId = session.projectRunId;
         state._setActiveAgentRun(sessionId, result.runId);
@@ -311,7 +312,8 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
         goal: text,
         sessionId: session.id,
         messageId,
-        attachments
+        attachments,
+        references
       });
       acceptedProjectRunId = result.projectRun.id;
       state._upsertExternalSession(toUiSession(result.mainSession, result.projectRun, team));
@@ -328,7 +330,7 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
     }
     await requestCore<DomainSession>("session.upsert", domainSession);
     const result = await requestCore<{ accepted: true; runId: string }>("session.send", {
-      sessionId, text, messageId, attachments, editMessageId,
+      sessionId, text, messageId, attachments, editMessageId, references,
       ...(workflowRef ? { workflowRef: { id: workflowRef.id, revision: workflowRef.revision } } : {})
     });
     acceptedRunId = result.runId;
@@ -357,7 +359,7 @@ export async function sendWorkbenchMessage(sessionId: string, text: string, atta
 }
 
 /** Sends immediate steering or queues a follow-up without stopping the active turn. Returns the mode actually applied. */
-export async function sendWorkbenchFollowUp(sessionId: string, text: string, mode: "steer" | "queue", submissionMessageId?: string): Promise<"steer" | "queue" | undefined> {
+export async function sendWorkbenchFollowUp(sessionId: string, text: string, mode: "steer" | "queue", submissionMessageId?: string, references?: CapabilityReferenceInput[], workflowRef?: WorkflowMention): Promise<"steer" | "queue" | undefined> {
   const store = useSessionsStore.getState();
   const session = store.sessions.find((item) => item.id === sessionId);
   if (!session || !text.trim()) return undefined;
@@ -368,7 +370,7 @@ export async function sendWorkbenchFollowUp(sessionId: string, text: string, mod
   // mid-turn injection channel; honor the mode it actually applied.
   const messageId = submissionMessageId ?? newId("msg");
   if (mode === "queue") store._addQueuedFollowUp(sessionId, { messageId, text, queuedAt: new Date().toISOString() });
-  const { mode: appliedMode } = await requestCore<{ accepted: true; mode: "steer" | "queue" }>("session.followUp", { sessionId, text, messageId, mode }).catch((error) => {
+  const { mode: appliedMode } = await requestCore<{ accepted: true; mode: "steer" | "queue" }>("session.followUp", { sessionId, text, messageId, mode, references, workflowRef }).catch((error) => {
     store._removeQueuedFollowUp(sessionId, messageId);
     store._append(sessionId, { kind: "error", code: "IPC_INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error), retryable: true });
     throw error;
@@ -1809,6 +1811,7 @@ function messageTimeline(messages: Message[], team?: UiTeam, artifacts: Artifact
         messageId: message.id,
         editedAt: message.editedAt,
         workflowRef: message.workflowRef,
+        references: message.references,
         streaming: message.sender === "agent" && message.nativeIdentity?.turnStatus === "running" && !message.nativeIdentity.completed,
         attachments: [...(message.attachmentIds?.flatMap((id) => {
           const artifact = artifactsById.get(id);

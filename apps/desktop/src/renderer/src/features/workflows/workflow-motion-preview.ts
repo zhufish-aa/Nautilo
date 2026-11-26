@@ -1,5 +1,5 @@
 import type { WorkflowDefinition, WorkflowEdge } from "@agenthub/domain";
-import { edgeKey, loopEdges } from "./workflow-geometry";
+import { edgeKey, graphReachable, loopEdges } from "./workflow-geometry";
 
 export type MotionNodeState = "idle" | "running" | "success" | "looping";
 export type MotionCue = { kind: "success" | "join"; sequence: number };
@@ -37,6 +37,12 @@ export function buildWorkflowMotionPreview(definition: WorkflowDefinition): Work
   });
 
   const loops = loopEdges(definition.edges);
+  const reviewRoutes = new Set(loops);
+  const forwardEdges = definition.edges.filter(edge => !edge.maxTraversals);
+  for (const edge of definition.edges) if (edge.maxTraversals) {
+    const predecessors = graphReachable(forwardEdges, edge.from[0], true);
+    for (const route of outgoing.get(edge.to) ?? []) if (predecessors.has(route.edge.to)) reviewRoutes.add(route.index);
+  }
   const visits = new Map<number, number>();
   const states = new Map<string, MotionNodeState>();
   const visited = new Set<string>();
@@ -69,7 +75,7 @@ export function buildWorkflowMotionPreview(definition: WorkflowDefinition): Work
     const routes = (outgoing.get(id) ?? []).filter(available);
     const parallel = node.kind === "main" || node.kind === "dispatch" || node.dispatch === "all" || node.exitMode === "some";
     // Prefer an available review loop once, then take a fresh exit. A loop-only route can show its configured fallback.
-    const choice = routes.find(route => !visit(route.index) && loops.has(route.index))
+    const choice = routes.find(route => !visit(route.index) && reviewRoutes.has(route.index))
       ?? routes.find(route => !visit(route.index)) ?? routes[0];
     return (parallel ? routes : choice ? [choice] : []).map(route => {
       const previous = visit(route.index);

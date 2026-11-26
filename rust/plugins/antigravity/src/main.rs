@@ -112,6 +112,18 @@ impl Plugin {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for Plugin {
+    async fn native_resources(&self, instance: &Value, cwd: &str, _session: &Value) -> anyhow::Result<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{json_file, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let home = resources.home.join(".gemini/config");
+        if !cwd.is_empty() { resources.skills(&resources.cwd.join(".agents/skills"), &[]); }
+        resources.skills(&home.join("skills"), &[]);
+        resources.skills(&resources.home.join(".gemini/skills"), &[]);
+        resources.skills(&resources.home.join(".agents/skills"), &[]);
+        let path = home.join("mcp_config.json");
+        resources.mcp(&path, &json_file(&path)["mcpServers"], &[]);
+        Ok(resources.finish())
+    }
     fn descriptor(&self) -> Value {
         config::descriptor()
     }

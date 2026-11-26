@@ -30,10 +30,11 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             result.map(|mut result|{if let Some(error)=result["error"].as_str(){let redacted=daemon.redaction.text(error);result["error"]=json!(redacted);}result}).map_err(|error|anyhow::Error::new(crate::errors::invalid("sourceControl",&daemon.redaction.text(&error.to_string()))))
         }});
     }
-    router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION, "features":{"sourceControl":2,"sourceControlHistory":1,"sourceControlHistoryPaging":1,"sourceControlEditing":1,"terminalTabs":1,"composerDrafts":1,"taskRetry":1,"workflows":1,"workflowPlans":1} })) });
+    router.register("health.get", |_| async { Ok(json!({ "status": "ok", "version": crate::VERSION, "features":{"sourceControl":2,"sourceControlHistory":1,"sourceControlHistoryPaging":1,"sourceControlEditing":1,"terminalTabs":1,"composerDrafts":1,"composerReferences":1,"taskRetry":1,"workflows":1,"workflowPlans":1} })) });
     reg(router,daemon,"workflow.templates",|d,_|d.workflows.list_templates());
     reg(router,daemon,"workflow.template",|d,input|d.workflows.get_template(&input));
     reg(router,daemon,"workflow.save",|d,input|d.workflows.save_template(&input));
+    reg(router,daemon,"workflow.archive",|d,input|d.workflows.archive_template(&input));
     reg(router,daemon,"workflow.validate",|d,input|Ok(d.workflows.validate(&input)));
     reg(router,daemon,"workflow.list",|d,input|d.workflows.list(&input));
     reg(router,daemon,"workflow.get",|d,input|d.workflows.inspect(input["runId"].as_str().unwrap_or("")));
@@ -219,6 +220,8 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
             async move {
                 let result = if method == "connection.diagnose" {
                     daemon.connections.diagnose(&input).await?
+                } else if input["scope"].is_object() {
+                    daemon.runs.composer_mcp_tools(&input["scope"], input["capabilityId"].as_str().unwrap_or("")).await?
                 } else {
                     daemon.capabilities.diagnose(input["capabilityId"].as_str().unwrap_or("")).await?
                 };
@@ -234,7 +237,18 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
     reg_str(router, daemon, "team.remove", "teamId", |d, id| d.teams.remove(id));
 
     // ---- capabilities
-    reg(router, daemon, "capability.list", |d, _| d.capabilities.list().map(Value::Array));
+    {
+        let daemon = daemon.clone();
+        router.register("capability.list", move |input| {
+            let daemon = daemon.clone();
+            async move {
+                let items = if input["sessionId"].is_string() || input["agentInstanceId"].is_string() {
+                    super::composer_references::public_catalog(daemon.runs.composer_catalog(&input).await?)
+                } else { daemon.capabilities.list()? };
+                Ok(Value::Array(items))
+            }
+        });
+    }
     reg(router, daemon, "capability.upsert", |d, input| d.capabilities.upsert(&input));
     reg_str(router, daemon, "capability.remove", "capabilityId", |d, id| d.capabilities.remove(id));
 
@@ -411,7 +425,13 @@ pub fn register_handlers(router: &mut Router, daemon: &Arc<Daemon>) {
         Ok(snapshot)
     });
     reg_str(router, daemon, "projectRun.get", "projectRunId", |d, id| d.orchestration.get(id));
-    reg(router, daemon, "orchestration.start", |d, input| d.orchestration.start(&input));
+    {
+        let daemon = daemon.clone();
+        router.register("orchestration.start", move |input| {
+            let daemon = daemon.clone();
+            async move { daemon.orchestration.start(&input).await.map_err(anyhow::Error::new) }
+        });
+    }
     reg(router, daemon, "orchestration.resolveDelegation", |d, input| {
         d.orchestration.resolve_delegation(
             input.get("projectRunId").and_then(Value::as_str).unwrap_or(""),

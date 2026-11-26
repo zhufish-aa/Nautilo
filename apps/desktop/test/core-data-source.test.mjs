@@ -131,7 +131,7 @@ test("chat workbench exposes live provider deltas, tools, and reasoning state", 
 
   assert.equal(existsSync(join(renderer, "features/sessions/RunActivityIndicator.tsx")), true);
   const activityIndicator = readFileSync(join(renderer, "features/sessions/RunActivityIndicator.tsx"), "utf8");
-  assert.match(activityIndicator, /latest && latest\.data\.kind !== "activity"/);
+  assert.match(activityIndicator, /role="status" className="conversation-run-wait"/);
 });
 
 test("chat timeline renders adjacent stored blocks while retaining tools and controls", () => {
@@ -144,15 +144,15 @@ test("chat timeline renders adjacent stored blocks while retaining tools and con
   assert.match(conversation, /blocks\.push\(block\)/);
   assert.doesNotMatch(conversation, /\.sort\(|\.splice\(|\.unshift\(/);
   assert.match(workbench, /timelineEntries\(timeline\)/);
-  assert.match(workbench, /ConversationTurnView turn=\{entry.turn\}/);
+  assert.match(workbench, /ConversationTurnView turn=\{entry.summary\}/);
   assert.match(workbench, /shell\(block.blockId/);
   assert.match(timeline, /function ToolActivityCard[\s\S]*const \[open, setOpen\] = useState\(false\)/);
   assert.match(timeline, /function CommandCard[\s\S]*const \[open, setOpen\] = useState\(false\)/);
   assert.doesNotMatch(timeline, /case "tool_group"/);
   assert.match(timeline, /case "file_change":[\s\S]*<FileChangeCard/);
   assert.match(timeline, /case "verification":[\s\S]*<VerificationCard/);
-  assert.match(timeline, /<Loader2[^>]*sessions.cards.running/);
-  assert.match(timeline, /useStreamingText/);
+  assert.match(timeline, /<Circle[^>]*sessions.cards.running/);
+  assert.match(timeline, /useSmoothStreamText/);
   assert.match(timeline, /prev\.event === next\.event/);
 });
 
@@ -186,7 +186,7 @@ test("delegated child work keeps the orchestration visibly running until stopped
   assert.match(page, /workbenchRunning = foregroundRunning \|\| waitingForDelegates \|\| waitingForApproval \|\| verifyingInBackground/);
   assert.doesNotMatch(page, /workbenchRunning = foregroundRunning \|\| orchestrationRunning/);
   assert.match(page, /running=\{workbenchRunning\}/);
-  assert.match(page, /RunActivityIndicator lifecycle=\{visibleLifecycle\}/);
+  assert.match(page, /RunActivityIndicator lifecycle=\{active \? visibleLifecycle : undefined\}/);
   assert.match(indicator, /等待协作任务/);
   assert.match(sessionList, /visibleSessionStatus\(session\.status, orchestrationLifecycle\)/);
   assert.match(agentPanel, /visibleSessionStatus\(session\.status, orchestrationLifecycle\)/);

@@ -16,7 +16,7 @@ pub fn template(db: &Connection, id: &str, revision: Option<u64>) -> CoreResult<
             .optional(),
         None => db
             .query_row(
-                "SELECT data FROM workflow_templates WHERE id=?1 ORDER BY revision DESC LIMIT 1",
+                "SELECT data FROM workflow_templates WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM workflow_template_archives WHERE id=?1) ORDER BY revision DESC LIMIT 1",
                 [id],
                 |r| r.get(0),
             )
@@ -27,7 +27,7 @@ pub fn template(db: &Connection, id: &str, revision: Option<u64>) -> CoreResult<
         .transpose()
 }
 pub fn templates(db: &Connection) -> CoreResult<Vec<Value>> {
-    let mut stmt=db.prepare("SELECT data FROM workflow_templates t WHERE revision=(SELECT MAX(revision) FROM workflow_templates WHERE id=t.id) ORDER BY updated_at DESC").map_err(db_fail)?;
+    let mut stmt=db.prepare("SELECT data FROM workflow_templates t WHERE revision=(SELECT MAX(revision) FROM workflow_templates WHERE id=t.id) AND NOT EXISTS(SELECT 1 FROM workflow_template_archives a WHERE a.id=t.id) ORDER BY updated_at DESC").map_err(db_fail)?;
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(0))
         .map_err(db_fail)?;
@@ -37,6 +37,18 @@ pub fn templates(db: &Connection) -> CoreResult<Vec<Value>> {
     })
     .collect()
 }
+pub fn archive_template(db: &Connection, id: &str, revision: u64) -> CoreResult<()> {
+    let changed = db.execute(
+        "INSERT OR IGNORE INTO workflow_template_archives(id)
+         SELECT ?1 WHERE ?2=(SELECT MAX(revision) FROM workflow_templates WHERE id=?1)",
+        params![id, revision],
+    ).map_err(db_fail)?;
+    if changed == 0 && !db.query_row("SELECT EXISTS(SELECT 1 FROM workflow_template_archives WHERE id=?1)", [id], |row| row.get::<_, bool>(0)).map_err(db_fail)? {
+        return Err(invalid("revision", "The template is missing or was updated. Reload it before archiving."));
+    }
+    Ok(())
+}
+
 pub fn save_template(db: &mut Connection, input: &Value, now: &str) -> CoreResult<Value> {
     let id = input["id"]
         .as_str()
@@ -46,6 +58,9 @@ pub fn save_template(db: &mut Connection, input: &Value, now: &str) -> CoreResul
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db_fail)?;
+    if tx.query_row("SELECT EXISTS(SELECT 1 FROM workflow_template_archives WHERE id=?1)", [id], |row| row.get::<_, bool>(0)).map_err(db_fail)? {
+        return Err(invalid("id", "The template was archived. Save a copy with a different id."));
+    }
     let current = template(&tx, id, None)?;
     let actual = current
         .as_ref()
@@ -335,6 +350,12 @@ mod tests {
             template(&db.raw, "template", None).unwrap().unwrap()["name"],
             "Second"
         );
+        assert!(archive_template(&db.raw, "template", 1).is_err());
+        archive_template(&db.raw, "template", 2).unwrap();
+        assert!(templates(&db.raw).unwrap().is_empty());
+        assert!(template(&db.raw, "template", None).unwrap().is_none());
+        assert_eq!(template(&db.raw, "template", Some(2)).unwrap().unwrap()["name"], "Second");
+        assert!(save_template(&mut db.raw, &input, "4").is_err());
     }
     #[test]
     fn workflow_repository_rolls_back_events_messages_and_state_together() {

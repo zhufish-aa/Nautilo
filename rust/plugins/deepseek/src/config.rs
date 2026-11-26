@@ -41,7 +41,7 @@ pub fn prepare(request: &Value) -> anyhow::Result<Config> {
         .flatten()
         .enumerate()
     {
-        let mut cfg = json!({"serverName":format!("nautilo_{index}"),"failOnStartupError":true});
+        let mut cfg = json!({"serverName":server["name"],"failOnStartupError":true});
         if server["transport"] == "http" {
             cfg["transport"] = json!("streamable-http");
             cfg["url"] = server["url"].clone();

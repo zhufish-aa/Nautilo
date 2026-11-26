@@ -7,7 +7,7 @@ export interface MarkdownParseResult {
 export type MarkdownWorkerPort = Pick<Worker, "postMessage" | "terminate" | "onmessage" | "onerror" | "onmessageerror">;
 
 type Listener = { result: (source: string, fragments: string[]) => void; error: () => void };
-type Request = { owner: object; source: string; id: number };
+type Request = { owner: object; source: string; id: number; blockwise?: true };
 
 /** One parser worker for the visible timeline, one in-flight snapshot, and
  * only the latest pending snapshot per mounted message. Map insertion order
@@ -44,7 +44,7 @@ export class MarkdownWorkerQueue {
     worker.onmessageerror = failed;
   }
 
-  subscribe(result: Listener["result"], error: Listener["error"]): { update: (source: string) => void; dispose: () => void } {
+  subscribe(result: Listener["result"], error: Listener["error"], blockwise = false): { update: (source: string) => void; dispose: () => void } {
     const owner = {};
     this.listeners.set(owner, { result, error });
     return {
@@ -54,7 +54,7 @@ export class MarkdownWorkerQueue {
           this.pending.delete(owner);
           return;
         }
-        this.pending.set(owner, { owner, source, id: this.nextId++ });
+        this.pending.set(owner, { owner, source, id: this.nextId++, blockwise: blockwise || undefined });
         this.drain();
       },
       dispose: () => {
@@ -80,7 +80,7 @@ export class MarkdownWorkerQueue {
     if (!next) return;
     this.pending.delete(next.owner);
     this.active = next;
-    try { this.worker.postMessage({ id: next.id, source: next.source }); }
+    try { this.worker.postMessage({ id: next.id, source: next.source, ...(next.blockwise ? { blockwise: true } : {}) }); }
     catch { this.fail(); }
   }
 

@@ -16,7 +16,7 @@ const created = (...blocks) => blocks.map(block => ({ type: "block_created", blo
 const seal = (blockId) => ({ type: "block_updated", blockId, sealed: true });
 const delta = (blockId, text) => ({ type: "block_delta", blockId, text });
 const shape = (timeline) => timelineEntries(timeline).map(entry => entry.block
-  ? entry.block.seq : [entry.turn.status, entry.process.map(block => block.seq)]);
+  ? entry.block.seq : entry.summary ? ["summary", entry.summary.runId] : [entry.turn.status, entry.process.map(block => block.seq)]);
 
 test("a visible workflow card splits the rows but does not repeat the turn disclosure", () => {
   const plan = { ...block(3, "notice", null, ""), content: { type: "workflow.plan", payload: { plan: { id: "plan" } } } };
@@ -25,9 +25,7 @@ test("a visible workflow card splits the rows but does not repeat the turn discl
     plan, block(4, "tool_call", "r1", "After plan"), block(5, "assistant_text", "r1", "Final"),
     block(6, "user_prompt", "r2", "Second"), block(7, "assistant_text", "r2", "Other reply")
   ], turns: [turn("r1", "completed", "b5"), turn("r2", "completed", "b7")] });
-  const entries = timelineEntries(timeline);
-  assert.deepEqual(entries.map(entry => entry.block?.seq ?? [entry.disclosureKey, entry.process.map(row => row.seq)]),
-    [1, ["b2", [2]], 3, ["b2", [4]], 5, 6, ["b7", []], 7]);
+  assert.deepEqual(shape(timeline), [1, ["completed", [2]], 3, ["summary", "r1"], ["completed", [4]], 5, 6, 7]);
 });
 
 test("streamed and reopened timelines preserve order, collapse interim text, and retain late edits", () => {
@@ -49,26 +47,26 @@ test("streamed and reopened timelines preserve order, collapse interim text, and
   live = applyTimelineChanges(live, page(2, [delta("b2", "ought"), seal("b2"), ...created(...blocks.slice(2, 7))]));
   assert.throws(() => applyTimelineChanges(live, page(3, [delta("b2", "replay")])), /closed block/);
   assert.throws(() => applyTimelineChanges(live, page(3, created(block(3, "tool_call", "r1", "late")))), /tail append/);
-  assert.deepEqual(shape(live), [1, ["running", [2, 3, 4, 5, 6, 7]]]);
+  assert.deepEqual(shape(live), [1, ["running", [2, 3]], ["running", [4, 5, 6]], 7]);
   const done = turn("r1", "completed", "b7");
   live = applyTimelineChanges(live, page(3, [], done));
-  assert.deepEqual(shape(live), [1, ["completed", [2, 3, 4, 5, 6]], 7]);
+  assert.deepEqual(shape(live), [1, ["completed", [2, 3]], ["summary", "r1"], ["completed", [4, 5, 6]], 7]);
   const next = turn("r2", "running");
   live = applyTimelineChanges(live, page(4, created(...blocks.slice(7)), next));
   const reopened = openTimeline({ revision: 4, blocks, turns: [done, next] });
   assert.deepEqual(live, reopened);
-  assert.deepEqual(shape(live), [1, ["completed", [2, 3, 4, 5, 6]], 7, 8, 9, ["running", [10]]]);
+  assert.deepEqual(shape(live), [1, ["completed", [2, 3]], ["summary", "r1"], ["completed", [4, 5, 6]], 7, 8, 9, ["running", [10]]]);
 });
 
 test("approval remains in place without grouping past it", () => {
   const blocks = [block(1, "thinking", "r", "Before"), block(2, "interaction", "r", "Question"), block(3, "tool_call", "r", "After")];
   const live = openTimeline({ revision: 1, blocks, turns: [turn("r", "completed")] });
   const resolved = applyTimelineChanges(live, page(2, [{ type: "block_updated", blockId: "b2", status: "resolved", result: { text: "Yes" } }]));
-  assert.deepEqual(shape(resolved), [["completed", [1]], 2, ["completed", [3]]]);
+  assert.deepEqual(shape(resolved), [["completed", [1]], 2, ["summary", "r"], ["completed", [3]]]);
   assert.equal(resolved.blocks[1].result.text, "Yes");
 });
 
-test("direct replies keep their completion row, and a turn with a process does not get a duplicate", () => {
+test("direct replies stay unwrapped, and a turn with a process has one summary just before its reply", () => {
   const blocks = [
     block(1, "user_prompt", "r1", "Hello"), block(2, "assistant_text", "r1", "Hello!"),
     block(3, "user_prompt", "r2", "Check"), block(4, "tool_call", "r2", "Listed files"),
@@ -80,6 +78,6 @@ test("direct replies keep their completion row, and a turn with a process does n
   ] }), page(2, [], summaries[0]));
   const reopened = openTimeline({ revision: 2, blocks, turns: summaries });
   assert.deepEqual(timelineEntries(live), timelineEntries(reopened));
-  assert.deepEqual(shape(reopened), [1, ["completed", []], 2, 3, ["completed", [4]], 5, 6]);
-  assert.equal(timelineEntries(reopened)[1].turn.durationMs, 3400);
+  assert.deepEqual(shape(reopened), [1, 2, 3, ["completed", [4]], 5, ["summary", "r2"], 6]);
+  assert.equal(timelineEntries(reopened)[5].summary.durationMs, 3400);
 });

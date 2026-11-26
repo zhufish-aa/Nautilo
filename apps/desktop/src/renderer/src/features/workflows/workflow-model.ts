@@ -1,18 +1,21 @@
 import type { WorkflowDefinition, WorkflowLayout, WorkflowRun, WorkflowInstance, WorkflowEvent, WorkflowNode } from "@agenthub/domain";
 
 export const nodeSize = (node: WorkflowNode): { width: number; height: number } =>
-  node.kind === "join" ? { width: 60, height: 60 } : { width: 168, height: Math.max(74, 26 + node.exits.length * 18) };
+  node.kind === "join" || node.kind === "condition" ? { width: 44, height: 44 }
+    : { width: node.kind === "agent" ? 204 : 162, height: Math.max(62, 22 + node.exits.length * 14) };
 export const nodeLabel = (node: WorkflowNode): string => node.name || node.id;
 export const nodeKinds = { main: "主 Agent", dispatch: "分发", agent: "Agent", join: "汇合", condition: "条件判断", call: "子流程" } as const;
 
 export function nodeTone(node: Pick<WorkflowNode, "id" | "kind" | "role">): "indigo" | "cyan" | "violet" | "amber" | "emerald" | "neutral" {
   if (node.id === "$return" || node.id === "$return_needs_decision") return "emerald";
-  if (node.kind === "main" || node.kind === "dispatch") return "indigo";
-  if (node.kind === "join" || node.kind === "condition") return "violet";
+  if (node.kind === "main") return "indigo";
+  if (node.kind === "dispatch") return "cyan";
+  if (node.kind === "join") return "emerald";
+  if (node.kind === "condition") return "amber";
   if (node.kind !== "agent") return "neutral";
   switch (node.role?.trim().toLowerCase()) {
     case "explorer": return "cyan";
-    case "analyst": return "violet";
+    case "analyst": return "indigo";
     case "verifier":
     case "reviewer": return "amber";
     default: return "neutral";
@@ -47,8 +50,7 @@ export function workflowEventText(event: WorkflowEvent, definition: WorkflowDefi
 }
 
 export function starterWorkflow(): { definition: WorkflowDefinition; layout: WorkflowLayout } {
-  return {
-    definition: {
+  const definition: WorkflowDefinition = {
       schemaVersion: 1, id: crypto.randomUUID(), name: "并行定位与交叉验证", entry: "main", inputs: { question: "text" },
       nodes: [
         { id: "main", name: "主 Agent", kind: "main", dispatch: "all", exits: [{ id: "code", name: "查代码" }, { id: "trace", name: "查时序" }] },
@@ -64,26 +66,112 @@ export function starterWorkflow(): { definition: WorkflowDefinition; layout: Wor
         { from: ["join", "done"], to: "judge" }, { from: ["judge", "done"], to: "$return" },
         { from: ["judge", "verify"], to: "verify" }, { from: ["verify", "done"], to: "judge", maxTraversals: 2, onLimit: "$return_needs_decision" }
       ]
-    },
-    layout: { nodes: { main: { x: 20, y: 180 }, code: { x: 245, y: 80 }, trace: { x: 245, y: 280 }, join: { x: 485, y: 185 }, judge: { x: 620, y: 175 }, verify: { x: 890, y: 285 }, $return: { x: 890, y: 70 } } }
   };
+  return { definition, layout: initialLayout(definition) };
 }
+export const starterKinds = [
+  { id: "parallel", label: "并行探索 + 交叉汇总" },
+  { id: "review", label: "执行 + 独立复核" },
+  { id: "condition", label: "条件意图分流" },
+] as const;
+
+export function applyStarter(blank: WorkflowDefinition, kind: typeof starterKinds[number]["id"]): WorkflowDefinition {
+  const { definition } = starterWorkflow();
+  definition.id = blank.id;
+  const title = starterKinds.find(item => item.id === kind)!.label;
+  for (const node of definition.nodes) if (node.kind === "agent") {
+    node.outputDescriptions = {
+      summary: "用一两句话写明本步发现或结论。",
+      evidence: "逐条列出可核对的依据，例如文件和行号、日志片段或复现步骤。",
+    };
+  }
+  if (kind === "parallel") {
+    definition.nodes = definition.nodes.filter(node => node.id !== "verify");
+    const judge = definition.nodes.find(node => node.id === "judge")!;
+    judge.prompt = "用 {{steps.code.latest.result.evidence}} 和 {{steps.trace.latest.result.evidence}} 回答 {{input.question}}，提交 summary 和 evidence。";
+    judge.exits = judge.exits.filter(exit => exit.id === "done");
+    definition.edges = definition.edges.filter(edge => edge.to !== "verify" && edge.from[0] !== "verify");
+  }
+  if (kind === "review") {
+    const [main, , , , judge, verify] = definition.nodes;
+    main.exits = [{ id: "start", name: "开始执行" }];
+    judge.name = "执行任务";
+    judge.prompt = "处理 {{input.question}}，提交 summary 和 evidence。初稿交给复核，收到复核结论后决定是否交回主会话。";
+    definition.nodes = [main, judge, verify];
+    definition.edges = [{ from: ["main", "start"], to: judge.id }, ...definition.edges.filter(edge => [judge.id, verify.id].includes(edge.from[0]))];
+  }
+  if (kind === "condition") {
+    const [main, code, trace] = definition.nodes;
+    main.exits = [{ id: "start", name: "判断意图" }];
+    definition.inputs = { question: "text", needsCode: "boolean" };
+    definition.inputDefaults = { needsCode: false };
+    definition.nodes = [main, {
+      id: "route", name: "判断意图", kind: "condition",
+      exits: [{ id: "code", name: "代码探索" }, { id: "trace", name: "检查时序" }],
+      cases: [{ path: "input.needsCode", equals: true, exit: "code" }], otherwise: "trace",
+    }, code, trace];
+    definition.edges = [
+      { from: ["main", "start"], to: "route" },
+      { from: ["route", "code"], to: code.id }, { from: ["route", "trace"], to: trace.id },
+      { from: [code.id, "done"], to: "$return" }, { from: [trace.id, "done"], to: "$return" },
+    ];
+  }
+  definition.name = title;
+  return definition;
+}
+
 export function initialLayout(definition: WorkflowDefinition): WorkflowLayout {
-  const levels = new Map([[definition.entry, 0]]);
-  for (let pass = 0; pass < definition.nodes.length; pass++) {
-    for (const edge of definition.edges.filter(edge => !edge.maxTraversals && !edge.to.startsWith("$"))) {
-      const level = levels.get(edge.from[0]);
-      if (level !== undefined && !levels.has(edge.to)) levels.set(edge.to, level + 1);
-    }
-  }
-  const rows = new Map<number, number>();
-  const nodes: WorkflowLayout["nodes"] = {};
+  const sizes = new Map(definition.nodes.map(node => [node.id, nodeSize(node)]));
+  const exits = new Map(definition.edges.map(edge => [JSON.stringify(edge.from), edge.maxTraversals ? edge.onLimit : edge.to]));
+  const outgoing = new Map<string, string[]>();
   for (const node of definition.nodes) {
-    const level = levels.get(node.id) ?? 0, row = rows.get(level) ?? 0;
-    nodes[node.id] = { x: 30 + level * 245, y: 65 + row * 170 }; rows.set(level, row + 1);
+    const targets = node.exits.map(port => exits.get(JSON.stringify([node.id, port.id]))).filter((id): id is string => !!id);
+    for (const id of targets) if (id.startsWith("$")) sizes.set(id, nodeSize({ id, kind: "main", exits: [] }));
+    outgoing.set(node.id, [...new Set(targets)]);
   }
-  nodes.$return = { x: (Math.max(...levels.values()) + 1) * 245 + 30, y: 65 };
-  if (definition.edges.some(edge => edge.to === "$return_needs_decision" || edge.onLimit === "$return_needs_decision")) nodes.$return_needs_decision = { x: nodes.$return.x, y: 290 };
+  const visiting = new Set<string>(), visited = new Set<string>();
+  const order: string[] = [];
+  function visit(id: string): void {
+    if (visited.has(id)) return;
+    visiting.add(id);
+    const targets = (outgoing.get(id) ?? []).filter(target => sizes.has(target) && !visiting.has(target));
+    outgoing.set(id, targets);
+    targets.forEach(visit);
+    visiting.delete(id);
+    visited.add(id);
+    order.push(id);
+  }
+  [...sizes.keys()].reverse().forEach(visit);
+  const levels = new Map<string, number>([[definition.entry, 0]]);
+  const lanes = new Map<string, number[]>();
+  const columns: { width: number; rows: { id: string; center: number; height: number }[] }[] = [];
+  for (const id of order.reverse()) {
+    const level = levels.get(id) ?? 0;
+    const size = sizes.get(id)!;
+    const column = columns[level] ??= { width: 0, rows: [] };
+    const proposals = lanes.get(id) ?? [0];
+    const wanted = proposals.reduce((sum, value) => sum + value, 0) / proposals.length;
+    const separation = (height: number) => (height + size.height) / 2 + 70;
+    const centers = [wanted, ...column.rows.flatMap(row => [row.center - separation(row.height), row.center + separation(row.height)])];
+    const center = centers.sort((a, b) => Math.abs(a - wanted) - Math.abs(b - wanted))
+      .find(value => column.rows.every(row => Math.abs(row.center - value) >= separation(row.height)))!;
+    column.rows.push({ id, center, height: size.height });
+    column.width = Math.max(column.width, size.width);
+    const targets = outgoing.get(id) ?? [];
+    targets.forEach((target, index) => {
+      levels.set(target, Math.max(level + 1, levels.get(target) ?? 0));
+      const values = lanes.get(target) ?? [];
+      values.push(center + (index - (targets.length - 1) / 2) * 156);
+      lanes.set(target, values);
+    });
+  }
+  const nodes: WorkflowLayout["nodes"] = {};
+  const top = Math.min(0, ...columns.flatMap(column => column.rows.map(row => row.center - row.height / 2)));
+  let x = 30;
+  for (const column of columns) {
+    for (const row of column.rows) nodes[row.id] = { x, y: Math.round(row.center - row.height / 2 - top + 65) };
+    x += column.width + 158;
+  }
   return { nodes };
 }
 export function eventProjection(run: WorkflowRun, sequence?: number): { instances: Map<string, WorkflowInstance>; events: WorkflowEvent[] } {
@@ -123,13 +211,14 @@ export function eventProjection(run: WorkflowRun, sequence?: number): { instance
     if (states[event.type]) instance.status = states[event.type];
     if (event.type === "node.retrying") {
       instance.attempt = data.attempt ?? instance.attempt + 1;
-      instance.error = undefined; instance.runId = undefined; instance.nativeWork = undefined;
+      instance.error = undefined; instance.runId = undefined; instance.nativeWork = undefined; instance.completedAt = undefined;
       instance.branches = undefined; instance.result = undefined; instance.reminders = 0; instance.childRunId = undefined;
     }
     if (["node.waiting_verification", "node.verification_started"].includes(event.type)) instance.status = "verifying";
     if (data.acceptance) instance.acceptance = structuredClone(data.acceptance);
     if (data.workspace) instance.workspace = structuredClone(data.workspace);
     if (event.type === "node.dispatched") { instance.runId = data.runId; instance.sessionId = data.sessionId; instance.prompt = data.prompt ?? instance.prompt; }
+    if (["node.completed","node.skipped","join.completed"].includes(event.type)) instance.completedAt = event.timestamp;
     if (event.type === "node.native_children") instance.nativeWork = data.nativeWork ? structuredClone(data.nativeWork) : undefined;
     if (event.type === "node.native_children_stopped" && instance.nativeWork) instance.nativeWork.released = true;
     if (event.type === "node.native_children_detached" && instance.nativeWork) instance.nativeWork.detached = true;

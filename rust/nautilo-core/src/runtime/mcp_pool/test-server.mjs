@@ -16,6 +16,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     else reply(message.id, { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } });
   } else if (message.id === 'roots') {
     reply(initialization.id, { protocolVersion: initialization.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' }, roots: message.result.roots });
+  } else if (message.method === 'tools/list') {
+    reply(message.id, { tools: [{ name: 'echo', pid: process.pid }] });
   } else if (message.method === 'tools/call') {
     if (message.params.name === 'pending') continue;
     const token = message.params._meta?.progressToken;

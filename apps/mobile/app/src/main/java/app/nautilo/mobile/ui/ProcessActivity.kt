@@ -1,6 +1,11 @@
 package app.nautilo.mobile.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -14,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -22,9 +28,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.nautilo.mobile.data.*
@@ -33,25 +41,46 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 /** Android presentation of PC ProcessDisclosure/ToolActivityCard/CodeExecutionCard. */
-@Composable internal fun ProcessActivity(item: ActivityItem) {
+@Composable internal fun ProcessActivity(item: ActivityItem, status: String = activityStatus(item), reveal: Boolean = false) {
     val p = item.payload
     val input = p.text("inputSummary", if (item.kind == "terminal") p.text("command", item.title) else item.detail.substringBefore('\n'))
     val output = p.text("outputSummary")
-    val status = activityStatus(item)
     when {
-        item.kind == "thought" -> ProcessDisclosure(item.id, "思考", reasoningPreview(item.detail), Icons.Outlined.Psychology, item.running, followPreviewTail = true) { Markdown(item.detail, fontSize = 14f, lineHeight = 23f, color = Secondary) }
+        item.kind == "thought" -> {
+            val text = rememberStreamText(item.detail, item.running, reveal)
+            ProcessDisclosure(item.id, "思考", reasoningPreview(text.value), Icons.Outlined.Psychology, item.running, followPreviewTail = true) {
+                Markdown(text.value, fontSize = 14f, lineHeight = 23f, color = Secondary, streaming = text.live, fade = text.fade)
+            }
+        }
         p.optJSONObject("subagent") != null || item.kind == "team" -> DelegationActivity(item)
         p.optJSONObject("codeExecution") != null || item.title == "run_code" -> CodeExecutionActivity(item, input, output)
         else -> {
             val inferred = remember(item.title, input, p.optJSONObject("fileDiff")?.toString()) { p.optJSONObject("fileDiff") ?: toolInputFileDiff(item.title, input) }
-            val label = if (item.kind == "terminal") "运行 ${p.text("command", item.title).replace(Regex("\\s+"), " ")}" else toolActivityLabel(item.title, status, input)
-            ProcessDisclosure(item.id, label, "", toolIcon(if (item.kind == "terminal") "command" else toolActivityKind(item.title, input)), item.running, status == "failed",
-                enabled = inferred != null || input.isNotBlank() || output.isNotBlank()) {
+            val kind = when {
+                item.kind == "terminal" -> "command"
+                isBrowserActivity(item.title) -> "browser"
+                else -> toolActivityKind(item.title, input)
+            }
+            val command = if (kind == "command") p.text("command").ifBlank { toolCommand(input).orEmpty() } else ""
+            val path = if (kind in listOf("read", "edit", "write", "skill")) inferred?.text("path")?.takeIf(String::isNotBlank) ?: toolFilePath(input) else null
+            val label = when (kind) {
+                "command" -> if (status == "failed") "命令执行失败" else "运行"
+                "browser" -> if (status == "failed") "浏览器操作失败" else "浏览器操作"
+                else -> toolActivityLabel(item.title, status, input, path != null)
+            }
+            val lineCounts by produceState<Pair<Int, Int>?>(null, inferred) {
+                val change = inferred?.let { withContext(Dispatchers.Default) { FileChange.decode(it) } }
+                value = change?.takeIf { it.verifiedDiff }?.let { it.added to it.removed }
+            }
+            ProcessDisclosure(item.id, label, path?.fileName().orEmpty().ifBlank { command.lineSequence().firstOrNull().orEmpty() },
+                toolIcon(kind), item.running, status == "failed", retainPreview = true, path = path,
+                enabled = inferred != null || input.isNotBlank() || output.isNotBlank() || command.isNotBlank(),
+                accessory = { lineCounts?.let { DiffCounts(it.first, it.second) } }) {
                 NPanel(shape = RoundedCornerShape(12.dp), border = BorderStroke(.5.dp, Line)) {
                     Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (inferred != null) ToolDiff(inferred)
-                        if (input.isNotBlank()) {
-                            if (inferred == null) EventCode(input) else ProcessDisclosure("${item.id}:raw", "原始输入", "", Icons.Outlined.Code) { EventCode(input) }
+                        if (input.isNotBlank() || command.isNotBlank()) {
+                            if (inferred == null) EventCode(command.ifBlank { input }) else ProcessDisclosure("${item.id}:raw", "原始输入", "", Icons.Outlined.Code) { EventCode(input) }
                         }
                         if (output.isNotBlank()) { if (input.isNotBlank() || inferred != null) NDivider(); ToolOutputView(output, status == "failed") }
                         if (p.has("exitCode")) Text("退出码 ${p.optInt("exitCode")}", color = if (p.optInt("exitCode") == 0) Secondary else Danger, fontSize = 12.sp)
@@ -62,8 +91,9 @@ import org.json.JSONObject
     }
 }
 
-private fun toolIcon(kind: String): ImageVector = when (kind) {
+internal fun toolIcon(kind: String): ImageVector = when (kind) {
     "command" -> Icons.Outlined.Terminal; "read" -> Icons.Outlined.Description; "write", "edit" -> Icons.Outlined.EditNote
+    "delete" -> Icons.Outlined.DeleteOutline; "browser" -> Icons.Outlined.Language; "agent" -> Icons.Outlined.SmartToy
     "skill" -> Icons.Outlined.AutoStories; "search" -> Icons.Outlined.Search; "mcp" -> Icons.Outlined.Extension
     "web" -> Icons.Outlined.Language; "image" -> Icons.Outlined.Image; "code" -> Icons.Outlined.Code
     "question" -> Icons.Outlined.HelpOutline; else -> Icons.Outlined.Build
@@ -71,8 +101,21 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
 
 @Composable internal fun ProcessDisclosure(id: String, label: String, preview: String, icon: ImageVector,
     running: Boolean = false, failed: Boolean = false, retainPreview: Boolean = false, enabled: Boolean = true, followPreviewTail: Boolean = false,
+    path: String? = null, accessory: @Composable () -> Unit = {},
     content: @Composable () -> Unit) {
     var open by rememberSaveable(id) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        ProcessHeader(id, label, if (open && !retainPreview) "" else preview, icon, open, running, failed, followPreviewTail, path, accessory,
+            onToggle = if (enabled) { { open = !open } } else null)
+        ProcessFold(open && enabled) {
+            Box(Modifier.fillMaxWidth().padding(start = 22.dp, top = 5.dp, bottom = 10.dp)) { content() }
+        }
+    }
+}
+
+@Composable internal fun ProcessHeader(id: String, label: String, preview: String, icon: ImageVector, open: Boolean,
+    running: Boolean = false, failed: Boolean = false, followPreviewTail: Boolean = false,
+    path: String? = null, accessory: @Composable () -> Unit = {}, iconTint: Color? = null, onToggle: (() -> Unit)?) {
     val previewScroll = rememberScrollState()
     LaunchedEffect(preview, previewScroll.maxValue, open) {
         if (followPreviewTail && !open) previewScroll.scrollTo(previewScroll.maxValue)
@@ -80,24 +123,43 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
     val angle by animateFloatAsState(if (open) 90f else 0f,
         tween(if (LocalNautiloMotion.current) 180 else 0, easing = MotionEase), label = "tool-chevron")
     val tone = if (failed) Danger else Secondary
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { open = !open }.heightIn(min = 36.dp).padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (running && !open) NSpinner(Modifier.size(14.dp), color = tone)
-            else Icon(if (open) Icons.Outlined.ExpandLess else if (failed) Icons.Outlined.ErrorOutline else icon, null, Modifier.size(15.dp), tint = tone)
-            if (preview.isBlank() || open && !retainPreview) Text(label, Modifier.weight(1f), fontSize = 14.sp, lineHeight = 22.sp, color = tone, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    val opener = LocalFileOpener.current
+    val reference = remember(path) { path?.let { fileReference(it, allowUnknown = true) } }
+    Row(Modifier.fillMaxWidth().then(if (onToggle != null) Modifier.clickable(onClick = onToggle) else Modifier)
+        .heightIn(min = 36.dp).padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Icon(if (failed) Icons.Outlined.ErrorOutline else icon, null, Modifier.size(15.dp), tint = iconTint ?: if (running) Accent else tone)
+            if (preview.isBlank()) Text(label, Modifier.weight(1f), fontSize = 13.5.sp, lineHeight = 20.sp, fontWeight = FontWeight.Normal, color = tone, maxLines = 2, overflow = TextOverflow.Ellipsis)
             else {
-                Text(label, fontSize = 14.sp, color = tone, maxLines = 1)
-                Text("·", color = tone, fontSize = 14.sp)
-                Text(preview, Modifier.weight(1f).then(if (followPreviewTail) Modifier.horizontalScroll(previewScroll, enabled = false).testTag("process-preview:$id") else Modifier),
-                    fontSize = 14.sp, color = tone, maxLines = 1, softWrap = false, overflow = if (followPreviewTail) TextOverflow.Clip else TextOverflow.Ellipsis)
+                Text(label, fontSize = 13.5.sp, fontWeight = FontWeight.Normal, color = tone, maxLines = 1)
+                Text("·", color = tone, fontSize = 13.5.sp)
+                Text(preview,
+                    fontSize = 13.5.sp, fontWeight = FontWeight.Normal, color = tone, maxLines = 1, softWrap = false,
+                    overflow = if (followPreviewTail) TextOverflow.Clip else TextOverflow.Ellipsis,
+                    textDecoration = if (reference != null && opener != null) TextDecoration.Underline else TextDecoration.None,
+                    modifier = Modifier.weight(1f).then(when {
+                        followPreviewTail -> Modifier.horizontalScroll(previewScroll, enabled = false).testTag("process-preview:$id")
+                        reference != null && opener != null -> Modifier.clickable { opener(reference) }
+                        else -> Modifier
+                    }))
             }
-            if (enabled) Icon(Icons.Outlined.ChevronRight, null, Modifier.size(13.dp).graphicsLayer { rotationZ = angle }, tint = tone)
-        }
-        if (open && enabled) MotionArrival(id, animate = true, distance = 3.dp) {
-            Box(Modifier.fillMaxWidth().padding(start = 22.dp, top = 5.dp, bottom = 10.dp)) { content() }
-        }
+            accessory()
+            if (onToggle != null) Icon(Icons.Outlined.ChevronRight, if (open) "收起" else "展开", Modifier.size(13.dp).graphicsLayer { rotationZ = angle }, tint = tone)
     }
 }
+
+@Composable internal fun ProcessFold(visible: Boolean, content: @Composable () -> Unit) {
+    val motion = LocalNautiloMotion.current
+    AnimatedVisibility(visible, enter = if (motion) expandVertically(tween(220, easing = MotionEase), expandFrom = Alignment.Top) + fadeIn(tween(220, easing = MotionEase)) else androidx.compose.animation.EnterTransition.None,
+        exit = if (motion) shrinkVertically(tween(220, easing = MotionEase), shrinkTowards = Alignment.Top) + fadeOut(tween(220, easing = MotionEase)) else androidx.compose.animation.ExitTransition.None) { content() }
+}
+
+@Composable internal fun DiffCounts(additions: Int, deletions: Int) {
+    val numbers = LocalTextStyle.current.copy(fontFeatureSettings = "tnum")
+    Text("+$additions", fontSize = 11.5.sp, color = Green, style = numbers)
+    Text("−$deletions", fontSize = 11.5.sp, color = Danger, style = numbers)
+}
+
+internal fun String.fileName() = replace('\\', '/').substringAfterLast('/')
 
 @Composable private fun CodeExecutionActivity(item: ActivityItem, input: String, output: String) {
     val program = remember(input) { codeExecutionInput(input) }
@@ -162,6 +224,7 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
         change to coloredLines(change.lines, change.path)
     } }
     val change = rendered?.first
+    val palette = MobilePalette
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(diff.text("path", "文件变更"), Modifier.weight(1f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -173,7 +236,11 @@ private fun toolIcon(kind: String): ImageVector = when (kind) {
             Column(Modifier.fillMaxWidth().heightIn(max = 320.dp).verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
                 lines.forEach { colored ->
                     val line = colored.line
-                    val background = when (line.kind) { DiffKind.Added -> Color(0xFFEDF6EF); DiffKind.Removed -> Color(0xFFFCEFF0); else -> Color.Transparent }
+                    val background = when (line.kind) {
+                        DiffKind.Added -> lerp(palette.card, palette.green, .09f)
+                        DiffKind.Removed -> lerp(palette.card, palette.danger, .09f)
+                        else -> Color.Transparent
+                    }
                     Row(Modifier.fillMaxWidth().background(background).padding(horizontal = 8.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text((line.newNumber ?: line.oldNumber)?.toString().orEmpty(), Modifier.width(30.dp), fontSize = 11.sp, fontFamily = UiFont, color = Secondary)
                         Text(when (line.kind) { DiffKind.Added -> "+"; DiffKind.Removed -> "−"; else -> " " }, fontSize = 12.sp, fontFamily = UiFont, color = if (line.kind == DiffKind.Removed) Danger else Secondary)

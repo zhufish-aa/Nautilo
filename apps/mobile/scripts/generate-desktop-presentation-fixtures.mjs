@@ -1,7 +1,17 @@
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { toolActivityKind, toolActivityLabel, codeExecutionInput, toolInputFileDiff } from "../../desktop/src/renderer/src/lib/tool-display.ts";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { reasoningPreview, toolOutput, toolCallTree } from "../../desktop/src/renderer/src/lib/process-display.ts";
+
+const requireDesktop = createRequire(new URL("../../desktop/package.json", import.meta.url));
+const { build } = createRequire(requireDesktop.resolve("vite/package.json"))("esbuild");
+const { outputFiles } = await build({
+  entryPoints: [fileURLToPath(new URL("../../desktop/src/renderer/src/lib/tool-display.ts", import.meta.url))],
+  bundle: true, write: false, format: "esm"
+});
+const { toolActivityKind, toolActivityLabel, codeExecutionInput, toolInputFileDiff } =
+  await import("data:text/javascript;base64," + Buffer.from(outputFiles[0].contents).toString("base64"));
 
 const tools = [
   ["read_file", "done", { file_path: "src/main.rs" }], ["Read", "running", { path: "README.md" }],

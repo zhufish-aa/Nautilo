@@ -51,38 +51,53 @@ export function applyTimelineChanges(current: SessionTimeline, page: TimelineCha
 }
 
 export type TimelineEntry = { block: TimelineBlock }
-  | { turn: TimelineTurn; process: TimelineBlock[]; disclosureKey: string };
+  | { turn: TimelineTurn; process: TimelineBlock[] }
+  | { summary: TimelineTurn };
 
 export function timelineEntries({ blocks, turns }: SessionTimeline): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
-  const turnsWithProcess = new Set<TimelineTurn>();
+  const lastProcess = new Map<TimelineTurn, TimelineEntry>();
+  const runningTails = new Map<string, TimelineBlock>();
+  for (const block of blocks) {
+    if (block.runId && turns.get(block.runId)?.status === "running" &&
+        ["assistant_text", "thinking", "tool_call", "user_append"].includes(block.kind)) {
+      runningTails.set(block.runId, block);
+    }
+  }
   let group: Extract<TimelineEntry, { process: TimelineBlock[] }> | undefined;
-  let previousProcess: typeof group;
   for (const block of blocks) {
     const turn = block.runId ? turns.get(block.runId) : undefined;
-    const workflowCard = block.content.type === "workflow.plan";
-    const foldable = turn && !workflowCard && block.kind !== "user_prompt" && block.kind !== "late_result"
-      && block.kind !== "interaction" && block.kind !== "approval" && block.kind !== "legacy"
-      && turn.finalBlockId !== block.blockId;
-    if (!foldable) {
+    const reply = block.kind === "assistant_text" && block === runningTails.get(turn?.runId ?? "");
+    const process = turn && turn.finalBlockId !== block.blockId && !reply
+      && ["thinking", "tool_call", "assistant_text", "assistant_note", "user_append", "notice"].includes(block.kind)
+      && !["workflow.plan", "run.failed"].includes(String(block.content.type));
+    if (!process) {
       group = undefined;
-      if (!workflowCard) previousProcess = undefined;
       entries.push({ block });
     } else {
-      if (group?.turn !== turn) {
-        const disclosureKey = previousProcess?.turn === turn ? previousProcess.disclosureKey : block.blockId;
-        group = { turn, process: [], disclosureKey };
-        previousProcess = group;
+      // Start a row at each steering message so it remains a navigation target.
+      if (group?.turn !== turn || block.kind === "user_append") {
+        group = { turn, process: [] };
         entries.push(group);
-        turnsWithProcess.add(turn);
+        lastProcess.set(turn, group);
       }
       group.process.push(block);
     }
   }
-  return entries.flatMap<TimelineEntry>(entry => {
-    if (!("block" in entry) || !entry.block.runId) return [entry];
-    const turn = turns.get(entry.block.runId);
-    return turn?.finalBlockId === entry.block.blockId && !turnsWithProcess.has(turn)
-      ? [{ turn, process: [], disclosureKey: entry.block.blockId }, entry] : [entry];
+  return entries.flatMap<TimelineEntry>((entry, index) => {
+    if ("process" in entry) {
+      const { turn } = entry;
+      const next = entries[index + 1];
+      if (turn.status !== "running" && lastProcess.get(turn) === entry &&
+          (!turn.finalBlockId || (next && "block" in next && next.block.blockId === turn.finalBlockId))) {
+        return [{ summary: turn }, entry];
+      }
+    } else if ("block" in entry && entry.block.runId) {
+      const turn = turns.get(entry.block.runId);
+      if (turn?.finalBlockId === entry.block.blockId && lastProcess.has(turn) && lastProcess.get(turn) !== entries[index - 1]) {
+        return [{ summary: turn }, entry];
+      }
+    }
+    return [entry];
   });
 }

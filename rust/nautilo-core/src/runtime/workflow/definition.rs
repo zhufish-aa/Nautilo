@@ -9,6 +9,8 @@ pub struct Definition {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub entry: String,
     #[serde(default)]
     pub inputs: BTreeMap<String, Value>,
@@ -29,12 +31,16 @@ pub struct Node {
     pub exits: Vec<Exit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypass: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(default = "tool")]
     pub completion: String,
     #[serde(default)]
     pub outputs: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub output_descriptions: BTreeMap<String, String>,
     #[serde(default = "one")]
     pub exit_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,7 +116,7 @@ impl Node {
         } else {
             "Submit branch and result using the available workflow_submit / agenthub_workflow_submit tool (possibly MCP-namespaced) before ending the turn. Echo the exact instanceId and attempt from the workflow scope above. Once the receipt says accepted, end this turn immediately. The workflow engine continues from your result. Do not poll its status or perform more work after acceptance."
         };
-        format!(
+        let mut instruction = format!(
             "{format} Valid outlet names: {}. Result fields: {}. Select {}.",
             self.exits
                 .iter()
@@ -123,7 +129,12 @@ impl Node {
             } else {
                 "exactly one outlet"
             }
-        )
+        );
+        if !self.output_descriptions.is_empty() {
+            instruction.push_str("\nResult field descriptions: ");
+            instruction.push_str(&json!(self.output_descriptions).to_string());
+        }
+        instruction
     }
 }
 fn all() -> String {
@@ -264,6 +275,9 @@ impl Definition {
         }
         let mut ids = HashSet::new();
         for n in &self.nodes {
+            if n.bypass && (n.kind != "agent" || n.exits.len() != 1 || n.for_each.is_some()) {
+                return Err(format!("{} cannot bypass: use an Agent with a single outlet and no list dispatch", n.id));
+            }
             if !(1..=5).contains(&n.max_attempts) || (n.max_attempts > 1 && n.kind != "agent") {
                 return Err(format!("Invalid attempt limit on {}", n.id));
             }
@@ -423,6 +437,9 @@ impl Definition {
             }
             for t in n.outputs.values() {
                 validate_type(t)?;
+            }
+            if let Some(field) = n.output_descriptions.keys().find(|field| !n.outputs.contains_key(*field)) {
+                return Err(format!("{} describes an undeclared result field: {field}", n.id));
             }
             if let Some(prompt) = &n.prompt {
                 validate_prompt(prompt, n)?;

@@ -6,12 +6,15 @@ import android.content.ClipboardManager
 import android.graphics.Typeface
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.os.SystemClock
 import android.text.Spanned
 import android.text.Spannable
 import android.text.SpannableString
 import android.text.style.ForegroundColorSpan
 import android.text.style.URLSpan
 import android.text.style.ClickableSpan
+import android.text.style.CharacterStyle
+import android.text.style.UpdateAppearance
 import android.text.TextPaint
 import android.text.method.LinkMovementMethod
 import android.view.Gravity
@@ -19,6 +22,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.MotionEvent
 import android.view.ViewConfiguration
+import android.view.ViewTreeObserver
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TableLayout
@@ -43,16 +47,19 @@ import org.commonmark.node.FencedCodeBlock
 import org.commonmark.node.IndentedCodeBlock
 import org.commonmark.parser.Parser
 import app.nautilo.mobile.data.FileReference
+import app.nautilo.mobile.data.StreamingMarkdownBoundary
 import app.nautilo.mobile.data.fileReference
 import app.nautilo.mobile.data.normalizeMarkdownFileLinks
 
 internal val LocalFileOpener = staticCompositionLocalOf<((FileReference) -> Unit)?> { null }
 
-@Composable fun Markdown(text: String, modifier: Modifier = Modifier, fontSize: Float = 17f, lineHeight: Float = 28f, color: Color = Ink) {
+@Composable fun Markdown(text: String, modifier: Modifier = Modifier, fontSize: Float = 17f, lineHeight: Float = 28f,
+    color: Color = Ink, streaming: Boolean = false, fade: Boolean = false) {
     val open = LocalFileOpener.current
     val palette = MobilePalette
     androidx.compose.runtime.key(palette) {
-        AndroidView(factory = { MarkdownView(it, fontSize, lineHeight, color.toArgb(), palette) }, modifier = modifier.fillMaxWidth(), update = { it.onFileOpen = open; it.render(text) })
+        AndroidView(factory = { MarkdownView(it, fontSize, lineHeight, color.toArgb(), palette) },
+            modifier = modifier.fillMaxWidth(), update = { it.onFileOpen = open; it.render(text, streaming, fade) })
     }
 }
 
@@ -80,12 +87,100 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
             }
         }).build()
     private var source: String? = null
+    private var streamSource: String? = null
+    private var boundary = StreamingMarkdownBoundary()
+    private var frozen = 0
+    private var tail: TextView? = null
+    private var pendingFormat: String? = null
+    private val selectionChanged = ViewTreeObserver.OnPreDrawListener {
+        val pending = pendingFormat
+        if (pending != null && !containsSelection(this)) render(pending)
+        true
+    }
     init { orientation = VERTICAL }
     private fun dp(value: Int) = (resources.displayMetrics.density * value).toInt()
 
-    fun render(markdown: String) {
+    fun render(markdown: String, streaming: Boolean = false, fade: Boolean = false) {
+        if (streaming) {
+            cancelPendingFormat()
+            renderStream(markdown, fade)
+            return
+        }
+        if (streamSource != null) {
+            if (containsSelection(this)) {
+                if (pendingFormat == null) viewTreeObserver.addOnPreDrawListener(selectionChanged)
+                pendingFormat = markdown
+                renderStream(markdown, false)
+                return
+            }
+            cancelPendingFormat()
+            resetStream()
+        }
         if (source == markdown) return
         source = markdown
+        renderBlocks(markdown, 0)
+    }
+
+    private fun cancelPendingFormat() {
+        if (pendingFormat != null) viewTreeObserver.removeOnPreDrawListener(selectionChanged)
+        pendingFormat = null
+    }
+
+    override fun onDetachedFromWindow() {
+        cancelPendingFormat()
+        super.onDetachedFromWindow()
+    }
+
+    private fun resetStream() {
+        source = null
+        streamSource = null
+        frozen = 0
+        tail = null
+        boundary = StreamingMarkdownBoundary()
+        removeAllViews()
+    }
+
+    private fun renderStream(markdown: String, fade: Boolean) {
+        val previous = streamSource
+        if (previous == markdown) return
+        val appending = previous != null && markdown.startsWith(previous)
+        if (!appending) resetStream()
+        val previousLength = streamSource?.length ?: 0
+        streamSource = markdown
+        boundary.append(markdown)
+        if (boundary.end > frozen && !containsSelection(this)) {
+            tail?.let(::removeView)
+            tail = null
+            renderBlocks(markdown.substring(frozen, boundary.end), childCount)
+            frozen = boundary.end
+        }
+        val view = tail ?: textView(context, bodyColor).apply {
+            readingStyle(bodySize, bodyLineHeight)
+            setTextColor(bodyColor)
+            setText(markdown.substring(frozen, maxOf(frozen, previousLength)), TextView.BufferType.EDITABLE)
+            addView(this, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                topMargin = if (childCount == 0) 0 else dp(20)
+            })
+            tail = this
+        }
+        val editable = view.editableText
+        val start = editable.length
+        editable.append(markdown, frozen + start, markdown.length)
+        val now = SystemClock.uptimeMillis()
+        editable.getSpans(0, start, StreamFade::class.java).forEach { if (now - it.started >= STREAM_FADE_MS) editable.removeSpan(it) }
+        if (fade && appending && start < editable.length) {
+            editable.setSpan(StreamFade(view, now), start, editable.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        // Setting TextView selection never requires switching Markdown modes.
+    }
+
+    private fun containsSelection(view: View): Boolean = when (view) {
+        is TextView -> view.hasSelection()
+        is ViewGroup -> (0 until view.childCount).any { containsSelection(view.getChildAt(it)) }
+        else -> false
+    }
+
+    private fun renderBlocks(markdown: String, start: Int) {
         // Parse once with CommonMark, never split pipe-delimited text ourselves.
         val root = markwon.parse(normalizeMarkdownFileLinks(markdown))
         val blocks = mutableListOf<Any>()
@@ -103,7 +198,8 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
             node = next
         }
         flush()
-        blocks.forEachIndexed { index, block ->
+        blocks.forEachIndexed { offset, block ->
+            val index = start + offset
             val old = getChildAt(index)
             val view = when (block) {
                 is Table -> (old as? MarkdownTable ?: MarkdownTable(context, colors)).also { it.onCell = ::linkFiles; it.setTable(block) }
@@ -119,7 +215,7 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
             }
             (view.layoutParams as LayoutParams).topMargin = if (index == 0) 0 else dp(20)
         }
-        while (childCount > blocks.size) removeViewAt(childCount - 1)
+        while (childCount > start + blocks.size) removeViewAt(childCount - 1)
     }
 
     private fun linkFiles(view: TextView) {
@@ -153,6 +249,16 @@ internal class MarkdownView(context: Context, private val bodySize: Float = 17f,
             movementMethod = LinkMovementMethod.getInstance()
             setPadding(0, 0, 0, 0)
         }
+    }
+}
+
+private const val STREAM_FADE_MS = 220L
+private class StreamFade(private val view: TextView, val started: Long) : CharacterStyle(), UpdateAppearance {
+    override fun updateDrawState(paint: TextPaint) {
+        val progress = ((SystemClock.uptimeMillis() - started).toFloat() / STREAM_FADE_MS).coerceIn(0f, 1f)
+        val opacity = 1f - (1f - progress) * (1f - progress) * (1f - progress)
+        paint.alpha = (paint.alpha * opacity).toInt()
+        if (progress < 1f) view.postInvalidateOnAnimation()
     }
 }
 

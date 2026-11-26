@@ -339,6 +339,13 @@ impl WorkflowRun {
         if node.kind == "join" {
             return self.arrive(&node, incoming, frames, traversals, now);
         }
+        if node.bypass {
+            let result = incoming["result"].clone();
+            let id = self.insert(&node, incoming, item, frames, traversals, "completed", now)?;
+            self.instances.last_mut().unwrap().completed_at = Some(now);
+            self.event("node.skipped", Some(&id), "Node bypassed", Value::Null, now);
+            return self.route(&id, &[node.exits[0].id.clone()], result, now);
+        }
         if let Some(each) = node.for_each.as_ref().filter(|_| item.is_none()) {
             let context = self.context(&node, &incoming, None);
             let list = binding_value(&context, &each.source)
@@ -497,7 +504,7 @@ impl WorkflowRun {
         let mut prompt = node
             .prompt
             .as_ref()
-            .filter(|_| !(node.for_each.is_some() && item.is_none() && status == "completed"))
+            .filter(|_| !node.bypass && !(node.for_each.is_some() && item.is_none() && status == "completed"))
             .map(|p| render(p, &self.context(node, &incoming, item.as_ref())))
             .transpose()?;
         let task = self.approved_nodes.get(&node.id).and_then(|plan| plan["task"].as_str());
@@ -521,7 +528,7 @@ impl WorkflowRun {
             run_id: None,
             execution_key: None,
             native_work: None,
-            acceptance: (node.kind == "agent" && self.workspace.is_some()).then(super::Acceptance::default),
+            acceptance: (node.kind == "agent" && !node.bypass && self.workspace.is_some()).then(super::Acceptance::default),
             workspace: None,
             branches: None,
             result: None,

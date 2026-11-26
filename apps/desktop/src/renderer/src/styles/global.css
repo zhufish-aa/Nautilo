@@ -653,7 +653,8 @@ html, body { font-family: var(--app-font-sans); font-size: 14px; font-weight: va
 .composer { padding: 0 32px 32px; }
 .workspace-stage .composer { background: transparent; }
 .composer .composer-queue { max-width: var(--conversation-width); }
-.composer .composer-box textarea { height: 56px; min-height: 56px; padding: 12px 18px 6px; font: var(--conversation-font-weight) var(--conversation-font-size)/var(--conversation-line-height) var(--app-font-sans); }
+.composer .composer-box .composer-reference-input { height: 56px; min-height: 56px; padding: 12px 18px 6px; font: var(--conversation-font-weight) var(--conversation-font-size)/var(--conversation-line-height) var(--app-font-sans); }
+.composer .composer-box [data-inline-references] .composer-reference-input { font-weight: 400; }
 .composer .composer-toolbar { min-height: 47px; padding: 7px 12px 10px; gap: 10px; flex-wrap: nowrap; }
 .composer .composer-attach { width: 28px; height: 28px; border: 0; color: var(--ink-2); border-radius: 7px; }
 .composer .composer-attach svg { width: 18px; height: 18px; }

@@ -17,7 +17,7 @@ test("browser events across harness namespaces render action summaries and a ded
   const info=browserActivity("mcp__nautilo_0__browser_run",input,outputText);
   assert.match(browserStepLabel(info.steps[0],true),/打开网页.*baidu/);
   const html=require("react-dom/server").renderToStaticMarkup(require("react").createElement(BrowserActivity,{name:"mcp__nautilo_0__browser_run",status:"failed",input,output:outputText,zh:true}));
-  assert.match(html,/<button[^>]*class="process-disclosure-row"/);
+  assert.match(html,/<button[^>]*class="process-disclosure-trigger"/);
   assert.match(html,/process-disclosure-chevron/);
   assert.match(html,/<svg/);assert.match(html,/点击元素/);assert.doesNotMatch(html,/mcp__nautilo/);
 });

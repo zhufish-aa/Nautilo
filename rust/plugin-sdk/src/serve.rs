@@ -133,7 +133,7 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                     write_frame(&writer, &frame).await;
                     std::process::exit(2);
                 }
-                let mut capabilities=plugin.capabilities();capabilities["nativeExperienceVersion"]=serde_json::json!(1);capabilities["terminalPlan"]=serde_json::json!(plugin.native_terminal_supported());
+                let mut capabilities=plugin.capabilities();capabilities["nativeExperienceVersion"]=serde_json::json!(1);capabilities["terminalPlan"]=serde_json::json!(plugin.native_terminal_supported());capabilities["nativeResources"]=serde_json::json!(true);
                 let frame = emit::ready(&plugin.descriptor(), &capabilities);
                 write_frame(&writer, &frame).await;
             }
@@ -144,6 +144,10 @@ pub async fn serve<P: ProviderPlugin + 'static>(plugin: P) {
                 tokio::spawn(async move {
                     let frame = match method.as_str() {
                         "detect" => emit::response(id, plugin.detect(&input).await),
+                        "nativeResources" => match plugin.native_resources(&input["instance"], input["cwd"].as_str().unwrap_or(""), &input["session"]).await {
+                            Ok(values) => emit::response(id, serde_json::Value::Array(values)),
+                            Err(error) => emit::failure(id, &error.to_string()),
+                        },
                         "steer" => match plugin.steer(input["runId"].as_str().unwrap_or(""),input["input"].as_str().unwrap_or("")).await {
                             Ok(()) => emit::response(id,serde_json::json!({"accepted":true})),
                             Err(error) => emit::failure(id,&error.to_string()),

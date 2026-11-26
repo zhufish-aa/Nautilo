@@ -1,22 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { conversationLocations, type ConversationLocation } from "../../lib/conversation-navigation";
 import { ClipboardList, FolderOpen } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { TimelineEventView, type TimelineRow, TimelineViewport } from "../timeline/Timeline";
-import { ConversationTurnView, isTurnTraceStep } from "../timeline/ConversationTurnView";
-import { workflowTool } from "../timeline/WorkflowToolActivity";
+import { ConversationTurnView } from "../timeline/ConversationTurnView";
+import { ProcessDisclosure } from "../timeline/ProcessDisclosure";
+import { TurnProcess } from "../timeline/ToolStepGroup";
 import { StatusChip } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Composer } from "./Composer";
 import { providerUiState } from "../../lib/provider-ui";
 import { useNativeTerminalState } from "../../lib/use-native-terminal";
 import { ArtifactsDrawer, DagDrawer, SubagentDrawer, TerminalDrawer } from "./Drawers";
-import { RunActivityIndicator, SessionActivityPill } from "./RunActivityIndicator";
+import { RunActivityIndicator } from "./RunActivityIndicator";
 import { sessionTargetName } from "./SessionListPanel";
 import { useSessionsStore, SESSION_EMPTY } from "../../stores/sessions";
 import { InteractionCards } from "./InteractionCards";
-import type { InteractionRequest, WorkflowMention } from "@agenthub/domain";
+import type { CapabilityReference, InteractionRequest, WorkflowMention } from "@agenthub/domain";
 import { useFilePreviewStore } from "../../stores/file-preview";
 import { useProjectsStore } from "../../stores/projects";
 import { useTeamsStore } from "../../stores/teams";
@@ -58,7 +59,7 @@ const NO_TASKS: never[] = [];
 
 function estimateShortMessageHeight(event: TimelineEvent): number | undefined {
   const { data } = event;
-  if (data.kind !== "message" || data.sender === "system" || data.attachments?.length || data.workflowRef
+  if (data.kind !== "message" || data.sender === "system" || data.attachments?.length || data.references?.length || data.workflowRef
     || data.text.length > 36 || /[\r\n]/.test(data.text)) return undefined;
   return data.sender === "user" ? 71 : 50;
 }
@@ -116,7 +117,8 @@ export function SessionWorkbench({
 }): JSX.Element {
   const { t, locale } = useI18n();
   const navigationLocations = useRef<ConversationLocation[]>([]);
-  const [turnExpansions, setTurnExpansions] = useState<Record<string, { completed: boolean; open: boolean }>>({});
+  const [processChoices, setProcessChoices] = useState<Record<string, boolean>>({});
+  const setProcessChoice = (id: string, open: boolean): void => setProcessChoices(previous => ({ ...previous, [id]: open }));
   const coreFeatures = useCoreFeatures();
   const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
   const activeAgentRunId = useSessionsStore(state => state.activeAgentRunIds[sessionId]);
@@ -127,10 +129,16 @@ export function SessionWorkbench({
   const nativeOwnsSession = nativeTerminal.nativeActive;
   const timelineState = useSessionTimeline(sessionId, active);
   const timeline = timelineState?.timeline;
+  const entries = useMemo(() => timeline ? timelineEntries(timeline) : [], [timeline]);
+  // Only the commit receiving a live append may start from an empty block.
+  // Virtualized remounts and snapshots use the existing text as their seed.
+  useLayoutEffect(() => { timelineState?.liveStarts?.clear(); }, [timelineState]);
+  const eventsByBlock = useMemo(() => new WeakMap<TimelineBlock, TimelineEvent | undefined>(), [sessionId]);
   const projected = useMemo(() => new Map(timeline?.blocks.flatMap(block => {
-    const event = timelineBlockEvent(sessionId, block);
+    if (!eventsByBlock.has(block)) eventsByBlock.set(block, timelineBlockEvent(sessionId, block));
+    const event = eventsByBlock.get(block);
     return event ? [[block.blockId, event] as const] : [];
-  })), [timeline?.blocks, sessionId]);
+  })), [timeline?.blocks, sessionId, eventsByBlock]);
   const visibleEvents = useMemo(() => Array.from(projected.values()), [projected]);
   const tasks = useSessionsStore((state) => state.tasks[sessionId] ?? NO_TASKS);
   const foregroundLifecycle = useSessionsStore((state) => state.foreground[sessionId]);
@@ -214,11 +222,9 @@ export function SessionWorkbench({
   // Latest TodoList/TodoWrite/update_plan call drives the floating goal card.
   const todoGoal = useMemo(() => latestTodoGoal(events), [events]);
 
-  // Keep the provider's event order. A tool burst is expanded into its own
-  // virtual rows instead of swallowing intermediate assistant messages.
-
   const handleEditMessage = useCallback(
-    (messageId: string, text: string, workflowRef?: WorkflowMention): void => startEditingMessage(sessionId, messageId, text, workflowRef),
+    (messageId: string, text: string, workflowRef?: WorkflowMention, references?: CapabilityReference[]): void =>
+      startEditingMessage(sessionId, messageId, text, workflowRef, references),
     [sessionId, startEditingMessage]
   );
   const handleOpenSubagent = useCallback((eventId: string): void => {
@@ -273,56 +279,52 @@ export function SessionWorkbench({
   const toolsTitle = locale === "zh-CN" ? "本次会话工具" : "Session tools";
   // Event IDs are stable across streaming patches. Only the changed row
   // updates; completed Markdown and closed tool details stay untouched.
-  type StepLinks = { turnId: string; before: boolean; after: boolean };
-  type WorkbenchRow = TimelineRow & { step?: StepLinks };
-  const shell = (key: string, node: ReactNode, { process = false, result = false, stepTurn, estimatedHeight }: {
-    process?: boolean; result?: boolean; stepTurn?: string; estimatedHeight?: number;
-  } = {}): WorkbenchRow => {
-    const step = stepTurn === undefined ? undefined : { turnId: stepTurn, before: false, after: false };
-    return { key, result, step, estimatedHeight: estimatedHeight ?? (process ? 30 : undefined), render: () => (
-      <div className="conversation-message-row mx-auto w-full" data-process={process || undefined}
-        data-trace-step={step ? true : undefined}>
-        {step ? <div className="conversation-process-row" data-turn-id={step.turnId} data-trace-step
-          data-trace-prev={step.before || undefined} data-trace-next={step.after || undefined}>{node}</div> : node}
-      </div>
-    ) };
-  };
-  const timelineRows: WorkbenchRow[] = [];
+  const shell = (key: string, node: ReactNode, { compact = false, result = false, estimatedHeight }: {
+    compact?: boolean; result?: boolean; estimatedHeight?: number;
+  } = {}): TimelineRow => ({
+    key, result, estimatedHeight, render: () => (
+      <div className={`conversation-message-row mx-auto w-full${result ? " conversation-result" : ""}`} data-process={compact || undefined}>{node}</div>
+    )
+  });
+  const timelineRows: TimelineRow[] = [];
   if (taskDescription) timelineRows.push(shell("delegated", <DelegatedTaskCard description={taskDescription} status={delegatedTask?.status} />));
   const timelineActions = { onEditMessage: handleEditMessage, onOpenSession, onOpenSubagent: handleOpenSubagent, onOpenWorkflow: handleOpenWorkflow, onOpenLocalFile };
-  const showBlock = (block: TimelineBlock, groupId?: string): void => {
-    if (block.kind === "interaction") {
-      const data = (block.result ?? block.content).payload as { interaction?: InteractionRequest };
-      if (data?.interaction) timelineRows.push(shell(block.blockId, <InteractionCards sessionId={sessionId} request={data.interaction} />));
-      return;
+  const renderEvent = (event: TimelineEvent): JSX.Element =>
+    <TimelineEventView event={event} {...timelineActions} showAuthor={false} streamActive={active} liveStarts={timelineState?.liveStarts} />;
+  const closedProcessRows = new Set<string>();
+  for (const entry of entries) {
+    if ("block" in entry) {
+      const { block } = entry;
+      if (block.kind === "interaction") {
+        const data = (block.result ?? block.content).payload as { interaction?: InteractionRequest };
+        if (data?.interaction) timelineRows.push(shell(block.blockId, <InteractionCards sessionId={sessionId} request={data.interaction} />));
+      } else {
+        const event = projected.get(block.blockId);
+        if (!event) continue;
+        const result = !!block.runId && timeline?.turns.get(block.runId)?.finalBlockId === block.blockId;
+        timelineRows.push(shell(block.blockId, renderEvent(event), { result, estimatedHeight: estimateShortMessageHeight(event) }));
+      }
+    } else if ("summary" in entry) {
+      const open = processChoices[entry.summary.runId] ?? false;
+      timelineRows.push(shell("process:" + entry.summary.runId,
+        <ConversationTurnView turn={entry.summary} expanded={open} onToggle={() => setProcessChoice(entry.summary.runId, !open)} />,
+        { compact: true, estimatedHeight: 42 }));
+    } else {
+      const running = entry.turn.status === "running";
+      const open = running || (processChoices[entry.turn.runId] ?? false);
+      const key = entry.process[0].blockId;
+      if (!open) closedProcessRows.add(key);
+      timelineRows.push(shell(key, <ProcessDisclosure className="conversation-turn-process" open={open}>
+        <TurnProcess events={entry.process.map(block => projected.get(block.blockId))}
+          liveTail={running && entry === entries.at(-1)} choices={processChoices} setChoice={setProcessChoice} renderEvent={renderEvent} />
+      </ProcessDisclosure>, { compact: true, estimatedHeight: open ? entry.process.length * 30 : 0 }));
     }
-    const event = projected.get(block.blockId);
-    if (!event) return;
-    const result = !!block.runId && timeline?.turns.get(block.runId)?.finalBlockId === block.blockId;
-    const trace = isTurnTraceStep(event);
-    const node = <TimelineEventView event={event} {...timelineActions} showAuthor={false} />;
-    timelineRows.push(shell(block.blockId, result ? <div className="conversation-result">{node}</div> : node, {
-      result, process: trace, stepTurn: trace ? groupId : undefined,
-      estimatedHeight: trace && event.data.kind === "tool_activity" && workflowTool(event.data.toolName) ? 38 : estimateShortMessageHeight(event)
-    }));
-  };
-  if (timeline) for (const entry of timelineEntries(timeline)) {
-    if ("block" in entry) { showBlock(entry.block); continue; }
-    const key = entry.disclosureKey;
-    const completed = entry.turn.status !== "running";
-    const choice = turnExpansions[key];
-    const hasProcess = entry.process.length > 0;
-    const expanded = hasProcess && (choice?.completed === completed ? choice.open : !completed);
-    if (!hasProcess || entry.process[0]?.blockId === key) {
-      timelineRows.push(shell("process:" + key, <ConversationTurnView turn={entry.turn} expanded={expanded}
-        onToggle={hasProcess ? () => setTurnExpansions(previous => ({ ...previous, [key]: { completed, open: !expanded } })) : undefined} />, { estimatedHeight: 65 }));
-    }
-    if (expanded) entry.process.forEach(block => showBlock(block, key));
   }
   if (timelineState?.error) timelineRows.push(shell("timeline-error", <p role="alert" className="text-sm text-danger">{timelineState.error}</p>));
-  if (workbenchRunning) timelineRows.push(shell("live-activity", (
-    <RunActivityIndicator lifecycle={visibleLifecycle} events={visibleEvents} waitingForDelegates={waitingForDelegates} />
-  ), { estimatedHeight: 30 }));
+  timelineRows.push(shell("live-activity", (
+    <RunActivityIndicator lifecycle={active ? visibleLifecycle : undefined} events={visibleEvents}
+      runId={foregroundRunning ? activeAgentRunId : undefined} waitingForDelegates={waitingForDelegates} />
+  ), { compact: true, estimatedHeight: workbenchRunning ? 30 : 0 }));
   if (timeline?.blocks.length === 0 && !workbenchRunning) {
     timelineRows.push(shell("empty", (
       <p className="py-16 text-center text-xl font-medium tracking-tight text-ink">
@@ -330,16 +332,7 @@ export function SessionWorkbench({
       </p>
     )));
   }
-  // Only neighboring trace rows share a rail.
-  let previousStep: StepLinks | undefined;
-  for (const { step } of timelineRows) {
-    if (step && previousStep?.turnId === step.turnId) {
-      previousStep.after = true;
-      step.before = true;
-    }
-    previousStep = step;
-  }
-  navigationLocations.current = conversationLocations(visibleEvents, timelineRows, navigationLocations.current);
+  navigationLocations.current = conversationLocations(visibleEvents, timelineRows.map(row => closedProcessRows.has(row.key) ? { key: "" } : row), navigationLocations.current);
 
   const activityRail = <SessionActivityRail key={sessionId} sessionId={sessionId} projectId={session.projectId}
     openFolder={openFolder} fileCount={changedFileCount} nativeTerminal={nativeOwnsSession} terminalTabs={coreFeatures.terminalTabs === 1} runningAgents={runningAgents}
@@ -381,8 +374,6 @@ export function SessionWorkbench({
           </div>
 
         </div>
-        {active && drawer !== "workflow" && <SessionActivityPill key={sessionId} lifecycle={visibleLifecycle} events={visibleEvents}
-          waitingForDelegates={waitingForDelegates} foreground={foregroundLifecycle} orchestration={orchestrationLifecycle} />}
         <div className="flex shrink-0 items-center gap-2">
           {headerActions}
           {active && project && openFolder && <button type="button" className="workspace-panel-icon" aria-label={t("sessions.workspace.openFolder", { name: project.name })}

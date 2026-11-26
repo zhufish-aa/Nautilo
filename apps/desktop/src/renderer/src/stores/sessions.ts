@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Session as DomainSession, WorkflowMention } from "@agenthub/domain";
+import type { CapabilityReference, Session as DomainSession, WorkflowMention } from "@agenthub/domain";
 import { getBridge, requestCore } from "../lib/bridge";
 import { newId } from "../lib/utils";
 import type {
@@ -55,12 +55,12 @@ interface SessionsState {
   /** A composer choice for the next message; the live turn keeps its saved configuration. */
   nextTurnModels: Record<string, NextTurnModel | undefined>;
   activeSessionId?: string;
-  editingMessage?: { sessionId: string; messageId: string; text: string; workflowRef?: WorkflowMention };
+  editingMessage?: { sessionId: string; messageId: string; text: string; workflowRef?: WorkflowMention; references?: CapabilityReference[] };
 
   setActiveSession: (id: string | undefined) => void;
   markSessionsRead: (ids: string[]) => void;
   removeSessions: (sessionIds: string[]) => void;
-  startEditingMessage: (sessionId: string, messageId: string, text: string, workflowRef?: WorkflowMention) => void;
+  startEditingMessage: (sessionId: string, messageId: string, text: string, workflowRef?: WorkflowMention, references?: CapabilityReference[]) => void;
   cancelEditingMessage: () => void;
   setNextTurnModel: (sessionId: string, selection: NextTurnModel | undefined) => void;
   createSession: (input: {
@@ -179,7 +179,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
           };
         }),
 
-      startEditingMessage: (sessionId, messageId, text, workflowRef) => set({ editingMessage: { sessionId, messageId, text, workflowRef } }),
+      startEditingMessage: (sessionId, messageId, text, workflowRef, references) => set({ editingMessage: { sessionId, messageId, text, workflowRef, references } }),
       cancelEditingMessage: () => set({ editingMessage: undefined }),
       setNextTurnModel: (sessionId, selection) => set((state) => {
         if (!state.sessions.some((session) => session.id === sessionId)) return state;

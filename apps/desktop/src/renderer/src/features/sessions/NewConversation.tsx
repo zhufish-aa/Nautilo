@@ -163,6 +163,7 @@ export function NewConversation({ mode = "code", onCreated, active = true }: {
           </div>
           <Composer
             draftId="new:conversation"
+            projectId={project?.id}
             running={false}
             submissionDisabledReason={blockingReason}
             onCreateSession={create}

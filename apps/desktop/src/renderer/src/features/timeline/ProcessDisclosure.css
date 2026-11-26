@@ -1,6 +1,7 @@
 .process-disclosure { min-width: 0; color: var(--ink-3); font: var(--app-font-weight) 13px/22px var(--app-font-sans); }
-.process-disclosure-row { display: flex; align-items: center; gap: var(--conversation-step-gap); width: 100%; min-width: 0; min-height: var(--conversation-step-height); padding: 3px var(--conversation-step-inset); border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; text-align: start; cursor: pointer; }
-.process-disclosure-label, .process-disclosure-dot, .process-disclosure-badge, .process-disclosure-accessory { flex-shrink: 0; }
+.process-disclosure-row { position: relative; display: flex; align-items: center; gap: var(--conversation-step-gap); width: 100%; min-width: 0; min-height: var(--conversation-step-height); padding: 3px var(--conversation-step-inset); border-radius: 6px; color: inherit; font: inherit; text-align: start; }
+.process-disclosure-dot, .process-disclosure-badge, .process-disclosure-accessory { flex-shrink: 0; }
+.process-disclosure-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .process-disclosure-badge { padding: 1px 5px; border-radius: 4px; background: var(--conversation-detail-badge); color: var(--ink-2); font: 500 11px/15px var(--font-mono); }
 .process-disclosure-dot, .process-disclosure-accessory { color: var(--conversation-detail-muted); }
 .process-disclosure-accessory { font-size: 11px; }
@@ -9,18 +10,13 @@
 .process-disclosure-preview[data-monospace] { color: var(--ink-2); font: 400 12px/20px var(--font-mono); }
 .reasoning-card > .process-disclosure-row .process-disclosure-label { color: var(--ink-2); font-weight: 500; }
 .reasoning-card > .process-disclosure-row :is(.process-disclosure-dot, .process-disclosure-preview) { color: var(--conversation-reasoning-preview); }
-.process-disclosure-chevron { flex-shrink: 0; margin-inline-start: auto; color: var(--conversation-detail-muted); opacity: .72; }
+.process-disclosure-trigger { flex: none; margin-inline-start: auto; cursor: pointer; }
+.process-disclosure-trigger::before { position: absolute; inset: 0; border-radius: inherit; content: ""; }
+.process-disclosure-trigger:focus-visible { outline: none; }
+.process-disclosure-trigger:focus-visible::before { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+.process-disclosure-chevron { flex: none; color: var(--conversation-detail-muted); opacity: .72; }
 .process-disclosure[data-open] > .process-disclosure-row .process-disclosure-chevron { transform: rotate(90deg); opacity: 1; }
-.process-disclosure-row:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
-.process-disclosure-row:focus-visible .process-disclosure-chevron { color: var(--ink-2); opacity: 1; }
-.process-disclosure-row:disabled { cursor: default; }
-.tool-activity-card .process-disclosure-label, .provider-compatibility-note .process-disclosure-label {
-  flex-shrink: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.process-disclosure-trigger:focus-visible .process-disclosure-chevron { color: var(--ink-2); opacity: 1; }
 .process-disclosure[data-running] > .process-disclosure-row { color: var(--ink-2); }
 .process-disclosure[data-failed] > .process-disclosure-row { color: var(--danger); }
 .process-disclosure-fold { display: grid; grid-template-rows: 0fr; opacity: 0; }
@@ -38,7 +34,7 @@
 .command-disclosure-exit[data-failed] { color: var(--conversation-detail-removed); }
 
 @media (hover: hover) and (pointer: fine) {
-  .process-disclosure-row:hover:not(:disabled) { background: var(--conversation-detail-hover); color: var(--ink-2); }
+  .process-disclosure-row:has(> .process-disclosure-trigger):hover { background: var(--conversation-detail-hover); color: var(--ink-2); }
   .process-disclosure-row:hover .process-disclosure-chevron { color: var(--ink-2); opacity: 1; }
   .process-disclosure[data-failed] > .process-disclosure-row:hover { color: var(--danger); }
 }

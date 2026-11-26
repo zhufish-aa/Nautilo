@@ -89,7 +89,7 @@ test('timeline follows delayed process layout, survives collapse, and respects r
     height = 1400; resized(content); await frame();
     assert.equal(top, 600, 'new tools and reasoning must not pull a reader back down');
 
-    scroll(1150); // Down into the bottom threshold re-enables following.
+    scroll(1160); // Down within 48 px re-enables following.
     height = 1600; resized(content); await frame();
     assert.equal(top, 1400);
     viewportHeight = 150; resized(viewport); await frame();
@@ -97,12 +97,37 @@ test('timeline follows delayed process layout, survives collapse, and respects r
 
     scroll(700);
     w.qa.render(2, 'new-user-message');
+    await frame();
     assert.equal(top, 700, 'sending a message does not move a reader away from history');
+    const returnButton = w.document.querySelector('.timeline-return-to-bottom');
+    assert.ok(returnButton, 'manual reading exposes the return button');
     w.qa.render(2, 'new-user-message', 's', false);
     height = 1800; resized(content); await frame();
     assert.equal(top, 700, 'hidden workbenches must not scroll');
+    w.qa.render(2, 'new-user-message', 's', true);
+    const scrollCalls = [];
+    viewport.scrollTo = options => scrollCalls.push(options);
+    w.document.querySelector('.timeline-return-to-bottom').click();
+    assert.equal(scrollCalls.length, 1);
+    assert.equal(scrollCalls[0].behavior, 'smooth');
+    height = 1900;
+    viewport.dispatchEvent(new w.Event('scrollend'));
+    assert.equal(top, 1750, 'return targets the new tail when content grows during the jump');
+    await frame();
     w.qa.render(2, 'new-user-message', 'other-session', true);
-    assert.equal(top, 1650);
+    assert.equal(top, 1750);
+    height = 2000;
+    resized(content);
+    const touch = (name, clientY) => {
+      const event = new w.Event(name, { bubbles: true });
+      Object.defineProperty(event, 'touches', { value: [{ clientY }] });
+      viewport.dispatchEvent(event);
+    };
+    touch('touchstart', 40);
+    touch('touchmove', 110);
+    await frame();
+    assert.equal(top, 1750, 'touch scrolling releases the follow lock before the pending frame');
+    assert.ok(w.document.querySelector('.timeline-return-to-bottom'));
     w.qa.close();
     assert.equal(observers.size, 0, 'unmount releases observers and pending frames');
   } finally { w.qa?.close(); w.close(); }

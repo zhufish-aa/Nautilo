@@ -144,6 +144,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "tokio",
  "toml 0.8.23",

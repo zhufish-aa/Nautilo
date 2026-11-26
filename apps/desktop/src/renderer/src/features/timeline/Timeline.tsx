@@ -5,11 +5,13 @@ import { isBrowserTool } from "../../lib/browser-display";
 import {
   AlertTriangle,
   Atom,
+  ArrowDown,
   ArrowRightLeft,
   Bot,
   Check,
   ChevronDown,
   ChevronRight,
+  Circle,
   Copy,
   FileCode2,
   FileText,
@@ -17,10 +19,8 @@ import {
   GitBranch,
   ImageIcon,
   Info,
-  Loader2,
   Pencil,
-  Terminal,
-  Workflow
+  Terminal
 } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
 import { SessionErrorCard } from "./SessionErrorCard";
@@ -30,13 +30,14 @@ import { useCoreFeatures } from "../../lib/use-core-features";
 import { delegationActivity } from "../../lib/delegation-activity";
 import { cn, formatDateTime } from "../../lib/utils";
 import type { TimelineEvent } from "../../lib/types";
-import type { WorkflowMention } from "@agenthub/domain";
+import type { CapabilityReference, WorkflowMention } from "@agenthub/domain";
+import { composerReferences, messageReferenceParts, referenceKey, referenceParts, ReferencePills } from "../sessions/ComposerReferences";
 import { WorkflowPlanCard } from "../sessions/WorkflowPlanCard";
 import { SourceControlDiffView } from "../sessions/SourceControlDiffView";
 import { StatusChip, Tag } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { ensureProjectRunHydrated, resolveWorkbenchApproval } from "../../lib/orchestration-runtime";
-import { toolActivityLabel, toolInputFileDiff } from "../../lib/tool-display";
+import { toolActivityKind, toolActivityLabel, toolCommand, toolFilePath, toolInputFileDiff } from "../../lib/tool-display";
 import { MarkdownContent } from "./MarkdownContent";
 import { DelegationCard } from "./DelegationCard";
 import { CodeExecutionCard } from "./CodeExecutionCard";
@@ -45,8 +46,8 @@ import { ToolActivityIcon } from "./ToolActivityIcon";
 import { WorkflowToolActivity, workflowTool } from "./WorkflowToolActivity";
 import { ManagedApprovalCard } from "./ManagedApprovalCard";
 import { reasoningPreview } from "../../lib/process-display";
-import { useStreamingText } from "../../lib/streaming-text";
-import { useMessageEntrance, useSurfaceEntrance, useUiReducedMotion } from "../../lib/ui-motion";
+import { useSmoothStreamText } from "../../lib/streaming-text";
+import { useMessageEntrance, useUiReducedMotion } from "../../lib/ui-motion";
 import { ConversationNavigator } from "./ConversationNavigator";
 import { locationAtRow, type ConversationLocation } from "../../lib/conversation-navigation";
 import { reconcileTimelineKeys, type TimelineKeySequence } from "../../lib/timeline-row-keys";
@@ -61,7 +62,7 @@ import { diffLines } from "../../lib/line-diff";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import "./conversation-details.css";
 
-const FOLLOW_TAIL_THRESHOLD = 120;
+const FOLLOW_TAIL_THRESHOLD = 48;
 const EMPTY_LOCATIONS: ConversationLocation[] = [];
 
 /**
@@ -103,16 +104,24 @@ export function TimelineViewport({
   active?: boolean;
   className?: string;
 }): JSX.Element {
+  const { locale } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const contentRef = useSurfaceEntrance<HTMLDivElement>(sessionKey, active);
+  const contentRef = useRef<HTMLDivElement>(null);
   const followTailRef = useRef(true);
+  const [pinned, setPinned] = useState(true);
+  // Input must beat a pin already queued for the next frame.
+  const followTail = useCallback((value: boolean) => {
+    followTailRef.current = value;
+    setPinned(value);
+  }, []);
   const lastScrollTopRef = useRef(0);
   const previousContent = useRef({ sessionKey, contentKey, rowCount: rows.length, forceFollowKey });
   const tailMotion = useRef<Animation>();
   const virtualized = rows.length > 80;
   const reduced = useUiReducedMotion();
   const [currentLocation, setCurrentLocation] = useState(0);
-  const navigationLock = useRef(false);
+  const navigationLock = useRef<"anchor" | "tail">();
+  const touchY = useRef<number>();
   const pendingNavigation = useRef<ConversationLocation>();
 
   const keySequenceRef = useRef<TimelineKeySequence>();
@@ -147,8 +156,9 @@ export function TimelineViewport({
     // scrollTop = scrollHeight reflects the real, freshly laid-out content
     // height (no virtualizer state lag). The virtualizer observes scroll via
     // the scroll event and re-windows accordingly.
-    if (Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop) > 1) {
-      element.scrollTop = element.scrollHeight;
+    const bottom = Math.max(0, element.scrollHeight - element.clientHeight);
+    if (Math.abs(bottom - element.scrollTop) > 1) {
+      element.scrollTop = bottom;
     }
     lastScrollTopRef.current = element.scrollTop;
     timelinePositions.set(sessionKey, { top: element.scrollTop, follow: true });
@@ -159,8 +169,8 @@ export function TimelineViewport({
     pendingReading.current = undefined;
     const viewport = scrollRef.current;
     if (!viewport) return;
-    followTailRef.current = false;
-    navigationLock.current = true;
+    followTail(false);
+    navigationLock.current = "anchor";
     setCurrentLocation(locationAtRow(locations, location.rowIndex));
     const row = viewport.querySelector<HTMLElement>(`[data-index="${location.rowIndex}"]`);
     if (row) {
@@ -172,7 +182,24 @@ export function TimelineViewport({
       pendingNavigation.current = location;
       virtualizer.scrollToIndex(location.rowIndex, { align: "start" });
     }
-  }, [locations, reduced, sessionKey, virtualized, virtualizer]);
+  }, [followTail, locations, reduced, sessionKey, virtualized, virtualizer]);
+  const resumeFollowing = useCallback(() => {
+    navigationLock.current = undefined;
+    followTail(true);
+    scrollToTail();
+  }, [followTail, scrollToTail]);
+  const returnToBottom = (): void => {
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    pendingNavigation.current = undefined;
+    pendingReading.current = undefined;
+    const top = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    if (reduced || top - viewport.scrollTop <= 1) resumeFollowing();
+    else {
+      navigationLock.current = "tail";
+      viewport.scrollTo({ top, behavior: "smooth" });
+    }
+  };
   const focused = useRef<string>();
   useEffect(() => {
     if (!active || !focusKey || focused.current === `${sessionKey}:${focusKey}`) return;
@@ -190,6 +217,10 @@ export function TimelineViewport({
   const saveReadingPosition = (viewport: HTMLDivElement): void => {
     if (!active) return;
     const scrollTop = viewport.scrollTop;
+    if (followTailRef.current) {
+      timelinePositions.set(sessionKey, { top: scrollTop, follow: true });
+      return;
+    }
     let firstIndex: number | undefined;
     let locationIndex: number | undefined;
     let offset = 0;
@@ -232,15 +263,15 @@ export function TimelineViewport({
   useLayoutEffect(() => {
     if (!active) return;
     pendingNavigation.current = undefined;
-    navigationLock.current = false;
+    navigationLock.current = undefined;
     const saved = timelinePositions.get(sessionKey);
-    followTailRef.current = saved?.follow ?? true;
+    followTail(saved?.follow ?? true);
     const viewport = scrollRef.current;
     if (viewport && saved && !saved.follow) {
       viewport.scrollTop = saved.top;
       lastScrollTopRef.current = viewport.scrollTop;
     } else scrollToTail();
-  }, [active, scrollToTail, sessionKey]);
+  }, [active, followTail, scrollToTail, sessionKey]);
 
   // Row IDs survive streaming, history prepends and folding. Pixel offsets
   // alone cannot preserve the reader when rows before the viewport change.
@@ -304,11 +335,14 @@ export function TimelineViewport({
     });
     observer.observe(content);
     observer.observe(viewport);
+    const finishReturn = () => { if (navigationLock.current === "tail") resumeFollowing(); };
+    viewport.addEventListener("scrollend", finishReturn);
     return () => {
       observer.disconnect();
+      viewport.removeEventListener("scrollend", finishReturn);
       if (frame !== undefined) cancelAnimationFrame(frame);
     };
-  }, [active, scrollToTail, sessionKey]);
+  }, [active, resumeFollowing, scrollToTail, sessionKey]);
 
   // Virtual row measurements also update the spacer's explicit height.
   const totalSize = virtualizer.getTotalSize();
@@ -319,41 +353,59 @@ export function TimelineViewport({
     scrollToTail();
   }, [totalSize, scrollToTail]);
 
+  const interruptNavigation = (viewport: HTMLDivElement): void => {
+    tailMotion.current?.cancel();
+    if (navigationLock.current) viewport.scrollTop = viewport.scrollTop;
+    navigationLock.current = undefined;
+    pendingNavigation.current = undefined;
+    pendingReading.current = undefined;
+  };
+
   return (
     <div className="relative h-full min-h-0">
-    {active && <ConversationNavigator sessionKey={sessionKey} locations={locations} current={followTailRef.current ? Math.max(0, locations.length - 1) : currentLocation} onNavigate={jumpToLocation} />}
+    {active && <ConversationNavigator sessionKey={sessionKey} locations={locations} current={pinned ? Math.max(0, locations.length - 1) : currentLocation} onNavigate={jumpToLocation} />}
     <div
       ref={scrollRef}
       onScroll={(event) => {
         const element = event.currentTarget;
         if (event.target !== element) return;
         const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
-        if (element.scrollTop < lastScrollTopRef.current - 1 && gap > 1) {
+        if (element.scrollTop < lastScrollTopRef.current - 1 && gap > FOLLOW_TAIL_THRESHOLD) {
           // Collapsing process rows or enlarging the viewport clamps scrollTop
           // to a smaller bottom offset. That is not the user scrolling up.
-          followTailRef.current = false;
-        } else if (!navigationLock.current && gap < FOLLOW_TAIL_THRESHOLD && element.scrollTop > lastScrollTopRef.current) {
+          followTail(false);
+        } else if (navigationLock.current !== "anchor" && gap <= FOLLOW_TAIL_THRESHOLD && element.scrollTop > lastScrollTopRef.current) {
           // Only scrolling DOWN into the tail re-engages follow mode.
-          followTailRef.current = true;
+          resumeFollowing();
         }
         lastScrollTopRef.current = element.scrollTop;
         saveReadingPosition(element);
       }}
       onWheel={(event) => {
-        tailMotion.current?.cancel();
-        navigationLock.current = false;
-        pendingNavigation.current = undefined;
-        pendingReading.current = undefined;
-        // Wheel input is the other explicit way to pause follow mode.
-        if (event.deltaY < 0) followTailRef.current = false;
+        if (!event.deltaY) return;
+        interruptNavigation(event.currentTarget);
+        if (event.deltaY < 0 && event.currentTarget.scrollTop > 0) {
+          followTail(false);
+          saveReadingPosition(event.currentTarget);
+        }
       }}
-      onPointerDown={() => { tailMotion.current?.cancel(); navigationLock.current = false; pendingNavigation.current = undefined; pendingReading.current = undefined; }}
+      onPointerDown={(event) => interruptNavigation(event.currentTarget)}
+      onTouchStart={(event) => { touchY.current = event.touches[0]?.clientY; }}
+      onTouchMove={(event) => {
+        const y = event.touches[0]?.clientY;
+        if (y !== undefined && touchY.current !== undefined && y > touchY.current && event.currentTarget.scrollTop > 0) {
+          interruptNavigation(event.currentTarget);
+          followTail(false);
+          saveReadingPosition(event.currentTarget);
+        }
+        touchY.current = y;
+      }}
       onClickCapture={(event) => {
-        const trigger = event.target instanceof Element && event.target.closest("button.process-disclosure-row, button.conversation-process-toggle");
+        const trigger = event.target instanceof Element && event.target.closest("button.process-disclosure-trigger, button.conversation-process-toggle");
         if (!trigger || !event.currentTarget.contains(trigger)) return;
         // Reading a past detail is a manual navigation. Do not follow its expanding height back to the tail.
-        navigationLock.current = true;
-        followTailRef.current = false;
+        navigationLock.current = "anchor";
+        followTail(false);
         pendingReading.current = undefined;
         pendingNavigation.current = undefined;
         saveReadingPosition(event.currentTarget);
@@ -383,6 +435,9 @@ export function TimelineViewport({
         </div>
       </div>
     </div>
+    {active && !pinned && <button type="button" className="timeline-return-to-bottom" onClick={returnToBottom}>
+      <ArrowDown size={14} aria-hidden />{locale === "zh-CN" ? "回到底部" : "Back to bottom"}
+    </button>}
     </div>
   );
 }
@@ -435,20 +490,27 @@ function CardShell({
   );
 }
 
-function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor = true }: {
+function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor = true, streamActive, revealFromStart }: {
   event: TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> };
   locale: "zh-CN" | "en-US";
-  onEditMessage?: (messageId: string, text: string, workflowRef?: WorkflowMention) => void;
+  onEditMessage?: (messageId: string, text: string, workflowRef?: WorkflowMention, references?: CapabilityReference[]) => void;
   onOpenLocalFile?: (path: string) => void;
   showAuthor?: boolean;
+  streamActive: boolean;
+  revealFromStart: boolean;
 }): JSX.Element {
-  const { sender, authorName, text, streaming, messageId, attachments, editedAt, workflowRef } = event.data;
+  const { sender, authorName, text, streaming, messageId, attachments, editedAt, workflowRef, references } = event.data;
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const isUser = sender === "user";
   const isSystem = sender === "system";
   const entranceRef = useMessageEntrance(event.sessionId, isUser ? messageId : undefined);
-  const visibleText = useStreamingText(text, Boolean(streaming), `${event.sessionId}:${event.id}`);
+  const reduced = useUiReducedMotion();
+  const visible = useSmoothStreamText(text, Boolean(streaming), streamActive && !reduced, revealFromStart);
+  const renderingLive = streamActive && (Boolean(streaming) || visible.text !== text);
+  const items = useMemo(() => isUser ? composerReferences(references, workflowRef) : [], [isUser, references, workflowRef]);
+  const inlineKeys = useMemo(() => new Set(referenceParts(text, items).flatMap(part => part.item ? [referenceKey(part.item)] : [])), [text, items]);
+  const renderInline = useCallback((part: string) => messageReferenceParts(part, items), [items]);
   if (isSystem) {
     return (
       <motion.p
@@ -462,7 +524,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
   }
   return (
       <div
-      className="group relative flex w-full"
+      className="group flex w-full"
     >
       <div className={cn("min-w-0 flex-1", isUser && "flex flex-col items-end")}>
         {isUser ? <span className="sr-only">{locale === "zh-CN" ? "你" : "You"}</span> : showAuthor && <div className="assistant-identity"><span className="assistant-mark"><Bot size={16} aria-hidden /></span><strong>{authorName ?? "Nautilo"}</strong></div>}
@@ -477,8 +539,9 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
             void popupTextMenu(window.getSelection()?.toString() ?? "", t);
           }}
         >
-          {isUser && workflowRef && <span className="workflow-reference-chip mb-1.5" title={"v" + workflowRef.revision}><Workflow size={13} aria-hidden /><span>{workflowRef.name}</span></span>}
-          <MarkdownContent source={visibleText} inverted={false} onOpenLocalFile={onOpenLocalFile} streaming={Boolean(streaming)} />
+          {items.length > 0 && <ReferencePills items={items.filter(item => !inlineKeys.has(referenceKey(item)))} />}
+          <MarkdownContent source={visible.text} inverted={false} onOpenLocalFile={onOpenLocalFile} streaming={renderingLive} fade={visible.fade}
+            renderInlineText={inlineKeys.size ? renderInline : undefined} />
           {attachments && attachments.length > 0 && (
             <div className={cn("mt-2.5 grid gap-2", attachments.length > 1 && "sm:grid-cols-2")}>
               {attachments.map((attachment) => attachment.kind === "image" && attachment.path ? (
@@ -518,10 +581,9 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
               ))}
             </div>
           )}
-          {streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-text-bottom" aria-label={locale === "zh-CN" ? "正在流式生成" : "Streaming"} />}
         </div>
         {!streaming && (
-          <div className="absolute right-0 top-full z-10 flex items-center gap-1 rounded-lg bg-card opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100" title={formatDateTime(event.timestamp, locale)}>
+          <div className="conversation-message-actions ms-auto flex w-fit items-center gap-1 rounded-lg bg-card opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100" title={formatDateTime(event.timestamp, locale)}>
             {editedAt && <span className="text-xs text-ink-3">{locale === "zh-CN" ? "已编辑" : "Edited"}</span>}
             <button
               type="button"
@@ -540,7 +602,7 @@ function MessageCard({ event, locale, onEditMessage, onOpenLocalFile, showAuthor
             {isUser && messageId && onEditMessage && (
               <button
                 type="button"
-                onClick={() => onEditMessage(messageId, text, workflowRef)}
+                onClick={() => onEditMessage(messageId, text, workflowRef, references)}
                 className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-card-hover hover:text-ink"
                 aria-label={locale === "zh-CN" ? "编辑" : "Edit"}
                 title={locale === "zh-CN" ? "编辑" : "Edit"}
@@ -568,18 +630,26 @@ function ActivityLine({ event, locale }: { event: TimelineEvent & { data: { kind
   );
 }
 
-function ReasoningCard({ event, locale }: { event: TimelineEvent & { data: { kind: "reasoning" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
+function ReasoningCard({ event, locale, streamActive, revealFromStart }: {
+  event: TimelineEvent & { data: { kind: "reasoning" } }; locale: "zh-CN" | "en-US"; streamActive: boolean; revealFromStart: boolean;
+}): JSX.Element {
   const [open, setOpen] = useState(false);
   const streaming = Boolean(event.data.streaming);
-  const visibleText = useStreamingText(event.data.text, streaming, `${event.sessionId}:${event.id}`);
-  const preview = useMemo(() => reasoningPreview(visibleText), [visibleText]);
+  const reduced = useUiReducedMotion();
+  const visible = useSmoothStreamText(event.data.text, streaming, streamActive && !reduced, revealFromStart);
+  const preview = useMemo(() => reasoningPreview(visible.text), [visible.text]);
   return <ProcessDisclosure className="reasoning-card" icon={<Atom size={14} />} label={locale === "zh-CN" ? "思考" : "Thinking"}
     preview={preview} followPreviewTail open={open} onToggle={() => setOpen(value => !value)} running={streaming}>
-    <MarkdownContent source={visibleText} streaming={streaming} />
+    <MarkdownContent source={visible.text} streaming={streamActive && (streaming || visible.text !== event.data.text)} fade={visible.fade} />
   </ProcessDisclosure>;
 }
 
-function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { kind: "tool_activity" } }; locale: "zh-CN" | "en-US" }): JSX.Element {
+function ToolActivityCard({ event, locale, t, onOpenLocalFile }: {
+  event: TimelineEvent & { data: { kind: "tool_activity" } };
+  locale: "zh-CN" | "en-US";
+  t: (key: MessageKey, values?: Record<string, string | number>) => string;
+  onOpenLocalFile?: (path: string, diff?: string) => void;
+}): JSX.Element {
   const [open, setOpen] = useState(false);
   const { toolName, status, input, output, fileDiff } = event.data;
   const resolvedFileDiff = useMemo(() => fileDiff ?? toolInputFileDiff(toolName, input), [fileDiff, toolName, input]);
@@ -590,11 +660,20 @@ function ToolActivityCard({ event, locale }: { event: TimelineEvent & { data: { 
   }, [resolvedFileDiff]);
   const details = Boolean(resolvedFileDiff || input || output);
   const zh = locale === "zh-CN";
-  const label = toolActivityLabel(toolName, status, input, locale);
+  const kind = toolActivityKind(toolName, input);
+  const path = ["read", "write", "edit", "skill"].includes(kind) ? resolvedFileDiff?.path ?? toolFilePath(input) : undefined;
+  const command = kind === "command" ? toolCommand(input) : undefined;
+  const { executor, summary } = command ? commandPresentation(command) : {};
+  const label = command ? (status === "failed" ? (zh ? "命令执行失败" : "Command failed") : (zh ? "运行" : "Run"))
+    : toolActivityLabel(toolName, status, input, locale, Boolean(path));
   if (isBrowserTool(toolName)) return <BrowserActivity name={toolName} status={status} input={input} output={output} zh={zh}/>;
   const accessory = counts && <span className="flex gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>;
   return (
-    <ProcessDisclosure className="tool-activity-card" label={label} accessory={accessory}
+    <ProcessDisclosure className="tool-activity-card" label={label} accessory={accessory} badge={executor} monospace={Boolean(command)}
+      preview={path ? <button type="button" className="file-activity-name" onClick={() => openTimelineFile(path, t, onOpenLocalFile, "drawer")}>
+        {path.split(/[\\/]/).at(-1) || path}
+      </button> : summary}
+      previewTitle={path ?? command} retainPreview
       icon={status === "failed" ? <AlertTriangle size={14} /> : <ToolActivityIcon name={toolName} input={input} />}
       open={open} onToggle={details ? () => setOpen(value => !value) : undefined} running={status === "running"} failed={status === "failed"}>
       <div className="overflow-hidden rounded-xl border border-line bg-card">
@@ -819,7 +898,8 @@ function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { ki
   const { executor, summary } = commandPresentation(command);
   const zh = locale === "zh-CN";
   return <ProcessDisclosure className="command-card" icon={status === "failed" ? <AlertTriangle size={14} /> : <Terminal size={14} />}
-    label={zh ? "运行" : status === "running" ? "Running" : "Ran"} badge={executor} preview={summary} previewTitle={command} monospace retainPreview
+    label={status === "failed" ? (zh ? "命令执行失败" : "Command failed") : zh ? "运行" : status === "running" ? "Running" : "Ran"}
+    badge={executor} preview={summary} previewTitle={command} monospace retainPreview
     open={open} onToggle={() => setOpen(value => !value)} running={status === "running"} failed={status === "failed"}
     accessory={status === "running" || attempts > 1 ? <>{status === "running" && <span className="sr-only">{t("sessions.cards.running")}</span>}{attempts > 1 && (zh ? `${attempts} 次` : `${attempts} attempts`)}</> : undefined}>
     <div className="command-disclosure-output">
@@ -844,7 +924,13 @@ function FileChangeCard({ event, locale, t, onOpenLocalFile }: {
     const label = file.changeType === "added" ? (zh ? "已写入" : "Wrote")
       : file.changeType === "deleted" ? (zh ? "已删除" : "Deleted") : (zh ? "已编辑" : "Edited");
     const preview = file.path.split(/[\\/]/).at(-1) || file.path;
-    return <ProcessDisclosure key={file.path} className="file-activity" label={label} preview={<span className="file-activity-name">{preview}</span>}
+    const openFile = (): void => {
+      if (onOpenLocalFile && file.diff && !file.comparisonUnavailable) onOpenLocalFile(file.path, file.diff);
+      else openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
+    };
+    const canOpen = file.changeType !== "deleted" || (!!file.diff && !!onOpenLocalFile);
+    return <ProcessDisclosure key={file.path} className="file-activity" label={label}
+      preview={canOpen ? <button type="button" className="file-activity-name" onClick={openFile}>{preview}</button> : preview}
       previewTitle={file.path} retainPreview icon={file.changeType === "added" ? <FileCode2 size={14} /> : <Pencil size={14} />}
       accessory={counts && <span className="flex gap-1.5 tabular-nums"><span className="text-ok">+{counts.additions}</span><span className="text-danger">−{counts.deletions}</span></span>}
       open={expanded} onToggle={() => setOpenPath(expanded ? undefined : file.path)}>
@@ -852,11 +938,7 @@ function FileChangeCard({ event, locale, t, onOpenLocalFile }: {
         {file.diff && !file.comparisonUnavailable
           ? <SourceControlDiffView patch={file.diff} scope={`${event.id}:${file.path}`} locale={locale} />
           : <p>{zh ? "这条记录没有可显示的差异。" : "No diff is available for this record."}</p>}
-        {(file.changeType !== "deleted" || (!!file.diff && !!onOpenLocalFile)) && <button type="button" className="mt-2 text-xs text-ink-3 hover:text-ink"
-          onClick={() => {
-            if (onOpenLocalFile && file.diff && !file.comparisonUnavailable) onOpenLocalFile(file.path, file.diff);
-            else openTimelineFile(file.path, t, onOpenLocalFile, "drawer");
-          }}>
+        {canOpen && <button type="button" className="mt-2 text-xs text-ink-3 hover:text-ink" onClick={openFile}>
           {file.diff && !file.comparisonUnavailable && onOpenLocalFile ? zh ? "在预览中查看改动" : "View changes in preview" : zh ? "预览文件" : "Preview file"}
         </button>}
       </div>
@@ -876,7 +958,7 @@ function VerificationCard({ event, t, locale }: { event: TimelineEvent & { data:
           <span className="shrink-0">{t("sessions.cards.verification")}</span>
           <code className="truncate font-mono text-xs text-ink-3">{command}</code>
           {status === "running" ? (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" aria-label={t("sessions.cards.running")} />
+            <Circle className="h-2 w-2 shrink-0 fill-current text-info" aria-label={t("sessions.cards.running")} />
           ) : (
             <StatusChip tone={status === "passed" ? "ok" : "danger"} label={t(status === "passed" ? "sessions.cards.passed" : "sessions.cards.failed")} />
           )}
@@ -992,23 +1074,27 @@ function TimelineEventViewImpl({
   onOpenSubagent,
   onOpenLocalFile,
   onOpenWorkflow,
-  showAuthor = true
+  showAuthor = true,
+  streamActive = false,
+  liveStarts
 }: {
   event: TimelineEvent;
   onOpenSession?: (id: string) => void;
-  onEditMessage?: (messageId: string, text: string, workflowRef?: WorkflowMention) => void;
+  onEditMessage?: (messageId: string, text: string, workflowRef?: WorkflowMention, references?: CapabilityReference[]) => void;
   onOpenSubagent?: (eventId: string) => void;
   onOpenWorkflow?: (runId: string) => void;
   /** Work mode only: local file clicks route to the session's preview pane. */
   onOpenLocalFile?: (path: string) => void;
   showAuthor?: boolean;
+  streamActive?: boolean;
+  liveStarts?: ReadonlySet<string>;
 }): JSX.Element | null {
   const { t, locale } = useI18n();
   const data = event.data;
 
   switch (data.kind) {
     case "message":
-      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} />;
+      return <MessageCard event={event as TimelineEvent & { data: Extract<TimelineEvent["data"], { kind: "message" }> }} locale={locale} onEditMessage={onEditMessage} onOpenLocalFile={onOpenLocalFile} showAuthor={showAuthor} streamActive={streamActive} revealFromStart={liveStarts?.has(event.id) ?? false} />;
     case "workflow_plan":
       return <WorkflowPlanCard key={data.plan.id} plan={data.plan} runStatus={data.runStatus} onViewExecution={onOpenWorkflow}/>;
     case "provider_ui":
@@ -1019,14 +1105,14 @@ function TimelineEventViewImpl({
     case "activity":
       return <ActivityLine event={event as TimelineEvent & { data: { kind: "activity" } }} locale={locale} />;
     case "reasoning":
-      return <ReasoningCard event={event as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} />;
+      return <ReasoningCard event={event as TimelineEvent & { data: { kind: "reasoning" } }} locale={locale} streamActive={streamActive} revealFromStart={liveStarts?.has(event.id) ?? false} />;
     case "tool_activity": {
       if (data.subagent) return <SubagentCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} onOpenSubagent={onOpenSubagent} />;
       const action = workflowTool(data.toolName);
       if (action) return <WorkflowToolActivity action={action} name={data.toolName} sessionId={event.sessionId} runId={event.runId}
         input={data.input} output={data.output} status={data.status} zh={locale === "zh-CN"} />;
       if (data.toolName === "run_code" || data.codeExecution) return <CodeExecutionCard data={data} locale={locale} sessionId={event.sessionId} runId={event.runId} />;
-      return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} />;
+      return <ToolActivityCard event={event as TimelineEvent & { data: { kind: "tool_activity" } }} locale={locale} t={t} onOpenLocalFile={onOpenLocalFile} />;
     }
     case "usage":
       return <UsageLine event={event as TimelineEvent & { data: { kind: "usage" } }} locale={locale} />;
@@ -1091,4 +1177,6 @@ export const TimelineEventView = memo(
     && prev.onOpenWorkflow === next.onOpenWorkflow
     && prev.onOpenLocalFile === next.onOpenLocalFile
     && prev.showAuthor === next.showAuthor
+    && prev.streamActive === next.streamActive
+    && prev.liveStarts === next.liveStarts
 );

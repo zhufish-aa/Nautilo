@@ -273,6 +273,41 @@ impl DeepSeek {
 
 #[async_trait::async_trait]
 impl ProviderPlugin for DeepSeek {
+    async fn native_resources(&self, instance: &Value, cwd: &str, _session: &Value) -> anyhow::Result<Vec<Value>> {
+        use agenthub_plugin_sdk::native_resources::{strings, yaml, Resources};
+        let mut resources = Resources::new(instance, cwd);
+        let args = strings(&instance["baseArgs"]);
+        let profile = args.windows(2).find(|pair|pair[0] == "--profile").map(|pair|pair[1])
+            .or_else(||args.iter().find_map(|arg|arg.strip_prefix("--profile="))).unwrap_or("web");
+        let home = resources.path("DSH_HOME").unwrap_or_else(||resources.home.join(".dsh")).join("profiles").join(profile);
+        let mut entries = std::collections::BTreeMap::<String, (std::path::PathBuf, Value)>::new();
+        for path in [home.join("cordis.yml"), home.join("cordis.patch.yml")] {
+            for entry in yaml(&path).as_array().into_iter().flatten() {
+                if let Some(id) = entry["id"].as_str() {
+                    let (_, effective) = entries.entry(id.into()).or_insert_with(||(path.clone(), json!({})));
+                    agenthub_plugin_sdk::native_config::merge(effective, entry.clone());
+                }
+            }
+        }
+        for (_, (path, entry)) in entries {
+            if entry["enabled"] == false { continue; }
+            let settings = &entry["config"];
+            match entry["name"].as_str() {
+                Some("@deepseek-ai/dsh-skill-filesystem") => {
+                    for dir in strings(&settings["customSkillDirs"]) { resources.skills(&resources.cwd.join(dir), &[]); }
+                    if settings["includeDefaultRoots"] != false {
+                        if !cwd.is_empty() { resources.skills(&resources.cwd.join(".agents/skills"), &[]); }
+                        resources.skills(&resources.home.join(".agents/skills"), &[]);
+                    }
+                }
+                Some("@deepseek-ai/dsh-mcp-client") => {
+                    if let Some(name) = settings["serverName"].as_str() { resources.mcp(&path, &json!({(name):settings}), &[]); }
+                }
+                _ => (),
+            }
+        }
+        Ok(resources.finish())
+    }
     fn descriptor(&self) -> Value {
         descriptor()
     }
