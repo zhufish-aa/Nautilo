@@ -268,8 +268,22 @@ export class BrowserShell {
         const scale = wc.getZoomFactor() * (this.metrics.get(wc)?.scale ?? 1);
         const rect = Object.fromEntries(Object.entries(selected.rect).map(([key,value])=>[key,Math.round(value*scale)])) as unknown as Rectangle;
         if (rect.width < 1 || rect.height < 1) return false;
-        const text = selected.selector ? `### 网页元素\n\n页面：${wc.getURL()}\n选择器：${selected.selector}\n尺寸：${selected.dimensions}\n\n\`\`\`html\n${selected.html?.replaceAll("\`","&#96;")}\n\`\`\`` : undefined;
-        this.sendDraft({sessionId,text,attachment:await this.capture(wc,rect)});
+        const attachment = await this.capture(wc,rect);
+        const element = selected.selector ? {
+          id: `el-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          url: wc.getURL(),
+          title: wc.getTitle() || undefined,
+          tag: selected.tag || "element",
+          label: selected.label || selected.selector,
+          selector: selected.selector,
+          dimensions: selected.dimensions || `${rect.width} × ${rect.height}`,
+          textPreview: selected.textPreview,
+          html: selected.html ?? "",
+          styles: selected.styles,
+          componentName: selected.componentName,
+          screenshotPath: attachment.path,
+        } : undefined;
+        this.sendDraft({sessionId,element,attachment});
         return true;
       } finally { this.busyPickers.delete(wc); }
     });

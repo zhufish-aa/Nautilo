@@ -290,7 +290,7 @@ export function SettingsPage(): JSX.Element {
               : "max-w-[760px]",
           )}
         >
-          {section !== "teams" && section !== "skills" && section !== "mcp" && section !== "plugins" && <h1 className="mb-8 text-[25px] font-semibold tracking-tight text-ink outline-none">
+          {section !== "teams" && section !== "skills" && section !== "mcp" && section !== "plugins" && section !== "agents" && <h1 className="mb-8 text-[25px] font-semibold tracking-tight text-ink outline-none">
             {zh ? activeItem.zh : activeItem.en}
           </h1>}
 
@@ -463,7 +463,7 @@ export function SettingsPage(): JSX.Element {
           {section === "assistant" && <AssistantSettingsPanel />}
           {section === "accounts" && <div className="settings-panel-card"><ConnectionsPanel /></div>}
 
-          {section === "agents" && <div className="settings-panel-card"><HarnessPanel /></div>}
+          {section === "agents" && <HarnessPanel />}
           {section === "teams" && <TeamsPage embedded />}
 
           {section === "skills" && <ProviderToolsPanel key="skills" />}

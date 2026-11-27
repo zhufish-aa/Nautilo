@@ -1,16 +1,270 @@
+/* ==========================================================================
+   Harness Management — Obsidian Stage, KPI Deck, Telemetry Cards & Config Studio
+   ========================================================================== */
+
 :is(.harness-overview, .ui-dialog[role="dialog"]:has(.harness-config-editor)) {
   --harness-surface: light-dark(var(--card), var(--session-inspector-fill));
+  --harness-well: light-dark(var(--panel), var(--glass-editor-fill));
   --harness-line: var(--session-inspector-divider);
-  --harness-field: var(--glass-search-fill);
+  --harness-line-strong: light-dark(rgba(15, 23, 42, 0.13), rgba(255, 255, 255, 0.11));
+  --harness-field: light-dark(var(--card), var(--glass-search-fill));
   --harness-blue: var(--glass-accent-blue);
-  --harness-muted: color-mix(in srgb, var(--ink-3) 80%, var(--harness-surface));
-  --harness-amber: light-dark(color-mix(in srgb, var(--glass-accent-amber) 76%, var(--ink)), var(--glass-accent-amber));
-  --harness-icon-fill: light-dark(var(--surface-soft), color-mix(in srgb, var(--glass-action-ink) 3%, transparent));
-  --harness-icon-line: color-mix(in srgb, var(--ink) 6%, transparent);
+  --harness-emerald: var(--glass-accent-emerald);
+  --harness-muted: color-mix(in srgb, var(--ink-3) 84%, var(--harness-surface));
+  --harness-amber: light-dark(color-mix(in srgb, var(--glass-accent-amber) 78%, var(--ink)), var(--glass-accent-amber));
+  --harness-icon-fill: light-dark(var(--surface-soft), color-mix(in srgb, var(--glass-action-ink) 3.5%, transparent));
+  --harness-icon-line: color-mix(in srgb, var(--ink) 7%, transparent);
+  --harness-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.harness-page { width: 100%; max-width: 1160px; margin-inline: auto; }
-.harness-panel.harness-overview { width: 100%; gap: 12px; container: harness-overview / inline-size; }
+/* Full-stage obsidian layout inside Settings -> Harness */
+.settings-layout[data-section="agents"] > .settings-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 24px 32px 24px 28px;
+  background: light-dark(var(--glass-stage), #0e1016);
+}
+.settings-layout[data-section="agents"] > .settings-content > .settings-content-inner {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  max-width: 1480px;
+}
+.settings-layout[data-section="agents"] .harness-panel.harness-overview {
+  flex: 1;
+  min-height: 0;
+}
+
+.harness-page {
+  width: 100%;
+  max-width: 1480px;
+  margin-inline: auto;
+  flex: 1;
+  min-height: 0;
+}
+.harness-page > .harness-panel.harness-overview {
+  flex: 1;
+  min-height: 0;
+}
+.harness-panel.harness-overview {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 16px;
+  container: harness-overview / inline-size;
+}
+
+/* Stage header */
+.harness-stage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  flex-shrink: 0;
+}
+.harness-stage-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.harness-stage-title > h1 {
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.25;
+}
+.harness-stage-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--harness-line);
+  border-radius: 999px;
+  background: var(--harness-surface);
+  color: var(--ink-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.harness-stage-pill > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+.harness-stage-pill[data-ready="true"] > i {
+  background: var(--harness-emerald);
+}
+.harness-stage-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.harness-detect-all.ui-button {
+  height: 32px;
+  min-height: 32px;
+  border: 1px solid var(--harness-line);
+  border-radius: 8px;
+  background: var(--harness-surface);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  gap: 6px;
+  transition: border-color 180ms var(--harness-ease), background-color 180ms var(--harness-ease), color 180ms var(--harness-ease), transform 140ms var(--harness-ease);
+}
+.harness-detect-all.ui-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--harness-blue) 42%, var(--harness-line));
+  background: color-mix(in srgb, var(--ink) 4%, var(--harness-surface));
+  color: var(--ink);
+}
+.harness-detect-all.ui-button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+/* 3-Cell Obsidian KPI Deck */
+.harness-kpi-deck {
+  position: relative;
+  isolation: isolate;
+  flex-shrink: 0;
+  border: 1px solid var(--harness-line);
+  border-radius: 13px;
+  background: var(--harness-surface);
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+}
+.harness-kpi-deck::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(380px circle at var(--mx, -400px) var(--my, -400px), color-mix(in srgb, var(--harness-blue) 6%, transparent), transparent 65%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 280ms var(--harness-ease);
+}
+.harness-kpi-deck:hover::before { opacity: 1; }
+.harness-kpi-deck-inner {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.harness-kpi-cell {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  padding: 15px 20px;
+}
+.harness-kpi-cell + .harness-kpi-cell {
+  border-inline-start: 1px solid var(--harness-line);
+}
+.harness-kpi-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.harness-kpi-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.harness-metric-dot {
+  position: relative;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  opacity: 0.45;
+  flex: none;
+}
+.harness-metric-dot[data-active="true"] {
+  background: var(--harness-emerald);
+  opacity: 1;
+}
+.harness-kpi-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.harness-kpi-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-weight: 500;
+  transition: color 160ms var(--harness-ease);
+}
+.harness-kpi-link:hover {
+  color: var(--harness-blue);
+}
+.harness-kpi-value {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+}
+.harness-kpi-value[data-accent="true"] {
+  color: var(--harness-blue);
+}
+.harness-kpi-value > em {
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  font-style: normal;
+  letter-spacing: normal;
+}
+.harness-kpi-sep {
+  margin-inline: 8px;
+  color: var(--ink-3);
+  font-weight: 400;
+  opacity: 0.45;
+}
+.harness-kpi-bar {
+  display: flex;
+  height: 4px;
+  margin-top: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  overflow: hidden;
+  gap: 1px;
+}
+.harness-kpi-bar > span {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: 999px;
+  transition: width 420ms var(--harness-ease);
+}
+.harness-kpi-bar-ready { background: var(--harness-emerald); }
+.harness-kpi-bar-disabled { background: color-mix(in srgb, var(--ink-3) 55%, transparent); }
+.harness-kpi-bar-missing { background: color-mix(in srgb, var(--glass-accent-amber) 78%, transparent); }
+.harness-kpi-sub {
+  display: block;
+  margin-top: 6px;
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Filter & Search Toolbar */
 .harness-overview-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -18,64 +272,152 @@
   justify-content: space-between;
   flex: none;
   gap: 8px 16px;
-  padding-inline: 10px;
   border-bottom: 1px solid var(--harness-line);
 }
-.harness-overview-filters { display: flex; gap: clamp(10px, 3cqw, 18px); }
-.harness-overview-filters > button {
+.harness-overview-toolbar .capability-underline-tabs {
+  margin-bottom: -1px;
+}
+.harness-overview-tools {
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-height: 36px;
-  margin-bottom: -1px;
-  padding: 4px 1px 7px;
-  border-bottom: 2px solid transparent;
-  color: var(--ink-3);
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding-bottom: 9px;
 }
-.harness-overview-filters > button > span { color: var(--ink-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.harness-overview-filters > button[aria-pressed="true"] { border-bottom-color: var(--harness-blue); color: light-dark(var(--ink), var(--glass-action-ink)); }
-.harness-overview-filters > button[aria-pressed="true"] > span { color: inherit; }
-
-.harness-overview-tools { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; padding-bottom: 6px; }
-.harness-overview-search, .harness-overview-detect {
-  height: 34px;
-  border: 1px solid var(--line);
+.harness-overview-search,
+.harness-overview-detect {
+  height: 32px;
+  border: 1px solid var(--harness-line);
   border-radius: 8px;
   background: var(--harness-field);
   color: var(--harness-muted);
+  transition: border-color 180ms var(--harness-ease), box-shadow 180ms var(--harness-ease), background-color 180ms var(--harness-ease), color 180ms var(--harness-ease);
 }
-.harness-overview-search { display: flex; align-items: center; gap: 8px; width: 220px; min-width: 0; padding-inline: 10px; }
+.harness-overview-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 260px;
+  min-width: 0;
+  padding-inline: 10px 7px;
+}
 .harness-overview-search > svg { flex: none; }
-.harness-overview-search input { flex: 1; min-width: 0; padding: 0; border: 0; outline: none; background: transparent; color: var(--ink); font-size: 13px; }
+.harness-overview-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+}
 .harness-overview-search input::placeholder { color: var(--harness-muted); }
-.harness-overview-search button { display: grid; place-items: center; flex: none; border-radius: 4px; color: inherit; }
-.harness-overview-detect { display: grid; place-items: center; width: 34px; flex: none; }
+.harness-overview-search button {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  color: inherit;
+}
+.harness-overview-search button:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+.harness-search-kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--harness-line-strong);
+  border-radius: 4px;
+  background: var(--harness-surface);
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1;
+  pointer-events: none;
+}
+.harness-overview-detect {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  flex: none;
+}
 .harness-overview-detect[aria-busy="true"] { color: var(--harness-blue); }
-.harness-overview-search:focus-within { border-color: var(--harness-blue); }
-.harness-overview button:focus-visible { outline: 2px solid var(--harness-blue); outline-offset: -2px; }
+.harness-overview-search:focus-within {
+  border-color: var(--harness-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--harness-blue) 14%, transparent);
+  background: var(--harness-well);
+}
+.harness-overview button:focus-visible {
+  outline: 2px solid var(--harness-blue);
+  outline-offset: 2px;
+}
 
-.harness-overview-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding-bottom: 12px; }
-.harness-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+/* Card Grid */
+.harness-overview-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding-bottom: 16px;
+}
+.harness-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
 .harness-tool-card {
+  position: relative;
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   width: 100%;
   min-width: 0;
-  padding: 12px 13px 0;
+  padding: 14px 16px 0;
   border: 1px solid var(--harness-line);
-  border-radius: 12px;
+  border-radius: 13px;
   background: var(--harness-surface);
   text-align: start;
   cursor: pointer;
+  overflow: hidden;
+  transition: border-color 180ms var(--harness-ease), background-color 180ms var(--harness-ease), transform 180ms var(--harness-ease);
 }
-.harness-tool-header { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-bottom: 11px; }
+.harness-tool-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(280px circle at var(--mx, -300px) var(--my, -300px), color-mix(in srgb, var(--harness-blue) 7%, transparent), transparent 65%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 260ms var(--harness-ease);
+}
+.harness-tool-card[data-state="disabled"] {
+  opacity: 0.78;
+}
+.harness-tool-card[data-state="missing"],
+.harness-tool-card[data-state="outdated"] {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--harness-amber) 24%, var(--harness-line));
+}
+
+.harness-tool-header {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 12px;
+}
 .harness-overview .harness-tool-card .provider-avatar.identity-avatar,
 .harness-config-editor .harness-profile-header > .provider-avatar.identity-avatar {
-  --harness-avatar-size: 34px;
-  --harness-mark-size: 19px;
+  --harness-avatar-size: 38px;
+  --harness-mark-size: 20px;
   display: grid;
   place-items: center;
   width: var(--harness-avatar-size);
@@ -83,7 +425,7 @@
   flex: none;
   padding: 0;
   border: 1px solid var(--harness-icon-line);
-  border-radius: 9px;
+  border-radius: 10px;
   background: var(--harness-icon-fill);
   box-shadow: none;
   color: var(--ink-3);
@@ -97,18 +439,29 @@
   color-scheme: inherit;
 }
 .dark :is(.harness-tool-card, .harness-profile-header) .provider-avatar:is([data-provider="pi"], [data-provider="deepseek"]) > img {
-  opacity: .82;
+  opacity: 0.86;
 }
 
 .harness-tool-identity { min-width: 0; }
-.harness-tool-identity > strong { display: block; color: var(--ink); font-size: 14.5px; font-weight: 600; line-height: 1.35; }
-.harness-tool-identity > strong, .harness-version-meta > span, .harness-tool-detail, .harness-tool-summary > [data-configured] {
+.harness-tool-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.harness-card-title-btn {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  color: var(--ink);
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: start;
 }
-.harness-version-meta, .harness-detail header p.harness-version-meta {
+.harness-version-meta,
+.harness-detail header p.harness-version-meta {
   display: flex;
   align-items: baseline;
   gap: 5px;
@@ -117,12 +470,127 @@
   font-size: 11.5px;
   line-height: 1.35;
 }
-.harness-version-meta > [aria-hidden], .harness-tool-summary > [aria-hidden] { flex: none; opacity: .65; }
-.harness-tool-version { font: 400 11px/1.4 var(--font-mono); font-variant-numeric: tabular-nums; }
-.harness-tool-status { display: inline-flex; align-items: center; align-self: start; gap: 5px; color: var(--harness-muted); font-size: 11px; line-height: 1.55; white-space: nowrap; }
-.harness-tool-status::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; }
-.harness-tool-status[data-state="ready"]::before { background: var(--glass-accent-emerald); }
-.harness-tool-status[data-state="missing"] { color: var(--harness-amber); }
+.harness-version-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.harness-version-meta > [aria-hidden] { flex: none; opacity: 0.55; }
+.harness-tool-version {
+  font: 400 11px/1.4 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.harness-tool-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  color: var(--harness-muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.harness-tool-status::before {
+  content: "";
+  width: 5.5px;
+  height: 5.5px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.harness-tool-status[data-state="ready"] {
+  background: color-mix(in srgb, var(--harness-emerald) 11%, transparent);
+  color: var(--harness-emerald);
+}
+.harness-tool-status[data-state="ready"]::before { background: var(--harness-emerald); }
+.harness-tool-status[data-state="missing"],
+.harness-tool-status[data-state="outdated"] {
+  background: color-mix(in srgb, var(--glass-accent-amber) 12%, transparent);
+  color: var(--harness-amber);
+}
+
+.harness-card-switch .ui-switch {
+  width: 32px;
+  height: 18px;
+  border: 1px solid var(--harness-line-strong);
+  background: light-dark(var(--line-strong), color-mix(in srgb, var(--ink) 8%, transparent));
+}
+.harness-card-switch .ui-switch[data-state="checked"] {
+  border-color: transparent;
+  background: var(--harness-blue);
+}
+.harness-card-switch .ui-switch-thumb {
+  width: 12px;
+  height: 12px;
+  translate: 2px 0;
+  transform: none;
+  background: light-dark(var(--glass-action-ink), #64748b);
+  box-shadow: none;
+}
+.harness-card-switch .ui-switch-thumb[data-state="checked"] {
+  translate: 16px 0;
+  background: var(--glass-action-ink);
+}
+
+/* Telemetry Chips Row */
+.harness-tool-telemetry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 50px;
+  padding-bottom: 12px;
+  align-content: flex-start;
+}
+.harness-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--harness-line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ink) 2.5%, transparent);
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.harness-meta-chip > svg { flex: none; opacity: 0.72; }
+.harness-meta-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.harness-meta-chip[data-active="true"] {
+  border-color: color-mix(in srgb, var(--harness-blue) 26%, var(--harness-line));
+  background: color-mix(in srgb, var(--harness-blue) 8%, transparent);
+  color: var(--ink-2);
+}
+.harness-meta-chip[data-active="true"] > svg {
+  color: var(--harness-blue);
+  opacity: 1;
+}
+.harness-meta-count {
+  font-variant-numeric: tabular-nums;
+}
+.harness-setup-hint {
+  margin: 0;
+  color: var(--harness-amber);
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.92;
+}
+
+/* Card Footer */
 .harness-tool-footer {
   display: flex;
   align-items: center;
@@ -134,75 +602,463 @@
   color: var(--harness-muted);
   font-size: 12px;
 }
-.harness-tool-summary { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
-.harness-tool-summary > :first-child { flex: none; max-width: 50%; }
-.harness-tool-summary > [data-configured="true"] { color: var(--ink); }
-.harness-tool-action { display: inline-flex; align-items: center; gap: 2px; flex: none; white-space: nowrap; }
+.harness-exec-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.harness-exec-chip > svg { flex: none; opacity: 0.65; }
+.harness-exec-chip > code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.harness-footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.harness-card-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--ink-3);
+  opacity: 0.55;
+  transition: opacity 160ms var(--harness-ease), background-color 160ms var(--harness-ease), color 160ms var(--harness-ease);
+}
+.harness-card-icon-btn:hover:not(:disabled) {
+  opacity: 1;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+.harness-tool-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color 160ms var(--harness-ease), transform 160ms var(--harness-ease);
+}
 
+/* ==========================================================================
+   Harness Runtime Config Dialog
+   ========================================================================== */
 .ui-dialog[role="dialog"]:has(.harness-config-editor) {
-  border-color: var(--harness-line);
+  border-color: var(--harness-line-strong);
   border-radius: 17px;
   background: var(--harness-surface);
   box-shadow: var(--glass-stage-shadow);
   backdrop-filter: none;
 }
-.ui-dialog:has(.harness-config-editor) > :first-child { align-items: center; padding: 14px 22px; border-color: var(--harness-line); }
+.ui-dialog:has(.harness-config-editor) > :first-child {
+  align-items: center;
+  padding: 14px 22px;
+  border-color: var(--harness-line);
+}
 .ui-dialog:has(.harness-config-editor) > :first-child h2 { font-size: 14px; }
 .ui-dialog:has(.harness-config-editor) > :nth-child(2) { padding: 18px 22px; }
-.ui-dialog:has(.harness-config-editor) > :last-child { flex-wrap: wrap; gap: 8px; padding: 11px 22px; border-color: var(--harness-line); background: transparent; }
-
-.harness-config-editor > .harness-profile-header { gap: 12px; margin-bottom: 12px; }
-.harness-config-editor .harness-profile-header > .provider-avatar.identity-avatar { --harness-avatar-size: 44px; --harness-mark-size: 22px; border-radius: 11px; }
-.harness-profile-copy { flex: 1; min-width: 0; }
-.harness-profile-title { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; }
-.harness-profile-title h3 { margin: 0; color: var(--ink); font-size: 18px; font-weight: 600; line-height: 1.3; }
-.harness-profile-title .harness-tool-status { align-self: center; }
-.harness-profile-maintenance { flex: none; }
-.harness-profile-maintenance .ui-button-ghost { width: 30px; height: 30px; padding: 0; border: 1px solid var(--harness-line); border-radius: 8px; background: var(--harness-field); color: var(--ink-3); }
-
-.harness-config-editor > .harness-enabled-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 0; padding-block: 10px; }
-.harness-enabled-row strong { color: var(--ink); font-size: 13px; font-weight: 550; }
-.harness-enabled-row .ui-switch[data-state="checked"] { background: var(--harness-blue); }
-.harness-enabled-row .ui-switch .ui-switch-thumb { background: var(--glass-action-ink); translate: 2px 0; transform: none; }
-.harness-enabled-row .ui-switch[data-state="checked"] .ui-switch-thumb { translate: 20px 0; }
-.harness-config-editor > .harness-config-section { margin-bottom: 16px; padding-top: 12px; border-top: 1px solid var(--harness-line); }
-.harness-config-editor > .harness-config-section:last-child { margin-bottom: 0; }
-.harness-section-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 11px; }
-.harness-section-heading h4 { color: var(--ink-2); font-size: 12.5px; font-weight: 600; }
-.harness-config-section > :not(.harness-section-heading) + :not(.harness-section-heading) { margin-top: 12px; }
-.harness-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.harness-config-section label { color: var(--ink-2); font-size: 12.5px; font-weight: 500; }
-.harness-config-section :is(.ui-field, .ui-select) { width: 100%; height: 36px; min-height: 36px; padding-inline: 10px; border: 1px solid var(--harness-line); border-radius: 8px; background: var(--harness-field); font-size: 12.5px; }
-.harness-config-section .harness-executable { font-family: var(--font-mono); font-weight: 400; }
-.harness-config-section :is(.ui-field:focus, .ui-select:focus-visible) { border-color: var(--harness-blue); box-shadow: none; }
-.harness-dialog-save-state { color: var(--harness-muted); font-size: 11.5px; }
-.harness-config-save.ui-button { background: var(--harness-blue); color: light-dark(var(--glass-action-ink), var(--on-accent)); box-shadow: none; }
-.harness-config-save.ui-button:disabled { border: 1px solid var(--harness-line); background: var(--harness-field); color: var(--harness-muted); opacity: .65; }
-
-.harness-tool-card:focus-visible { border-color: var(--harness-blue); }
-.harness-tool-card:focus-visible .harness-tool-action { color: var(--harness-blue); }
-
-@media (hover: hover) and (pointer: fine) {
-  .harness-tool-card:hover { border-color: color-mix(in srgb, var(--harness-blue) 38%, transparent); background: color-mix(in srgb, var(--harness-blue) 4%, var(--harness-surface)); }
-  .harness-tool-card:hover .harness-tool-action { color: var(--harness-blue); }
-  .harness-overview-filters > button:hover:not([aria-pressed="true"]), .harness-overview-search button:hover,
-  .harness-profile-maintenance .ui-button-ghost:hover { color: var(--ink); }
-  .harness-overview-detect:hover:not(:disabled) { border-color: var(--harness-blue); color: var(--harness-blue); }
+.ui-dialog:has(.harness-config-editor) > :last-child {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 22px;
+  border-color: var(--harness-line);
+  background: transparent;
 }
-@media (prefers-reduced-motion: no-preference) {
-  html:not([data-reduce-motion]) .harness-overview-detect[aria-busy="true"] > svg { animation: var(--animate-spin); }
-  html:not([data-reduce-motion]) .harness-enabled-row .ui-switch-thumb { transition: translate 180ms var(--ease-out-ui); }
-  @media (hover: hover) and (pointer: fine) {
-    html:not([data-reduce-motion]) .harness-tool-card { transition: border-color 160ms ease, background-color 160ms ease; }
-    html:not([data-reduce-motion]) .harness-tool-action { transition: transform 160ms var(--ease-out-ui); }
-    html:not([data-reduce-motion]) .harness-tool-card:hover .harness-tool-action { transform: translateX(2px); }
+
+.harness-config-editor > .harness-profile-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.harness-config-editor .harness-profile-header > .provider-avatar.identity-avatar {
+  --harness-avatar-size: 46px;
+  --harness-mark-size: 23px;
+  border-radius: 12px;
+}
+.harness-profile-copy { flex: 1; min-width: 0; }
+.harness-profile-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 9px;
+}
+.harness-profile-title h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+.harness-capability-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+.harness-cap-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--harness-line);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.harness-cap-pill-accent {
+  border-color: color-mix(in srgb, var(--harness-blue) 28%, var(--harness-line));
+  background: color-mix(in srgb, var(--harness-blue) 9%, transparent);
+  color: var(--harness-blue);
+}
+.harness-profile-maintenance { flex: none; }
+.harness-profile-maintenance .ui-button-ghost {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--harness-line);
+  border-radius: 8px;
+  background: var(--harness-field);
+  color: var(--ink-3);
+}
+
+/* Ecosystem quick-jump tiles */
+.harness-ecosystem-links {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.harness-eco-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--harness-line);
+  border-radius: 10px;
+  background: var(--harness-field);
+  text-align: start;
+  transition: border-color 160ms var(--harness-ease), background-color 160ms var(--harness-ease);
+}
+.harness-eco-tile:hover {
+  border-color: color-mix(in srgb, var(--harness-blue) 40%, var(--harness-line));
+  background: color-mix(in srgb, var(--harness-blue) 5%, var(--harness-field));
+}
+.harness-eco-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+}
+.harness-eco-tile > strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.harness-eco-tile > strong > small {
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 450;
+}
+.harness-eco-arrow {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: var(--ink-3);
+  opacity: 0.6;
+  transition: transform 160ms var(--harness-ease), color 160ms var(--harness-ease), opacity 160ms var(--harness-ease);
+}
+.harness-eco-tile:hover .harness-eco-arrow {
+  transform: translate(1px, -1px);
+  color: var(--harness-blue);
+  opacity: 1;
+}
+
+.harness-config-editor > .harness-enabled-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  border: 1px solid var(--harness-line);
+  border-radius: 10px;
+  background: var(--harness-field);
+}
+.harness-enabled-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.harness-enabled-copy strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.harness-enabled-copy small {
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.harness-enabled-row .ui-switch[data-state="checked"] { background: var(--harness-blue); }
+.harness-enabled-row .ui-switch .ui-switch-thumb {
+  background: var(--glass-action-ink);
+  translate: 2px 0;
+  transform: none;
+}
+.harness-enabled-row .ui-switch[data-state="checked"] .ui-switch-thumb { translate: 20px 0; }
+
+.harness-config-editor > .harness-config-section {
+  margin-bottom: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--harness-line);
+}
+.harness-config-editor > .harness-config-section:last-child { margin-bottom: 0; }
+.harness-section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 11px;
+}
+.harness-section-heading h4 {
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.harness-config-section > :not(.harness-section-heading) + :not(.harness-section-heading) { margin-top: 12px; }
+.harness-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.harness-config-section label {
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+}
+.harness-config-section :is(.ui-field, .ui-select) {
+  width: 100%;
+  height: 36px;
+  min-height: 36px;
+  padding-inline: 10px;
+  border: 1px solid var(--harness-line);
+  border-radius: 8px;
+  background: var(--harness-field);
+  font-size: 12.5px;
+}
+.harness-exec-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.harness-exec-field .ui-field {
+  flex: 1;
+  min-width: 0;
+}
+.harness-exec-action {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 36px;
+  border: 1px solid var(--harness-line);
+  border-radius: 8px;
+  background: var(--harness-field);
+  color: var(--ink-3);
+  transition: border-color 160ms var(--harness-ease), color 160ms var(--harness-ease);
+}
+.harness-exec-action:hover {
+  border-color: color-mix(in srgb, var(--harness-blue) 40%, var(--harness-line));
+  color: var(--ink);
+}
+.harness-config-section .harness-executable {
+  font-family: var(--font-mono);
+  font-weight: 400;
+}
+.harness-config-section :is(.ui-field:focus, .ui-select:focus-visible) {
+  border-color: var(--harness-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--harness-blue) 14%, transparent);
+}
+.harness-field-hint {
+  margin-top: 5px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.harness-dialog-save-state {
+  color: var(--harness-amber);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.harness-config-save.ui-button {
+  background: var(--harness-blue);
+  color: light-dark(var(--glass-action-ink), var(--on-accent));
+  box-shadow: none;
+}
+.harness-config-save.ui-button:disabled {
+  border: 1px solid var(--harness-line);
+  background: var(--harness-field);
+  color: var(--harness-muted);
+  opacity: 0.65;
+}
+
+/* Native plugins disclosure */
+.harness-plugins-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--harness-line);
+  border-radius: 10px;
+  background: var(--harness-field);
+  text-align: start;
+  transition: border-color 160ms var(--harness-ease);
+}
+.harness-plugins-trigger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--harness-blue) 36%, var(--harness-line));
+}
+.harness-plugins-trigger-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--harness-blue) 11%, transparent);
+  color: var(--harness-blue);
+  flex: none;
+}
+.harness-plugins-trigger-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.harness-plugins-trigger-copy strong {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.harness-plugins-trigger-copy small {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.harness-plugins-chevron {
+  color: var(--ink-3);
+  transition: transform 200ms var(--harness-ease);
+}
+.harness-plugins-chevron.is-open {
+  transform: rotate(180deg);
+}
+.harness-plugins-body {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--harness-line);
+  border-radius: 10px;
+  background: var(--harness-well);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.harness-notice-muted {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.harness-install-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--glass-accent-amber) 28%, var(--harness-line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--glass-accent-amber) 7%, transparent);
+  color: var(--harness-amber);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.harness-error-alert {
+  margin-top: 10px;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--harness-line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* Hover & Motion */
+@media (hover: hover) and (pointer: fine) {
+  .harness-tool-card:hover {
+    border-color: color-mix(in srgb, var(--harness-blue) 40%, var(--harness-line));
+    background: color-mix(in srgb, var(--harness-blue) 3%, var(--harness-surface));
+  }
+  .harness-tool-card:hover::before { opacity: 1; }
+  .harness-tool-card:hover .harness-tool-action {
+    color: var(--harness-blue);
+    transform: translateX(2px);
+  }
+  .harness-tool-card:hover .harness-card-icon-btn { opacity: 0.9; }
+  .harness-profile-maintenance .ui-button-ghost:hover { color: var(--ink); }
+  .harness-overview-detect:hover:not(:disabled) {
+    border-color: var(--harness-blue);
+    color: var(--harness-blue);
   }
 }
-@container harness-overview (max-width: 880px) { .harness-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@container harness-overview (max-width: 590px) {
-  .harness-overview-toolbar { padding-inline: 0; }
-  .harness-overview-tools { order: -1; width: 100%; padding-bottom: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-tool-card,
+  .harness-tool-card::before,
+  .harness-tool-action,
+  .harness-kpi-bar > span {
+    transition: none;
+  }
+}
+:root[data-reduce-motion] .harness-tool-card,
+:root[data-reduce-motion] .harness-tool-card::before,
+:root[data-reduce-motion] .harness-tool-action,
+:root[data-reduce-motion] .harness-kpi-bar > span {
+  transition: none;
+}
+
+/* Responsive container rules */
+@container harness-overview (max-width: 860px) {
+  .harness-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .harness-kpi-deck-inner { grid-template-columns: minmax(0, 1fr); }
+  .harness-kpi-cell + .harness-kpi-cell {
+    border-inline-start: 0;
+    border-top: 1px solid var(--harness-line);
+  }
+}
+@container harness-overview (max-width: 600px) {
+  .harness-overview-tools { width: 100%; }
   .harness-overview-search { flex: 1; }
   .harness-card-grid { grid-template-columns: minmax(0, 1fr); }
 }
-@media (max-width: 520px) { .harness-form-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 560px) {
+  .harness-form-grid,
+  .harness-ecosystem-links {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

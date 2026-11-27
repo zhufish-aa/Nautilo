@@ -114,6 +114,72 @@ export function browserPredicates(actual: unknown, expected: Record<string, unkn
   }).every(Boolean);
 }
 
+export type BrowserWaitCase = {
+  name: string;
+  selector?: string;
+  url_includes?: string;
+  text_includes?: string;
+};
+
+export function browserWaitCases(input: unknown): BrowserWaitCase[] {
+  const invalid = () => new BrowserToolError("INVALID_FIELD",
+    "wait_any needs 2–8 uniquely named cases with a selector, url_includes, or text_includes.",
+    { field: "cases" }, undefined, false);
+  if (!Array.isArray(input) || input.length < 2 || input.length > 8) throw invalid();
+  const names = new Set<string>();
+  for (const item of input) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw invalid();
+    const { name, ...conditions } = item;
+    const entries = Object.entries(conditions);
+    if (typeof name !== "string" || !/^[A-Za-z0-9_.-]{1,40}$/.test(name) || names.has(name) ||
+      !entries.length || entries.some(([key, value]) => !["selector", "url_includes", "text_includes"].includes(key) ||
+        typeof value !== "string" || !value.trim() || value.length > 2000)) throw invalid();
+    names.add(name);
+  }
+  return input;
+}
+
+/** Test alternatives in a single page read per poll. No alternative dispatches input. */
+export async function waitForBrowserCase(page: WebContents, cases: BrowserWaitCase[], check: () => void, timeoutMs: number) {
+  const started = performance.now();
+  const deadline = started + timeoutMs;
+  let attempts = 0;
+  let lastUrl = "";
+  do {
+    check();
+    attempts++;
+    lastUrl = page.getURL();
+    const candidates = cases.filter(item => !item.url_includes || lastUrl.includes(item.url_includes));
+    const needsPage = candidates.some(item => item.selector || item.text_includes);
+    const results = needsPage ? await evaluateBrowser(page, `cases => {
+      let text;
+      return cases.map(item => {
+        if (item.text_includes && !(text ??= document.body?.innerText ?? "").includes(item.text_includes)) return false;
+        if (!item.selector) return true;
+        return Array.from(document.querySelectorAll(item.selector)).some(node =>
+          node.getClientRects().length && getComputedStyle(node).visibility === "visible");
+      });
+    }`, candidates, check, Math.max(100, Math.min(3000, deadline - performance.now()))).catch(error => {
+      check();
+      // A submitted form may replace the execution context between reading the URL and querying the DOM.
+      if (error instanceof Error && /execution context was destroyed|cannot find context with specified id/i.test(error.message))
+        return [];
+      throw error;
+    }) as boolean[] :
+      candidates.map(() => true);
+    check();
+    const match = candidates[results.indexOf(true)];
+    if (match && page.getURL() === lastUrl)
+      return { matched: match.name, attempts, elapsed_ms: Math.round(performance.now() - started), url: lastUrl };
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) break;
+    await new Promise(resolve => setTimeout(resolve, Math.min(100, remaining)));
+  } while (true);
+  throw new BrowserToolError("ASSERT_FAILED", "None of the browser states matched before the timeout.",
+    { cases: cases.map(item => item.name), url: lastUrl, attempts, timeout_ms: timeoutMs },
+    "Inspect the page. Resume from observation; do not repeat already dispatched actions.");
+}
+
 /** Poll only observations. An action that produced them is never replayed. */
 export async function expectBrowser(page: WebContents, expect: BrowserExpect, observed: BrowserObserved, check: () => void, timeoutMs = 15000) {
   const allowed = new Set(["url", "title", "selector", "text", "eval", "popup", "navigation", "network", "load_state", "network_idle_ms", "event"]);

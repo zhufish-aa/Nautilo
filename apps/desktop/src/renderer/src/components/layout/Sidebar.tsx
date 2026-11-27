@@ -166,9 +166,11 @@ export function Sidebar({ onToggle }: { onToggle: (expand: boolean) => void }): 
           {command(zh ? "新会话 · Ctrl/⌘ N" : "New chat · Ctrl/⌘ N", <button className={rowClass} aria-current={isNewConversation ? "page" : undefined} onClick={() => newConversation()} data-tour="sessions-new">
             {isNewConversation && activeSurface}
             <Plus className="h-4 w-4 shrink-0" aria-hidden />{zh ? "新建任务" : "New task"}
+            <kbd className="sidebar-cmd-kbd" aria-hidden>Ctrl N</kbd>
           </button>)}
           {command(zh ? "搜索 · Ctrl/⌘ K" : "Search · Ctrl/⌘ K", <button ref={searchTrigger} className={rowClass} onClick={() => setSearchOpen(true)}>
             <Search className="h-4 w-4 shrink-0" aria-hidden />{zh ? "搜索" : "Search"}
+            <kbd className="sidebar-cmd-kbd" aria-hidden>Ctrl K</kbd>
           </button>)}
         </div>
         <div className="sidebar-feature-nav">
@@ -190,7 +192,7 @@ export function Sidebar({ onToggle }: { onToggle: (expand: boolean) => void }): 
           </NavLink>)}
         </div>
         <div className="sidebar-project-history" data-nav="sessions">
-          <div className="sidebar-section-heading"><span>{zh ? "项目与任务" : "Projects & tasks"}</span><button onClick={() => setAddProjectOpen(true)} aria-label={t("projects.addTitle")}><Plus size={15} /></button></div>
+          <div className="sidebar-section-heading"><span>{zh ? "项目与任务" : "Projects & tasks"}</span><button className="sidebar-section-add" onClick={() => setAddProjectOpen(true)} title={t("projects.addTitle")} aria-label={t("projects.addTitle")}><Plus size={14} /></button></div>
           <SessionListPanel embedded activeSessionId={location.pathname === "/assistant" || new URLSearchParams(location.search).get("new") === "1" ? undefined : activeSessionId} onSelect={selectSession} onNew={newConversation} onDelete={setDeletingSession} />
         </div>
         <div className="mx-3 mt-2 border-t border-line/60 py-3">

@@ -18,6 +18,7 @@ import { useSessionsStore } from "./stores/sessions";
 import { useComposerDraftsStore } from "./stores/composer-drafts";
 import { startComposerPersistence } from "./lib/composer-persistence";
 import { toast } from "./stores/toast";
+import type { BrowserDraft, BrowserElementContext } from "../../shared/browser-shell";
 const AssistantPage = lazy(() => import("./features/assistant/AssistantPage"));
 const DetachedPanel = lazy(() => import("./features/sessions/DetachedPanel"));
 const HarnessPage = lazy(() => import("./features/agents/HarnessPanel").then((module) => ({ default: module.HarnessPage })));
@@ -76,6 +77,29 @@ function useDocumentPreferences(): void {
   }, [locale]);
 }
 
+function parseLegacyElementDraft(draft: BrowserDraft): BrowserElementContext | undefined {
+  if (!draft.text || !draft.text.startsWith("### 网页元素")) return undefined;
+  const url = draft.text.match(/页面[：:]\s*(.+)/)?.[1]?.trim() ?? "";
+  const selector = draft.text.match(/选择器[：:]\s*(.+)/)?.[1]?.trim() ?? "";
+  if (!selector) return undefined;
+  const dimensions = (draft.text.match(/尺寸[：:]\s*(.+)/)?.[1]?.trim() ?? "").replace(/\s*CSS\s*px$/i, "");
+  const html = draft.text.match(/```html\n([\s\S]*?)\n```/)?.[1]?.replaceAll("&#96;", "`") ?? "";
+  const lastSegment = selector.split(">").at(-1)?.trim() ?? selector;
+  const tag = lastSegment.match(/^([a-zA-Z0-9_-]+)/)?.[1] ?? "element";
+  const textMatch = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return {
+    id: `el-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    url,
+    tag,
+    label: lastSegment.replace(/:nth-of-type\(\d+\)/g, ""),
+    selector,
+    dimensions: dimensions || "—",
+    textPreview: textMatch ? textMatch.slice(0, 120) : undefined,
+    html,
+    screenshotPath: draft.attachment?.path,
+  };
+}
+
 export default function App(): JSX.Element {
   useDocumentPreferences();
   const panels = getBridge()?.panels;
@@ -99,19 +123,28 @@ export default function App(): JSX.Element {
   useEffect(() => {
     if (target) return;
     return getBridge()?.browser?.onDraft(draft => {
-      if (!draft.text && !draft.attachment) {
+      if (!draft.text && !draft.attachment && !draft.element) {
         navigate("/sessions?session="+encodeURIComponent(draft.sessionId!));
         return;
       }
       const id = draft.sessionId ?? useSessionsStore.getState().activeSessionId ?? "new";
       const store = useComposerDraftsStore.getState();
-      if (draft.text) {
+      const element = draft.element ?? parseLegacyElementDraft(draft);
+      if (draft.text && !element) {
         const text = store.drafts[id]?.text;
         store.setText(id,text ? text + "\n\n" + draft.text : draft.text);
+      }
+      if (element) {
+        store.setElements(id, previous => [...previous, element]);
       }
       if (draft.attachment) {
         const attachment = draft.attachment;
         store.setAttachments(id,previous => [...previous,attachment]);
+      }
+      if (element) {
+        requestAnimationFrame(() => {
+          document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus({ preventScroll: true });
+        });
       }
       void startComposerPersistence().catch(error => toast.error(String(error)));
     });

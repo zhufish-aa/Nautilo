@@ -11,7 +11,10 @@ const exports={};let locale='en';
 const modules = {
   react: React, 'react/jsx-runtime': jsx, 'lucide-react': { Activity: () => null },
   'framer-motion': { AnimatePresence: ({ children }) => children,
-    motion: { div: ({ initial, animate, exit, transition, ...props }) => React.createElement('div', props) } },
+    motion: {
+      div: ({ initial, animate, exit, transition, ...props }) => React.createElement('div', props),
+      span: ({ initial, animate, exit, transition, ...props }) => React.createElement('span', props),
+    } },
   '../../lib/i18n': { useI18n: () => ({ locale }) },
   '../../lib/ui-motion': { useUiReducedMotion: () => true },
   '../../lib/tool-display': { toolActivityKind: name => name === 'bash' ? 'command' : 'tool' },

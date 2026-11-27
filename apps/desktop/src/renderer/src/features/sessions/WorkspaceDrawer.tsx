@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { motion, useIsPresent } from "framer-motion";
 import "./workspace-panels.css";
 import "./browser-workspace.css";
@@ -10,6 +10,9 @@ import type { PanelTarget } from "../../../../shared/panel-window";
 import {ResizeHandle,useRememberedWidth} from "../../components/ui/ResizeHandle";
 import { WindowControls } from "../../components/layout/TitleBar";
 import { useUiReducedMotion } from "../../lib/ui-motion";
+
+/** When true, WorkspaceDrawer renders borderless full-bleed inside the unified multi-tab right dock. */
+export const DockEmbedContext = createContext(false);
 
 /** Contextual, non-modal workspace panel: chat and its controls stay available. */
 export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defaultWidth = 580, minWidth = 420, adjacentMinWidth = 0, placement = "right", headerContent, headerActions, resizable = false, defaultHeight = 320, defaultMaximized = false, storageKey, keepMounted = false, className = "", nativePanel, moveDisabled = false, beforeMove, windowChrome = false, hideHeader = false, animateReview = false }: {
@@ -28,6 +31,7 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
   animateReview?: boolean | "slide";
 }): JSX.Element | null {
   const { t, locale } = useI18n();
+  const embeddedInDock = useContext(DockEmbedContext);
   const panel = useRef<HTMLElement>(null);
   const present = useIsPresent();
   const reducedMotion = useUiReducedMotion();
@@ -114,6 +118,37 @@ export function WorkspaceDrawer({ open, onClose, title, subtitle, children, defa
     const observer=new ResizeObserver(measure);observer.observe(parent);return()=>observer.disconnect();
   },[open,resizable,placement]);
   if (!open && !keepMounted) return null;
+  if (embeddedInDock && !detached) {
+    // Inside the unified multi-tab right dock, the dock owns outer width,
+    // resize handle, maximize, and tab close. Render a clean full-bleed stage.
+    const showSubHeader = !hideHeader && (Boolean(headerContent) || Boolean(headerActions) || Boolean(nativePanel && panelApi));
+    return (
+      <div
+        ref={panel as unknown as React.RefObject<HTMLDivElement>}
+        role="region"
+        aria-label={title}
+        aria-hidden={!interactive || undefined}
+        hidden={!open}
+        style={!open ? { display: "none" } : undefined}
+        className={`dock-embedded-drawer flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden outline-none ${className}`}
+      >
+        {showSubHeader && (
+          <header className="dock-sub-toolbar flex shrink-0 items-center justify-between gap-2 border-b border-line/70 px-3 py-1.5">
+            <div className="flex min-w-0 flex-1 items-center gap-2">{headerContent ?? <span className="truncate text-xs font-medium text-ink-2">{title}</span>}</div>
+            <div className="workspace-panel-actions no-drag">
+              {headerActions}
+              {!windowChrome && nativePanel && panelApi && (
+                <button type="button" className="workspace-panel-icon" title={moveLabel} aria-label={moveLabel} disabled={moving || moveDisabled} onClick={() => void moveWindow()}>
+                  <ExternalLink size={14} />
+                </button>
+              )}
+            </div>
+          </header>
+        )}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
+      </div>
+    );
+  }
   const Panel = animateReview ? motion.aside : "aside";
   const offset = animateReview === "slide" ? "translateX(18px)" : "translateY(6px)";
   const centered = animateReview === "slide" ? "translateX(0px)" : "translateY(0px)";

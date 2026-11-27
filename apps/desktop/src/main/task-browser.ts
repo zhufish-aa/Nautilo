@@ -18,7 +18,7 @@ import { browserRegions } from "./browser-dom";
 import { browserCommand, isBrowserAgentInput } from "./browser-protocol";
 import { forgetBrowserPresence, showBrowserPresence } from "./browser-presence";
 import {forgetBrowserPointer,setBrowserPointerActive} from "./browser-pointer";
-import { browserTimeout, evaluateBrowser, expectBrowser, type BrowserExpect } from "./browser-expect";
+import { browserTimeout, browserWaitCases, evaluateBrowser, expectBrowser, waitForBrowserCase, type BrowserExpect, type BrowserWaitCase } from "./browser-expect";
 import { recoverBrowserRenderer } from "./browser-health";
 import { BrowserSpacePreviews } from "./browser-space-previews";
 import { browserFavicon } from "./browser-favicon";
@@ -551,7 +551,7 @@ export class TaskBrowser {
       }
       if (["browser_eval", "browser_assert", "browser_wait"].includes(name) ||
         (name === "browser_run" && Array.isArray(args.steps) && args.steps.some((step: any) => step &&
-          (step.target || step.expect || step.id || step.follow || step.optional || ["eval", "assert", "goto", "dblclick", "screenshot"].includes(step.action))))) {
+          (step.target || step.expect || step.id || step.follow || step.observe_ms !== undefined || step.cases !== undefined || step.when !== undefined || step.optional || ["eval", "assert", "wait_any", "goto", "dblclick", "screenshot"].includes(step.action))))) {
         const { images = [], ...output } = await this.runObserved(group, name, args, signal);
         return { ...(output.ok ? {} : { isError: true }), structuredContent: output,
           content: [...images, { type: "text", text: JSON.stringify(output) }] };
@@ -926,6 +926,24 @@ export class TaskBrowser {
     const ids = steps.map((step, index) => step?.id ?? "s" + (index + 1));
     if (ids.some(id => typeof id !== "string" || !/^[A-Za-z0-9_.-]{1,40}$/.test(id)) || new Set(ids).size !== ids.length)
       throw new BrowserToolError("INVALID_REQUEST", "Step IDs must be unique and contain at most forty letters, digits, dots, underscores or hyphens.", {}, undefined, false);
+    const casesByStep = new Map<string, BrowserWaitCase[]>();
+    for (const [index, step] of steps.entries()) {
+      if (step?.when !== undefined) {
+        const when = step.when;
+        if (!when || typeof when !== "object" || Object.keys(when).length !== 2 ||
+          !casesByStep.get(when.step)?.some(item => item.name === when.case))
+          throw new BrowserToolError("INVALID_FIELD", "when must reference a named case on an earlier wait_any step.", { field: "when", step: ids[index] }, undefined, false);
+      }
+      if (step?.action === "wait_any") {
+        if (step.expect !== undefined || step.follow !== undefined)
+          throw new BrowserToolError("INVALID_FIELD", "Use cases to verify wait_any. Run popup tracking on the triggering step.", { step: ids[index] }, undefined, false);
+        casesByStep.set(ids[index], browserWaitCases(step.cases));
+      } else if (step?.cases !== undefined) {
+        throw new BrowserToolError("INVALID_FIELD", "cases is only available on wait_any.", { field: "cases", step: ids[index] }, undefined, false);
+      }
+    }
+    const matchedCases = new Map<string, string>();
+    const readActions = ["read", "assert", "wait", "wait_any", "screenshot", "wait_for_control"];
     let page = this.lookup(group, args.tabId === "viewed" ? group.viewed : args.tabId ?? group.agent);
     const reports: Record<string, any>[] = [], allPopups: Record<string, string>[] = [], images: Record<string, string>[] = [];
     let unlock: (() => void) | undefined, locked: TaskPage | undefined, revision = 0;
@@ -945,9 +963,19 @@ export class TaskBrowser {
         let removeNetwork = () => {};
         try {
           if (!step || typeof step.action !== "string") throw new BrowserToolError("INVALID_REQUEST", "Every step needs an action.", {}, undefined, false);
+          if (step.when && matchedCases.get(step.when.step) !== step.when.case) {
+            check();
+            report.status = "skipped";
+            report.result = { when: step.when, matched: matchedCases.get(step.when.step) ?? null };
+            continue;
+          }
           const action = step.action === "goto" ? "open" : step.action === "dblclick" ? "click" : step.action;
-          const write = !["read", "assert", "wait", "screenshot", "wait_for_control"].includes(action) || !!step.expect?.eval ||
-            (action === "wait_for_control" && steps.slice(index+1).some(item=>!["read","assert","wait","screenshot","wait_for_control"].includes(item.action)));
+          const observesInput = action === "click" || action === "press";
+          if (step.observe_ms !== undefined && (!observesInput || !Number.isInteger(step.observe_ms) || step.observe_ms < 0 || step.observe_ms > 200))
+            throw new BrowserToolError("INVALID_FIELD", "observe_ms must be an integer from 0 to 200 on click, dblclick or press.", { field: "observe_ms" }, undefined, false);
+          const observationMs = observesInput ? step.observe_ms ?? 200 : 0;
+          const write = !readActions.includes(action) || !!step.expect?.eval ||
+            (action === "wait_for_control" && steps.slice(index+1).some(item=>!readActions.includes(item.action)));
           if (write && locked !== page) {
             unlock?.(); unlock = undefined; locked = undefined;
             unlock = await this.acquireWriter(group, page, args.controlTimeoutMs ?? 15000, signal);
@@ -976,7 +1004,14 @@ export class TaskBrowser {
             await browserCommand(wc, "Network.enable");
           }
           const timeout = browserTimeout(step.timeout_ms ?? step.timeoutMs, ["open", "reload", "back", "forward"].includes(action) ? 30000 : action === "read" ? 10000 : action === "eval" ? 5000 : 15000);
-          if (action === "eval") {
+          const cases = casesByStep.get(ids[index]);
+          if (cases) {
+            const outcome = await waitForBrowserCase(wc, cases, () => check(), timeout);
+            matchedCases.set(ids[index], outcome.matched);
+            report.result = outcome;
+            report.verification = { verified: true, actual: outcome };
+            verified = true;
+          } else if (action === "eval") {
             if (step.expect) {
               const expectation = step.expect.eval ? step.expect : {eval:{script:step.script,arg:step.arg,expect:step.expect}};
               const outcome = await expectBrowser(wc, expectation, { from, popups: () => this.popups(page, popupStart) }, () => check(true), timeout);
@@ -1002,7 +1037,7 @@ export class TaskBrowser {
             }
           }
           const origin = page;
-          if (["click", "press"].includes(action)) await new Promise(resolve => setTimeout(resolve, 200));
+          if (observationMs > 0) await new Promise(resolve => setTimeout(resolve, observationMs));
           check(write);
           const expectsNewTab = step.follow === "new_tab" || step.expect?.popup === true;
           if (expectsNewTab && !this.popups(origin, popupStart).length) {

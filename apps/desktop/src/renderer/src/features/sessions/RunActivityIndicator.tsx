@@ -49,11 +49,38 @@ export function RunActivityIndicator({ lifecycle, events, runId, waitingForDeleg
   }, [working, startedAt, latest?.id, latest?.timestamp]);
 
   return <AnimatePresence initial={false}>
-    {(working || waiting) && <motion.div key="frontier" role="status" className="conversation-run-wait"
-      initial={{ opacity: reducedMotion ? 1 : 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-      transition={{ duration: reducedMotion ? 0 : 0.22, ease: [0.22, 1, 0.36, 1] }}>
-      {working ? <span className="conversation-wait-orbit" aria-hidden /> : <Activity size={14} aria-hidden />}
-      <span className="conversation-wait-label">{label}</span>
+    {(working || waiting) && <motion.div
+      key="frontier"
+      role="status"
+      className="conversation-run-wait"
+      data-state={waiting ? "waiting" : "running"}
+      initial={reducedMotion ? false : { opacity: 0, y: 7, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={reducedMotion ? undefined : { opacity: 0, y: -4, scale: 0.98 }}
+      transition={{ duration: reducedMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] }}
+    >
+      {working ? (
+        <span className="conversation-wait-orbit" aria-hidden>
+          <i className="conversation-wait-core" />
+        </span>
+      ) : (
+        <span className="conversation-wait-alert" aria-hidden><Activity size={13} /></span>
+      )}
+      <span className="conversation-wait-label-wrap">
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.span
+            key={label}
+            className="conversation-wait-label"
+            data-shimmer={working && !reducedMotion ? label : undefined}
+            initial={reducedMotion ? false : { opacity: 0, y: 5 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reducedMotion ? undefined : { opacity: 0, y: -5 }}
+            transition={{ duration: reducedMotion ? 0 : 0.18, ease: [0.22, 1, 0.36, 1] }}
+          >
+            {label}
+          </motion.span>
+        </AnimatePresence>
+      </span>
       {working && <span className="conversation-wait-time" aria-hidden>
         <span className="conversation-wait-divider">·</span>{formatElapsed(elapsedSeconds, zh)}
       </span>}

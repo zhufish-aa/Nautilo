@@ -1098,7 +1098,13 @@ void app
     assert.equal((await panel("V2", "state")).ownership, "stopped");
     await floatingButton("resume");
     assert.equal((await panel("V2", "state")).manual, false);
-    const beforePopup = await v2("browser_run", {steps:[{id:"popup",action:"click",target:{role:"link",name:"Discuss"},expect:{popup:true,url:{includes:"comments"}},follow:"new_tab"},{id:"follow",action:"assert",expect:{selector:{css:"body",state:"visible"}}}],snapshot:false});
+    const invalidObservation = await call("V2", {
+      steps: [{ action: "click", selector: "a", observe_ms: -1 }],
+      contract_version: 2,
+    }, "browser_run");
+    assert.equal(invalidObservation.structuredContent.error.code, "INVALID_FIELD");
+    assert.equal(invalidObservation.structuredContent.steps[0].dispatched, undefined);
+    const beforePopup = await v2("browser_run", {steps:[{id:"popup",action:"click",target:{role:"link",name:"Discuss"},expect:{popup:true,url:{includes:"comments"}},follow:"new_tab",observe_ms:0},{id:"follow",action:"assert",expect:{selector:{css:"body",state:"visible"}}}],snapshot:false});
     assert.equal(beforePopup.popups.length, 1);
     assert.notEqual(beforePopup.tab_id, v2id);
     assert.equal(beforePopup.tab_id, beforePopup.popups[0].tab_id);

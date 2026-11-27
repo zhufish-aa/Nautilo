@@ -2,6 +2,32 @@
 
 `browser_state` 和 `browser_session {"action":"list"}` 的 `capabilities` 返回当前服务版本、工具名称与能力入口。MCP 初始化也提供同一份清单。客户端若只显示旧工具，应刷新该 MCP 的工具列表；不能仅依据旧会话里的清单断言能力缺失。
 
+## 用显式验证缩短动作等待
+
+`browser_run` 的 `click`、`dblclick`、`press` 默认留出 200 毫秒收集导航和新标签页。已知操作留在当前页且有明确成功条件时，可设 `observe_ms: 0`，让 `expect` 立即开始验证。此设置只缩短被动观察窗口，延迟出现的导航或弹窗可能不在动作回执中。需要跟随弹窗时，继续使用 `follow: "new_tab"` 或 `expect.popup: true`。
+
+```json
+{"steps":[{"action":"click","selector":"#save","follow":"same_tab","observe_ms":0,"expect":{"selector":{"css":"#saved","state":"visible"}}}],"snapshot":false}
+```
+
+## 同时等待多个结果并按结果执行
+
+`wait_any` 在当前标签页一次观察 2–8 个命名状态。每个状态可组合可见的主文档 CSS 元素、URL 子串、可见正文子串。同一轮同时匹配时取声明最靠前的一项。后续步骤通过 `when` 引用前面的等待步骤和状态名，条件不匹配的步骤在回执中标为 `skipped`。
+
+```json
+{"steps":[
+  {"action":"click","selector":"#submit","observe_ms":0,"follow":"same_tab"},
+  {"id":"outcome","action":"wait_any","timeout_ms":4000,"cases":[
+    {"name":"saved","selector":"#saved"},
+    {"name":"validation_error","selector":"#errors"},
+    {"name":"login_required","url_includes":"/login"}
+  ]},
+  {"action":"read","selector":"#errors","when":{"step":"outcome","case":"validation_error"}}
+],"snapshot":false}
+```
+
+这是页面状态检测。需要等待新标签页、浏览器对话框或下载时，继续使用对应的弹窗和事件验证。超时后可从观察步骤继续，已发出的提交动作仍以原回执为准。
+
 ## 页面导出与指定 URL 下载
 
 这两个入口共用下载登记、来源标签归属与保存逻辑，但必须分别验收。

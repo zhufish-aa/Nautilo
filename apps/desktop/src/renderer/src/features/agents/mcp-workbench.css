@@ -1,68 +1,237 @@
+/* ==========================================================================
+   MCP Workbench — Twin Obsidian Cards, Interactive Harness Routing & Diagnostics
+   ========================================================================== */
+
 .capability-library.mcp-library {
-  --mcp-surface: light-dark(var(--card), #0d0f14);
-  --mcp-inset: light-dark(var(--panel), var(--glass-editor-fill));
+  --mcp-surface: light-dark(var(--card), var(--session-inspector-fill));
+  --mcp-well: light-dark(var(--panel), var(--glass-editor-fill));
+  --mcp-field: light-dark(var(--card), var(--glass-search-fill));
   --mcp-line: var(--session-inspector-divider);
-  --mcp-blue: var(--glass-accent-blue-bright);
-  --mcp-muted: var(--glass-control-muted);
+  --mcp-line-strong: light-dark(rgba(15, 23, 42, 0.13), rgba(255, 255, 255, 0.11));
+  --mcp-blue: var(--glass-accent-blue);
+  --mcp-emerald: var(--glass-accent-emerald);
+  --mcp-amber: var(--glass-accent-amber);
+  --mcp-sky: var(--nacre-sky, #38bdf8);
+  --mcp-muted: var(--ink-3);
   --mcp-off-thumb: #64748b;
   --mcp-danger: light-dark(var(--danger), #f87171);
+  --mcp-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
-.mcp-library .capability-search .ui-field { background: var(--mcp-inset); }
-.mcp-library .ui-button-primary:hover:not(:disabled) { background: var(--mcp-blue); }
 
+.mcp-library .capability-transport-filter {
+  width: 112px;
+  min-width: 96px;
+  height: 32px;
+  min-height: 32px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 8px;
+  background: var(--mcp-field);
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+/* KPI Deck MCP-specific extensions */
+.mcp-kpi-bar-http {
+  background: var(--mcp-sky);
+}
+.mcp-kpi-health-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mcp-batch-check-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--mcp-line-strong);
+  border-radius: 6px;
+  background: var(--mcp-field);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: border-color 160ms var(--mcp-ease), color 160ms var(--mcp-ease), background-color 160ms var(--mcp-ease);
+}
+.mcp-batch-check-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--mcp-blue) 45%, var(--mcp-line));
+  background: color-mix(in srgb, var(--mcp-blue) 10%, var(--mcp-field));
+  color: var(--ink);
+}
+.mcp-batch-check-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.mcp-kpi-fail-num {
+  color: var(--mcp-danger);
+}
+
+/* Twin Floating Obsidian Cards */
+.mcp-view { min-width: 0; }
 .mcp-workbench {
   display: grid;
-  grid-template-columns: 312px minmax(0, 1fr);
-  align-items: stretch;
-  min-height: 360px;
-  border: 1px solid var(--mcp-line);
-  border-radius: 12px;
-  overflow: hidden;
-  background: var(--mcp-surface);
+  grid-template-columns: minmax(330px, 0.92fr) minmax(440px, 1.08fr);
+  gap: 16px;
+  min-width: 0;
+  height: clamp(500px, calc(100dvh - 280px), 920px);
 }
-.mcp-workbench[data-empty="true"] { grid-template-columns: minmax(0, 1fr); }
+.mcp-workbench[data-empty="true"],
+.mcp-workbench[data-compact="true"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.mcp-workbench[data-empty="true"] {
+  height: auto;
+}
 .mcp-workbench-empty {
   display: grid;
   align-content: center;
   justify-items: center;
-  gap: 10px;
-  padding: 24px;
+  gap: 12px;
+  padding: 48px 24px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 14px;
+  background: var(--mcp-surface);
   color: var(--mcp-muted);
   font-size: 13px;
 }
+.mcp-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 12px;
+  background: var(--mcp-well);
+  color: var(--ink-3);
+}
 
-.mcp-service-list {
+.mcp-service-list,
+.mcp-inspector-pane {
   position: relative;
-  max-height: clamp(360px, 64vh, 680px);
-  overflow-y: auto;
+  isolation: isolate;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--mcp-line);
+  border-radius: 14px;
+  background: var(--mcp-surface);
+  overflow: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
 }
-.mcp-service-list section > h2 {
+.mcp-service-list::before,
+.mcp-inspector-pane::before {
+  content: "";
+  position: sticky;
+  display: block;
+  inset: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+/* Group headers (matching Skills collapsible groups) */
+.mcp-group-section + .mcp-group-section {
+  border-top: 1px solid var(--mcp-line);
+}
+.mcp-group-bar {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 3;
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px 8px 10px;
+  border-bottom: 1px solid var(--mcp-line);
+  background: color-mix(in srgb, var(--mcp-surface) 94%, transparent);
+  backdrop-filter: blur(8px);
+}
+.mcp-group-bar > button {
+  display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--mcp-line);
-  background: var(--mcp-surface);
-  color: var(--mcp-muted);
-  font-size: 11.5px;
-  font-weight: 500;
+  min-width: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 550;
 }
-.mcp-service-list section > h2 > span { font-variant-numeric: tabular-nums; }
+.mcp-group-bar > button strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-group-bar > button small {
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.mcp-group-chevron {
+  flex: none;
+  color: var(--ink-3);
+  transition: transform 180ms var(--mcp-ease);
+}
+.mcp-group-bar > button[aria-expanded="true"] .mcp-group-chevron {
+  transform: rotate(90deg);
+}
+.mcp-group-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.mcp-group-actions > button {
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 5px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.mcp-group-actions > button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+.mcp-group-actions > button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.mcp-group-items {
+  overflow: hidden;
+  padding: 5px 6px;
+}
+
+/* List Rows */
 .mcp-list-row {
+  position: relative;
   display: flex;
   align-items: center;
-  border-bottom: 1px solid var(--mcp-line);
-  padding-inline-end: 14px;
+  gap: 8px;
+  border-radius: 10px;
+  padding-inline-end: 10px;
+  transition: background-color 150ms ease;
 }
-.mcp-list-row:hover { background: color-mix(in srgb, var(--ink) 3%, transparent); }
-.mcp-list-row[data-selected="true"] {
-  box-shadow: inset 2.5px 0 var(--mcp-blue);
-  background: light-dark(transparent, color-mix(in srgb, var(--mcp-blue) 9%, transparent));
+.mcp-list-row:hover {
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.mcp-row-active-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 1px solid color-mix(in srgb, var(--mcp-blue) 28%, var(--mcp-line));
+  border-radius: inherit;
+  background: light-dark(
+    color-mix(in srgb, var(--mcp-blue) 6%, var(--mcp-surface)),
+    color-mix(in srgb, var(--mcp-blue) 10%, var(--mcp-surface))
+  );
+  pointer-events: none;
+}
+.mcp-list-row > :not(.mcp-row-active-bg) {
+  position: relative;
+  z-index: 1;
 }
 .mcp-list-select {
   display: flex;
@@ -70,49 +239,77 @@
   flex: 1;
   min-width: 0;
   gap: 10px;
-  padding: 10px 10px 10px 14px;
+  padding: 9px 6px 9px 10px;
   text-align: start;
 }
 .mcp-list-select:focus-visible { outline-offset: -2px; }
-.mcp-list-icon {
+
+.mcp-list-icon,
+.mcp-detail-icon {
   position: relative;
   display: grid;
-  flex: 0 0 30px;
   place-items: center;
-  height: 30px;
-  border: 1px solid color-mix(in srgb, var(--ink) 6%, transparent);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--ink) 3%, var(--mcp-surface));
-  color: var(--mcp-muted);
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--transport-accent, var(--ink)) 18%, var(--mcp-line));
+  background: color-mix(in srgb, var(--transport-accent, var(--ink)) 8%, var(--mcp-surface));
+  color: var(--transport-accent, var(--ink-2));
 }
+.mcp-list-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+.mcp-detail-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+:is(.mcp-list-icon, .mcp-detail-icon)[data-transport="stdio"] {
+  --transport-accent: var(--mcp-blue);
+}
+:is(.mcp-list-icon, .mcp-detail-icon)[data-transport="http"] {
+  --transport-accent: var(--mcp-sky);
+}
+
 .mcp-health-dot {
   display: inline-block;
   flex: 0 0 6px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--mcp-muted);
+  background: color-mix(in srgb, var(--ink-3) 50%, transparent);
 }
-.mcp-health-dot[data-health="passed"] { background: var(--glass-accent-emerald); }
-.mcp-health-dot[data-health="warning"] { background: var(--glass-accent-amber); }
+.mcp-health-dot[data-health="passed"] { background: var(--mcp-emerald); }
+.mcp-health-dot[data-health="warning"] { background: var(--mcp-amber); }
 .mcp-health-dot[data-health="failed"] { background: var(--mcp-danger); }
-.mcp-health-dot[data-health="checking"] { background: var(--mcp-blue); }
-.mcp-list-icon .mcp-health-dot {
+.mcp-health-dot[data-health="checking"] {
+  background: var(--mcp-blue);
+  animation: mcp-dot-pulse 1.4s ease-in-out infinite;
+}
+:is(.mcp-list-icon, .mcp-detail-icon) .mcp-health-dot {
   position: absolute;
-  right: -1px;
-  bottom: -1px;
+  right: -2px;
+  bottom: -2px;
+  width: 7px;
+  height: 7px;
   box-shadow: 0 0 0 2px var(--mcp-surface);
 }
-.mcp-list-identity { display: grid; gap: 2px; min-width: 0; }
+
+.mcp-list-identity {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
 .mcp-list-identity > strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--ink);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 1.3;
 }
-.mcp-list-identity > span {
+.mcp-list-sub {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -120,29 +317,69 @@
   font-size: 11px;
   white-space: nowrap;
 }
+.mcp-tool-count-tag {
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.mcp-row-reach {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 4.5%, transparent);
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mcp-row-reach > i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--mcp-emerald);
+}
+
 .mcp-transport-label,
-.mcp-origin-label,
-.mcp-harness-chip {
+.mcp-origin-label {
   border: 1px solid var(--mcp-line);
   border-radius: 5px;
-  padding: 1px 5px;
-  color: var(--mcp-muted);
-  font-size: 11px;
-  font-weight: 400;
+  padding: 1px 6px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.45;
 }
 .mcp-transport-label {
   flex: none;
+  font-family: var(--font-mono);
   background: color-mix(in srgb, var(--ink) 3%, transparent);
-  font: 400 10.5px/1.4 var(--app-font-sans);
 }
+.mcp-transport-label[data-transport="http"] {
+  border-color: color-mix(in srgb, var(--mcp-sky) 28%, var(--mcp-line));
+  background: color-mix(in srgb, var(--mcp-sky) 10%, transparent);
+  color: var(--mcp-sky);
+}
+.mcp-transport-label[data-transport="stdio"] {
+  border-color: color-mix(in srgb, var(--mcp-blue) 26%, var(--mcp-line));
+  background: color-mix(in srgb, var(--mcp-blue) 9%, transparent);
+  color: var(--mcp-blue);
+}
+
 .mcp-workbench .ui-switch {
   flex: 0 0 34px;
   width: 34px;
   height: 20px;
-  border: 1px solid var(--mcp-line);
+  border: 1px solid var(--mcp-line-strong);
   background: light-dark(var(--line-strong), color-mix(in srgb, var(--ink) 9%, transparent));
 }
-.mcp-workbench .ui-switch[data-state="checked"] { border-color: transparent; background: var(--mcp-blue); }
+.mcp-workbench .ui-switch[data-state="checked"] {
+  border-color: transparent;
+  background: var(--mcp-blue);
+}
 .mcp-workbench .ui-switch-thumb {
   width: 14px;
   height: 14px;
@@ -151,137 +388,688 @@
   background: light-dark(var(--glass-action-ink), var(--mcp-off-thumb));
   box-shadow: none;
 }
-.mcp-workbench .ui-switch-thumb[data-state="checked"] { translate: 16px 0; background: var(--glass-action-ink); }
+.mcp-workbench .ui-switch-thumb[data-state="checked"] {
+  translate: 16px 0;
+  background: var(--glass-action-ink);
+}
 
-.mcp-server-detail { min-width: 0; border-inline-start: 1px solid var(--mcp-line); }
-.mcp-server-detail > :not(:first-child) { border-top: 1px solid var(--mcp-line); }
+/* ==========================================================================
+   Right Inspector Pane
+   ========================================================================== */
+.mcp-inspector-motion {
+  min-height: 100%;
+}
+.mcp-server-detail {
+  min-width: 0;
+}
+.mcp-server-detail > :not(:first-child) {
+  border-top: 1px solid var(--mcp-line);
+}
+
 .mcp-detail-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 14px;
-  padding: 18px 24px;
+  padding: 18px 22px;
 }
-.mcp-detail-heading { min-width: 0; }
-.mcp-detail-heading > div,
-.mcp-detail-actions,
-.mcp-enabled-harnesses {
+.mcp-detail-heading {
+  min-width: 0;
+  flex: 1;
+}
+.mcp-detail-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+.mcp-detail-title-copy {
+  min-width: 0;
+  flex: 1;
+}
+.mcp-detail-name-line {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 7px;
 }
-.mcp-detail-heading h2 { color: var(--ink); font-size: 18px; font-weight: 650; overflow-wrap: anywhere; }
-.mcp-origin-label { overflow-wrap: anywhere; }
-.mcp-detail-heading p {
-  margin-top: 5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--mcp-muted);
-  font-size: 13px;
-  font-weight: 400;
+.mcp-detail-name-line h2 {
+  color: var(--ink);
+  font-size: 17.5px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
 }
-.mcp-detail-heading p[data-empty="true"] { opacity: .68; }
-.mcp-detail-actions { flex: none; gap: 9px; }
+.mcp-origin-label { overflow-wrap: anywhere; }
+.mcp-detail-title-copy > p {
+  margin-top: 5px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.mcp-detail-desc-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-3);
+}
+.mcp-detail-desc-empty > button {
+  color: var(--mcp-blue);
+  font-size: 12px;
+  font-weight: 500;
+}
+.mcp-detail-desc-empty > button:hover {
+  text-decoration: underline;
+}
+
+.mcp-detail-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 7px;
+}
 .mcp-icon-button {
   display: grid;
   place-items: center;
-  flex: 0 0 26px;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  color: var(--mcp-muted);
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--ink-3);
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
 }
-.mcp-icon-button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--ink); }
-.mcp-delete-button:hover { background: color-mix(in srgb, var(--mcp-danger) 10%, transparent); color: var(--mcp-danger); }
+.mcp-icon-button:hover {
+  border-color: var(--mcp-line);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  color: var(--ink);
+}
+.mcp-icon-button[data-copied="true"] {
+  color: var(--mcp-emerald);
+}
+.mcp-delete-button:hover {
+  border-color: color-mix(in srgb, var(--mcp-danger) 24%, transparent);
+  background: color-mix(in srgb, var(--mcp-danger) 10%, transparent);
+  color: var(--mcp-danger);
+}
+
+/* Interactive Multi-Harness Routing Section */
+.mcp-detail-scope,
 .mcp-run-config,
-.mcp-diagnostics { padding: 16px 24px; }
-.mcp-server-detail h3 { color: var(--ink); font-size: 13px; font-weight: 600; }
+.mcp-diagnostics {
+  padding: 16px 22px;
+}
+.mcp-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.mcp-server-detail h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.mcp-scope-count {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.mcp-scope-count[data-active="true"] {
+  background: color-mix(in srgb, var(--mcp-blue) 14%, transparent);
+  color: var(--mcp-blue);
+}
+.mcp-section-quick-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mcp-section-quick-actions > button {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-weight: 500;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.mcp-section-quick-actions > button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+.mcp-section-quick-actions > button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.mcp-harness-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.mcp-harness-chips > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 9px 0 7px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 8px;
+  background: var(--mcp-field);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  transition: border-color 160ms var(--mcp-ease), background-color 160ms var(--mcp-ease), color 160ms var(--mcp-ease), transform 120ms ease;
+}
+.mcp-harness-chips > button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--mcp-blue) 40%, var(--mcp-line));
+  color: var(--ink);
+}
+.mcp-harness-chips > button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.mcp-harness-chips > button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--mcp-blue) 42%, var(--mcp-line));
+  background: color-mix(in srgb, var(--mcp-blue) 11%, var(--mcp-surface));
+  color: var(--ink);
+}
+.mcp-harness-chips > button > .provider-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+}
+.mcp-harness-chips > button > .provider-avatar > :is(img, svg) {
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+}
+.mcp-chip-state {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--mcp-line-strong);
+  border-radius: 4px;
+  color: var(--glass-action-ink);
+  transition: background-color 150ms ease, border-color 150ms ease;
+}
+.mcp-harness-chips > button[aria-pressed="true"] .mcp-chip-state {
+  border-color: var(--mcp-blue);
+  background: var(--mcp-blue);
+}
+.mcp-detail-muted {
+  margin-top: 8px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+/* Runtime Config Section */
 .mcp-command {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 7px;
-  padding: 7px 8px 7px 12px;
-  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
-  border-radius: 8px;
-  background: var(--mcp-inset);
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--mcp-line-strong);
+  border-radius: 9px;
+  background: var(--mcp-well);
 }
 .mcp-command > code {
   flex: 1;
   min-width: 0;
   color: var(--ink);
-  font: 400 12.5px/1.5 var(--app-font-sans);
+  font: 400 12px/1.55 var(--font-mono);
   overflow-wrap: anywhere;
   user-select: text;
 }
 .mcp-config-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 16px;
-  margin-top: 12px;
+  gap: 10px;
+  margin-top: 10px;
 }
-.mcp-config-fields dt { display: flex; gap: 4px; align-items: center; color: var(--mcp-muted); font-size: 11.5px; }
-.mcp-config-fields dt > button { height: 22px; }
-.mcp-config-fields dd { font-size: 12px; font-weight: 400; }
-.mcp-config-fields code { display: block; font-family: var(--app-font-sans); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
-.mcp-enabled-harnesses { margin-top: 11px; color: var(--mcp-muted); font-size: 11.5px; }
-.mcp-harness-chip { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); }
+.mcp-config-card {
+  padding: 10px 12px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--mcp-well) 65%, transparent);
+  min-width: 0;
+}
+.mcp-config-secrets {
+  grid-column: 1 / -1;
+}
+.mcp-config-fields dt {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 550;
+}
+.mcp-config-fields dt > button {
+  width: 22px;
+  height: 22px;
+  flex-basis: 22px;
+}
+.mcp-config-fields dd {
+  font-size: 11.5px;
+  font-weight: 400;
+}
+.mcp-config-fields code {
+  display: block;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.mcp-secret-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+}
+.mcp-secret-row + .mcp-secret-row {
+  border-top: 1px solid color-mix(in srgb, var(--mcp-line) 70%, transparent);
+}
+.mcp-secret-key {
+  color: var(--ink);
+  font-weight: 500;
+}
+.mcp-secret-val {
+  color: var(--ink-3);
+}
+.mcp-secret-copy {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--ink-3);
+  opacity: 0.65;
+  transition: opacity 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+.mcp-secret-copy:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+.mcp-secret-copy[data-copied="true"] {
+  opacity: 1;
+  color: var(--mcp-emerald);
+}
 
+/* ==========================================================================
+   Diagnostics & Handshake Stepper + Tool Inventory Explorer
+   ========================================================================== */
 .mcp-diagnostics-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.mcp-diagnostics-title-group {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 10px;
 }
-.mcp-diagnostics-status { display: flex; align-items: center; gap: 6px; color: var(--mcp-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.mcp-diagnostics-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 4.5%, transparent);
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.mcp-diagnostics-status[data-health="passed"] {
+  background: color-mix(in srgb, var(--mcp-emerald) 11%, transparent);
+  color: var(--mcp-emerald);
+}
+.mcp-diagnostics-status[data-health="failed"] {
+  background: color-mix(in srgb, var(--mcp-danger) 11%, transparent);
+  color: var(--mcp-danger);
+}
+.mcp-diagnostics-status[data-health="warning"] {
+  background: color-mix(in srgb, var(--mcp-amber) 12%, transparent);
+  color: var(--mcp-amber);
+}
+.mcp-diagnostics-status[data-health="checking"] {
+  background: color-mix(in srgb, var(--mcp-blue) 12%, transparent);
+  color: var(--mcp-blue);
+}
+
 .mcp-check-button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-inline-start: auto;
-  padding: 0 9px;
+  padding: 0 11px;
   height: 30px;
-  border: 1px solid var(--mcp-line);
-  border-radius: 7px;
+  border: 1px solid var(--mcp-line-strong);
+  border-radius: 8px;
+  background: var(--mcp-field);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  transition: border-color 160ms var(--mcp-ease), color 160ms var(--mcp-ease), background-color 160ms var(--mcp-ease);
+}
+.mcp-check-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--mcp-blue) 45%, var(--mcp-line));
+  background: color-mix(in srgb, var(--mcp-blue) 8%, var(--mcp-field));
+  color: var(--ink);
+}
+.mcp-check-button:disabled { opacity: 0.65; }
+
+.mcp-diagnostics-progress {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--mcp-blue) 25%, var(--mcp-line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--mcp-blue) 6%, transparent);
   color: var(--ink-2);
   font-size: 12px;
 }
-.mcp-check-button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--mcp-blue) 38%, transparent); color: var(--ink); }
-.mcp-check-button:disabled { opacity: .7; }
-.mcp-diagnostics-note,
-.mcp-diagnostics-server,
-.mcp-diagnostics-issue { margin-top: 10px; color: var(--mcp-muted); font-size: 12px; font-weight: 400; }
-.mcp-diagnostics-server strong { color: var(--ink); font-size: 13px; font-weight: 550; }
-.mcp-diagnostics-server p { margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.mcp-diagnostics-issue[data-health="failed"] > p { color: var(--mcp-danger); }
-.mcp-diagnostics-issue[data-health="warning"] > p { color: var(--glass-accent-amber); }
-.mcp-diagnostics-issue summary { width: fit-content; margin-top: 4px; cursor: pointer; }
-.mcp-diagnostics-issue pre { max-height: 180px; overflow: auto; padding: 7px 0; color: var(--ink-2); font: 400 11.5px/1.55 var(--app-font-sans); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
-.mcp-diagnostics-tools { margin-top: 14px; }
-.mcp-diagnostics-tools > div { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 7px; margin-bottom: 5px; }
-.mcp-diagnostics-tools h4 { color: var(--ink); font-size: 12.5px; font-weight: 600; }
-.mcp-diagnostics-tools h4 > span { margin-inline-start: 4px; color: var(--mcp-muted); font-weight: 400; font-variant-numeric: tabular-nums; }
-.mcp-diagnostics-tools label { display: flex; align-items: center; gap: 6px; padding: 0 7px; border: 1px solid var(--mcp-line); border-radius: 6px; background: var(--mcp-inset); color: var(--mcp-muted); }
-.mcp-diagnostics-tools input { width: 110px; min-height: 26px; font-size: 11.5px; outline: none; }
-.mcp-diagnostics-tools label:focus-within { border-color: var(--mcp-blue); }
-.mcp-diagnostics-tools ul { max-height: 280px; margin: 0; overflow-y: auto; scrollbar-width: thin; }
-.mcp-diagnostics-tools li { display: grid; grid-template-columns: minmax(100px, max-content) minmax(0, 1fr); gap: 10px; padding: 7px 0; border-top: 1px solid var(--mcp-line); font-size: 12px; font-weight: 400; }
-.mcp-diagnostics-tools li > code { max-width: 240px; color: var(--ink); font-family: var(--app-font-sans); overflow-wrap: anywhere; }
-.mcp-diagnostics-tools li > p { color: var(--mcp-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-@container skills-library (max-width: 720px) {
-  .mcp-workbench { grid-template-columns: 252px minmax(0, 1fr); }
-  .mcp-detail-header { flex-wrap: wrap; }
-  .mcp-detail-header, .mcp-run-config, .mcp-diagnostics { padding-inline: 16px; }
+.mcp-diagnostics-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mcp-blue);
+  flex: none;
+  animation: mcp-dot-pulse 1.4s ease-in-out infinite;
 }
-@container skills-library (max-width: 560px) {
-  .mcp-workbench { grid-template-columns: minmax(0, 1fr); }
-  .mcp-service-list { max-height: 250px; border-bottom: 1px solid var(--mcp-line); }
-  .mcp-server-detail { border-inline-start: 0; }
+
+.mcp-diag-stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.mcp-diag-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 8px;
+  background: var(--mcp-well);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.mcp-diag-step-icon {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--mcp-emerald) 14%, transparent);
+  color: var(--mcp-emerald);
+}
+.mcp-diag-step[data-state="failed"] {
+  border-color: color-mix(in srgb, var(--mcp-danger) 30%, var(--mcp-line));
+}
+.mcp-diag-step[data-state="failed"] .mcp-diag-step-icon {
+  background: color-mix(in srgb, var(--mcp-danger) 14%, transparent);
+  color: var(--mcp-danger);
+}
+.mcp-diag-step[data-state="warning"] {
+  border-color: color-mix(in srgb, var(--mcp-amber) 30%, var(--mcp-line));
+}
+.mcp-diag-step[data-state="warning"] .mcp-diag-step-icon {
+  background: color-mix(in srgb, var(--mcp-amber) 14%, transparent);
+  color: var(--mcp-amber);
+}
+.mcp-diag-step-name {
+  color: var(--ink);
+  font-weight: 500;
+}
+.mcp-diag-step-ms {
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+}
+
+.mcp-diagnostics-note,
+.mcp-diagnostics-server {
+  margin-top: 10px;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.mcp-diagnostics-server {
+  padding: 10px 12px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 9px;
+  background: var(--mcp-well);
+}
+.mcp-diagnostics-server strong {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.mcp-diagnostics-server p {
+  margin-top: 3px;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mcp-diagnostics-issue {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.mcp-diagnostics-issue[data-health="failed"] {
+  border-color: color-mix(in srgb, var(--mcp-danger) 28%, var(--mcp-line));
+  background: color-mix(in srgb, var(--mcp-danger) 7%, transparent);
+}
+.mcp-diagnostics-issue[data-health="failed"] > p { color: var(--mcp-danger); }
+.mcp-diagnostics-issue[data-health="warning"] {
+  border-color: color-mix(in srgb, var(--mcp-amber) 28%, var(--mcp-line));
+  background: color-mix(in srgb, var(--mcp-amber) 7%, transparent);
+}
+.mcp-diagnostics-issue[data-health="warning"] > p { color: var(--mcp-amber); }
+.mcp-diagnostics-issue summary {
+  width: fit-content;
+  margin-top: 6px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.mcp-diagnostics-issue pre {
+  max-height: 180px;
+  margin-top: 8px;
+  padding: 9px 11px;
+  overflow: auto;
+  border: 1px solid var(--mcp-line);
+  border-radius: 7px;
+  background: var(--mcp-well);
+  color: var(--ink-2);
+  font: 400 11.5px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* Tool Inventory Explorer */
+.mcp-diagnostics-tools {
+  margin-top: 14px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 10px;
+  background: var(--mcp-well);
+  overflow: hidden;
+}
+.mcp-diagnostics-tools-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--mcp-line);
+  background: color-mix(in srgb, var(--mcp-surface) 70%, transparent);
+}
+.mcp-diagnostics-tools h4 {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+.mcp-diagnostics-tools h4 > span {
+  margin-inline-start: 5px;
+  color: var(--ink-3);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.mcp-diagnostics-tools label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--mcp-line);
+  border-radius: 6px;
+  background: var(--mcp-field);
+  color: var(--ink-3);
+}
+.mcp-diagnostics-tools input {
+  width: 130px;
+  min-height: 24px;
+  color: var(--ink);
+  font-size: 11.5px;
+  outline: none;
+  background: transparent;
+}
+.mcp-diagnostics-tools label:focus-within { border-color: var(--mcp-blue); }
+.mcp-tools-clear {
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+.mcp-tools-clear:hover { color: var(--ink); }
+.mcp-diagnostics-tools ul {
+  max-height: 300px;
+  margin: 0;
+  padding: 0 12px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  list-style: none;
+}
+.mcp-diagnostics-tools li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 0;
+}
+.mcp-diagnostics-tools li + li {
+  border-top: 1px solid var(--mcp-line);
+}
+.mcp-tool-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mcp-tool-name-row > code {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.mcp-tool-copy {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--ink-3);
+  opacity: 0;
+  transition: opacity 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+.mcp-diagnostics-tools li:hover .mcp-tool-copy,
+.mcp-tool-copy:focus-visible,
+.mcp-tool-copy[data-copied="true"] {
+  opacity: 1;
+}
+.mcp-tool-copy:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+.mcp-tool-copy[data-copied="true"] {
+  color: var(--mcp-emerald);
+}
+.mcp-diagnostics-tools li > p {
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Matrix row button styling */
+.mcp-matrix-row-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+}
+.mcp-matrix-row-btn > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-drawer .mcp-inspector-pane {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+}
+
+@keyframes mcp-dot-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+@container skills-library (max-width: 760px) {
+  .mcp-detail-header { flex-wrap: wrap; }
+  .mcp-detail-header, .mcp-detail-scope, .mcp-run-config, .mcp-diagnostics { padding-inline: 16px; }
+  .mcp-config-fields { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .mcp-check-button .service-check-spinning { animation: none; }
+  .mcp-check-button .service-check-spinning,
+  .mcp-health-dot[data-health="checking"],
+  .mcp-diagnostics-pulse {
+    animation: none;
+  }
 }
-:root[data-reduce-motion] .mcp-check-button .service-check-spinning { animation: none; }
+:root[data-reduce-motion] .mcp-check-button .service-check-spinning,
+:root[data-reduce-motion] .mcp-health-dot[data-health="checking"],
+:root[data-reduce-motion] .mcp-diagnostics-pulse {
+  animation: none;
+}

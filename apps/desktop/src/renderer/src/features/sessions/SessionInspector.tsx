@@ -1,11 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { motion } from "framer-motion";
 import { RefreshCw, X } from "lucide-react";
 import type { RuntimeConnection } from "@agenthub/domain";
 import { accountQuotaSource, type AccountQuota, type IpcRequestMap } from "@agenthub/schemas";
 import { useAccountQuota } from "../../lib/account-quota";
 import { useI18n } from "../../lib/i18n";
 import { promptCacheRates } from "../../lib/session-usage";
+import { useUiReducedMotion } from "../../lib/ui-motion";
 import type { TimelineEvent, UiSession } from "../../lib/types";
 import { useConnectionsStore } from "../../stores/connections";
 import { useAgentsStore } from "../../stores/agents";
@@ -15,35 +17,74 @@ import { useUsageStore } from "../../stores/usage";
 import { AgentPanel } from "./AgentPanel";
 import { useContextUsage } from "./ContextUsageIndicator";
 import { InspectorDisclosure } from "./InspectorDisclosure";
-import { WorkspaceDrawer } from "./WorkspaceDrawer";
 import "./session-inspector.css";
 
 const tokenFormat = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 
-export function SessionInspector({ session, events, lineageOnly, onClose, onOpenSession, compactSlot }: {
+export function SessionInspector({ session, events, lineageOnly, floating = false, onClose, onOpenSession, compactSlot }: {
   session: UiSession;
   events: TimelineEvent[];
   lineageOnly: boolean;
+  floating?: boolean;
   onClose: () => void;
   onOpenSession: (id: string) => void;
   compactSlot: (element: HTMLSpanElement | null) => void;
 }): JSX.Element {
   const { t, locale } = useI18n();
   const zh = locale === "zh-CN";
+  const reduced = useUiReducedMotion();
+  const cardRef = useRef<HTMLElement>(null);
   const title = lineageOnly ? t("sessions.workspace.agents") : zh ? "会话检查器" : "Conversation inspector";
   const closeLabel = zh ? "收起面板" : "Close panel";
-  return <WorkspaceDrawer open onClose={onClose} title={title} resizable defaultWidth={322} minWidth={260} adjacentMinWidth={360}
-    storageKey="nautilo.session.inspector.width" hideHeader animateReview="slide"
-    className={lineageOnly ? "session-inspector" : "session-inspector session-inspector-overlay"}>
-    <header className="session-inspector-heading"><h2>{title}</h2><button type="button" className="workspace-panel-icon" onClick={onClose} title={closeLabel} aria-label={closeLabel}><X size={15} aria-hidden /></button></header>
-    <div className="session-inspector-body">
-      {!lineageOnly && <>
+
+  useEffect(() => {
+    if (!floating) return;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && cardRef.current?.contains(document.activeElement)) {
+        event.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [floating, onClose]);
+
+  if (lineageOnly) {
+    return (
+      <div className="session-inspector flex h-full min-h-0 w-full flex-col bg-transparent">
+        <div className="session-inspector-body">
+          <AgentPanel session={session} onOpenSession={onOpenSession} showEmpty />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <motion.aside
+      ref={cardRef}
+      role="dialog"
+      aria-label={title}
+      className="session-inspector session-inspector-float"
+      initial={reduced ? false : { opacity: 0, y: -8, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={reduced ? undefined : { opacity: 0, y: -6, scale: 0.98 }}
+      transition={{ duration: reduced ? 0 : 0.18, ease: [0.22, 1, 0.36, 1] }}
+    >
+      <header className="session-inspector-heading">
+        <h2>{title}</h2>
+        <button type="button" className="workspace-panel-icon" onClick={onClose} title={closeLabel} aria-label={closeLabel}>
+          <X size={15} aria-hidden />
+        </button>
+      </header>
+      <div className="session-inspector-body">
         <ContextSection sessionId={session.id} events={events} compactSlot={compactSlot} />
         <AccountsSection session={session} />
-      </>}
-      <AgentPanel session={session} onOpenSession={onOpenSession} showEmpty={lineageOnly} />
-    </div>
-  </WorkspaceDrawer>;
+        <AgentPanel session={session} onOpenSession={onOpenSession} showEmpty={false} />
+      </div>
+    </motion.aside>
+  );
 }
 
 function ContextSection({ sessionId, events, compactSlot }: {
@@ -232,7 +273,7 @@ function AccountLimits({ account, lookup, auto = false, unpinned = false, dotTar
           <div className="session-inspector-meter-heading">
             <strong title={title}>{title}</strong><span>{percent}%</span>
           </div>
-          <div role="progressbar" aria-label={zh ? `${title}剩余` : `${title} remaining`} aria-valuenow={percent} className="session-inspector-quota-steps">
+          <div role="progressbar" aria-label={zh ? `${title}剩余` : `${title} remaining`} aria-valuenow={percent} className="session-inspector-quota-steps" data-tone={percent <= 15 ? "danger" : percent <= 40 ? "warn" : "ok"}>
             {Array.from({ length: 20 }, (_, index) => <span key={index} aria-hidden style={{ backgroundSize: `${Math.min(100, Math.max(0, (remaining - index * 5) * 20))}% 100%` }} />)}
           </div>
           {remainingQuota(window) && <div className="session-inspector-muted">{remainingQuota(window)}</div>}

@@ -31,10 +31,10 @@ export function flashComposer(box: HTMLElement | null, launch = false, morphing 
   if (ripple?.animate) {
     ripple.getAnimations().forEach(animation => animation.cancel());
     ripple.animate([
-      { opacity: 0.85, transform: "translate3d(0, 0, 0) scale(.8)" },
-      { opacity: 0.4, transform: "translate3d(0, 0, 0) scale(1.6)", offset: 0.45 },
-      { opacity: 0, transform: "translate3d(0, 0, 0) scale(2.4)" }
-    ], { duration: 420, easing: composerEase });
+      { opacity: 0.65, transform: "translate3d(0, 0, 0) scale(.86)" },
+      { opacity: 0.28, transform: "translate3d(0, 0, 0) scale(1.45)", offset: 0.48 },
+      { opacity: 0, transform: "translate3d(0, 0, 0) scale(1.95)" }
+    ], { duration: 380, easing: composerEase });
   }
 
   const sendBtn = box.querySelector<HTMLElement>(".composer-send");
@@ -42,30 +42,30 @@ export function flashComposer(box: HTMLElement | null, launch = false, morphing 
     sendBtn.getAnimations().forEach(animation => animation.cancel());
     sendBtn.animate([
       { transform: "scale(1)" },
-      { transform: "scale(.85)", offset: 0.22 },
-      { transform: "scale(1.06)", offset: 0.6 },
+      { transform: "scale(.88)", offset: 0.22 },
+      { transform: "scale(1.04)", offset: 0.62 },
       { transform: "scale(1)" }
-    ], { duration: 320, easing: composerSpring });
+    ], { duration: 300, easing: composerSpring });
   }
 
   const arrow = box.querySelector<HTMLElement>(".composer-launch-arrow");
   if (arrow?.animate) {
     arrow.getAnimations().forEach(animation => animation.cancel());
     arrow.animate([
-      { opacity: 1, transform: "translate3d(0, 0, 0) scale(1)" },
-      { opacity: 0.9, transform: "translate3d(0, -14px, 0) scale(1.05)", offset: 0.42 },
-      { opacity: 0, transform: "translate3d(0, -32px, 0) scale(.75)" }
-    ], { duration: 340, easing: composerEase });
+      { opacity: 0.95, transform: "translate3d(0, 0, 0) scale(1)" },
+      { opacity: 0.8, transform: "translate3d(0, -11px, 0) scale(1.02)", offset: 0.45 },
+      { opacity: 0, transform: "translate3d(0, -24px, 0) scale(.82)" }
+    ], { duration: 320, easing: composerEase });
   }
 
   const streak = box.querySelector<HTMLElement>(".composer-send-streak");
   if (streak?.animate) {
     streak.getAnimations().forEach(animation => animation.cancel());
     streak.animate([
-      { opacity: 0, transform: "translate3d(0, 2px, 0) scaleX(.76) scaleY(.75)" },
-      { opacity: 0.85, transform: "translate3d(0, -10px, 0) scaleX(.96) scaleY(1)", offset: 0.28 },
-      { opacity: 0, transform: "translate3d(0, -38px, 0) scaleX(1.02) scaleY(.5)" }
-    ], { duration: 400, easing: composerEase });
+      { opacity: 0, transform: "translate3d(0, 2px, 0) scaleX(.8) scaleY(.75)" },
+      { opacity: 0.48, transform: "translate3d(0, -8px, 0) scaleX(.94) scaleY(1)", offset: 0.3 },
+      { opacity: 0, transform: "translate3d(0, -28px, 0) scaleX(1) scaleY(.55)" }
+    ], { duration: 380, easing: composerEase });
   }
 
   if (!morphing && box.animate) {

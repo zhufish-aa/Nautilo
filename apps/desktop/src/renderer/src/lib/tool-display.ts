@@ -133,7 +133,7 @@ export function toolActivityKind(name: string, input?: string): ToolActivityKind
     || fileKind === "read" && /(?:^|[\\/])SKILL\.md$/i.test(path ?? "")
     || /(?:Get-Content|\bcat\b|\btype\b|\bsed\b|\bhead\b).*\bSKILL\.md\b/i.test(command)) return "skill";
   if (/(?:^|_)mcp(?:_|$)/.test(normalized) || normalized.startsWith("codex_apps_") || mcpTool(name)) return "mcp";
-  if (/(?:^|_)(?:bash|pwsh|shell|shell_command|exec_command|run_command|execute_command|terminal|write_stdin)(?:_|$)/.test(normalized)) return "command";
+  if (/(?:^|_)(?:bash|pwsh|powershell|cmd|shell|shell_command|exec_command|run_command|execute_command|terminal|write_stdin)(?:_|$)/.test(normalized)) return "command";
   if (/(?:^|_)(?:read_image|view_image|image_gen|imagegen)(?:_|$)/.test(normalized)) return "image";
   if (/(?:^|_)(?:run_code|execute_code|python|node_repl)(?:_|$)/.test(normalized)) return "code";
   if (/(?:^|_)(?:web|web_search|web_fetch|fetch_url|browse)(?:_|$)/.test(normalized)) return "web";

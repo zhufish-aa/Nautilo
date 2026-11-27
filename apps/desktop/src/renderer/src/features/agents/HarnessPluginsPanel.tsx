@@ -15,17 +15,23 @@ export function HarnessPluginsPanel({ instanceId, accounts }: { instanceId: stri
   const [account, setAccount] = useState(accounts.length === 1 ? accounts[0]!.id : "");
   const selected = accounts.find(item => item.id === account);
   const [working, setWorking] = useState(false);
-  return <section className="harness-config-section">
-    <button type="button" className="flex w-full items-center gap-2 text-sm font-medium" aria-expanded={open} disabled={working}
-      onClick={() => setOpen(value => !value)}><Puzzle size={15} />{zh ? "原生插件" : "Native plugins"}
-      <ChevronDown size={15} className={open ? "ml-auto rotate-180" : "ml-auto"} /></button>
-    {open && <div className="mt-3 space-y-3">
+  return <section className="harness-config-section harness-plugins-section">
+    <button type="button" className="harness-plugins-trigger" aria-expanded={open} disabled={working}
+      onClick={() => setOpen(value => !value)}>
+      <span className="harness-plugins-trigger-icon" aria-hidden><Puzzle size={14} /></span>
+      <span className="harness-plugins-trigger-copy">
+        <strong>{zh ? "原生插件" : "Native plugins"}</strong>
+        <small>{zh ? "管理该 CLI 原生扩展与插件清单" : "Manage native extensions and plugins for this CLI"}</small>
+      </span>
+      <ChevronDown size={15} className={`harness-plugins-chevron ${open ? "is-open" : ""}`} aria-hidden />
+    </button>
+    {open && <div className="harness-plugins-body">
       {(accounts.length > 0 || account) && <SelectField aria-label={zh ? "插件配置范围" : "Plugin profile"} disabled={working}
         placeholder={zh ? "请选择配置范围" : "Choose a profile"} value={account ? (selected?.id ?? "") : "__default"}
         options={[{ value: "__default", label: zh ? "CLI 默认配置" : "Default CLI profile" }, ...accounts.map(item => ({ value: item.id, label: item.name }))]}
         onValueChange={value => setAccount(value === "__default" ? "" : value)} />}
       {account && !selected
-        ? <p role="status" className="text-sm text-ink-2">{zh ? "原账号已不可用，请重新选择配置范围。" : "This account is unavailable. Choose a profile to continue."}</p>
+        ? <p role="status" className="text-xs text-ink-2">{zh ? "原账号已不可用，请重新选择配置范围。" : "This account is unavailable. Choose a profile to continue."}</p>
         : <Inventory key={JSON.stringify([instanceId, selected?.id, selected?.revision])} instanceId={instanceId} connectionId={selected?.id} onWorking={setWorking} />}
     </div>}
   </section>;

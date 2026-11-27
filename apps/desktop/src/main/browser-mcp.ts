@@ -50,7 +50,7 @@ const actionSchema = {
         "forward",
         "reload",
         "zoom",
-        "goto", "dblclick", "assert", "eval", "screenshot",
+        "goto", "dblclick", "assert", "eval", "screenshot", "wait_any",
       ],
     },
     url: { type: "string" },
@@ -323,6 +323,8 @@ const readProperties=tools.find(tool=>tool.name === "browser_read").inputSchema.
 Object.assign(readProperties,{format:{enum:["text","refs"],default:"text"},root:{type:"string"},view_id:{type:"string"},viewId:{type:"string"},limit:{type:"integer",minimum:1,maximum:24000,description:"Character limit for text; node count 1–200 for format:refs."}});
 Object.assign(actionSchema.properties,{expect:{anyOf:[expectSchema,inlineSpec((expectSpec as any).$defs.predicateMap,expectSpec)]}});
 Object.assign(actionSchema.properties,{format:{enum:["text","refs"]},root:{type:"string"},view_id:{type:"string"},limit:{type:"integer",minimum:1,maximum:24000}});
+tools.find(tool => tool.name === "browser_run").description +=
+  " wait_any selects the first matching named page state in cases. Later steps can use when:{step,case} to run only for that outcome.";
 
 export const browserCapabilities = {
   version:"1.2.1",tools:tools.map(tool=>tool.name),

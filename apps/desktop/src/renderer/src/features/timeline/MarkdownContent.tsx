@@ -1,4 +1,4 @@
-import { Children, Fragment, createContext, memo, useContext, useLayoutEffect, useMemo, useRef, useState, cloneElement, isValidElement, type MouseEvent, type ReactElement, type ReactNode, type RefObject } from "react";
+import { Children, Fragment, createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, cloneElement, isValidElement, type MouseEvent, type ReactElement, type ReactNode, type RefObject } from "react";
 import { Check, Copy } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { classifyLocalHref, isImagePath, isExternalOpenPath, parseFileReference, splitTextByFileReferences } from "../../lib/file-references";
@@ -186,6 +186,7 @@ function StreamFadeSegment({ children, fresh }: { children: ReactNode; fresh: bo
 
 function CodeBlock({ children }: { children?: ReactNode }): JSX.Element {
   const { locale } = useI18n();
+  const zh = locale === "zh-CN";
   const streaming = useContext(StreamingCode);
   const code = Children.toArray(children).find(isValidElement<{ className?: string }>);
   const language = code?.props.className?.match(/(?:^|\s)language-([^\s]+)/)?.[1];
@@ -193,6 +194,13 @@ function CodeBlock({ children }: { children?: ReactNode }): JSX.Element {
   const highlighted = useMemo(() => !streaming && language ? highlightCode(text, "", language) : undefined, [streaming, text, language]);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1600);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
   const copy = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(text.replace(/\n$/, ""));
@@ -203,15 +211,20 @@ function CodeBlock({ children }: { children?: ReactNode }): JSX.Element {
     }
   };
   return (
-    <div className="group/code relative my-3 overflow-hidden rounded-xl border border-line bg-card">
-      <button type="button" onClick={() => void copy()} aria-label={locale === "zh-CN" ? "复制代码" : "Copy code"} title={locale === "zh-CN" ? "复制代码" : "Copy code"}
-        className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md bg-card text-ink-3 transition-colors hover:bg-card-hover hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
-        {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
-      </button>
-      <pre className="max-w-full overflow-auto p-4 pr-12 font-mono text-[13px] font-normal leading-relaxed text-ink-2 [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-inherit">
+    <div className="chat-code-block group/code">
+      <div className="chat-code-header">
+        <span className="chat-code-lang">{language || (zh ? "代码" : "code")}</span>
+        <button type="button" onClick={() => void copy()} data-copied={copied || undefined}
+          aria-label={copied ? (zh ? "已复制" : "Copied") : (zh ? "复制代码" : "Copy code")}
+          className="chat-code-copy">
+          {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
+          <span>{copied ? (zh ? "已复制" : "Copied") : (zh ? "复制" : "Copy")}</span>
+        </button>
+      </div>
+      <pre className="max-w-full overflow-auto px-3.5 py-3 font-mono text-[12.5px] font-normal leading-relaxed text-ink-2 [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-inherit">
         {highlighted === undefined ? children : <code className={code?.props.className} dangerouslySetInnerHTML={{ __html: highlighted }} />}
       </pre>
-      {copyError && <p role="status" className="px-4 pb-2 text-xs text-danger">{locale === "zh-CN" ? "无法复制，请选择代码后复制。" : "Could not copy. Select the code and copy it manually."}</p>}
+      {copyError && <p role="status" className="px-3.5 pb-2 text-xs text-danger">{zh ? "无法复制，请选择代码后复制。" : "Could not copy. Select the code and copy it manually."}</p>}
     </div>
   );
 }

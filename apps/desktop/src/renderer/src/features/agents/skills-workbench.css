@@ -76,15 +76,15 @@
 }
 :is(.skill-library, .skill-drawer, .capability-import-dialog, .resource-sync-dialog) :is(.ui-select, .ui-select > span:first-child) { text-align: start; }
 
-/* Settings full-stage obsidian canvas for Skills (higher specificity than management.css) */
-.settings-layout[data-section="skills"] > .settings-content {
+/* Settings full-stage obsidian canvas for Skills & MCP (higher specificity than management.css) */
+.settings-layout:is([data-section="skills"], [data-section="mcp"]) > .settings-content {
   display: flex;
   flex-direction: column;
   overflow: hidden;
   padding: 24px 32px 24px 28px;
   background: light-dark(var(--glass-stage), #0e1016);
 }
-.settings-layout[data-section="skills"] > .settings-content > .settings-content-inner {
+.settings-layout:is([data-section="skills"], [data-section="mcp"]) > .settings-content > .settings-content-inner {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -92,31 +92,37 @@
   width: 100%;
   max-width: 1480px;
 }
-.settings-layout[data-section="skills"] .capability-library.skill-library:not(.mcp-library) {
+.settings-layout:is([data-section="skills"], [data-section="mcp"]) .capability-library.skill-library,
+.skills-route-stage > .capability-library.skill-library {
   flex: 1;
   min-height: 0;
   max-width: none;
   padding: 0;
 }
-.settings-layout[data-section="skills"] .skill-view,
-.settings-layout[data-section="skills"] .skill-view-stage {
+.settings-layout:is([data-section="skills"], [data-section="mcp"]) :is(.skill-view, .skill-view-stage, .mcp-view, .mcp-view-stage),
+.skills-route-stage :is(.skill-view, .skill-view-stage, .mcp-view, .mcp-view-stage) {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
-.settings-layout[data-section="skills"] .skill-workbench:not([data-empty="true"]) {
+.settings-layout[data-section="skills"] .skill-workbench:not([data-empty="true"]),
+.settings-layout[data-section="mcp"] .mcp-workbench:not([data-empty="true"]),
+.skills-route-stage .skill-workbench:not([data-empty="true"]),
+.skills-route-stage .mcp-workbench:not([data-empty="true"]) {
   flex: 1;
   min-height: 0;
   height: auto;
 }
-.settings-layout[data-section="skills"] .skill-matrix:not(.skill-workbench-empty) {
+.settings-layout:is([data-section="skills"], [data-section="mcp"]) .skill-matrix:not(.skill-workbench-empty):not(.mcp-workbench-empty),
+.skills-route-stage .skill-matrix:not(.skill-workbench-empty):not(.mcp-workbench-empty) {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
-.settings-layout[data-section="skills"] .skill-matrix-scroll {
+.settings-layout:is([data-section="skills"], [data-section="mcp"]) .skill-matrix-scroll,
+.skills-route-stage .skill-matrix-scroll {
   flex: 1;
   min-height: 0;
   max-height: none;
@@ -168,17 +174,14 @@
 /* Page header & actions */
 .capability-heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
 .capability-library.skill-library {
-  max-width: 1160px;
+  max-width: 1480px;
+  width: 100%;
+  margin-inline: auto;
   padding: 0 0 18px;
   display: flex;
   flex-direction: column;
   gap: 16px;
   container: skills-library / inline-size;
-}
-.capability-library.skill-library:not(.mcp-library) {
-  max-width: 1480px;
-  width: 100%;
-  margin-inline: auto;
 }
 .skill-library-heading, .skill-library-context, .skill-target-context, .skill-library-toolbar, .skill-library-filters {
   display: flex; align-items: center; min-width: 0; flex-wrap: wrap; gap: 10px 16px;

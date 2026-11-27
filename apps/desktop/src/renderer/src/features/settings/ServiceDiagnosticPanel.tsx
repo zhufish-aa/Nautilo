@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, ChevronDown, CircleAlert, Clock3, Plug, RefreshCw, Search, X } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, Clock3, Copy, Plug, RefreshCw, Search, X } from "lucide-react";
 import type { DiagnosticStage, ServiceDiagnostic } from "@agenthub/schemas";
 import { useI18n } from "../../lib/i18n";
 import { UI_EASE_OUT, useUiReducedMotion } from "../../lib/ui-motion";
@@ -36,6 +36,14 @@ export function McpDiagnosticPanel({ target }: { target: DiagnosticTarget }): JS
   const checking = useServiceDiagnostics((state) => state.checking[key]);
   const check = useServiceDiagnostics((state) => state.check);
   const [query, setQuery] = useState("");
+  const [copiedTool, setCopiedTool] = useState("");
+
+  useEffect(() => {
+    if (!copiedTool) return;
+    const timer = window.setTimeout(() => setCopiedTool(""), 1400);
+    return () => window.clearTimeout(timer);
+  }, [copiedTool]);
+
   const issue = result?.steps.find((step) => step.state === "failed")
     ?? result?.steps.find((step) => step.state === "warning");
   const description = result?.steps.find((step) => step.id === "initialize" && step.state === "passed")?.message;
@@ -43,30 +51,63 @@ export function McpDiagnosticPanel({ target }: { target: DiagnosticTarget }): JS
     `${tool.name} ${tool.description ?? ""}`.toLowerCase().includes(query.trim().toLowerCase()),
   );
   const health = checking ? "checking" : result?.state ?? "unchecked";
-  const status = checking ? (zh ? "正在检测" : "Checking")
+  const status = checking ? (zh ? "正在握手检测…" : "Running handshake…")
     : !result ? (zh ? "尚未检测" : "Not checked")
     : result.state === "failed" ? (zh ? "连接失败" : "Connection failed")
     : result.state === "warning" ? (zh ? "检测完成 · 有待确认项" : "Checked · review required")
     : (zh ? "连接正常" : "Connection healthy");
   const summary = [status, !checking && result && `${result.elapsedMs} ms`,
-    !checking && result?.toolCount !== undefined && (zh ? `发现 ${result.toolCount} 个工具` : `${result.toolCount} tools found`),
+    !checking && result?.toolCount !== undefined && (zh ? `发现 ${result.toolCount} 个工具` : `${result.toolCount} tools`),
   ].filter(Boolean).join(" · ");
 
-  return <section className="mcp-diagnostics" aria-label={zh ? "连接诊断" : "Connection diagnostics"}>
+  const copyToolName = async (name: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(name);
+      setCopiedTool(name);
+    } catch {
+      /* clipboard errors are silent here */
+    }
+  };
+
+  return <section className="mcp-diagnostics" data-health={health} aria-label={zh ? "连接诊断" : "Connection diagnostics"}>
     <div className="mcp-diagnostics-header">
-      <h3>{zh ? "连接诊断" : "Connection diagnostics"}</h3>
-      <span className="mcp-diagnostics-status" role="status" data-health={health}>
-        <i className="mcp-health-dot" data-health={health} aria-hidden />{summary}
-      </span>
+      <div className="mcp-diagnostics-title-group">
+        <h3>{zh ? "连接诊断" : "Connection diagnostics"}</h3>
+        <span className="mcp-diagnostics-status" role="status" data-health={health}>
+          <i className="mcp-health-dot" data-health={health} aria-hidden />{summary}
+        </span>
+      </div>
       <button type="button" className="mcp-check-button" disabled={checking} onClick={() => void check(target)}>
-        <RefreshCw size={14} className={checking ? "service-check-spinning" : undefined} aria-hidden />
-        {zh ? "检测连接" : "Check connection"}
+        <RefreshCw size={13} className={checking ? "service-check-spinning" : undefined} aria-hidden />
+        {checking ? (zh ? "检测中" : "Checking") : result ? (zh ? "重新检测" : "Check again") : (zh ? "检测连接" : "Check connection")}
       </button>
     </div>
+
+    {checking && (
+      <div className="mcp-diagnostics-progress" role="status">
+        <span className="mcp-diagnostics-pulse" aria-hidden />
+        <span>{zh ? "正在执行独立 MCP 传输启动、协议握手与工具清单读取…" : "Running standalone MCP transport launch, handshake, and tool discovery…"}</span>
+      </div>
+    )}
+
     {!result && !checking && <p className="mcp-diagnostics-note">
-      {zh ? "点击「检测连接」以验证服务连通性并读取工具列表与描述。" : "Check the connection to verify the service and read its tool list and descriptions."}
+      {zh ? "点击「检测连接」以验证服务连通性、各阶段耗时并读取可用工具清单。" : "Click Check connection to verify transport, handshake latency, and discoverable tools."}
     </p>}
+
     {!checking && result && <>
+      {result.steps.length > 0 && (
+        <ol className="mcp-diag-stepper" aria-label={zh ? "诊断阶段" : "Diagnostic stages"}>
+          {result.steps.map((step, index) => (
+            <li key={`${step.id}:${index}`} className="mcp-diag-step" data-state={step.state}>
+              <span className="mcp-diag-step-icon" aria-hidden>
+                {step.state === "passed" ? <Check size={11} strokeWidth={2.5} /> : step.state === "failed" ? <X size={11} strokeWidth={2.5} /> : <CircleAlert size={11} />}
+              </span>
+              <span className="mcp-diag-step-name">{stageNames[step.id]?.[zh ? 0 : 1] ?? step.id}</span>
+              <span className="mcp-diag-step-ms">{step.elapsedMs} ms</span>
+            </li>
+          ))}
+        </ol>
+      )}
       {issue && <div className="mcp-diagnostics-issue" data-health={issue.state}>
         <p>{(issue.code && reasons[issue.code]?.[zh ? 0 : 1]) || issue.message || status}</p>
         {issue.message && <details>
@@ -80,12 +121,29 @@ export function McpDiagnosticPanel({ target }: { target: DiagnosticTarget }): JS
           {description && <p>{description}</p>}
         </div>}
       {result.tools && result.tools.length > 0 && <div className="mcp-diagnostics-tools">
-        <div>
+        <div className="mcp-diagnostics-tools-bar">
           <h4>{zh ? "可用工具" : "Available tools"} <span>{result.toolCount ?? result.tools.length}{result.truncated ? "+" : ""}</span></h4>
-          <label><Search size={13} aria-hidden /><input aria-label={zh ? "筛选工具" : "Filter tools"} placeholder={zh ? "筛选工具" : "Filter tools"} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+          <label>
+            <Search size={12} aria-hidden />
+            <input aria-label={zh ? "筛选工具" : "Filter tools"} placeholder={zh ? "筛选工具…" : "Filter tools…"} value={query} onChange={(event) => setQuery(event.target.value)} />
+            {query && <button type="button" className="mcp-tools-clear" onClick={() => setQuery("")} aria-label={zh ? "清空" : "Clear"}><X size={11} aria-hidden /></button>}
+          </label>
         </div>
         {tools?.length ? <ul>{tools.map((tool) => <li key={tool.name}>
-          <code>{tool.name}</code>{tool.description && <p title={tool.description}>{tool.description}</p>}
+          <div className="mcp-tool-name-row">
+            <code>{tool.name}</code>
+            <button
+              type="button"
+              className="mcp-tool-copy"
+              data-copied={copiedTool === tool.name}
+              title={copiedTool === tool.name ? (zh ? "已复制" : "Copied") : (zh ? "复制工具名" : "Copy tool name")}
+              aria-label={zh ? `复制 ${tool.name}` : `Copy ${tool.name}`}
+              onClick={() => void copyToolName(tool.name)}
+            >
+              {copiedTool === tool.name ? <Check size={11} aria-hidden /> : <Copy size={11} aria-hidden />}
+            </button>
+          </div>
+          {tool.description && <p title={tool.description}>{tool.description}</p>}
         </li>)}</ul> : <p className="mcp-diagnostics-note">{zh ? "没有匹配的工具" : "No matching tools"}</p>}
       </div>}
     </>}

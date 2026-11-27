@@ -102,9 +102,8 @@ DeepSeek Harness 同会话切换账号时，后台从新连接的已启用模型
 - **各 Harness 的后台事件与回收验收**：Pi/OMP/Claude、Kimi ACP、DeepSeek、Codex app-server 及 OpenCode HTTP/SSE 已接会话后台通道。OpenCode 的实际接口检查覆盖 1.19.5；真实账号/模型和原生 TUI 完整往返仍待逐项验收。共享 SessionPool、DeepSeek 和 Codex 已取消按固定空闲时间直接关闭进程；Codex 在显式容量限制下还会查询原生后台终端。不能据此声称所有运行环境都已安全回收，上述实现也不替代各安装版本与真实账号下的完整验收。
 - **原生界面历史对账的剩余项**：OpenCode、Codex 及 Pi/OMP/Command Code 的上述读取路径已接入；原生撤销、分支、删除、首次空白 TUI 的原生身份建立，以及 daemon 崩溃后子会话历史和未完成前缀的完整恢复仍待建设/验收。Trae 尚未声明可靠的终端/历史读取；内置 Claude/Kimi 的历史读取不在本次插件调整内。不能把拼接提示词作为原生恢复的替代。
 - **官方开源 trae-agent**：继续使用其真实一次性运行和历史桥接；未核实常驻协议或交互终端接口前，不虚构支持。Command Code 的结构化接口同样仍按原生单次进程运行。
-- **TRAE 企业版 CLI**：已用官方 Windows 企业分发包 `0.216.0-tob` 验证 ACP 启动、命名配置档以及模型和额度查询的未登录分支。模型菜单使用原生 `model/list`，保留每个模型各自提供的推理档位。账号额度使用同一 CLI 登录的 `model/internalUsage/read`，展示每周基础额度和 CLI 提供的每日模型额度。共享池总额和企业付款余额仍由企业控制台查询。
-- **权限与交互**：默认沿用 TRAE 原生配置，显式选择请求批准、自动审批或完全访问时使用对应的 `--permission-mode`。Rust 后端离线验收覆盖模型分页、额度查询、权限切换后续聊、单次审批及表单回填。此前已验证取消待审批并以同一会话 ID 续聊。Electron 构建和侧栏渲染检查通过。
-- **企业实机验收**：在公司环境确认 `traecli login status`，将 Trae Harness 指向公司安装的 CLI，新对话选「原生配置」。在公司允许的测试仓库核对模型和推理档位、侧栏额度、首轮回复、审批、取消及同一会话续聊。真实 SSO、公司模型及额度、企业 MCP 与专属域网络策略仍待登录后验收。当前适配按轮启动 ACP。常驻后台任务与子 Agent、原生终端交接和历史同步、Nautilo 托管 Skills 同步和 ACP URL 交互仍有缺口。参见 [TRAE CLI 2.0 登录](https://docs.trae.cn/cli_get-started-with-trae-cli-2)、[ACP 参数](https://docs.trae.cn/cli_agent-client-protocol) 和 [代理环境变量](https://docs.trae.cn/cli_environment-variables)。
+- **TRAE 企业版 CLI**：已用官方企业分发包 Windows `0.216.0-tob` 验证 `acp serve`、`--acp`、命名配置档与未登录提示。Rust 后端的离线验收覆盖启动回退、代理变量、模型和推理选项、允许与拒绝的选项映射、取消待审批请求、同一原生会话续聊和回复持久化。
+- **企业环境验收**：先在公司终端使用实际二进制运行 `traecli login status`，从同一用户环境启动 Nautilo。将 Trae Harness 的可执行文件设为公司安装的 CLI，全局参数按需填写公司使用的 `--profile` 等选项，新对话选「原生配置」。用公司允许的测试仓库验证首轮模型回复、同一会话续聊、审批、取消后续聊和已配置的企业 MCP。模型列表、企业 SSO、专属域及网络策略最终由实机验收。当前适配仍按轮启动 ACP 并通过原生会话 ID 恢复。常驻后台任务、ACP 表单提问及原生终端和历史同步尚待接入。参见 [TRAE CLI 2.0 登录](https://docs.trae.cn/cli_get-started-with-trae-cli-2)、[ACP 参数](https://docs.trae.cn/cli_agent-client-protocol) 和 [代理环境变量](https://docs.trae.cn/cli_environment-variables)。
 - **Kimi API /自定义包装器**：当前安装版本下仍使用可用的单次结构化路径；ACP 常驻结论只适用于支持该登录/配置方式的路径。
 - **逐 CLI 真实往返**：七个原生终端方案还需逐个在当前选定账号下验证进入、原生操作、退出、继续聊天。当前没有使用用户模型 API 批量发测试请求。
 - **源码管理剩余项**：stash、原生 rebase/cherry-pick 等操作的继续/中止、未跟踪文件的可恢复清理、PR 工作流及真实远程认证验收仍待补齐；子模块与目录/文件类型冲突使用原生终端。源码管理主流程的本地检查不能替代这些工作，也不代表所有 Git 配置和版本已完整兼容。

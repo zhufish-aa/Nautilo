@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
-  ArrowLeft, ArrowRight, Camera, Check, Copy, Crosshair, Globe, Hand, LayoutGrid,
+  ArrowLeft, ArrowRight, Bug, Camera, Check, Code2, Copy, Crop, Crosshair, Globe, Hand, LayoutGrid,
   LockKeyhole, MonitorSmartphone, MoreHorizontal, Pin, Play, RotateCw, X,
 } from "lucide-react";
 import { getBridge } from "../../lib/bridge";
@@ -272,11 +272,14 @@ export function BrowserDrawer({sessionId,onClose,onOverview,surfaceSuspended=fal
   };
   const startPicker = async (mode:"element"|"region") => {
     try {
-      if (picker) {await bridge.shell("cancel",tab);return;}
+      if (picker === mode) {await bridge.shell("cancel",tab);return;}
+      if (picker) {await bridge.shell("cancel",tab);}
       setPicker(mode);
       if (await bridge.shell("pick",{...tab,mode})) {
         setFeedback("capture");
-        toast.success(word("已加入会话输入框","Added to chat draft"));
+        toast.success(mode === "element"
+          ? word("元素已作为上下文卡片加入输入框","Element added to composer")
+          : word("区域截图已加入输入框","Region screenshot added to composer"));
       }
     } catch (err) {report(err);}
     finally {setPicker(undefined);}
@@ -451,13 +454,19 @@ export function BrowserDrawer({sessionId,onClose,onOverview,surfaceSuspended=fal
         </div>}
       </form>
       <div className="br-tools">
-        {!!current?.errors && <button className="br-radar" title={word("报错雷达","Diagnostics")} aria-label={word("报错雷达","Diagnostics")} aria-pressed={diagnostics}
-          onClick={() => {setDiagnostics(value=>!value);void bridge.shell("clear",{...tab,remove:false}).catch(report);}}>
-          <span className="br-dot" data-tone="danger"/>{current.errors}
-        </button>}
-        <button className="br-icon" disabled={!page} title={word("拾取网页元素","Pick element")} aria-label={word("拾取网页元素","Pick element")} aria-pressed={!!picker} onClick={() => void startPicker("element")}><Crosshair/></button>
-        <button className="br-icon" disabled={!page} title={word("截屏入聊 · Shift 选择区域","Capture to chat · Shift to select region")} aria-label={word("截屏入聊","Capture to chat")} aria-pressed={picker==="region"}
-          onClick={event => void(event.shiftKey ? startPicker("region") : capture())}>{feedback==="capture" ? <Check/> : <Camera/>}</button>
+        <button className="br-icon" disabled={!page} title={word("拾取网页元素（点击选中，↑/↓ 切换父子层级）","Pick page element (↑/↓ parent/child)")} aria-label={word("拾取网页元素","Pick element")} aria-pressed={picker==="element"} onClick={() => void startPicker("element")}><Crosshair/></button>
+        <button className="br-icon" disabled={!page} title={word("框选区域截屏入聊","Capture region to chat")} aria-label={word("框选区域截屏","Capture region")} aria-pressed={picker==="region"} onClick={() => void startPicker("region")}><Crop/></button>
+        <button className="br-icon" disabled={!page} title={word("整页截屏入聊","Capture full viewport to chat")} aria-label={word("整页截屏","Capture viewport")} onClick={() => void capture()}>{feedback==="capture" ? <Check/> : <Camera/>}</button>
+        <span className="br-tool-divider" aria-hidden/>
+        {current?.errors ? (
+          <button className="br-radar" title={word("控制台 / 网络诊断","Console & network diagnostics")} aria-label={word("报错雷达","Diagnostics")} aria-pressed={diagnostics}
+            onClick={() => {setDiagnostics(value=>!value);void bridge.shell("clear",{...tab,remove:false}).catch(report);}}>
+            <span className="br-dot" data-tone="danger"/>{current.errors}
+          </button>
+        ) : (
+          <button className="br-icon" disabled={!page} title={word("控制台 / 网络诊断","Console & network diagnostics")} aria-label={word("控制台诊断","Diagnostics")} aria-pressed={diagnostics}
+            onClick={() => setDiagnostics(value=>!value)}><Bug/></button>
+        )}
         <div className="br-device-tools" ref={deviceTools} onBlur={event=>{
           if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) dismissDeviceMenu();
         }} onKeyDown={event=>{
@@ -478,6 +487,7 @@ export function BrowserDrawer({sessionId,onClose,onOverview,surfaceSuspended=fal
             <button role="menuitem" type="button" disabled={!device} onClick={()=>void selectDevice(device,!landscape).catch(report)}><span>{word("横竖屏翻转","Rotate viewport")}</span><RotateCw/></button>
           </div>}
         </div>
+        <button className="br-icon" disabled={!page} title={word("打开 / 关闭开发者工具 (DevTools)","Toggle DevTools")} aria-label={word("开发者工具","DevTools")} onClick={() => void bridge.shell("devtools",tab).catch(report)}><Code2/></button>
         <span className="br-tool-divider" aria-hidden/>
         <button className="br-control" disabled={!tabId} data-mode={state.manual?"manual":active?"agent":"ready"} aria-label={control} title={control} onClick={takeControl}>
           {state.manual ? <Play/> : active ? <span className="br-dot" data-tone="blue" data-pulse/> : <Hand/>}
@@ -488,10 +498,26 @@ export function BrowserDrawer({sessionId,onClose,onOverview,surfaceSuspended=fal
       </div>
       <span className="br-load-progress" data-loading={!!current?.loading} style={{transform:`scaleX(${current?.progress ?? 0})`}} aria-hidden/>
     </div>
-    {state.manual && page && notice && <div className="br-takeover">
-      <Hand/><span>{word("已由你接管操作，完成后点击「交还 AI」继续执行","You have control. Return to AI when finished.")}</span>
-      <button className="br-icon" title={word("关闭提示","Dismiss hint")} aria-label={word("关闭提示","Dismiss hint")} onClick={()=>setNotice(false)}><X/></button>
-    </div>}
+    {picker && (
+      <div className="br-picker-bar" role="status">
+        <div className="br-picker-bar-copy">
+          {picker === "element" ? <Crosshair aria-hidden/> : <Crop aria-hidden/>}
+          <span>
+            {picker === "element"
+              ? word("正在拾取网页元素","Picking page element")
+              : word("正在框选截屏区域","Selecting screenshot region")}
+            <small>
+              {picker === "element"
+                ? word("· 点击选中，↑/↓ 切换父子层级，Enter 确认","· Click to select, ↑/↓ parent/child, Enter to confirm")
+                : word("· 在页面拖拽框选，松开即加入对话","· Drag on page to capture")}
+            </small>
+          </span>
+        </div>
+        <button type="button" className="br-picker-cancel" onClick={() => void bridge.shell("cancel",tab).catch(report)}>
+          {word("取消 (Esc)","Cancel (Esc)")}
+        </button>
+      </div>
+    )}
     {error && <div role="alert" className="br-error">{error}<button className="br-icon" aria-label={word("关闭提示","Dismiss")} onClick={()=>setError("")}><X/></button></div>}
     {!page ? <BrowserStart key={tabId} zh={zh} data={omnibox} onOpen={navigate} onProbe={()=>hydrate(true)}/> :
       device ? <div className="br-device">

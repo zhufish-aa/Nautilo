@@ -341,6 +341,11 @@ impl RunService {
         run_log::run_event(run_id, "cancel_request", json!({}));
         let active = self.active.lock().unwrap().remove(run_id);
         let existing = Repositories::new(&self.db.lock().unwrap().raw).runs().get(run_id)?;
+        if let Some(existing) = existing.as_ref().filter(|_| active.is_some()) {
+            let mut updated = existing.as_object().cloned().unwrap_or_default();
+            updated.insert("status".to_string(), json!("cancelling"));
+            Repositories::new(&self.db.lock().unwrap().raw).runs().save(&Value::Object(updated))?;
+        }
         if let Some(session_id)=existing.as_ref().and_then(|r|r["sessionId"].as_str()){self.account_gateways.cancel_session(session_id).await;}
         let Some(active) = active else {
             if let Some(existing) = existing {
@@ -359,11 +364,6 @@ impl RunService {
             }
             return Ok(());
         };
-        if let Some(existing) = &existing {
-            let mut updated = existing.as_object().cloned().unwrap_or_default();
-            updated.insert("status".to_string(), json!("cancelling"));
-            Repositories::new(&self.db.lock().unwrap().raw).runs().save(&Value::Object(updated))?;
-        }
         // Resolve any pending provider approvals for this run right away.
         // Otherwise the plugin-side interaction handler stays parked on its
         // oneshot and the run's own stream never finalizes.
@@ -1104,6 +1104,16 @@ impl RunService {
         run_log::run_event(&consume_run_id, "consume_enter", json!({}));
         while let Some(event) = adapter_events.recv().await {
             let _ingress = ingress.lock().await;
+            // Workflow shutdown takes the cancel handle before stopping its
+            // transports. Drain the stream without treating those errors as failures.
+            let _failure_guard = if matches!(&event, AdapterEvent::Error { .. } | AdapterEvent::Timeout { .. }) {
+                match turn.try_lock() {
+                    Ok(guard) if guard.is_some() => Some(guard),
+                    _ => continue,
+                }
+            } else {
+                None
+            };
             if let AdapterEvent::Error { message } = &event {
                 provider_error = Some(self.redaction.text(message));
             }

@@ -12,6 +12,25 @@ import { createServer } from "node:http";
 const require = createRequire(import.meta.url);
 const desktop = fileURLToPath(new URL("..", import.meta.url));
 
+test("browser batch detects an outcome and dispatches only the matching branch", {
+  timeout: 30000,
+  skip: process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilo-browser-branch-"));
+  const entry = join(root, "main.cjs");
+  const esbuild = createRequire(require.resolve("vite/package.json"))("esbuild");
+  const bundle = await esbuild.build({
+    entryPoints: [join(desktop, "test/helpers/browser-branch-fixture.ts")],
+    bundle: true, platform: "node", format: "cjs", external: ["electron"], write: false,
+  });
+  await writeFile(entry, bundle.outputFiles[0].contents);
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  await promisify(execFile)(require("electron"), [
+    "--user-data-dir=" + root, "--disable-breakpad", "--disable-background-networking", entry,
+  ], { env, windowsHide: true, timeout: 25000 });
+});
+
 test("browser MCP contracts, files, dialogs, login import and last-window stop",{
   timeout:95000,
   skip:process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY,

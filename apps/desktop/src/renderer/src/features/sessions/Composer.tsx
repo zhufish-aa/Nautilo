@@ -3,7 +3,8 @@ import { AnimatePresence } from "framer-motion";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { createPortal } from "react-dom";
 import type { SlashCommandDefinition, WorkflowTemplate } from "@agenthub/domain";
-import { ArrowUp, AtSign, Bug, Check, FileText, FolderTree, GitPullRequest, Lightbulb, Loader2, Paperclip, Plus, Square, Target, Workflow, X } from "lucide-react";
+import { ArrowUp, AtSign, Bug, Check, Crosshair, FileText, FolderTree, GitPullRequest, Lightbulb, Loader2, Paperclip, Plus, Square, Target, Workflow, X } from "lucide-react";
+import type { BrowserElementContext } from "../../../../shared/browser-shell";
 import { useI18n } from "../../lib/i18n";
 import { useUiReducedMotion } from "../../lib/ui-motion";
 import { configureWorkbenchSession, sendWorkbenchFollowUp, sendWorkbenchMessage, stopWorkbenchRun } from "../../lib/orchestration-runtime";
@@ -100,8 +101,10 @@ export function Composer({
   const quotedFiles = quoteTail ? quoteTail.slice(1).split("\n").map(quote => quote.slice(1, -1)) : [];
   const editableText = quoteTail ? value.slice(0, -quoteTail.length) : value;
   const attachments = draft.attachments;
+  const elements = draft.elements ?? [];
   const updateText = useComposerDraftsStore((state) => state.setText);
   const updateAttachments = useComposerDraftsStore((state) => state.setAttachments);
+  const updateElements = useComposerDraftsStore((state) => state.setElements);
   const updateWorkflow = useComposerDraftsStore((state) => state.setWorkflow);
   const updateReferences = useComposerDraftsStore((state) => state.setReferences);
   const submitting = useComposerDraftsStore((state) => !!state.pending[draftKey]);
@@ -112,6 +115,20 @@ export function Composer({
   }); }, [draftKey]);
   const setValue = (text: string): void => updateText(draftKey, goalSelected && !text.startsWith("/goal ") ? `/goal ${text}` : text);
   const setAttachments = (next: DesktopAttachment[] | ((current: DesktopAttachment[]) => DesktopAttachment[])): void => updateAttachments(draftKey, next);
+  const removeElement = (el: BrowserElementContext): void => {
+    updateElements(draftKey, current => current.filter(item => item.id !== el.id));
+    if (el.screenshotPath) {
+      updateAttachments(draftKey, current => current.filter(item => item.path !== el.screenshotPath));
+    }
+  };
+  const elementScreenshotPaths = useMemo(
+    () => new Set(elements.map(el => el.screenshotPath).filter((p): p is string => Boolean(p))),
+    [elements],
+  );
+  const standaloneAttachments = useMemo(
+    () => attachments.filter(item => !elementScreenshotPaths.has(item.path)),
+    [attachments, elementScreenshotPaths],
+  );
   const [importing, setImporting] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string>();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -276,8 +293,8 @@ export function Composer({
   const waitsForNextTurn = !!nextTurnModel && (running || hasQueuedFollowUps);
   const hasReferences = !!draft.workflow || !!draft.references?.length;
   const referencesAvailable = (!draft.workflow || canReference) && (!draft.references?.length || canAttach);
-  const canSend = canCompose && !submitting && !running && !waitsForNextTurn && !importing && (goalSelected ? !!value.trim() && !planSelected : value.trim().length > 0 || attachments.length > 0 || hasReferences) && !disabled && !submissionDisabledReason && referencesAvailable;
-  const canFollowUp = !!sessionId && !goalSelected && !submitting && running && !waitsForNextTurn && !importing && !disabled && !editingMessage && attachments.length === 0 && (value.trim().length > 0 || hasReferences) && referencesAvailable;
+  const canSend = canCompose && !submitting && !running && !waitsForNextTurn && !importing && (goalSelected ? !!value.trim() && !planSelected : value.trim().length > 0 || attachments.length > 0 || elements.length > 0 || hasReferences) && !disabled && !submissionDisabledReason && referencesAvailable;
+  const canFollowUp = !!sessionId && !goalSelected && !submitting && running && !waitsForNextTurn && !importing && !disabled && !editingMessage && attachments.length === 0 && elements.length === 0 && (value.trim().length > 0 || hasReferences) && referencesAvailable;
   const actionsDisabled = !canCompose || disabled || importing || running;
   const planDisabled = actionsDisabled || submitting || hasQueuedFollowUps || goalSelected;
   const toggleGoal = (): void => {
@@ -377,10 +394,24 @@ export function Composer({
       submission = store.move(submission, destinationId);
       const sent = submission;
       void deliverComposerSubmission(sent, async () => {
-        const text = sent.draft.text.trim() || (sent.draft.workflow
-          ? (locale === "zh-CN" ? "请为这次任务拟一份工作流执行计划。" : "Prepare a plan using the referenced workflow.")
-          : sent.draft.references?.length ? (zh ? "请使用我引用的能力协助这次任务。" : "Use the attached capabilities to help with this task.")
-          : t("sessions.composer.attachmentPrompt"));
+        const elementBlock = sent.draft.elements?.length
+          ? sent.draft.elements.map((el, idx) => [
+              `### ${zh ? `网页元素` : `Page Element`}${sent.draft.elements!.length > 1 ? ` ${idx + 1}` : ""}`,
+              `${zh ? "页面" : "URL"}: ${el.url}`,
+              `${zh ? "元素" : "Element"}: ${el.label} (${el.dimensions})`,
+              `${zh ? "选择器" : "Selector"}: \`${el.selector}\``,
+              el.textPreview ? `${zh ? "文本" : "Text"}: ${el.textPreview}` : "",
+              el.styles ? `${zh ? "样式" : "Styles"}: ${el.styles}` : "",
+              el.html ? `\`\`\`html\n${el.html.replaceAll("\`", "&#96;")}\n\`\`\`` : "",
+            ].filter(Boolean).join("\n")).join("\n\n")
+          : "";
+        const userText = sent.draft.text.trim();
+        const text = elementBlock
+          ? (userText ? `${userText}\n\n${elementBlock}` : `${zh ? "请查看我选中的网页元素：" : "Please inspect the selected page element:"}\n\n${elementBlock}`)
+          : userText || (sent.draft.workflow
+            ? (locale === "zh-CN" ? "请为这次任务拟一份工作流执行计划。" : "Prepare a plan using the referenced workflow.")
+            : sent.draft.references?.length ? (zh ? "请使用我引用的能力协助这次任务。" : "Use the attached capabilities to help with this task.")
+            : t("sessions.composer.attachmentPrompt"));
         const references = sent.draft.references?.map(ref => ref.kind === "skill" ? { kind: ref.kind, id: ref.id } : { kind: ref.kind, id: ref.id, tool: ref.tool });
         if (sent.kind === "message") {
           await sendWorkbenchMessage(destinationId, text, sent.draft.attachments, sent.editMessageId, sent.messageId, sent.draft.workflow, references);
@@ -557,10 +588,44 @@ export function Composer({
             </button>
           </div>
         )}
-        {attachments.length > 0 && (
+        {(elements.length > 0 || standaloneAttachments.length > 0) && (
           <div className="flex gap-2 overflow-x-auto px-3 pt-3">
-            {attachments.map((attachment) => (
-              <div key={attachment.path} className="group relative flex h-16 min-w-[154px] max-w-[220px] items-center gap-2.5 rounded-xl border border-line bg-card-hover px-2.5">
+            {elements.map((el) => (
+              <div
+                key={el.id}
+                title={`${el.selector}${el.styles ? `\n${el.styles}` : ""}\n${el.url}`}
+                className="group relative flex h-16 min-w-[204px] max-w-[280px] shrink-0 items-center gap-2.5 rounded-xl border border-accent/25 bg-card-hover px-2.5 shadow-[inset_0_1px_rgba(255,255,255,0.04)]"
+              >
+                {el.screenshotPath ? (
+                  <img src={artifactUrlForPath(el.screenshotPath)} alt="" className="h-11 w-11 shrink-0 rounded-lg border border-line/70 object-cover" />
+                ) : (
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-accent/15 text-accent">
+                    <Crosshair className="h-4 w-4" aria-hidden />
+                  </span>
+                )}
+                <div className="min-w-0 flex-1 pr-4">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-flex max-w-[140px] items-center gap-1 truncate rounded bg-accent/15 px-1.5 py-0.5 font-mono text-[10.5px] font-medium text-accent">
+                      &lt;{el.label}&gt;
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] text-ink-3 tabular-nums">{el.dimensions}</span>
+                  </div>
+                  <p className="mt-1 truncate text-[11px] text-ink-2">
+                    {el.textPreview || el.selector}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removeElement(el)}
+                  className="absolute right-1.5 top-1.5 rounded-full bg-card/90 p-1 text-ink-3 opacity-65 shadow-sm transition-opacity hover:text-danger group-hover:opacity-100 focus-visible:opacity-100"
+                  aria-label={zh ? "移除选中的网页元素" : "Remove selected element"}
+                >
+                  <X className="h-3 w-3" aria-hidden />
+                </button>
+              </div>
+            ))}
+            {standaloneAttachments.map((attachment) => (
+              <div key={attachment.path} className="group relative flex h-16 min-w-[154px] max-w-[220px] shrink-0 items-center gap-2.5 rounded-xl border border-line bg-card-hover px-2.5">
                 {attachment.kind === "image" ? (
                   <img src={artifactUrlForPath(attachment.path)} alt="" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
                 ) : (
@@ -695,7 +760,7 @@ export function Composer({
             compactLoading={slash.loading}
           />
           <div className="composer-actions">
-            {(!running || (!submitting && (value.trim().length > 0 || attachments.length > 0 || hasReferences))) && (
+            {(!running || (!submitting && (value.trim().length > 0 || attachments.length > 0 || elements.length > 0 || hasReferences))) && (
               <button
                 type="button"
                 onClick={submit}

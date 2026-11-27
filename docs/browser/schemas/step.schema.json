@@ -32,6 +32,7 @@
         "scroll_into_view",
         "scroll_to_text",
         "wait",
+      "wait_any",
         "assert",
         "eval",
         "screenshot",
@@ -79,6 +80,43 @@
     },
     "expect": {
       "$ref": "https://nautilo.dev/schemas/expect.schema.json"
+    },
+    "observe_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 200,
+      "description": "Passive navigation and popup observation window after click/dblclick/press. Defaults to 200 ms. Use 0 when an explicit expectation or a later step verifies the outcome. Explicit popup waits and expectations still apply."
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 8,
+      "description": "wait_any selects the first matching case; all conditions within a case must match.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "anyOf": [
+          { "required": ["selector"] },
+          { "required": ["url_includes"] },
+          { "required": ["text_includes"] }
+        ],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,40}$" },
+          "selector": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "CSS selector for a visible element in the main document." },
+          "url_includes": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "text_includes": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        }
+      }
+    },
+    "when": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "case"],
+      "properties": {
+        "step": { "type": "string", "description": "ID of an earlier wait_any step." },
+        "case": { "type": "string", "description": "Run this step only when the named case matched." }
+      }
     },
     "follow": {
       "enum": [

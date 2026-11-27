@@ -113,8 +113,9 @@ void app.whenReady().then(async () => {
   assert.equal(await selection,true);
   await eventually(async()=>await messageCount()===3);
   const picked = await latest();
-  assert.match(picked.text,/#sample/);
-  assert.match(picked.text,/180 × 80/);
+  assert.match(picked.element.selector,/#sample/);
+  assert.equal(picked.element.dimensions,"180 × 80");
+  assert.equal(picked.element.screenshotPath,picked.attachment.path);
   assert.ok(nativeImage.createFromPath(picked.attachment.path).getSize().width<size.width);
   assert.equal(await page.executeJavaScript('!!document.querySelector("[data-nautilo-pointer=picker]")'),false);
   const captureRegion = shell("pick",{mode:"region"});

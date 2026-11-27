@@ -1,0 +1,538 @@
+/* ==========================================================================
+   SessionSideDock — Unified Multi-Tab Right Workspace Pane & Floating Popovers
+   ========================================================================== */
+
+/* Top-right Header Controls (Inspector Pill, Overview Popover, Side Pane Toggle) */
+.dock-header-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+.dock-header-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--session-inspector-divider);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  color: var(--ink-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+.dock-header-pill:hover {
+  border-color: color-mix(in srgb, var(--ink) 16%, transparent);
+  background: color-mix(in srgb, var(--ink) 5.5%, transparent);
+  color: var(--ink);
+}
+.dock-header-pill[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--glass-accent-blue) 45%, var(--session-inspector-divider));
+  background: color-mix(in srgb, var(--glass-accent-blue) 14%, transparent);
+  color: var(--glass-accent-blue);
+}
+.dock-ctx-pct[data-high] {
+  color: var(--glass-accent-amber);
+}
+
+.dock-header-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--ink-2);
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+.dock-header-icon:hover {
+  border-color: var(--session-inspector-divider);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  color: var(--ink);
+}
+.dock-header-icon[aria-pressed="true"],
+.dock-header-icon[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--glass-accent-blue) 42%, var(--session-inspector-divider));
+  background: color-mix(in srgb, var(--glass-accent-blue) 13%, transparent);
+  color: var(--glass-accent-blue);
+}
+.dock-mini-badge {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--glass-accent-blue);
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 13px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.dock-header-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--glass-accent-amber);
+}
+
+/* Floating Quick Overview Popover (portal-mounted to body so it can never be clipped) */
+.dock-overview-anchor { position: relative; }
+.dock-overview-popover {
+  position: fixed;
+  z-index: 120;
+  width: 272px;
+  max-width: calc(100vw - 24px);
+  padding: 6px;
+  border: 1px solid light-dark(rgba(15, 23, 42, 0.12), rgba(255, 255, 255, 0.12));
+  border-radius: 13px;
+  background: light-dark(rgba(255, 255, 255, 0.97), rgba(14, 17, 24, 0.97));
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.65), inset 0 1px rgba(255, 255, 255, 0.06);
+}
+.dock-overview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 5px 9px 7px;
+  border-bottom: 1px solid var(--session-inspector-divider);
+  margin-bottom: 4px;
+}
+.dock-overview-head > span {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+.dock-overview-head > small {
+  color: var(--ink-3);
+  font-size: 10.5px;
+}
+.dock-overview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dock-overview-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border-radius: 8px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  transition: background-color 130ms ease, color 130ms ease;
+}
+.dock-overview-item:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+.dock-overview-item > svg {
+  flex: none;
+  color: var(--ink-3);
+}
+.dock-overview-item:hover > svg { color: var(--ink); }
+.dock-overview-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dock-overview-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink-2);
+  font: 550 10.5px/1.4 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.dock-overview-badge[data-tone="accent"] {
+  background: color-mix(in srgb, var(--glass-accent-blue) 16%, transparent);
+  color: var(--glass-accent-blue);
+}
+.dock-overview-badge[data-tone="ok"] {
+  background: color-mix(in srgb, var(--glass-accent-emerald) 14%, transparent);
+  color: var(--glass-accent-emerald);
+}
+.dock-overview-badge[data-tone="warn"] {
+  background: color-mix(in srgb, var(--glass-accent-amber) 16%, transparent);
+  color: var(--glass-accent-amber);
+}
+.dock-overview-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--glass-accent-blue);
+}
+.dock-overview-dot[data-tone="warn"] { background: var(--glass-accent-amber); }
+.dock-overview-dot[data-tone="ok"] { background: var(--glass-accent-emerald); }
+.dock-overview-item kbd,
+.dock-launcher-row kbd {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--session-inspector-divider);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  color: var(--ink-3);
+  font: 500 10px/16px var(--font-mono);
+  text-align: center;
+}
+
+/* ==========================================================================
+   Unified Multi-Tab Right Workspace Dock (matching reference Images 3 & 4)
+   ========================================================================== */
+.session-side-dock {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-height: 0;
+  max-width: 100%;
+  border-inline-start: 1px solid var(--session-inspector-divider);
+  background: var(--session-inspector-fill);
+  animation: dock-slide-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes dock-slide-in {
+  from { opacity: 0; transform: translate3d(14px, 0, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-side-dock { animation: none; }
+}
+html[data-reduce-motion] .session-side-dock { animation: none; }
+.session-side-dock.is-maximized {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  border-inline-start: 0;
+}
+
+.dock-tabbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: var(--workspace-header-height, 46px);
+  min-height: var(--workspace-header-height, 46px);
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--session-inspector-divider);
+  background: light-dark(
+    color-mix(in srgb, var(--card) 94%, transparent),
+    #0b0d12
+  );
+  flex-shrink: 0;
+}
+.dock-tabs-scroll {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.dock-tabs-scroll::-webkit-scrollbar { display: none; }
+
+.dock-tab {
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  height: 29px;
+  border-radius: 7px;
+  flex: none;
+  max-width: 180px;
+}
+.dock-tab-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 1px solid light-dark(rgba(15, 23, 42, 0.1), rgba(255, 255, 255, 0.095));
+  border-radius: inherit;
+  background: light-dark(var(--card), #151924);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+  pointer-events: none;
+}
+.dock-tab-btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 6px 0 9px;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 0;
+  transition: color 130ms ease;
+}
+.dock-tab:hover .dock-tab-btn,
+.dock-tab[data-active] .dock-tab-btn {
+  color: var(--ink);
+}
+.dock-tab-btn > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dock-tab-badge {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink-2);
+  font: 550 10px/15px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.dock-tab-badge[data-tone="accent"] {
+  background: color-mix(in srgb, var(--glass-accent-blue) 18%, transparent);
+  color: var(--glass-accent-blue);
+}
+.dock-tab-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--glass-accent-blue);
+}
+.dock-tab-dot[data-tone="warn"] { background: var(--glass-accent-amber); }
+.dock-tab-dot[data-tone="ok"] { background: var(--glass-accent-emerald); }
+
+.dock-tab-close {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-inline-end: 4px;
+  border-radius: 5px;
+  color: var(--ink-3);
+  opacity: 0.45;
+  transition: opacity 130ms ease, background-color 130ms ease, color 130ms ease;
+}
+.dock-tab:hover .dock-tab-close,
+.dock-tab[data-active] .dock-tab-close {
+  opacity: 0.85;
+}
+.dock-tab-close:hover {
+  opacity: 1 !important;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink);
+}
+
+.dock-tab-add {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 7px;
+  color: var(--ink-3);
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.dock-tab-add:hover,
+.dock-tab-add[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink);
+}
+
+.dock-tabbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+}
+.dock-bar-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--ink-3);
+  transition: background-color 130ms ease, color 130ms ease;
+}
+.dock-bar-icon:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+
+/* Tab Content Stage */
+.dock-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: light-dark(var(--card), #0a0c11);
+}
+.dock-panel-slot {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.dock-panel-slot[hidden] {
+  display: none !important;
+}
+.dock-embedded-drawer .dock-sub-toolbar {
+  background: light-dark(var(--surface-soft), #0e1118);
+  min-height: 36px;
+}
+
+/* New Tab (+) Launcher View (matching reference Image 4) */
+.dock-launcher {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+  padding: 44px 24px 32px;
+}
+.dock-launcher-inner {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.dock-launcher-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--glass-accent-blue) 45%, var(--session-inspector-divider));
+  border-radius: 999px;
+  background: light-dark(var(--card), #0e1118);
+  color: var(--ink-3);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--glass-accent-blue) 12%, transparent);
+}
+.dock-launcher-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+}
+.dock-launcher-search input::placeholder { color: var(--ink-3); }
+.dock-launcher-search button {
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+.dock-launcher-search button:hover { color: var(--ink); }
+
+.dock-launcher-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.dock-launcher-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  text-align: left;
+  color: var(--ink);
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.dock-launcher-row:hover {
+  border-color: var(--session-inspector-divider);
+  background: color-mix(in srgb, var(--ink) 4.5%, transparent);
+}
+.dock-launcher-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border: 1px solid var(--session-inspector-divider);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  color: var(--ink-2);
+}
+.dock-launcher-row:hover .dock-launcher-icon {
+  border-color: color-mix(in srgb, var(--glass-accent-blue) 36%, var(--session-inspector-divider));
+  color: var(--glass-accent-blue);
+}
+.dock-launcher-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dock-launcher-copy strong {
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--ink);
+}
+.dock-launcher-copy small {
+  font-size: 11px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dock-launcher-open-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--glass-accent-blue) 12%, transparent);
+  color: var(--glass-accent-blue);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.dock-launcher-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+
+/* Floating Session Inspector Popover Card */
+.session-inspector-float {
+  position: absolute;
+  top: calc(var(--workspace-header-height, 46px) + 8px);
+  right: 12px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  width: min(344px, calc(100% - 24px));
+  max-height: calc(100% - var(--workspace-header-height, 46px) - 24px);
+  border: 1px solid light-dark(rgba(15, 23, 42, 0.12), rgba(255, 255, 255, 0.12));
+  border-radius: 14px;
+  background: light-dark(rgba(255, 255, 255, 0.96), rgba(11, 13, 18, 0.96));
+  backdrop-filter: blur(20px);
+  box-shadow: 0 22px 54px -12px rgba(0, 0, 0, 0.65), inset 0 1px rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+.session-inspector-float > .session-inspector-heading {
+  height: 40px;
+  background: transparent;
+}

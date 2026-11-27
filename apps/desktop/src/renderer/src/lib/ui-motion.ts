@@ -67,11 +67,23 @@ export function useMessageEntrance(sessionId: string, messageId?: string, motion
     }
     const element = ref.current;
     if (!entrance.current.play || reduced || !element?.animate) return;
+    const prevOrigin = element.style.transformOrigin;
+    element.style.transformOrigin = "bottom right";
+    element.setAttribute("data-just-sent", "true");
     const animation = element.animate(motion?.keyframes ?? [
-      { opacity: 0, transform: "translateY(16px) scale(0.98)" },
-      { opacity: 1, transform: "translateY(0px) scale(1)" }
-    ], motion?.options ?? { duration: 280, easing: "cubic-bezier(.22, 1, .36, 1)" });
-    return () => animation.cancel();
+      { opacity: 0, transform: "translate3d(0, 22px, 0) scale(0.955)" },
+      { opacity: 1, transform: "translate3d(0, -1px, 0) scale(1.003)", offset: 0.72 },
+      { opacity: 1, transform: "translate3d(0, 0, 0) scale(1)" }
+    ], motion?.options ?? { duration: 360, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+    const glintTimer = window.setTimeout(() => {
+      element.removeAttribute("data-just-sent");
+    }, 620);
+    return () => {
+      window.clearTimeout(glintTimer);
+      element.removeAttribute("data-just-sent");
+      element.style.transformOrigin = prevOrigin;
+      animation.cancel();
+    };
   }, [key, reduced, motion]);
   return ref;
 }

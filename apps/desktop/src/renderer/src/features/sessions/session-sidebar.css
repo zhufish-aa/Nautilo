@@ -1,0 +1,564 @@
+/* ==========================================================================
+   Sidebar & Collapsible Session Tree — Obsidian Craft
+   ========================================================================== */
+
+.sidebar-rail {
+  --sb-surface: light-dark(var(--card), #0b0d12);
+  --sb-hover: light-dark(rgba(15, 23, 42, 0.045), rgba(255, 255, 255, 0.045));
+  --sb-active: light-dark(rgba(37, 99, 235, 0.08), rgba(59, 130, 246, 0.12));
+  --sb-active-border: light-dark(rgba(37, 99, 235, 0.2), rgba(59, 130, 246, 0.24));
+  --sb-line: color-mix(in srgb, var(--ink) 7.5%, transparent);
+  --sb-blue: var(--glass-accent-blue);
+  --sb-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Primary & feature nav refinement */
+.sidebar-rail .sidebar-command {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  border-radius: 9px;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 10px;
+  gap: 9px;
+}
+.sidebar-rail .sidebar-command:hover {
+  color: var(--ink);
+  background: var(--sb-hover);
+}
+.sidebar-rail .sidebar-command[aria-current="page"] {
+  color: var(--ink);
+  font-weight: 550;
+}
+.sidebar-rail .sidebar-command > svg {
+  width: 15px;
+  height: 15px;
+  opacity: 0.78;
+  transition: opacity 150ms ease, color 150ms ease;
+}
+.sidebar-rail .sidebar-command:is(:hover, [aria-current="page"]) > svg {
+  opacity: 1;
+}
+.sidebar-cmd-kbd {
+  margin-inline-start: auto;
+  padding: 1px 5px;
+  border: 1px solid var(--sb-line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  color: var(--ink-3);
+  font: 500 10px/1.35 var(--font-mono);
+  opacity: 0.65;
+  transition: opacity 150ms ease;
+}
+.sidebar-command:hover .sidebar-cmd-kbd {
+  opacity: 0.95;
+}
+.sidebar-slot[data-icon-rail] .sidebar-cmd-kbd {
+  display: none;
+}
+
+.sidebar-feature-nav {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--sb-line);
+}
+
+/* Project & session history header */
+.sidebar-project-history {
+  margin-top: 8px;
+  padding: 8px 4px 0;
+  border-top: 1px solid var(--sb-line);
+}
+.sidebar-project-history > .sidebar-section-heading {
+  margin: 2px 12px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+.sidebar-section-add {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--ink-3);
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.sidebar-section-add:hover {
+  background: var(--sb-hover);
+  color: var(--ink);
+}
+
+/* Optional inline toolbar inside SessionListPanel (live filter / collapse threads) */
+.session-list-controls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px 6px;
+  flex-shrink: 0;
+}
+.session-list-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--sb-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 2.5%, transparent);
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+.session-list-chip:hover {
+  border-color: color-mix(in srgb, var(--ink) 16%, transparent);
+  color: var(--ink);
+}
+.session-list-chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--sb-blue) 42%, transparent);
+  background: color-mix(in srgb, var(--sb-blue) 14%, transparent);
+  color: var(--sb-blue);
+}
+.session-list-chip-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--sb-blue);
+}
+.session-list-collapse-btn {
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 6px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.session-list-collapse-btn:hover {
+  background: var(--sb-hover);
+  color: var(--ink);
+}
+
+/* Project group & smooth accordion container */
+.sb-scroll-list {
+  scrollbar-width: thin;
+  overflow-anchor: none;
+}
+.sb-project-group + .sb-project-group {
+  margin-top: 4px;
+}
+.sb-accordion-shell {
+  overflow: hidden;
+  will-change: height, opacity;
+}
+.sb-accordion-inner {
+  padding-top: 2px;
+}
+.sb-project-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-inline: 2px;
+}
+.sb-project-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  height: 29px;
+  padding: 0 7px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  transition: background-color 140ms ease, color 140ms ease, transform 120ms var(--sb-ease);
+}
+.sb-project-trigger:active {
+  transform: scale(0.99);
+}
+.sb-project-trigger:hover {
+  background: var(--sb-hover);
+  color: var(--ink);
+}
+.sb-project-chevron {
+  flex: none;
+  color: var(--ink-3);
+  transition: transform 220ms var(--sb-ease), color 150ms ease;
+}
+.sb-project-trigger[aria-expanded="false"] .sb-project-chevron {
+  transform: rotate(-90deg);
+}
+.sb-project-folder {
+  flex: none;
+  color: var(--ink-3);
+  opacity: 0.78;
+  transition: color 180ms ease, opacity 180ms ease;
+}
+.sb-project-folder.is-open {
+  color: var(--ink-2);
+  opacity: 0.95;
+}
+.sb-project-live-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--sb-blue);
+  animation: sb-dot-pulse 1.6s ease-in-out infinite;
+}
+.sb-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(100% - 8px);
+  height: 28px;
+  margin: 4px 4px 2px;
+  border: 1px dashed var(--sb-line);
+  border-radius: 7px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+.sb-load-more:hover {
+  border-color: color-mix(in srgb, var(--sb-blue) 35%, var(--sb-line));
+  background: var(--sb-hover);
+  color: var(--ink);
+}
+.sb-project-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-project-count {
+  margin-inline-start: auto;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+.sb-project-new {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--ink-3);
+  opacity: 0.55;
+  transition: opacity 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+.sb-project-row:hover .sb-project-new,
+.sb-project-new:focus-visible {
+  opacity: 1;
+}
+.sb-project-new:hover {
+  background: var(--sb-hover);
+  color: var(--ink);
+}
+
+/* Session tree item */
+.sb-session-item {
+  position: relative;
+  min-width: 0;
+  margin-block: 1px;
+}
+.sb-tree-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--sb-line);
+  pointer-events: none;
+}
+
+.sb-session-btn {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px 0 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--ink-2);
+  text-align: left;
+  outline: none;
+  transition: background-color 150ms ease, color 150ms ease, transform 140ms var(--sb-ease);
+}
+.sb-session-btn > :not(.sb-active-pill) {
+  position: relative;
+  z-index: 1;
+}
+.sb-session-btn:active {
+  transform: scale(0.988);
+}
+.sb-session-item[data-child="true"] .sb-session-btn {
+  height: 28px;
+  padding: 0 8px 0 7px;
+  gap: 6px;
+}
+.sb-session-btn:hover {
+  background: var(--sb-hover);
+  color: var(--ink);
+}
+.sb-session-btn[aria-current="page"] {
+  background: transparent;
+  color: var(--ink);
+}
+.sb-session-btn[aria-current="page"]:hover {
+  background: transparent;
+}
+.sb-active-pill {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 1px solid var(--sb-active-border);
+  border-radius: inherit;
+  background: var(--sb-active);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
+  pointer-events: none;
+}
+.sb-active-pill::before {
+  content: "";
+  position: absolute;
+  inset-block: 6px;
+  inset-inline-start: 0;
+  width: 2.5px;
+  border-radius: 999px;
+  background: var(--sb-blue);
+}
+.sb-session-btn:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sb-blue) 50%, transparent);
+}
+
+/* Running & Waiting subtle row atmosphere in sidebar */
+.sb-session-item[data-running="true"] .sb-session-btn:not([aria-current="page"]) {
+  background: color-mix(in srgb, var(--sb-blue) 5%, transparent);
+}
+.sb-session-item[data-waiting="true"] .sb-session-btn:not([aria-current="page"]) {
+  background: color-mix(in srgb, var(--glass-accent-amber) 6%, transparent);
+}
+
+/* Gentle cascade entrance when expanding child threads */
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-reduce-motion]) .sb-session-item[data-child="true"] {
+    animation: sb-child-enter 220ms var(--sb-ease) both;
+    animation-delay: var(--sb-child-delay, 0ms);
+  }
+  html:not([data-reduce-motion]) .sb-session-btn:hover .sb-session-leading {
+    transform: translateX(1px);
+  }
+  html:not([data-reduce-motion]) .sb-session-leading {
+    transition: transform 180ms var(--sb-ease);
+  }
+  html:not([data-reduce-motion]) .sb-session-item[data-running="true"] .sb-session-title {
+    color: var(--ink);
+  }
+}
+@keyframes sb-child-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -5px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* Leading icon / provider micro-avatar */
+.sb-session-leading {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--ink-3);
+}
+.sb-session-leading .provider-avatar.identity-avatar {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  opacity: 0.78;
+}
+.sb-session-btn:is(:hover, [aria-current="page"]) .sb-session-leading .provider-avatar.identity-avatar {
+  opacity: 1;
+}
+.sb-session-leading .provider-avatar > :is(img, svg) {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  border-radius: 3px;
+}
+.sb-session-item[data-child="true"] .sb-session-leading {
+  width: 14px;
+  height: 14px;
+}
+
+.sb-session-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 450;
+  line-height: 1.35;
+}
+.sb-session-btn[aria-current="page"] .sb-session-title,
+.sb-session-item[data-unread="true"] .sb-session-title {
+  color: var(--ink);
+  font-weight: 550;
+}
+.sb-session-item[data-child="true"] .sb-session-title {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.sb-session-item[data-child="true"] .sb-session-btn:is(:hover, [aria-current="page"]) .sb-session-title {
+  color: var(--ink);
+}
+
+/* Trailing metadata (time + unread + thread pill, smoothly swaps with delete on hover) */
+.sb-session-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+.sb-session-time {
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+  transition: opacity 130ms ease;
+}
+.sb-session-item:hover .sb-session-time,
+.sb-session-item:focus-within .sb-session-time {
+  opacity: 0;
+}
+.sb-session-unread {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--sb-blue);
+  color: var(--glass-action-ink);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Collapsible subagent thread count pill */
+.sb-thread-toggle {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 19px;
+  padding: 0 5px 0 4px;
+  border: 1px solid var(--sb-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+.sb-thread-toggle:hover {
+  border-color: color-mix(in srgb, var(--sb-blue) 42%, transparent);
+  background: color-mix(in srgb, var(--sb-blue) 12%, transparent);
+  color: var(--ink);
+}
+.sb-thread-toggle[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--sb-blue) 30%, transparent);
+  background: color-mix(in srgb, var(--sb-blue) 10%, transparent);
+  color: var(--sb-blue);
+}
+.sb-thread-toggle[data-active-children="true"] {
+  border-color: color-mix(in srgb, var(--sb-blue) 45%, transparent);
+  background: color-mix(in srgb, var(--sb-blue) 14%, transparent);
+  color: var(--sb-blue);
+}
+.sb-thread-chevron {
+  transition: transform 160ms var(--sb-ease);
+}
+.sb-thread-toggle[aria-expanded="true"] .sb-thread-chevron {
+  transform: rotate(90deg);
+}
+.sb-thread-live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--sb-blue);
+  animation: sb-dot-pulse 1.6s ease-in-out infinite;
+}
+
+/* Delete button (sits cleanly over the faded timestamp without overlapping thread pill) */
+.sb-session-delete {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  transform: translateY(-50%);
+  border-radius: 6px;
+  color: var(--ink-3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 130ms ease, background-color 130ms ease, color 130ms ease;
+}
+.sb-session-item:hover .sb-session-delete,
+.sb-session-delete:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.sb-session-delete:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+.sb-session-item[data-has-thread="true"]:hover .sb-thread-toggle {
+  margin-inline-end: 22px;
+}
+
+@keyframes sb-dot-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+/* Clean up legacy global.css overrides inside sidebar-project-history */
+.sidebar-project-history [data-session-id] > [aria-current="page"]::before {
+  box-shadow: none;
+}

@@ -1,10 +1,12 @@
 import { create } from "zustand";
 import type { CapabilityReference, WorkflowMention } from "@agenthub/domain";
+import type { BrowserElementContext } from "../../../shared/browser-shell";
 import type { DesktopAttachment } from "../types/bridge";
 
 export interface ComposerDraft {
   text: string;
   attachments: DesktopAttachment[];
+  elements?: BrowserElementContext[];
   workflow?: WorkflowMention;
   references?: CapabilityReference[];
 }
@@ -12,6 +14,7 @@ export interface ComposerDraft {
 export const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 
 type AttachmentUpdate = DesktopAttachment[] | ((current: DesktopAttachment[]) => DesktopAttachment[]);
+type ElementUpdate = BrowserElementContext[] | ((current: BrowserElementContext[]) => BrowserElementContext[]);
 export interface ComposerSubmission {
   token: number;
   messageId: string;
@@ -34,13 +37,14 @@ interface ComposerDraftsState {
   drafts: Record<string, ComposerDraft>;
   setText: (id: string, text: string) => void;
   setAttachments: (id: string, next: AttachmentUpdate) => void;
+  setElements: (id: string, next: ElementUpdate) => void;
   setWorkflow: (id: string, workflow?: WorkflowMention) => void;
   setReferences: (id: string, references?: CapabilityReference[]) => void;
   clear: (id: string) => void;
 }
 
 function updatedDrafts(drafts: Record<string, ComposerDraft>, id: string, draft: ComposerDraft): Record<string, ComposerDraft> {
-  if (draft.text || draft.attachments.length || draft.workflow || draft.references?.length) return { ...drafts, [id]: draft };
+  if (draft.text || draft.attachments.length || draft.elements?.length || draft.workflow || draft.references?.length) return { ...drafts, [id]: draft };
   if (!(id in drafts)) return drafts;
   const next = { ...drafts };
   delete next[id];
@@ -62,7 +66,7 @@ export const useComposerDraftsStore = create<ComposerDraftsState>()((set, get) =
       : state.failed[id]?.find((entry) => entry.submission.token === retryToken)?.submission;
     if (retryToken !== undefined && !previous) return undefined;
     const draft = previous?.draft ?? state.drafts[id];
-    if (!draft || (!draft.text.trim() && !draft.attachments.length && !draft.workflow && !draft.references?.length)) return undefined;
+    if (!draft || (!draft.text.trim() && !draft.attachments.length && !draft.elements?.length && !draft.workflow && !draft.references?.length)) return undefined;
     const submission: ComposerSubmission = { token: ++nextToken, messageId: previous?.messageId ?? crypto.randomUUID(), sourceKey: id, key: id, draft, kind: previous?.kind ?? kind, editMessageId: previous ? previous.editMessageId : editMessageId };
     set({ pending: { ...state.pending, [id]: submission } });
     return submission;
@@ -111,6 +115,13 @@ export const useComposerDraftsStore = create<ComposerDraftsState>()((set, get) =
     if (current.attachments === attachments) return state;
     return { drafts: updatedDrafts(state.drafts, id, { ...current, attachments }) };
   }),
+  setElements: (id, next) => set((state) => {
+    const current = state.drafts[id] ?? EMPTY_COMPOSER_DRAFT;
+    const prev = current.elements ?? [];
+    const elements = typeof next === "function" ? next(prev) : next;
+    if (prev === elements) return state;
+    return { drafts: updatedDrafts(state.drafts, id, { ...current, elements: elements.length ? elements : undefined }) };
+  }),
   setWorkflow: (id, workflow) => set((state) => {
     const current = state.drafts[id] ?? EMPTY_COMPOSER_DRAFT;
     return { drafts: updatedDrafts(state.drafts, id, { ...current, workflow }) };
@@ -154,6 +165,9 @@ function validDraft(value: unknown): value is ComposerDraft {
   if (draft.references !== undefined && (!Array.isArray(draft.references) || draft.references.length > 24 ||
     !draft.references.every(item => item && typeof item.id === "string" && typeof item.name === "string" &&
       (item.kind === "skill" || (item.kind === "mcp" && (item.tool === undefined || typeof item.tool === "string")))))) return false;
+  if (draft.elements !== undefined && (!Array.isArray(draft.elements) || draft.elements.length > 16 ||
+    !draft.elements.every(item => item && typeof item === "object" && typeof (item as BrowserElementContext).id === "string" &&
+      typeof (item as BrowserElementContext).selector === "string" && typeof (item as BrowserElementContext).label === "string"))) return false;
   return typeof draft.text === "string" && Array.isArray(draft.attachments) && draft.attachments.every(item => {
     if (!item || typeof item !== "object") return false;
     const file = item as Record<string, unknown>;

@@ -60,6 +60,7 @@ import { locationAtRow, type ConversationLocation } from "../../lib/conversation
 import { reconcileTimelineKeys, type TimelineKeySequence } from "../../lib/timeline-row-keys";
 import { resolveReadingAnchor, timelinePositions } from "../../lib/timeline-position";
 import { ToolFileDiffView } from "./ToolFileDiffView";
+import { CommandDetails, ToolCallDetails } from "./ToolCallDetails";
 import { TimelineImage } from "./TimelineImage";
 import { artifactUrlForPath, openFileWithToast, popupFileMenu, popupTextMenu } from "./media-actions";
 import { openFilePreview } from "../../stores/file-preview";
@@ -675,7 +676,10 @@ function ToolActivityCard({ event, locale, t, onOpenLocalFile }: {
   const kind = toolActivityKind(toolName, input);
   const path = ["read", "write", "edit", "skill"].includes(kind) ? resolvedFileDiff?.path ?? toolFilePath(input) : undefined;
   const command = kind === "command" ? toolCommand(input) : undefined;
-  const { executor, summary } = command ? commandPresentation(command) : {};
+  const shellTool = /powershell|pwsh/i.test(toolName) ? "pwsh" : /bash/i.test(toolName) ? "bash" : /cmd/i.test(toolName) ? "cmd" : undefined;
+  const cmdInfo = command ? commandPresentation(command, shellTool) : undefined;
+  const executor = cmdInfo?.executor;
+  const summary = cmdInfo?.summary;
   const label = command ? (status === "failed" ? (zh ? "命令执行失败" : "Command failed") : (zh ? "运行" : "Run"))
     : toolActivityLabel(toolName, status, input, locale, Boolean(path));
   if (isBrowserTool(toolName)) return <BrowserActivity name={toolName} status={status} input={input} output={output} zh={zh}/>;
@@ -688,17 +692,19 @@ function ToolActivityCard({ event, locale, t, onOpenLocalFile }: {
       previewTitle={path ?? command} retainPreview
       icon={status === "failed" ? <AlertTriangle size={14} /> : <ToolActivityIcon name={toolName} input={input} />}
       open={open} onToggle={details ? () => setOpen(value => !value) : undefined} running={status === "running"} failed={status === "failed"}>
-      <div className="overflow-hidden rounded-xl border border-line bg-card">
-          {resolvedFileDiff && <ToolFileDiffView diff={resolvedFileDiff} locale={locale} />}
-          {input && !resolvedFileDiff && <pre className="max-h-40 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2">{input}</pre>}
-          {input && resolvedFileDiff && (
-            <details className="border-t border-line">
-              <summary className="cursor-pointer px-3 py-2 text-xs text-ink-3">{zh ? "原始输入" : "Raw input"}</summary>
-              <pre className="max-h-40 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap text-ink-2">{input}</pre>
-            </details>
-          )}
-          {output && <pre className={cn("max-h-56 overflow-auto px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink-2", (input || resolvedFileDiff) && "border-t border-line")}>{output}</pre>}
-      </div>
+      <ToolCallDetails
+        toolName={toolName}
+        kind={kind}
+        status={status}
+        input={input}
+        output={output}
+        path={path}
+        command={command}
+        executor={executor}
+        resolvedFileDiff={resolvedFileDiff}
+        locale={locale}
+        onOpenFile={file => openTimelineFile(file, t, onOpenLocalFile, "drawer")}
+      />
     </ProcessDisclosure>
   );
 }
@@ -1129,14 +1135,19 @@ function TaskUpdateCard({ event, onOpenSession }: { event: TimelineEvent & { dat
   return <TaskUpdateGroup events={[event]} onOpenSession={onOpenSession} />;
 }
 
-function commandPresentation(command: string): { executor?: string; summary: string } {
+function commandPresentation(command: string, fallbackShell?: string): { executor?: string; summary: string } {
   const singleLine = command.replace(/\s+/g, " ").trim();
   const prefix = singleLine.match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/);
-  const executor = (prefix?.[1] ?? prefix?.[2] ?? prefix?.[3])?.split(/[\\/]/).at(-1)?.replace(/\.exe$/i, "");
+  const firstToken = (prefix?.[1] ?? prefix?.[2] ?? prefix?.[3])?.split(/[\\/]/).at(-1)?.replace(/\.exe$/i, "");
+  const isKnownShell = /^(?:powershell|pwsh|bash|sh|zsh|cmd)$/i.test(firstToken ?? "");
+  if (fallbackShell && !isKnownShell) {
+    return { executor: fallbackShell, summary: singleLine };
+  }
+  const executor = firstToken;
   const argumentsText = singleLine.slice(prefix?.[0].length ?? 0).trim();
   const summary = /^(?:powershell|pwsh)$/i.test(executor ?? "")
     ? argumentsText.match(/(?:^|\s)-(?:Command|c)\s+(.+)$/i)?.[1]?.replace(/^"|"$/g, "") ?? argumentsText
-    : argumentsText;
+    : argumentsText || singleLine;
   return { executor, summary };
 }
 
@@ -1150,11 +1161,14 @@ function CommandCard({ event, t, locale }: { event: TimelineEvent & { data: { ki
     badge={executor} preview={summary} previewTitle={command} monospace retainPreview
     open={open} onToggle={() => setOpen(value => !value)} running={status === "running"} failed={status === "failed"}
     accessory={status === "running" || attempts > 1 ? <>{status === "running" && <span className="sr-only">{t("sessions.cards.running")}</span>}{attempts > 1 && (zh ? `${attempts} 次` : `${attempts} attempts`)}</> : undefined}>
-    <div className="command-disclosure-output">
-      <pre><code>{command}</code></pre>
-      {output && <pre>{output}</pre>}
-      {exitCode !== undefined && <p className="command-disclosure-exit" data-failed={exitCode !== 0 || undefined}>{t("sessions.cards.exitCode", { code: exitCode })}</p>}
-    </div>
+    <CommandDetails
+      command={command}
+      shell={executor}
+      output={output}
+      exitCode={exitCode}
+      failed={status === "failed"}
+      locale={locale as "zh-CN" | "en-US"}
+    />
   </ProcessDisclosure>;
 }
 

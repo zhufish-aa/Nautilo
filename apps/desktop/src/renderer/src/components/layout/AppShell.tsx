@@ -73,6 +73,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   const isSettings = location.pathname.startsWith("/settings");
   const isRuns = location.pathname === "/runs";
   const isWorkflows = location.pathname === "/workflows";
+  const isWorkbenchRoute = /^\/(?:agents|skills)(?:\/|$)/.test(location.pathname);
 
   return (
     <div ref={shell} className="app-shell flex h-screen flex-col overflow-hidden text-ink" data-git-sidebar-expanded={gitExpanded || undefined}>
@@ -103,15 +104,20 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
           <main
             id="main-content"
             tabIndex={-1}
-            className={cn("workspace-main relative min-w-0 flex-1 outline-none", fullBleed || isSettings || isAssistant ? "overflow-hidden" : "overflow-y-auto")}
+            className={cn("workspace-main relative min-w-0 flex-1 outline-none", fullBleed || isSettings || isAssistant || isWorkbenchRoute ? "overflow-hidden" : "overflow-y-auto")}
           >
             {/* One mounted workspace for /sessions and the legacy /work URL. */}
             <div className={cn("relative h-full overflow-hidden", !fullBleed && "hidden")} aria-hidden={!fullBleed}>
               <SessionsPage active={fullBleed} />
             </div>
             {isSettings || isAssistant ? children : !fullBleed ? (
-              <div className={isRuns ? "runs-route-surface min-h-full w-full" : isWorkflows ? "workflow-route h-full w-full" : cn("mx-auto px-7 py-7", /^\/teams(?:\/|$)/.test(location.pathname) ? "max-w-[1216px]" : "max-w-6xl")}>
-                <PageTransition className={isWorkflows ? "h-full" : undefined} transitionKey={location.pathname}>{children}</PageTransition>
+              <div className={
+                isRuns ? "runs-route-surface min-h-full w-full"
+                  : isWorkflows ? "workflow-route h-full w-full"
+                  : isWorkbenchRoute ? "workbench-route-surface flex h-full w-full flex-col overflow-hidden px-7 py-6"
+                  : "mx-auto w-full max-w-[1440px] px-7 py-7"
+              }>
+                <PageTransition className={isWorkflows || isWorkbenchRoute ? "flex h-full min-h-0 flex-col" : undefined} transitionKey={location.pathname}>{children}</PageTransition>
               </div>
             ) : null}
           </main>

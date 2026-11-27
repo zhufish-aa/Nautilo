@@ -146,9 +146,30 @@
 .br-radar { height: 24px; padding: 0 8px; border-color: var(--br-danger-border); background: var(--br-danger-soft); color: var(--br-danger); font-size: 11.5px; animation: br-control-in 220ms var(--br-spring) both; }
 .br-radar[aria-pressed=true] { border-color: var(--br-danger); }
 
-.br-error, .br-takeover { display: flex; align-items: center; justify-content: space-between; flex: none; gap: 6px; padding: 0 8px; min-height: 26px; font-size: 11.5px; }
+.br-error, .br-takeover, .br-picker-bar { display: flex; align-items: center; justify-content: space-between; flex: none; gap: 8px; padding: 0 10px; min-height: 28px; font-size: 11.5px; }
 .br-error { color: var(--br-danger); background: var(--br-danger-soft); }
 .br-takeover { background: var(--br-amber-soft); color: var(--br-amber); }
+.br-picker-bar {
+  background: color-mix(in srgb, var(--br-accent) 12%, var(--br-bg-toolbar));
+  border-bottom: 1px solid color-mix(in srgb, var(--br-accent) 28%, var(--br-border-subtle));
+  color: var(--br-text-primary);
+  animation: br-appear 140ms var(--br-ease) both;
+}
+.br-picker-bar-copy { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; }
+.br-picker-bar-copy svg { width: 13px; height: 13px; color: var(--br-accent); flex: none; }
+.br-picker-bar-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.br-picker-bar-copy small { color: var(--br-text-secondary); font-size: 11px; margin-left: 4px; }
+.br-picker-cancel {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--br-border-default);
+  border-radius: 5px;
+  background: var(--br-bg-recessed);
+  color: var(--br-text-secondary);
+  font-size: 11px;
+  flex: none;
+}
+.br-picker-cancel:hover { color: var(--br-text-primary); border-color: var(--br-border-strong); }
 .br-takeover > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .br-takeover > svg { width: 13px; height: 13px; }
 .br-viewport { position: relative; flex: 1; min-height: 0; overflow: hidden; background: var(--br-bg-canvas); }

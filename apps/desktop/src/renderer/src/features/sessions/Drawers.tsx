@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
+import { useContext, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import { AnimatePresence } from "framer-motion";
 import { Bot, FileText, Loader2, SquareTerminal, TerminalSquare } from "lucide-react";
 import { useI18n, type MessageKey } from "../../lib/i18n";
@@ -10,7 +10,7 @@ import { terminalWindowStart } from "../../lib/terminal-window";
 import { useProgressiveRows } from "../../lib/use-progressive-rows";
 import { cn } from "../../lib/utils";
 import type { SessionTask, TimelineEvent } from "../../lib/types";
-import { WorkspaceDrawer as Drawer } from "./WorkspaceDrawer";
+import { DockEmbedContext, WorkspaceDrawer as Drawer } from "./WorkspaceDrawer";
 import { ChangeReview, type ReviewEditorState } from "./ChangeReview";
 import { buildReviewFiles, reviewBefore, type ReviewChangeGroup } from "../../lib/change-review";
 import { Button } from "../../components/ui/Button";
@@ -406,8 +406,9 @@ export function ArtifactsDrawer({
     ...sessions.filter(item => item.parentSessionId === sessionId).flatMap(item => allArtifacts[item.id] ?? [])
   ];
 
-  return <AnimatePresence initial={false}>
-    {open && <Drawer key={sessionId ?? "current"} open={open} onClose={onClose} title={locale === "zh-CN" ? "文件更改" : "File changes"} defaultWidth={1200} defaultMaximized hideHeader animateReview className="change-review-drawer">
+  const embeddedInDock = useContext(DockEmbedContext);
+  const content = open ? (
+    <Drawer key={sessionId ?? "current"} open={open} onClose={onClose} title={locale === "zh-CN" ? "文件更改" : "File changes"} defaultWidth={1020} hideHeader animateReview={!embeddedInDock} className="change-review-drawer">
       <ChangeReview key={sessionId ?? "current"} groups={changeGroups} projectRoot={projectRoot} sessionId={sessionId}
         selectedIndex={selectedFile} onSelect={index => setSelectedId(reviewFiles[index]?.id)} onClose={onClose}
         editor={editor} onEditorChange={value => setEditor(current => current ? { ...current, value } : current)}
@@ -420,10 +421,11 @@ export function ArtifactsDrawer({
           {filesystemComparisons.length > 0 && <ComparisonSourcePanel artifacts={filesystemComparisons} locale={locale} />}
           {providerComparisons.length > 0 && <ComparisonSourcePanel artifacts={providerComparisons} locale={locale} source="provider" />}
         </>}
-
       />
-    </Drawer>}
-  </AnimatePresence>;
+    </Drawer>
+  ) : null;
+
+  return embeddedInDock ? <>{content}</> : <AnimatePresence initial={false}>{content}</AnimatePresence>;
 }
 
 /* ---------------------------------------------------------------------------

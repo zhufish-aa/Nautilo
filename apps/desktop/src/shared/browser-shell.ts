@@ -32,10 +32,26 @@ export interface BrowserShellState {
   pinned: boolean;
 }
 
+export interface BrowserElementContext {
+  id: string;
+  url: string;
+  title?: string;
+  tag: string;
+  label: string;
+  selector: string;
+  dimensions: string;
+  textPreview?: string;
+  html: string;
+  styles?: string;
+  componentName?: string;
+  screenshotPath?: string;
+}
+
 export interface BrowserDraft {
   sessionId?: string;
   text?: string;
   attachment?: DesktopAttachment;
+  element?: BrowserElementContext;
 }
 
 export interface BrowserOmniboxData {

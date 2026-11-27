@@ -30,6 +30,7 @@ impl RuntimeToolProvider for NoOtherTools {
 enum Behavior {
     Submit,
     HoldAfterSubmit,
+    FailAfterSubmit,
     OmitFirst,
     Block,
     Structured,
@@ -172,11 +173,18 @@ impl Probe {
             if native_background {
                 let _ = tx.send(native_child_event("running"));
             }
-            if child && request.instance["providerOptions"]["holdAfterSubmit"] == true {
-                cancel_rx.await.unwrap();
+            let after_submit = request.instance["providerOptions"]["afterSubmit"].as_str();
+            if child && matches!(after_submit, Some("cancel" | "error")) {
+                let message = if after_submit == Some("cancel") {
+                    cancel_rx.await.unwrap();
+                    r#"502: {"code":"NATIVE_ACCOUNT_ERROR","message":"Codex account request cancelled"}"#
+                } else {
+                    "Fixture upstream model request failed"
+                };
+                let _ = tx.send(AdapterEvent::Error { message: message.into() });
                 let _ = tx.send(AdapterEvent::Exit {
-                    exit_code: Some(130),
-                    signal: Some("cancelled".into()),
+                    exit_code: Some(1),
+                    signal: None,
                 });
                 return;
             }
@@ -338,7 +346,12 @@ impl Fixture {
                     &now_iso(),
                 )
                 .unwrap();
-            repos.agents().save(&json!({"id":"agent","providerId":"workflow-fixture","displayName":"Test Agent","enabled":true,"executable":"node","baseArgs":[],"env":{"API_KEY":"fixture-secret"},"providerOptions":{"omitFirst":matches!(behavior,Behavior::OmitFirst),"block":matches!(behavior,Behavior::Block),"structuredFinal":matches!(behavior,Behavior::Structured),"nativeBackground":matches!(behavior,Behavior::Background),"holdAfterSubmit":matches!(behavior,Behavior::HoldAfterSubmit)}}), &now_iso()).unwrap();
+            let after_submit = match behavior {
+                Behavior::HoldAfterSubmit => Some("cancel"),
+                Behavior::FailAfterSubmit => Some("error"),
+                _ => None,
+            };
+            repos.agents().save(&json!({"id":"agent","providerId":"workflow-fixture","displayName":"Test Agent","enabled":true,"executable":"node","baseArgs":[],"env":{"API_KEY":"fixture-secret"},"providerOptions":{"omitFirst":matches!(behavior,Behavior::OmitFirst),"block":matches!(behavior,Behavior::Block),"structuredFinal":matches!(behavior,Behavior::Structured),"nativeBackground":matches!(behavior,Behavior::Background),"afterSubmit":after_submit}}), &now_iso()).unwrap();
             if approval {
                 repos.teams().save(&json!({"id":"team","delegationPolicy":"ask_before_delegate","members":[],"roles":[]}), &now_iso()).unwrap();
             }
@@ -623,10 +636,12 @@ async fn workflow_stops_the_provider_after_acceptance_and_returns_the_result() {
     let fixture = Fixture::new(Behavior::HoldAfterSubmit, false);
     let run = fixture.start();
     let done = fixture.until(&run.id, |run| {
-        run.status == "completed" && run.messages.iter().all(|message| message.status == "delivered")
-            && !fixture.service.runs.session_busy("main-session")
+        (run.status == "completed" && run.messages.iter().all(|message| message.status == "delivered")
+            && !fixture.service.runs.session_busy("main-session"))
+            || run.instances.iter().any(|instance| matches!(instance.status.as_str(), "failed" | "waiting_retry"))
     }).await;
     let child = done.instances.iter().find(|instance| instance.node_id == "explore").unwrap();
+    assert_eq!(done.status, "completed", "{:?}", child.error);
     assert_eq!(fixture.probe.cancellations.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.probe.releases.load(Ordering::SeqCst), 0);
     assert_eq!(child.result.as_ref().unwrap()["summary"], "verified evidence");
@@ -634,12 +649,30 @@ async fn workflow_stops_the_provider_after_acceptance_and_returns_the_result() {
     let repos = Repositories::new(&db.raw);
     let child_run = repos.runs().get(child.run_id.as_deref().unwrap()).unwrap().unwrap();
     assert_eq!(child_run["status"], "completed");
+    let events = repos.events().replay(None, None, child.run_id.as_deref(), None).unwrap();
+    assert!(events.iter().all(|event| event["type"] != "run.failed"));
     let child_session = child.session_id.as_deref().unwrap();
     let session = repos.sessions().get(child_session).unwrap().unwrap();
     assert_eq!(session["providerSessionId"], format!("native-{child_session}"));
     assert!(fixture.probe.calls.lock().unwrap().iter().any(|call| {
         call.0 == "main-session" && call.1.as_deref() == Some("main-native") && call.2.contains("verified evidence")
     }));
+}
+
+#[tokio::test]
+async fn workflow_reports_provider_failure_before_intentional_stop_even_with_a_submission() {
+    let fixture = Fixture::new(Behavior::FailAfterSubmit, false);
+    let run = fixture.start();
+    let failed = fixture.until(&run.id, |run| run.status == "needs_decision").await;
+    let child = failed.instances.iter().find(|instance| instance.node_id == "explore").unwrap();
+    assert_eq!(child.result.as_ref().unwrap()["summary"], "verified evidence");
+    assert_eq!(child.status, "failed");
+    assert_eq!(fixture.probe.cancellations.load(Ordering::SeqCst), 0);
+
+    let db = fixture.db.lock().unwrap();
+    let events = Repositories::new(&db.raw).events().replay(None, None, child.run_id.as_deref(), None).unwrap();
+    assert!(events.iter().any(|event| event["type"] == "run.failed"
+        && event["payload"]["message"] == "Fixture upstream model request failed"));
 }
 
 #[tokio::test]

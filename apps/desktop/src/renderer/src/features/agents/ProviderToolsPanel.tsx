@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useSearchParams } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Activity,
   Copy,
   Grid3x3,
   Import,
@@ -26,11 +28,11 @@ import { Dialog } from "../../components/ui/Dialog";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { Input } from "../../components/ui/Input";
 import { SelectField } from "../../components/ui/Select";
-import { Switch } from "../../components/ui/Switch";
 import { SlidingTabs } from "../../components/ui/SlidingTabs";
 import { toast } from "../../stores/toast";
 import { useProviderToolsStore } from "../../stores/provider-tools";
 import { useAgentsStore } from "../../stores/agents";
+import { diagnosticKey, useServiceDiagnostics } from "../../stores/service-diagnostics";
 import { CapabilityEditorDialog, type CapabilityDialogState } from "./CapabilityEditorDialog";
 import { ProviderAvatar } from "../../components/ui/IdentityAvatar";
 import { McpWorkbench } from "./McpWorkbench";
@@ -51,6 +53,8 @@ function messageOf(error: unknown): string {
 
 export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }): JSX.Element {
   const { t, locale } = useI18n();
+  const [searchParams] = useSearchParams();
+  const requestedHarness = searchParams.get("harness") || "";
   const [syncOpen, setSyncOpen] = useState(false);
   const providers = useProviderMetas();
   const tools = useProviderToolsStore((state) => state.tools);
@@ -60,12 +64,23 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   const load = useProviderToolsStore((state) => state.load);
   const toggle = useProviderToolsStore((state) => state.toggleForHarness);
   const remove = useProviderToolsStore((state) => state.remove);
+  const diagnosticResults = useServiceDiagnostics((state) => state.results);
+  const diagnosticChecking = useServiceDiagnostics((state) => state.checking);
+  const runDiagnostic = useServiceDiagnostics((state) => state.check);
 
-  const [selectedProviderId, setProviderId] = useState("");
+  const [selectedProviderId, setProviderId] = useState(requestedHarness);
+  useEffect(() => {
+    if (requestedHarness && providers.some(provider => provider.id === requestedHarness)) {
+      setProviderId(requestedHarness);
+    }
+  }, [requestedHarness, providers]);
+
   const providerId = providers.some((provider) => provider.id === selectedProviderId) ? selectedProviderId : providers[0]?.id || "";
   const daemonProviderId = toDaemonProviderId(providerId);
   const harnessName = providerMeta(providerId).name;
   const [toggling, setToggling] = useState<string[]>([]);
+  const [batchChecking, setBatchChecking] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
   const zh = locale === "zh-CN";
   const reduced = useUiReducedMotion();
   const skills = kind === "skill";
@@ -80,6 +95,7 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   const [query, setQuery] = useState("");
   const [view, setView] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [transportFilter, setTransportFilter] = useState<"all" | "stdio" | "http">("all");
   const [editor, setEditor] = useState<CapabilityDialogState>();
   const [importOpen, setImportOpen] = useState(false);
   const [importSeed, setImportSeed] = useState<
@@ -96,7 +112,6 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   }, [load, loaded]);
 
   useEffect(() => {
-    if (!skills) return;
     function focusSearch(event: KeyboardEvent): void {
       if (event.key !== "/" || event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey
         || event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable]")
@@ -106,7 +121,7 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     }
     window.addEventListener("keydown", focusSearch);
     return () => window.removeEventListener("keydown", focusSearch);
-  }, [skills]);
+  }, []);
 
   const inventory = useMemo(() => tools.filter(tool => tool.kind === kind), [tools, kind]);
   const enabledCount = inventory.filter(tool => capabilityEnabledFor(tool, daemonProviderId)).length;
@@ -122,6 +137,31 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     const cjk = text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu)?.length ?? 0;
     return sum + cjk + Math.ceil((Array.from(text).length - cjk) / 4);
   }, 0) : 0;
+
+  const mcpTelemetry = useMemo(() => {
+    if (skills) return null;
+    let stdioCount = 0;
+    let httpCount = 0;
+    let passed = 0;
+    let warning = 0;
+    let failed = 0;
+    let checkingCount = 0;
+    let discoveredTools = 0;
+    for (const tool of inventory) {
+      if (tool.mcp?.transport === "http") httpCount += 1;
+      else stdioCount += 1;
+      const key = diagnosticKey({ kind: "mcp", id: tool.id, version: tool.updatedAt });
+      if (diagnosticChecking[key]) checkingCount += 1;
+      const res = diagnosticResults[key];
+      if (!res) continue;
+      if (res.state === "passed") passed += 1;
+      else if (res.state === "warning") warning += 1;
+      else if (res.state === "failed") failed += 1;
+      discoveredTools += res.toolCount ?? res.tools?.length ?? 0;
+    }
+    return { stdioCount, httpCount, passed, warning, failed, checked: passed + warning + failed, checkingCount, discoveredTools };
+  }, [skills, inventory, diagnosticResults, diagnosticChecking]);
+
   const originNames: Record<CapabilityOriginKind, string> = {
     builtin: zh ? "Nautilo 内置" : "Built into Nautilo",
     plugin: zh ? "来自插件" : "From plugins",
@@ -130,14 +170,26 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     unknown: zh ? "来源未记录" : "Source not recorded"
   };
   const normalized = query.trim().toLocaleLowerCase();
-  const terms = skills ? normalized.split(/\s+/) : [normalized];
+  const terms = normalized ? normalized.split(/\s+/) : [""];
   const filtered = inventory.filter(tool => {
     const enabled = isEnabled(tool);
     if (filterView === "enabled" && !enabled || filterView === "disabled" && enabled
       || filterView === "missing" && capabilityDescription(tool)) return false;
     const origin = capabilityOrigin(tool);
     if (sourceFilter !== "all" && origin.kind !== sourceFilter) return false;
-    const searchable = [tool.name, tool.description, originNames[origin.kind], origin.label, origin.path, ...tool.tags].join(" ").toLocaleLowerCase();
+    if (!skills && transportFilter !== "all") {
+      const transport = tool.mcp?.transport === "http" ? "http" : "stdio";
+      if (transport !== transportFilter) return false;
+    }
+    const searchable = [
+      tool.name,
+      tool.description,
+      originNames[origin.kind],
+      origin.label,
+      origin.path,
+      tool.mcp?.transport === "http" ? `http ${tool.mcp.url ?? ""}` : `stdio ${tool.mcp?.command ?? ""}`,
+      ...tool.tags,
+    ].join(" ").toLocaleLowerCase();
     return terms.every(term => searchable.includes(term));
   }).sort((a, b) => a.name.localeCompare(b.name, locale));
   const groups = (["builtin", "local", "plugin", "custom", "unknown"] as const)
@@ -199,13 +251,6 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     setEditor({ mode: "edit", capability: tool, focusDescription });
   };
 
-  const handleToggle = (tool: ProviderCapability, enabled: boolean): void => {
-    setToggling((ids) => [...ids, tool.id]);
-    void toggle(tool.id, daemonProviderId, enabled)
-      .catch((error: unknown) => toast.error(messageOf(error)))
-      .finally(() => setToggling((ids) => ids.filter((id) => id !== tool.id)));
-  };
-
   const applyBindings = async (updates: Array<{ id: string; targets: string[]; enabled: boolean }>): Promise<void> => {
     if (writing.current || !updates.length) return;
     writing.current = true;
@@ -240,6 +285,31 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
     setCopyFrom("");
   };
 
+  const runBatchDiagnostics = async (): Promise<void> => {
+    if (batchChecking || !inventory.length) return;
+    const enabledItems = inventory.filter(tool => capabilityEnabledFor(tool, daemonProviderId));
+    const queue = enabledItems.length > 0 ? enabledItems : inventory;
+    setBatchChecking(true);
+    setBatchProgress({ done: 0, total: queue.length });
+    let cursor = 0;
+    let done = 0;
+    const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+      while (cursor < queue.length) {
+        const item = queue[cursor++];
+        if (!item) break;
+        await runDiagnostic({ kind: "mcp", id: item.id, version: item.updatedAt });
+        done += 1;
+        setBatchProgress({ done, total: queue.length });
+      }
+    });
+    try {
+      await Promise.all(workers);
+    } finally {
+      setBatchChecking(false);
+      setBatchProgress(null);
+    }
+  };
+
   const confirmDelete = async (): Promise<void> => {
     if (!deleting) return;
     setDeleteBusy(true);
@@ -255,13 +325,13 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   };
 
   const actions = <div className="capability-heading-actions">
-    <Button variant="outline" size="sm" className="skill-action-sync" disabled={skills && !!toggling.length} onClick={() => setSyncOpen(true)}>
+    <Button variant="outline" size="sm" className="skill-action-sync" disabled={!!toggling.length} onClick={() => setSyncOpen(true)}>
       <RefreshCw size={13} aria-hidden />{zh ? "原生同步" : "Native sync"}
     </Button>
-    <Button variant="outline" size="sm" className="skill-action-import" disabled={skills && !!toggling.length} onClick={() => openImport()}>
+    <Button variant="outline" size="sm" className="skill-action-import" disabled={!!toggling.length} onClick={() => openImport()}>
       <Import size={14} aria-hidden />{t("agents.tools.import.button")}
     </Button>
-    <Button variant="primary" size="sm" className="skill-action-create" disabled={skills && !!toggling.length} onClick={openCreate}>
+    <Button variant="primary" size="sm" className="skill-action-create" disabled={!!toggling.length} onClick={openCreate}>
       <Plus size={15} aria-hidden />{kind === "mcp" ? (zh ? "添加 MCP" : "Add MCP") : (zh ? "添加 Skill" : "Add Skill")}
     </Button>
   </div>;
@@ -273,14 +343,14 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   const search = <div className="capability-search relative">
     <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-ink-3" aria-hidden />
     <Input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)}
-      placeholder={skills ? (zh ? "搜索名称、描述、标签或来源..." : "Search names, descriptions, tags or sources...") : t("agents.tools.searchPlaceholder")}
-      className={skills ? "pl-8 pr-8" : "pl-9"} aria-label={t("agents.tools.searchPlaceholder")} aria-keyshortcuts={skills ? "/" : undefined} />
-    {skills && (query ? (
+      placeholder={skills ? (zh ? "搜索名称、描述、标签或来源..." : "Search names, descriptions, tags or sources...") : (zh ? "搜索服务名、命令、地址或来源..." : "Search server name, command, URL or source...")}
+      className="pl-8 pr-8" aria-label={t("agents.tools.searchPlaceholder")} aria-keyshortcuts="/" />
+    {query ? (
       <button type="button" className="skill-search-clear" onClick={() => { setQuery(""); searchRef.current?.focus(); }}
         aria-label={zh ? "清空搜索" : "Clear search"}><X size={13} aria-hidden /></button>
     ) : (
       <kbd className="skill-search-kbd" aria-hidden>/</kbd>
-    ))}
+    )}
   </div>;
   const filters: Array<{ id: string; label: string; count: number; warning?: boolean }> = [
     { id: "all", label: zh ? "全部" : "All", count: inventory.length },
@@ -291,10 +361,22 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
   const sourceSelect = <SelectField value={sourceFilter} onValueChange={setSourceFilter}
     aria-label={zh ? "筛选来源" : "Filter by source"} className="capability-source-filter"
     options={[{ value: "all", label: zh ? "所有来源" : "All sources" }, ...Object.entries(originNames).map(([value, label]) => ({ value, label }))]} />;
-  const totalSkills = inventory.length;
-  const enabledPct = totalSkills ? (enabledCount / totalSkills) * 100 : 0;
+  const transportSelect = !skills && <SelectField value={transportFilter} onValueChange={value => setTransportFilter(value as "all" | "stdio" | "http")}
+    aria-label={zh ? "筛选协议" : "Filter by transport"} className="capability-transport-filter"
+    options={[
+      { value: "all", label: zh ? "全部协议" : "All transports" },
+      { value: "stdio", label: "STDIO" },
+      { value: "http", label: "HTTP" },
+    ]} />;
+
+  const totalItems = inventory.length;
+  const enabledPct = totalItems ? (enabledCount / totalItems) * 100 : 0;
   const missingDisabledCount = skills ? inventory.filter(tool => !capabilityDescription(tool) && !capabilityEnabledFor(tool, daemonProviderId)).length : 0;
-  const missingPct = totalSkills ? (missingDisabledCount / totalSkills) * 100 : 0;
+  const missingPct = totalItems ? (missingDisabledCount / totalItems) * 100 : 0;
+  const enabledStdioCount = !skills ? inventory.filter(tool => capabilityEnabledFor(tool, daemonProviderId) && tool.mcp?.transport !== "http").length : 0;
+  const enabledHttpCount = !skills ? enabledCount - enabledStdioCount : 0;
+  const enabledStdioPct = totalItems ? (enabledStdioCount / totalItems) * 100 : 0;
+  const enabledHttpPct = totalItems ? (enabledHttpCount / totalItems) * 100 : 0;
   const originSummary = (["builtin", "local", "plugin", "custom"] as const)
     .map(origin => {
       const count = inventory.filter(tool => capabilityOrigin(tool).kind === origin).length;
@@ -324,7 +406,7 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
         <div className="skill-library-heading">
           <div className="skill-library-context">
             <h1>{kind === "mcp" ? (zh ? "MCP 服务" : "MCP servers") : (zh ? "Skills 技能" : "Skills")}</h1>
-            {skills && <div className="skill-mode" data-matrix={matrix} role="group" aria-label={zh ? "技能视图" : "Skills view"}>
+            <div className="skill-mode" data-matrix={matrix} role="group" aria-label={skills ? (zh ? "技能视图" : "Skills view") : (zh ? "MCP 视图" : "MCP view")}>
               <span aria-hidden />
               <button type="button" aria-pressed={!matrix} onClick={() => setMatrix(false)}>
                 <LayoutPanelLeft size={13} aria-hidden />{zh ? "工作台" : "Workbench"}
@@ -332,19 +414,15 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
               <button type="button" aria-pressed={matrix} onClick={() => { setCopyFrom(""); setMatrix(true); }}>
                 <Grid3x3 size={13} aria-hidden />{zh ? "多 Harness 矩阵" : "Harness matrix"}
               </button>
-            </div>}
-            {!skills && <div className="skill-target-context">
-              {harness}
-              <span className="skill-library-count">{zh ? `${enabledCount} / ${inventory.length} 已启用` : `${enabledCount} / ${inventory.length} enabled`}</span>
-            </div>}
+            </div>
           </div>
           {actions}
         </div>
-        {skills && <AnimatePresence initial={false}>
+        <AnimatePresence initial={false}>
           {!matrix && <motion.section
             className="skill-kpi-deck"
-            key="harness-context"
-            aria-label={zh ? "当前技能配置概览" : "Active skill configuration overview"}
+            key={`${kind}-harness-context`}
+            aria-label={skills ? (zh ? "当前技能配置概览" : "Active skill configuration overview") : (zh ? "当前 MCP 配置概览" : "Active MCP configuration overview")}
             onPointerMove={onSpotlightMove}
             initial={reduced ? false : { opacity: 0, height: 0, marginTop: -8 }}
             animate={{ opacity: 1, height: "auto", marginTop: 0 }}
@@ -376,41 +454,99 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
                   </details>
                 </div>
               </div>
-              <div className="skill-kpi-cell">
-                <span className="skill-kpi-label">
-                  <i className="skill-metric-dot" data-active={enabledCount > 0} aria-hidden />
-                  {zh ? "已启用技能" : "Enabled skills"}
-                </span>
-                <strong className="skill-kpi-value" data-accent={enabledCount > 0}>
-                  {enabledCount}<em> / {totalSkills}</em>
-                </strong>
-                <div className="skill-kpi-bar" aria-hidden>
-                  <span className="skill-kpi-bar-enabled" style={{ width: `${enabledPct}%` }} />
-                  <span className="skill-kpi-bar-missing" style={{ width: `${missingPct}%` }} />
+
+              {skills ? <>
+                <div className="skill-kpi-cell">
+                  <span className="skill-kpi-label">
+                    <i className="skill-metric-dot" data-active={enabledCount > 0} aria-hidden />
+                    {zh ? "已启用技能" : "Enabled skills"}
+                  </span>
+                  <strong className="skill-kpi-value" data-accent={enabledCount > 0}>
+                    {enabledCount}<em> / {totalItems}</em>
+                  </strong>
+                  <div className="skill-kpi-bar" aria-hidden>
+                    <span className="skill-kpi-bar-enabled" style={{ width: `${enabledPct}%` }} />
+                    <span className="skill-kpi-bar-missing" style={{ width: `${missingPct}%` }} />
+                  </div>
+                  <small className="skill-kpi-sub">{originSummary || (zh ? "暂无技能记录" : "No skills yet")}</small>
                 </div>
-                <small className="skill-kpi-sub">{originSummary || (zh ? "暂无技能记录" : "No skills yet")}</small>
-              </div>
-              <div className="skill-kpi-cell">
-                <span className="skill-kpi-label">
-                  <Sparkles size={11} className="skill-kpi-spark" aria-hidden />
-                  {zh ? "索引开销估算" : "Estimated index"}
-                </span>
-                <strong className="skill-kpi-value" data-warn={indexTokens >= 1000}
-                  title={zh ? "按已启用技能的名称和描述估算。中日韩字符约 1 Token，其他字符约 4 个计 1 Token。实际用量取决于模型。" : "Estimated from enabled names and descriptions. About one token per CJK character or four other characters. Actual counts depend on the model."}>
-                  ~{indexTokens}<em> tok</em>
-                </strong>
-                <small className="skill-kpi-sub">
-                  {missingCount > 0
-                    ? (zh ? `${missingCount} 项缺少触发说明` : `${missingCount} missing description`)
-                    : (zh ? "所有技能触发说明完整" : "All skill descriptions complete")}
-                </small>
-              </div>
+                <div className="skill-kpi-cell">
+                  <span className="skill-kpi-label">
+                    <Sparkles size={11} className="skill-kpi-spark" aria-hidden />
+                    {zh ? "索引开销估算" : "Estimated index"}
+                  </span>
+                  <strong className="skill-kpi-value" data-warn={indexTokens >= 1000}
+                    title={zh ? "按已启用技能的名称和描述估算。中日韩字符约 1 Token，其他字符约 4 个计 1 Token。实际用量取决于模型。" : "Estimated from enabled names and descriptions. About one token per CJK character or four other characters. Actual counts depend on the model."}>
+                    ~{indexTokens}<em> tok</em>
+                  </strong>
+                  <small className="skill-kpi-sub">
+                    {missingCount > 0
+                      ? (zh ? `${missingCount} 项缺少触发说明` : `${missingCount} missing description`)
+                      : (zh ? "所有技能触发说明完整" : "All skill descriptions complete")}
+                  </small>
+                </div>
+              </> : mcpTelemetry && <>
+                <div className="skill-kpi-cell">
+                  <span className="skill-kpi-label">
+                    <i className="skill-metric-dot" data-active={enabledCount > 0} aria-hidden />
+                    {zh ? "已启用 MCP 服务" : "Enabled MCP servers"}
+                  </span>
+                  <strong className="skill-kpi-value" data-accent={enabledCount > 0}>
+                    {enabledCount}<em> / {totalItems}</em>
+                  </strong>
+                  <div className="skill-kpi-bar" aria-hidden>
+                    <span className="skill-kpi-bar-enabled" style={{ width: `${enabledStdioPct}%` }} />
+                    <span className="mcp-kpi-bar-http" style={{ width: `${enabledHttpPct}%` }} />
+                  </div>
+                  <small className="skill-kpi-sub">
+                    {totalItems > 0
+                      ? `STDIO ${mcpTelemetry.stdioCount} · HTTP ${mcpTelemetry.httpCount}${originSummary ? ` · ${originSummary}` : ""}`
+                      : (zh ? "暂无 MCP 服务配置" : "No MCP servers configured")}
+                  </small>
+                </div>
+                <div className="skill-kpi-cell mcp-kpi-health-cell">
+                  <div className="mcp-kpi-health-head">
+                    <span className="skill-kpi-label">
+                      <Activity size={11} className="skill-kpi-spark" aria-hidden />
+                      {zh ? "连通性诊断" : "Connectivity"}
+                    </span>
+                    <button
+                      type="button"
+                      className="mcp-batch-check-btn"
+                      disabled={batchChecking || !inventory.length}
+                      onClick={() => void runBatchDiagnostics()}
+                      title={enabledCount > 0
+                        ? (zh ? `检测 ${harnessName} 已启用的 ${enabledCount} 个服务` : `Check ${enabledCount} enabled servers for ${harnessName}`)
+                        : (zh ? `检测全部 ${inventory.length} 个服务` : `Check all ${inventory.length} servers`)}
+                    >
+                      <RefreshCw size={11} className={batchChecking ? "animate-spin" : undefined} aria-hidden />
+                      {batchChecking && batchProgress
+                        ? (zh ? `检测中 ${batchProgress.done}/${batchProgress.total}` : `Checking ${batchProgress.done}/${batchProgress.total}`)
+                        : enabledCount > 0 ? (zh ? "检测已启用" : "Check enabled") : (zh ? "全部检测" : "Check all")}
+                    </button>
+                  </div>
+                  <strong className="skill-kpi-value" data-warn={mcpTelemetry.failed > 0} data-accent={mcpTelemetry.failed === 0 && mcpTelemetry.passed > 0}>
+                    {mcpTelemetry.checked > 0 ? (
+                      <>{mcpTelemetry.passed}<em> {zh ? "正常" : "ok"}</em>{mcpTelemetry.failed > 0 && <><em> · </em><span className="mcp-kpi-fail-num">{mcpTelemetry.failed}</span><em> {zh ? "异常" : "err"}</em></>}</>
+                    ) : (
+                      <>{zh ? "未检测" : "Idle"}</>
+                    )}
+                  </strong>
+                  <small className="skill-kpi-sub">
+                    {mcpTelemetry.checked > 0
+                      ? (zh
+                        ? `已检 ${mcpTelemetry.checked} / ${totalItems}${mcpTelemetry.discoveredTools > 0 ? ` · 发现 ${mcpTelemetry.discoveredTools} 个工具` : ""}`
+                        : `Checked ${mcpTelemetry.checked} / ${totalItems}${mcpTelemetry.discoveredTools > 0 ? ` · ${mcpTelemetry.discoveredTools} tools` : ""}`)
+                      : (zh ? "点击右侧一键验证服务握手与可用工具" : "Verify server handshakes and discover tools")}
+                  </small>
+                </div>
+              </>}
             </div>
           </motion.section>}
-        </AnimatePresence>}
+        </AnimatePresence>
         <div className="skill-library-toolbar">
           <SlidingTabs value={filterView} onChange={setView} items={filters} className="capability-underline-tabs" label={zh ? "启用状态" : "Enabled status"} />
-          <div className="skill-library-filters">{search}{sourceSelect}</div>
+          <div className="skill-library-filters">{search}{transportSelect}{sourceSelect}</div>
         </div>
       <ResourceSyncDialog kind={kind} open={syncOpen} onOpenChange={setSyncOpen}/>
       {loadError && tools.length === 0 ? (
@@ -429,18 +565,20 @@ export function ProviderToolsPanel({ kind = "skill" }: { kind?: CapabilityKind }
         </Card>
       ) : kind === "mcp" ? (
         <McpWorkbench
+          matrix={matrix}
+          showWorkbench={() => setMatrix(false)}
           groups={groups}
+          inventory={inventory}
           originNames={originNames}
-          hasServers={inventory.length > 0}
+          ready={ready}
+          providers={providers}
+          providerId={daemonProviderId}
+          harnessName={harnessName}
+          busy={!!toggling.length}
+          setBindings={setBindings}
           onCreate={openCreate}
           onEdit={openEdit}
           onDelete={setDeleting}
-          renderSwitch={(tool) => <Switch
-            checked={capabilityEnabledFor(tool, daemonProviderId)}
-            disabled={!providerId || toggling.includes(tool.id)}
-            onCheckedChange={(checked) => handleToggle(tool, checked)}
-            aria-label={`${harnessName} · ${tool.name}`}
-          />}
         />
       ) : <SkillWorkbench matrix={matrix} showWorkbench={() => setMatrix(false)} groups={groups} inventory={inventory}
         originNames={originNames} ready={ready} providers={providers} providerId={daemonProviderId} harnessName={harnessName}

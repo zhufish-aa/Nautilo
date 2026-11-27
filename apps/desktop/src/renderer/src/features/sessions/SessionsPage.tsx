@@ -143,7 +143,7 @@ export function SessionsPage({ active = true }: { active?: boolean }): JSX.Eleme
       origin.exit.forEach(element => element.remove());
     };
   }, [session?.id, active, reducedMotion]);
-  const [drawer, setDrawer] = useState<DrawerKind>(() => window.innerWidth >= 1500 ? "inspector" : null);
+  const [drawer, setDrawer] = useState<DrawerKind>(null);
   const [preview, setPreview] = useState<PreviewFileRequest & { sessionId: string }>();
   const openPreview = useCallback((path: string, diff?: string): void => {
     if (!session) return;
